@@ -333,18 +333,7 @@ local plugin_specs = {
   { "godlygeek/tabular", cmd = { "Tabularize" } },
 
   -- Markdown previewing (only for Mac and Windows)
-  {
-    "iamcco/markdown-preview.nvim",
-    enabled = function()
-      if vim.g.is_win or vim.g.is_mac then
-        return true
-      end
-      return false
-    end,
-    build = "cd app && npm install",
-    ft = { "markdown" },
-  },
-
+  { "cnshsliu/smp.nvim" },
   {
     "folke/zen-mode.nvim",
     cmd = "ZenMode",
