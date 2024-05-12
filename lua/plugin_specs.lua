@@ -62,9 +62,6 @@ local plugin_specs = {
     end,
   },
 
-  -- Python indent (follows the PEP8 style)
-  { "Vimjas/vim-python-pep8-indent", ft = { "python" } },
-
   -- Python-related text object
   { "jeetsukumaran/vim-pythonsense", ft = { "python" } },
 

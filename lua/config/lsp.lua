@@ -113,51 +113,17 @@ local capabilities = require('cmp_nvim_lsp').default_capabilities()
 
 local lspconfig = require("lspconfig")
 
-if utils.executable("pylsp") then
-  local venv_path = os.getenv('VIRTUAL_ENV')
-  local py_path = nil
-  -- decide which python executable to use for mypy
-  if venv_path ~= nil then
-    py_path = venv_path .. "/bin/python3"
-  else
-    py_path = vim.g.python3_host_prog
-  end
-
-  lspconfig.pylsp.setup {
-    on_attach = custom_attach,
-    settings = {
-      pylsp = {
-        plugins = {
-          -- formatter options
-          black = { enabled = true },
-          autopep8 = { enabled = false },
-          yapf = { enabled = false },
-          -- linter options
-          pylint = { enabled = true, executable = "pylint" },
-          ruff = { enabled = false },
-          pyflakes = { enabled = false },
-          pycodestyle = { enabled = false },
-          -- type checker
-          pylsp_mypy = {
-            enabled = true,
-            overrides = { "--python-executable", py_path, true },
-            report_progress = true,
-            live_mode = false
-          },
-          -- auto-completion options
-          jedi_completion = { fuzzy = true },
-          -- import sorting
-          isort = { enabled = true },
-        },
-      },
-    },
-    flags = {
-      debounce_text_changes = 200,
-    },
-    capabilities = capabilities,
+if utils.executable("ruff-lsp") then
+  lspconfig.ruff_lsp.setup {
+    init_options = {
+      settings = {
+        -- Any extra CLI arguments for `ruff` go here.
+        args = {},
+      }
+    }
   }
 else
-  vim.notify("pylsp not found!", vim.log.levels.WARN, { title = "Nvim-config" })
+  vim.notify("ruff-lsp not found!", vim.log.levels.WARN, { title = "Nvim-config" })
 end
 
 -- if utils.executable('pyright') then
