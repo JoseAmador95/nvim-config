@@ -160,19 +160,6 @@ if utils.executable("clangd") then
   }
 end
 
--- set up vim-language-server
-if utils.executable("vim-language-server") then
-  lspconfig.vimls.setup {
-    on_attach = custom_attach,
-    flags = {
-      debounce_text_changes = 500,
-    },
-    capabilities = capabilities,
-  }
-else
-  vim.notify("vim-language-server not found!", vim.log.levels.WARN, { title = "Nvim-config" })
-end
-
 -- set up bash-language-server
 if utils.executable("bash-language-server") then
   lspconfig.bashls.setup {
