@@ -162,22 +162,11 @@ vim.api.nvim_set_keymap('n', '0', '^', { noremap = true, silent = true })
 
 -- Window Navigation --------------------------------------------------------
 
--- Moving between windows
--- vim.api.nvim_set_keymap('n', '<C-j>', '<C-W>j', { noremap = true })
--- vim.api.nvim_set_keymap('n', '<C-k>', '<C-W>k', { noremap = true })
--- vim.api.nvim_set_keymap('n', '<C-h>', '<C-W>h', { noremap = true })
--- vim.api.nvim_set_keymap('n', '<C-l>', '<C-W>l', { noremap = true })
-
--- Navigate through tabs using J and K
-vim.api.nvim_set_keymap('n', 'J', ':tabprevious<CR>', {
-    noremap = true,
-    silent = true
-})
-
-vim.api.nvim_set_keymap('n', 'K', ':tabnext<CR>', {
-    noremap = true,
-    silent = true
-})
+-- Navigate tabs with JK
+vim.cmd([[
+nnoremap J <Cmd>Tabprevious<CR>
+nnoremap K <Cmd>Tabnext<CR>
+]])
 
 -- Enhancements -------------------------------------------------------------
 
