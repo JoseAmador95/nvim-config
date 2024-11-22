@@ -16,8 +16,18 @@ vim.g.mapleader = "," -- Change to any preferred leader key
 vim.opt.undofile = true
 vim.opt.undodir = vim.fn.stdpath("config") .. "/undodir"
 
+-- Clipboard -----------------------------------------------------------------
+
 -- Enable system clipboard integration
 vim.opt.clipboard = "unnamedplus"
+
+-- Delete without affecting the clipboard
+vim.api.nvim_set_keymap('n', 'd', '"_d', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('v', 'd', '"_d', { noremap = true, silent = true })
+
+-- Cut (delete and yank) behavior explicitly set to the clipboard
+vim.api.nvim_set_keymap('n', 'c', '"_c', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('n', 'x', '"_x', { noremap = true, silent = true })
 
 -- Interface and Display Options ---------------------------------------------
 
