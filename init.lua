@@ -189,7 +189,6 @@ vim.api.nvim_create_user_command('ReloadConfig', 'source $MYVIMRC', {})
 require('package_manager')
 require('cfg-vscode-multi-cursor')
 require('cfg-telescope')
-require('cfg-treesitter')
 require('cfg-nvim-tree')
 require('cfg-nvim-cokeline')
 

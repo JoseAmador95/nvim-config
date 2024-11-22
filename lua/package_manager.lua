@@ -20,7 +20,6 @@ packer.startup(function(use)
     -- Add plugins here
     use "nvim-lua/plenary.nvim" -- Utility functions used by many plugins
     use "nvim-telescope/telescope.nvim" -- Fuzzy finder
-    use "nvim-treesitter/nvim-treesitter" -- Syntax highlighting
     use "vscode-neovim/vscode-multi-cursor.nvim" -- Multi-cursor support in VSCode
     use 'nvim-tree/nvim-web-devicons'
     use {
