@@ -16,6 +16,12 @@ vim.g.mapleader = "," -- Change to any preferred leader key
 vim.opt.undofile = true
 vim.opt.undodir = vim.fn.stdpath("config") .. "/undodir"
 
+-- Command Pallete -----------------------------------------------------------
+
+vim.opt.wildmode = { "longest:full" }
+vim.opt.wildmenu = true
+vim.opt.wildoptions = { "pum", "tagfile" }
+
 -- Clipboard -----------------------------------------------------------------
 
 -- Enable system clipboard integration
