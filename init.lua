@@ -11,6 +11,7 @@ vim.opt.compatible = false
 
 -- Leader Key
 vim.g.mapleader = "," -- Change to any preferred leader key
+vim.g.maplocalleader = "," -- Set a local leader key
 
 -- Enable persistent undo and set undo file directory
 vim.opt.undofile = true
