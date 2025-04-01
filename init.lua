@@ -194,8 +194,14 @@ vim.api.nvim_create_user_command('ReloadConfig', 'source $MYVIMRC', {})
 -- Plugins --------------------------------------------------------------------
 
 require('package_manager')
-require('cfg-vscode-multi-cursor')
-require('cfg-telescope')
-require('cfg-nvim-tree')
-require('cfg-nvim-cokeline')
+
+if vim.g.vscode then
+    -- VSCode extension
+    require('cfg-vscode-multi-cursor')
+else
+    -- ordinary Neovim
+    require('cfg-telescope')
+    require('cfg-nvim-tree')
+    require('cfg-nvim-cokeline')
+end
 
