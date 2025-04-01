@@ -19,9 +19,9 @@ vim.opt.undodir = vim.fn.stdpath("config") .. "/undodir"
 
 -- Command Pallete -----------------------------------------------------------
 
-vim.opt.wildmode = { "longest:full" }
+vim.opt.wildmode = {"longest:full"}
 vim.opt.wildmenu = true
-vim.opt.wildoptions = { "pum", "tagfile" }
+vim.opt.wildoptions = {"pum", "tagfile"}
 
 -- Clipboard -----------------------------------------------------------------
 
@@ -29,12 +29,24 @@ vim.opt.wildoptions = { "pum", "tagfile" }
 vim.opt.clipboard = "unnamedplus"
 
 -- Delete without affecting the clipboard
-vim.api.nvim_set_keymap('n', 'd', '"_d', { noremap = true, silent = true })
-vim.api.nvim_set_keymap('v', 'd', '"_d', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('n', 'd', '"_d', {
+    noremap = true,
+    silent = true
+})
+vim.api.nvim_set_keymap('v', 'd', '"_d', {
+    noremap = true,
+    silent = true
+})
 
 -- Cut (delete and yank) behavior explicitly set to the clipboard
-vim.api.nvim_set_keymap('n', 'c', '"_c', { noremap = true, silent = true })
-vim.api.nvim_set_keymap('n', 'x', '"_x', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('n', 'c', '"_c', {
+    noremap = true,
+    silent = true
+})
+vim.api.nvim_set_keymap('n', 'x', '"_x', {
+    noremap = true,
+    silent = true
+})
 
 -- Interface and Display Options ---------------------------------------------
 
@@ -165,7 +177,10 @@ vim.api.nvim_set_keymap('n', '<leader>ss', ':setlocal spell!<CR>', {
 })
 
 -- Map 0 to go to the first character of the line
-vim.api.nvim_set_keymap('n', '0', '^', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('n', '0', '^', {
+    noremap = true,
+    silent = true
+})
 
 -- Window Navigation --------------------------------------------------------
 
