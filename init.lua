@@ -182,6 +182,42 @@ vim.api.nvim_set_keymap('n', '0', '^', {
     silent = true
 })
 
+-- Terminal Configuration ----------------------------------------------------
+
+-- Enable mouse support in all modes
+vim.opt.mouse = 'a'
+
+-- Terminal key mappings for copy/paste
+vim.api.nvim_set_keymap('t', '<D-v>', '<C-\\><C-n>"+pi', {
+    noremap = true,
+    silent = true
+})
+vim.api.nvim_set_keymap('t', '<C-S-v>', '<C-\\><C-n>"+pi', {
+    noremap = true,
+    silent = true
+})
+
+-- Allow copy with Cmd+C in visual mode in terminal
+vim.api.nvim_set_keymap('t', '<D-c>', '<C-\\><C-n>"+yi', {
+    noremap = true,
+    silent = true
+})
+vim.api.nvim_set_keymap('t', '<C-S-c>', '<C-\\><C-n>"+yi', {
+    noremap = true,
+    silent = true
+})
+
+-- Terminal settings
+vim.api.nvim_create_autocmd("TermOpen", {
+    callback = function()
+        -- Disable line numbers in terminal
+        vim.opt_local.number = false
+        vim.opt_local.relativenumber = false
+        -- Start in insert mode
+        vim.cmd("startinsert")
+    end
+})
+
 -- Window Navigation --------------------------------------------------------
 
 -- Navigate tabs with JK
