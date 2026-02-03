@@ -1,5 +1,6 @@
 -- Core Settings ------------------------------------------------------------
--- Disable netrw at the very start of your init.lua
+
+-- Disable netrw
 vim.g.loaded_netrw = 1
 vim.g.loaded_netrwPlugin = 1
 
@@ -23,30 +24,15 @@ vim.opt.wildmode = {"longest:full"}
 vim.opt.wildmenu = true
 vim.opt.wildoptions = {"pum", "tagfile"}
 
+-- Unused providers ---------------------------------------------------------
+
+vim.g.loaded_perl_provider = 0
+vim.g.loaded_ruby_provider = 0
+
 -- Clipboard -----------------------------------------------------------------
 
 -- Enable system clipboard integration
 vim.opt.clipboard = "unnamedplus"
-
--- Delete without affecting the clipboard
-vim.api.nvim_set_keymap('n', 'd', '"_d', {
-    noremap = true,
-    silent = true
-})
-vim.api.nvim_set_keymap('v', 'd', '"_d', {
-    noremap = true,
-    silent = true
-})
-
--- Cut (delete and yank) behavior explicitly set to the clipboard
-vim.api.nvim_set_keymap('n', 'c', '"_c', {
-    noremap = true,
-    silent = true
-})
-vim.api.nvim_set_keymap('n', 'x', '"_x', {
-    noremap = true,
-    silent = true
-})
 
 -- Interface and Display Options ---------------------------------------------
 
@@ -121,11 +107,6 @@ vim.api.nvim_set_keymap('i', 'jj', '<Esc>', {
     silent = true
 })
 
--- Fast saving and quitting
-vim.api.nvim_set_keymap('n', '<leader>w', ':w!<CR>', {
-    noremap = true,
-    silent = true
-})
 vim.api.nvim_set_keymap('n', '<leader>q', ':q<CR>', {
     noremap = true,
     silent = true
@@ -142,24 +123,8 @@ vim.api.nvim_set_keymap('n', '<leader>x', ':x<CR>', {
 -- Custom command to save with sudo
 vim.api.nvim_create_user_command('W', 'w !sudo tee % > /dev/null', {})
 
--- Copy and paste with Command keys in Visual mode
-vim.api.nvim_set_keymap('v', '<D-c>', '"+y', {
-    noremap = true,
-    silent = true
-})
-
 -- Toggle paste mode with leader+pp
 vim.api.nvim_set_keymap('n', '<leader>pp', ':setlocal paste!<CR>', {
-    noremap = true,
-    silent = true
-})
-
--- Undo and redo with Command keys
-vim.api.nvim_set_keymap('n', '<D-z>', 'u', {
-    noremap = true,
-    silent = true
-})
-vim.api.nvim_set_keymap('n', '<D-Z>', '<C-r>', {
     noremap = true,
     silent = true
 })
@@ -187,25 +152,6 @@ vim.api.nvim_set_keymap('n', '0', '^', {
 -- Enable mouse support in all modes
 vim.opt.mouse = 'a'
 
--- Terminal key mappings for copy/paste
-vim.api.nvim_set_keymap('t', '<D-v>', '<C-\\><C-n>"+pi', {
-    noremap = true,
-    silent = true
-})
-vim.api.nvim_set_keymap('t', '<C-S-v>', '<C-\\><C-n>"+pi', {
-    noremap = true,
-    silent = true
-})
-
--- Allow copy with Cmd+C in visual mode in terminal
-vim.api.nvim_set_keymap('t', '<D-c>', '<C-\\><C-n>"+yi', {
-    noremap = true,
-    silent = true
-})
-vim.api.nvim_set_keymap('t', '<C-S-c>', '<C-\\><C-n>"+yi', {
-    noremap = true,
-    silent = true
-})
 
 -- Terminal settings
 vim.api.nvim_create_autocmd("TermOpen", {
