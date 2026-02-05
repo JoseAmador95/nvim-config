@@ -8,6 +8,6 @@ return {
   end,
   opts = {
     preset = "helix",
-    delay = 1000,
+    delay = 500,
   }
 }
