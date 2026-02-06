@@ -56,6 +56,9 @@ vim.opt.smartcase = true -- Smart case for search
 vim.opt.incsearch = true -- Show matches as you type
 vim.opt.hlsearch = true -- Highlight search results
 
+-- Scroll off
+vim.opt.scrolloff = 10
+
 -- Tab and Indent Settings ---------------------------------------------------
 
 vim.opt.expandtab = true -- Use spaces instead of tabs
