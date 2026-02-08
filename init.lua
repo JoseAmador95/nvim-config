@@ -65,6 +65,9 @@ vim.opt.expandtab = true -- Use spaces instead of tabs
 vim.opt.tabstop = 4 -- Number of spaces per tab
 vim.opt.shiftwidth = 4 -- Indentation width
 vim.opt.smarttab = true -- Smart indentation
+vim.o.cindent = false
+vim.o.smartindent = true
+vim.o.autoindent = true
 
 -- File Management and Auto-commands -----------------------------------------
 
