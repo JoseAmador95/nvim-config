@@ -20,9 +20,9 @@ vim.opt.undodir = vim.fn.stdpath("config") .. "/undodir"
 
 -- Command Pallete -----------------------------------------------------------
 
-vim.opt.wildmode = {"longest:full"}
+vim.opt.wildmode = { "longest:full" }
 vim.opt.wildmenu = true
-vim.opt.wildoptions = {"pum", "tagfile"}
+vim.opt.wildoptions = { "pum", "tagfile" }
 
 -- Unused providers ---------------------------------------------------------
 
@@ -78,93 +78,92 @@ vim.opt.writebackup = false
 vim.opt.swapfile = false
 
 -- Auto-command to check for changes in files when refocusing Neovim
-vim.api.nvim_create_autocmd({"FocusGained", "BufEnter"}, {
-    command = "checktime"
+vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter" }, {
+	command = "checktime",
 })
 
 -- Auto-reload configuration on save
 vim.api.nvim_create_autocmd("BufWritePost", {
-    pattern = "init.lua",
-    command = "source $MYVIMRC"
+	pattern = "init.lua",
+	command = "source $MYVIMRC",
 })
 
 -- Automatically remove trailing whitespace on save for specific file types
 function CleanExtraSpaces()
-    local save_cursor = vim.fn.getpos(".")
-    local old_query = vim.fn.getreg('/')
-    vim.cmd([[silent! %s/\s\+$//e]])
-    vim.fn.setpos('.', save_cursor)
-    vim.fn.setreg('/', old_query)
+	local save_cursor = vim.fn.getpos(".")
+	local old_query = vim.fn.getreg("/")
+	vim.cmd([[silent! %s/\s\+$//e]])
+	vim.fn.setpos(".", save_cursor)
+	vim.fn.setreg("/", old_query)
 end
 
 vim.api.nvim_create_autocmd("BufWritePre", {
-    pattern = {"*.txt", "*.js", "*.py", "*.wiki", "*.sh", "*.coffee"},
-    callback = CleanExtraSpaces
+	pattern = { "*.txt", "*.js", "*.py", "*.wiki", "*.sh", "*.coffee" },
+	callback = CleanExtraSpaces,
 })
 
 -- Key Mappings -------------------------------------------------------------
 
 -- Map 'jj' to exit Insert mode
-vim.api.nvim_set_keymap('i', 'jj', '<Esc>', {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("i", "jj", "<Esc>", {
+	noremap = true,
+	silent = true,
 })
 
-vim.api.nvim_set_keymap('n', '<leader>q', ':q<CR>', {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("n", "<leader>q", ":q<CR>", {
+	noremap = true,
+	silent = true,
 })
-vim.api.nvim_set_keymap('n', '<leader>Q', ':q!<CR>', {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("n", "<leader>Q", ":q!<CR>", {
+	noremap = true,
+	silent = true,
 })
-vim.api.nvim_set_keymap('n', '<leader>x', ':x<CR>', {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("n", "<leader>x", ":x<CR>", {
+	noremap = true,
+	silent = true,
 })
 
 -- Custom command to save with sudo
-vim.api.nvim_create_user_command('W', 'w !sudo tee % > /dev/null', {})
+vim.api.nvim_create_user_command("W", "w !sudo tee % > /dev/null", {})
 
 -- Toggle paste mode with leader+pp
-vim.api.nvim_set_keymap('n', '<leader>pp', ':setlocal paste!<CR>', {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("n", "<leader>pp", ":setlocal paste!<CR>", {
+	noremap = true,
+	silent = true,
 })
 
 -- Clear search highlights with leader+Enter
-vim.api.nvim_set_keymap('n', '<leader><CR>', ':nohlsearch<CR>', {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("n", "<leader><CR>", ":nohlsearch<CR>", {
+	noremap = true,
+	silent = true,
 })
 
 -- Toggle spell checking
-vim.api.nvim_set_keymap('n', '<leader>ss', ':setlocal spell!<CR>', {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("n", "<leader>ss", ":setlocal spell!<CR>", {
+	noremap = true,
+	silent = true,
 })
 
 -- Map 0 to go to the first character of the line
-vim.api.nvim_set_keymap('n', '0', '^', {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("n", "0", "^", {
+	noremap = true,
+	silent = true,
 })
 
 -- Terminal Configuration ----------------------------------------------------
 
 -- Enable mouse support in all modes
-vim.opt.mouse = 'a'
-
+vim.opt.mouse = "a"
 
 -- Terminal settings
 vim.api.nvim_create_autocmd("TermOpen", {
-    callback = function()
-        -- Disable line numbers in terminal
-        vim.opt_local.number = false
-        vim.opt_local.relativenumber = false
-        -- Start in insert mode
-        vim.cmd("startinsert")
-    end
+	callback = function()
+		-- Disable line numbers in terminal
+		vim.opt_local.number = false
+		vim.opt_local.relativenumber = false
+		-- Start in insert mode
+		vim.cmd("startinsert")
+	end,
 })
 
 -- Window Navigation --------------------------------------------------------
@@ -178,26 +177,25 @@ nnoremap K <Cmd>Tabnext<CR>
 -- Enhancements -------------------------------------------------------------
 
 -- Visual mode enhancements for searching with *
-vim.api.nvim_set_keymap('v', '*', [[:<C-u>call VisualSelection('', '')<CR>/<C-R>=@/<CR><CR>]], {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("v", "*", [[:<C-u>call VisualSelection('', '')<CR>/<C-R>=@/<CR><CR>]], {
+	noremap = true,
+	silent = true,
 })
 
-vim.api.nvim_set_keymap('v', '#', [[:<C-u>call VisualSelection('', '')<CR>?<C-R>=@/<CR><CR>]], {
-    noremap = true,
-    silent = true
+vim.api.nvim_set_keymap("v", "#", [[:<C-u>call VisualSelection('', '')<CR>?<C-R>=@/<CR><CR>]], {
+	noremap = true,
+	silent = true,
 })
 
 -- Custom command to reload configuration
-vim.api.nvim_create_user_command('ReloadConfig', 'source $MYVIMRC', {})
+vim.api.nvim_create_user_command("ReloadConfig", "source $MYVIMRC", {})
 
 -- Plugins --------------------------------------------------------------------
 
-require('config.lazy')
-
+require("config.lazy")
 
 if vim.g.vscode then
-  require('editor.vscode')
+	require("editor.vscode")
 else
-  require('editor.terminal')
+	require("editor.terminal")
 end
