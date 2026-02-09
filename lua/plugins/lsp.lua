@@ -3,7 +3,10 @@ return {
 	-- Mason core: install/manage LSP servers & tools
 	{
 		"williamboman/mason.nvim",
-		lazy = false, -- start at boot so :Mason is available
+		cond = function()
+			return not vim.g.vscode
+		end,
+		cmd = { "Mason", "MasonUpdate" },
 		build = ":MasonUpdate",
 		config = function()
 			require("mason").setup()
@@ -13,6 +16,9 @@ return {
 	-- Mason bridge for Neovim LSP
 	{
 		"williamboman/mason-lspconfig.nvim",
+		cond = function()
+			return not vim.g.vscode
+		end,
 		event = { "BufReadPre", "BufNewFile" }, -- load when editing files
 		dependencies = {
 			"hrsh7th/cmp-nvim-lsp", -- capabilities for nvim-cmp
@@ -217,6 +223,9 @@ return {
 
 	{
 		"WhoIsSethDaniel/mason-tool-installer.nvim",
+		cond = function()
+			return not vim.g.vscode
+		end,
 		event = { "BufReadPre", "BufNewFile" },
 		dependencies = { "williamboman/mason.nvim" },
 		config = function()

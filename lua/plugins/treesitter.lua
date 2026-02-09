@@ -3,7 +3,7 @@ return {
 	{
 		"nvim-treesitter/nvim-treesitter",
 		version = false,
-		lazy = false, -- Treesitter itself should not be lazy-loaded
+		event = { "BufReadPost", "BufNewFile" },
 		build = ":TSUpdate",
 		config = function()
 			-- Modern nvim-treesitter API (rewrite):
@@ -19,20 +19,18 @@ return {
 		end,
 	},
 
-	-- Always-on context (loads at startup)
 	{
 		"nvim-treesitter/nvim-treesitter-context",
-		lazy = false,
+		event = { "BufReadPost", "BufNewFile" },
 		opts = {},
 		cond = function()
 			return not vim.g.vscode
 		end,
 	},
 
-	-- Always-on rainbow delimiters (loads at startup)
 	{
 		"HiPhish/rainbow-delimiters.nvim",
-		lazy = false,
+		event = { "BufReadPost", "BufNewFile" },
 		config = function()
 			local rd = require("rainbow-delimiters")
 
