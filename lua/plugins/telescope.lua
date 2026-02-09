@@ -18,6 +18,10 @@ return {
 		opts = {
 			defaults = {
 				cwd = vim.fn.getcwd(),
+                file_ignore_patterns = {
+                    "node_modules",
+                    ".git"
+                },
 				mappings = {
 					i = {
 						["<C-j>"] = "move_selection_next",
@@ -42,7 +46,7 @@ return {
 				},
 				live_grep = {
 					additional_args = function()
-						return { "--hidden", "--glob=!.git/*" }
+						return { "--hidden" }
 					end,
 				},
 			},
