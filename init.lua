@@ -175,7 +175,11 @@ vim.opt.mouse = "a"
 -- Enhancements -------------------------------------------------------------
 
 -- Custom command to reload configuration
-vim.api.nvim_create_user_command("ReloadConfig", "source $MYVIMRC", {})
+vim.api.nvim_create_user_command("ReloadConfig", function()
+	vim.cmd("source $MYVIMRC")
+	pcall(vim.cmd, "Lazy reload")
+	vim.notify("Neovim config reloaded", vim.log.levels.INFO, { title = "Config" })
+end, { desc = "Reload config and plugin specs" })
 
 -- Plugins --------------------------------------------------------------------
 
