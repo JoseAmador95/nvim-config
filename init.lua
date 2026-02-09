@@ -33,7 +33,6 @@ vim.opt.clipboard = "unnamedplus"
 -- Interface and Display Options ---------------------------------------------
 
 -- Display settings
-vim.opt.cmdheight = 1 -- Command line height
 vim.opt.cursorline = true -- Highlight the cursor line
 vim.opt.foldcolumn = "1" -- Show a small column for folding
 vim.opt.number = true -- Show line numbers
@@ -57,9 +56,7 @@ vim.opt.expandtab = true -- Use spaces instead of tabs
 vim.opt.tabstop = 4 -- Number of spaces per tab
 vim.opt.shiftwidth = 4 -- Indentation width
 vim.opt.smarttab = true -- Smart indentation
-vim.opt.cindent = false
 vim.opt.smartindent = true
-vim.opt.autoindent = true
 --
 -- use custom tab names
 local tabnames = require("config.tabnames")
