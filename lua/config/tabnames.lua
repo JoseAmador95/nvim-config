@@ -79,28 +79,25 @@ local function build_unique(paths)
 			for _, p in ipairs(gpaths) do
 				local sp = split[p]
 				local label = base
-				-- prepend directories until name is unique
+
+				-- prepend directories until unique
 				for level = #sp, 1, -1 do
-					local prefix = table.concat({ sp[level], base }, "/")
+					local prefix = sp[level] .. "/" .. label
+
+					-- Check if ANY other file would collide with this prefix
 					local ok = true
-					for other, _ in ipairs(gpaths) do
-						if other ~= p then
-							if prefix == base then
+					for _, q in ipairs(gpaths) do
+						if q ~= p then
+							local q_sp = split[q]
+							local rel = (q_sp[level] and (q_sp[level] .. "/" .. base)) or base
+							if rel == prefix then
 								ok = false
+								break
 							end
 						end
 					end
 
-					label = sp[level] .. "/" .. label
-					local seen = {}
-					for _, q in ipairs(gpaths) do
-						local rel = table.concat({ table.unpack(split[q], level) }, "/") .. "/" .. base
-						if seen[rel] then
-							ok = false
-						end
-						seen[rel] = true
-					end
-
+					label = prefix
 					if ok then
 						break
 					end

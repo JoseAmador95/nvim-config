@@ -148,7 +148,7 @@ vim.keymap.set("n", "<leader>ss", ":setlocal spell!<CR>", {
 })
 
 -- Map 0 to go to the first non-blank character on the line
-vim.keymap.set("n", "0", "^", {
+vim.keymap.set("n", "H", "^", {
   noremap = true,
   silent = true,
   desc = "Beginning of indentation",

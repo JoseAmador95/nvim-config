@@ -13,17 +13,19 @@ return {
 			-- Auto-open nvim-tree when opening a directory like `nvim .`
 			vim.api.nvim_create_autocmd("VimEnter", {
 				callback = function(data)
-					-- `data.file` is the file or directory passed on the CLI
 					local dir = data.file
-					if dir == "" then
-						-- If no argument was passed, but `nvim` started in a directory,
-						-- check if argc() is 0 and current dir has files; optional behavior:
+
+					-- Case: `nvim <directory>`
+					if dir ~= "" and vim.fn.isdirectory(dir) == 1 then
+						vim.cmd.cd(dir)
+						require("nvim-tree.api").tree.open()
 						return
 					end
-					if vim.fn.isdirectory(dir) == 1 then
-						-- Change to the directory
-						vim.cmd.cd(dir)
-						-- Open the tree
+
+					-- Case: `nvim` inside a directory (optional behavior)
+					if dir == "" and vim.fn.argc() == 0 then
+						-- Auto-open tree if current directory has files
+						-- (You can remove this if you don’t like it)
 						require("nvim-tree.api").tree.open()
 					end
 				end,
