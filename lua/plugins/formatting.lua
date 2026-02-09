@@ -3,15 +3,6 @@ return {
 		"stevearc/conform.nvim",
 		event = { "BufWritePre" },
 		cmd = { "ConformInfo", "Format", "FormatToggle" },
-		keys = {
-			{
-				"<leader>f",
-				function()
-					require("conform").format({ async = true, lsp_format = "fallback" })
-				end,
-				desc = "Format buffer",
-			},
-		},
 		init = function()
 			vim.g.conform_format_on_save = false
 		end,
