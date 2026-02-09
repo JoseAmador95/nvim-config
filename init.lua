@@ -18,7 +18,6 @@ vim.opt.undodir = vim.fn.stdpath("config") .. "/.undodir"
 -- Command Pallete -----------------------------------------------------------
 
 vim.opt.wildmode = { "longest:full" }
-vim.opt.wildmenu = true
 vim.opt.wildoptions = { "pum", "tagfile" }
 
 -- Unused providers ---------------------------------------------------------
@@ -58,9 +57,9 @@ vim.opt.expandtab = true -- Use spaces instead of tabs
 vim.opt.tabstop = 4 -- Number of spaces per tab
 vim.opt.shiftwidth = 4 -- Indentation width
 vim.opt.smarttab = true -- Smart indentation
-vim.o.cindent = false
-vim.o.smartindent = true
-vim.o.autoindent = true
+vim.opt.cindent = false
+vim.opt.smartindent = true
+vim.opt.autoindent = true
 --
 -- use custom tab names
 local tabnames = require("config.tabnames")
@@ -73,7 +72,6 @@ vim.o.tabline = "%!v:lua.require'config.tabnames_tabline'.tabline()"
 vim.opt.history = 500 -- Command history length
 vim.opt.autoread = true -- Auto-read when a file changes outside Neovim
 vim.opt.encoding = "utf-8" -- Set default encoding
-vim.opt.fileformats = "unix,dos,mac"
 vim.opt.backup = false
 vim.opt.writebackup = false
 vim.opt.swapfile = false
