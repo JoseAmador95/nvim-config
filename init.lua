@@ -7,6 +7,9 @@ vim.g.loaded_netrwPlugin = 1
 -- optionally enable 24-bit colour
 vim.opt.termguicolors = true
 
+-- Enable built-in regex syntax highlight immediately on file open
+vim.cmd("syntax enable")
+
 -- Leader Key
 vim.g.mapleader = "," -- Change to any preferred leader key
 vim.g.maplocalleader = "," -- Set a local leader key
