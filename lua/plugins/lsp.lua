@@ -31,6 +31,64 @@ return {
 		config = function()
 			local mlsp = require("mason-lspconfig")
 			local devcontainer_tools = require("config.devcontainer_tools")
+
+			local function safe_lsp_jump(method, title)
+				return function()
+					local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
+					if not clients or #clients == 0 then
+						vim.notify((title or "LSP") .. ": no active client for method", vim.log.levels.INFO)
+						return
+					end
+
+					local position_encoding = clients[1].offset_encoding or "utf-16"
+					local params = vim.lsp.util.make_position_params(0, position_encoding)
+					vim.lsp.buf_request(0, method, params, function(err, result, ctx)
+						local function is_list(value)
+							if vim.islist then
+								return vim.islist(value)
+							end
+							return type(value) == "table" and value[1] ~= nil
+						end
+
+						if err then
+							vim.notify((title or "LSP") .. ": " .. (err.message or "request failed"), vim.log.levels.ERROR)
+							return
+						end
+
+						if not result or (is_list(result) and vim.tbl_isempty(result)) then
+							vim.notify((title or "LSP") .. ": no location found", vim.log.levels.INFO)
+							return
+						end
+
+						local client = ctx and ctx.client_id and vim.lsp.get_client_by_id(ctx.client_id) or nil
+						local response_encoding = client and client.offset_encoding or position_encoding
+
+						local location = is_list(result) and result[1] or result
+						local uri = location.uri or location.targetUri
+						if not uri then
+							vim.notify((title or "LSP") .. ": invalid location from server", vim.log.levels.WARN)
+							return
+						end
+
+						if vim.startswith(uri, "file://") then
+							local file = vim.uri_to_fname(uri)
+							local current = vim.api.nvim_buf_get_name(0)
+							local start_dir = current ~= "" and vim.fs.dirname(current) or vim.loop.cwd()
+							local mapped = devcontainer_tools.container_path_to_host(file, start_dir)
+							local mapped_uri = vim.uri_from_fname(mapped)
+							if location.uri then
+								location.uri = mapped_uri
+							end
+							if location.targetUri then
+								location.targetUri = mapped_uri
+							end
+						end
+
+						vim.lsp.util.show_document(location, response_encoding, { reuse_win = true, focus = true })
+					end)
+				end
+			end
+
 			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
 
 			local ensure_servers = {
@@ -69,13 +127,13 @@ return {
 					vim.keymap.set(
 						"n",
 						"gd",
-						vim.lsp.buf.definition,
+						safe_lsp_jump("textDocument/definition", "Go to definition"),
 						{ buffer = ev.buff, silent = true, desc = "Go to definition" }
 					)
 					vim.keymap.set(
 						"n",
 						"gD",
-						vim.lsp.buf.declaration,
+						safe_lsp_jump("textDocument/declaration", "Go to declaration"),
 						{ buffer = ev.buff, silent = true, desc = "Go to declaration" }
 					)
 					vim.keymap.set(
@@ -226,7 +284,7 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		event = { "BufReadPre", "BufNewFile" },
+		event = "VeryLazy",
 		dependencies = { "williamboman/mason.nvim" },
 		config = function()
 			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1

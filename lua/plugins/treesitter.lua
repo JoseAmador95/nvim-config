@@ -3,14 +3,25 @@ return {
 	{
 		"nvim-treesitter/nvim-treesitter",
 		version = false,
-		event = { "BufReadPost", "BufNewFile" },
+		lazy = false,
 		build = ":TSUpdate",
 		config = function()
-			-- Modern nvim-treesitter API (rewrite):
-			-- Prefer this; if you still need the legacy branch, we can switch later.
+			local max_filesize = 200 * 1024
 			require("nvim-treesitter").setup({
-				highlight = { enable = true },
-				indent = { enable = true },
+				ensure_installed = { "c", "cpp", "lua", "vim", "vimdoc", "query" },
+				auto_install = false,
+				sync_install = false,
+				highlight = {
+					enable = true,
+					disable = function(_, buf)
+						local ok, stats = pcall(vim.loop.fs_stat, vim.api.nvim_buf_get_name(buf))
+						return ok and stats and stats.size > max_filesize
+					end,
+				},
+				indent = {
+					enable = true,
+					disable = { "c", "cpp" },
+				},
 			})
 		end,
 		-- If you want to skip inside VSCode:
@@ -21,7 +32,7 @@ return {
 
 	{
 		"nvim-treesitter/nvim-treesitter-context",
-		event = { "BufReadPost", "BufNewFile" },
+		event = "VeryLazy",
 		opts = {},
 		cond = function()
 			return not vim.g.vscode
@@ -30,7 +41,7 @@ return {
 
 	{
 		"HiPhish/rainbow-delimiters.nvim",
-		event = { "BufReadPost", "BufNewFile" },
+		event = "VeryLazy",
 		config = function()
 			local rd = require("rainbow-delimiters")
 
