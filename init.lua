@@ -102,69 +102,69 @@ vim.api.nvim_create_autocmd("BufWritePre", {
 
 -- Map 'jj' to exit Insert mode
 vim.keymap.set("i", "jj", "<Esc>", {
-  noremap = true,
-  silent = true,
-  desc = "Exit insert mode",
+	noremap = true,
+	silent = true,
+	desc = "Exit insert mode",
 })
 
 -- Quit commands
 vim.keymap.set("n", "<leader>q", ":q<CR>", {
-  noremap = true,
-  silent = true,
-  desc = "Quit",
+	noremap = true,
+	silent = true,
+	desc = "Quit",
 })
 
 vim.keymap.set("n", "<leader>Q", ":q!<CR>", {
-  noremap = true,
-  silent = true,
-  desc = "Force quit",
+	noremap = true,
+	silent = true,
+	desc = "Force quit",
 })
 
 vim.keymap.set("n", "<leader>x", ":x<CR>", {
-  noremap = true,
-  silent = true,
-  desc = "Save & quit",
+	noremap = true,
+	silent = true,
+	desc = "Save & quit",
 })
 
 -- Toggle paste mode with <leader>pp
 vim.keymap.set("n", "<leader>pp", ":setlocal paste!<CR>", {
-  noremap = true,
-  silent = true,
-  desc = "Toggle paste mode",
+	noremap = true,
+	silent = true,
+	desc = "Toggle paste mode",
 })
 
 -- Clear search highlight
 vim.keymap.set("n", "<leader><CR>", ":nohlsearch<CR>", {
-  noremap = true,
-  silent = true,
-  desc = "Clear search highlight",
+	noremap = true,
+	silent = true,
+	desc = "Clear search highlight",
 })
 
 -- Toggle spell checking
 vim.keymap.set("n", "<leader>ss", ":setlocal spell!<CR>", {
-  noremap = true,
-  silent = true,
-  desc = "Toggle spell checking",
+	noremap = true,
+	silent = true,
+	desc = "Toggle spell checking",
 })
 
 -- Map 0 to go to the first non-blank character on the line
 vim.keymap.set("n", "H", "^", {
-  noremap = true,
-  silent = true,
-  desc = "Beginning of indentation",
+	noremap = true,
+	silent = true,
+	desc = "Beginning of indentation",
 })
 
 -- Navigate tabs with J / K
 vim.keymap.set("n", "J", "<Cmd>tabprevious<CR>", {
-  noremap = true,
-  silent = true,
-  desc = "Previous tab",
+	noremap = true,
+	silent = true,
+	desc = "Previous tab",
 })
 
 vim.keymap.set("n", "K", "<Cmd>tabnext<CR>", {
-  noremap = true,
-  silent = true,
-  desc = "Next tab",
+	noremap = true,
+	silent = true,
+	desc = "Next tab",
 })
 
 -- Terminal Configuration ----------------------------------------------------
