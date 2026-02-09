@@ -16,6 +16,7 @@ return {
 		event = { "BufReadPre", "BufNewFile" }, -- load when editing files
 		dependencies = {
 			"hrsh7th/cmp-nvim-lsp", -- capabilities for nvim-cmp
+			"b0o/SchemaStore.nvim",
 			-- NOTE: we no longer depend on "neovim/nvim-lspconfig" framework calls.
 			-- nvim-lspconfig is still useful because it ships the server configs in `lsp/`,
 			-- which Neovim 0.11+ auto-merges when you call vim.lsp.config().
@@ -50,14 +51,13 @@ return {
 			-- nvim-cmp capabilities
 			--------------------------------------------------------------------------
 			local capabilities = require("cmp_nvim_lsp").default_capabilities()
+			local has_schemastore, schemastore = pcall(require, "schemastore")
 
 			-- Global on_attach-style keymaps (recommended with new API)
 			-- Use LspAttach so it applies to any server that attaches later.
 			vim.api.nvim_create_autocmd("LspAttach", {
 				group = vim.api.nvim_create_augroup("LspKeymaps", { clear = true }),
 				callback = function(ev)
-					local helpers = require("config.lsp_helpers")
-
 					-- SYMBOL NAVIGATION
 					vim.keymap.set(
 						"n",
@@ -134,8 +134,11 @@ return {
 			-- Python: pyright
 			vim.lsp.config("pyright", {
 				capabilities = capabilities,
-				-- settings can be added here if you want stricter type checking, e.g.:
-				-- settings = { python = { analysis = { typeCheckingMode = "basic" } } },
+				settings = {
+					pyright = {
+						disableOrganizeImports = true,
+					},
+				},
 			})
 
 			vim.lsp.config("ruff", {
@@ -150,10 +153,23 @@ return {
 
 			vim.lsp.config("yamlls", {
 				capabilities = capabilities,
+				settings = {
+					yaml = {
+						keyOrdering = false,
+						schemaStore = has_schemastore and { enable = false, url = "" } or { enable = true },
+						schemas = has_schemastore and schemastore.yaml.schemas() or {},
+					},
+				},
 			})
 
 			vim.lsp.config("jsonls", {
 				capabilities = capabilities,
+				settings = {
+					json = {
+						validate = { enable = true },
+						schemas = has_schemastore and schemastore.json.schemas() or {},
+					},
+				},
 			})
 
 			vim.lsp.config("taplo", {
@@ -172,9 +188,13 @@ return {
 				capabilities = capabilities,
 				settings = {
 					Lua = {
+						runtime = { version = "LuaJIT" },
 						diagnostics = { globals = { "vim" } },
 						telemetry = { enable = false },
-						workspace = { checkThirdParty = false },
+						workspace = {
+							checkThirdParty = false,
+							library = vim.api.nvim_get_runtime_file("", true),
+						},
 					},
 				},
 			})
