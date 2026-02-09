@@ -1,6 +1,9 @@
 return {
 	{
 		"stevearc/conform.nvim",
+		cond = function()
+			return not vim.g.vscode
+		end,
 		event = { "BufWritePre" },
 		cmd = { "ConformInfo", "Format", "FormatToggle" },
 		init = function()

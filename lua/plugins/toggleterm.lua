@@ -1,6 +1,6 @@
 return {
 	"akinsho/toggleterm.nvim",
-	lazy = false,
+	cmd = { "ToggleTerm", "TermExec" },
 	cond = function()
 		return not vim.g.vscode
 	end,
