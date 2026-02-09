@@ -24,6 +24,8 @@ return {
 			local function smart_open(prompt_bufnr)
 				local entry = action_state.get_selected_entry()
 				local filepath = entry.path or entry.filename
+				local lnum = tonumber(entry.lnum) or tonumber(entry.line) or 1
+				local col = tonumber(entry.col) or 1
 
 				actions.close(prompt_bufnr)
 
@@ -42,12 +44,23 @@ return {
 					if name == filepath then
 						-- File is open as the MAIN buffer of this tab → reuse tab
 						vim.api.nvim_set_current_tabpage(tabpage)
+						local line_count = vim.api.nvim_buf_line_count(buf)
+						local target_line = math.max(1, math.min(lnum, line_count))
+						local line = vim.api.nvim_buf_get_lines(buf, target_line - 1, target_line, false)[1] or ""
+						local target_col = math.max(0, math.min(col - 1, #line))
+						vim.api.nvim_win_set_cursor(win, { target_line, target_col })
 						return
 					end
 				end
 
 				-- 2. File may be open in a split or not open at all → create new tab
 				vim.cmd("tabedit " .. vim.fn.fnameescape(filepath))
+				local current_buf = vim.api.nvim_get_current_buf()
+				local line_count = vim.api.nvim_buf_line_count(current_buf)
+				local target_line = math.max(1, math.min(lnum, line_count))
+				local line = vim.api.nvim_buf_get_lines(current_buf, target_line - 1, target_line, false)[1] or ""
+				local target_col = math.max(0, math.min(col - 1, #line))
+				vim.api.nvim_win_set_cursor(0, { target_line, target_col })
 			end
 
 			return {
