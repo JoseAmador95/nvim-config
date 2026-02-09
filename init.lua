@@ -106,49 +106,83 @@ vim.api.nvim_create_autocmd("BufWritePre", {
 -- Key Mappings -------------------------------------------------------------
 
 -- Map 'jj' to exit Insert mode
-vim.api.nvim_set_keymap("i", "jj", "<Esc>", {
-	noremap = true,
-	silent = true,
+vim.keymap.set("i", "jj", "<Esc>", {
+  noremap = true,
+  silent = true,
+  desc = "Exit insert mode",
 })
 
-vim.api.nvim_set_keymap("n", "<leader>q", ":q<CR>", {
-	noremap = true,
-	silent = true,
-})
-vim.api.nvim_set_keymap("n", "<leader>Q", ":q!<CR>", {
-	noremap = true,
-	silent = true,
-})
-vim.api.nvim_set_keymap("n", "<leader>x", ":x<CR>", {
-	noremap = true,
-	silent = true,
+-- Quit commands
+vim.keymap.set("n", "<leader>q", ":q<CR>", {
+  noremap = true,
+  silent = true,
+  desc = "Quit",
 })
 
--- Custom command to save with sudo
-vim.api.nvim_create_user_command("W", "w !sudo tee % > /dev/null", {})
-
--- Toggle paste mode with leader+pp
-vim.api.nvim_set_keymap("n", "<leader>pp", ":setlocal paste!<CR>", {
-	noremap = true,
-	silent = true,
+vim.keymap.set("n", "<leader>Q", ":q!<CR>", {
+  noremap = true,
+  silent = true,
+  desc = "Force quit",
 })
 
--- Clear search highlights with leader+Enter
-vim.api.nvim_set_keymap("n", "<leader><CR>", ":nohlsearch<CR>", {
-	noremap = true,
-	silent = true,
+vim.keymap.set("n", "<leader>x", ":x<CR>", {
+  noremap = true,
+  silent = true,
+  desc = "Save & quit",
+})
+
+-- Toggle paste mode with <leader>pp
+vim.keymap.set("n", "<leader>pp", ":setlocal paste!<CR>", {
+  noremap = true,
+  silent = true,
+  desc = "Toggle paste mode",
+})
+
+-- Clear search highlight
+vim.keymap.set("n", "<leader><CR>", ":nohlsearch<CR>", {
+  noremap = true,
+  silent = true,
+  desc = "Clear search highlight",
 })
 
 -- Toggle spell checking
-vim.api.nvim_set_keymap("n", "<leader>ss", ":setlocal spell!<CR>", {
-	noremap = true,
-	silent = true,
+vim.keymap.set("n", "<leader>ss", ":setlocal spell!<CR>", {
+  noremap = true,
+  silent = true,
+  desc = "Toggle spell checking",
 })
 
--- Map 0 to go to the first character of the line
-vim.api.nvim_set_keymap("n", "0", "^", {
-	noremap = true,
-	silent = true,
+-- Map 0 to go to the first non-blank character on the line
+vim.keymap.set("n", "0", "^", {
+  noremap = true,
+  silent = true,
+  desc = "Beginning of indentation",
+})
+
+-- Navigate tabs with J / K
+vim.keymap.set("n", "J", "<Cmd>tabprevious<CR>", {
+  noremap = true,
+  silent = true,
+  desc = "Previous tab",
+})
+
+vim.keymap.set("n", "K", "<Cmd>tabnext<CR>", {
+  noremap = true,
+  silent = true,
+  desc = "Next tab",
+})
+
+-- Visual mode enhancements for searching with *
+vim.keymap.set("v", "*", [[:<C-u>call VisualSelection('', '')<CR>/<C-R>=@/<CR><CR>]], {
+  noremap = true,
+  silent = true,
+  desc = "Search for visual selection",
+})
+
+vim.keymap.set("v", "#", [[:<C-u>call VisualSelection('', '')<CR>?<C-R>=@/<CR><CR>]], {
+  noremap = true,
+  silent = true,
+  desc = "Search backward for visual selection",
 })
 
 -- Terminal Configuration ----------------------------------------------------
@@ -167,26 +201,7 @@ vim.api.nvim_create_autocmd("TermOpen", {
 	end,
 })
 
--- Window Navigation --------------------------------------------------------
-
--- Navigate tabs with JK
-vim.cmd([[
-nnoremap J <Cmd>tabprevious<CR>
-nnoremap K <Cmd>tabnext<CR>
-]])
-
 -- Enhancements -------------------------------------------------------------
-
--- Visual mode enhancements for searching with *
-vim.api.nvim_set_keymap("v", "*", [[:<C-u>call VisualSelection('', '')<CR>/<C-R>=@/<CR><CR>]], {
-	noremap = true,
-	silent = true,
-})
-
-vim.api.nvim_set_keymap("v", "#", [[:<C-u>call VisualSelection('', '')<CR>?<C-R>=@/<CR><CR>]], {
-	noremap = true,
-	silent = true,
-})
 
 -- Custom command to reload configuration
 vim.api.nvim_create_user_command("ReloadConfig", "source $MYVIMRC", {})
