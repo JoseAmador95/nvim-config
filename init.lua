@@ -7,9 +7,6 @@ vim.g.loaded_netrwPlugin = 1
 -- optionally enable 24-bit colour
 vim.opt.termguicolors = true
 
--- Disable compatibility mode (for Vim compatibility clarity)
-vim.opt.compatible = false
-
 -- Leader Key
 vim.g.mapleader = "," -- Change to any preferred leader key
 vim.g.maplocalleader = "," -- Set a local leader key
