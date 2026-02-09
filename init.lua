@@ -43,10 +43,6 @@ vim.opt.ruler = true -- Show the cursor position in the status line
 vim.opt.showmatch = true -- Highlight matching brackets
 vim.opt.wildmenu = true -- Enhanced command-line completion
 
--- Status line setup
-vim.opt.laststatus = 2
-vim.opt.statusline = "%F%m%r%h %w %=%{getcwd()} Line:%l Column:%c"
-
 -- Search settings
 vim.opt.ignorecase = true -- Ignore case in search
 vim.opt.smartcase = true -- Smart case for search
