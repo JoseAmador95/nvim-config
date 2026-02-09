@@ -23,10 +23,27 @@ return {
 		},
 		config = function()
 			local mlsp = require("mason-lspconfig")
+			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
+
+			local ensure_servers = {
+				"bashls",
+				"clangd",
+				"jsonls",
+				"lua_ls",
+				"marksman",
+				"pyright",
+				"ruff",
+				"taplo",
+				"yamlls",
+			}
+
+			if not has_cmake_language_server then
+				table.insert(ensure_servers, "cmake")
+			end
 
 			-- Ensure the servers exist; Mason will install them if missing
 			mlsp.setup({
-				ensure_installed = { "clangd", "pyright" },
+				ensure_installed = ensure_servers,
 			})
 
 			--------------------------------------------------------------------------
@@ -105,6 +122,7 @@ return {
 				cmd = {
 					"clangd",
 					"--background-index",
+					"--clang-tidy",
 					"--cross-file-rename",
 					"--completion-style=detailed",
 					"--header-insertion=never",
@@ -120,8 +138,93 @@ return {
 				-- settings = { python = { analysis = { typeCheckingMode = "basic" } } },
 			})
 
+			vim.lsp.config("ruff", {
+				capabilities = capabilities,
+			})
+
+			local cmake_cmd = vim.fn.exepath("cmake-language-server")
+			vim.lsp.config("cmake", {
+				capabilities = capabilities,
+				cmd = cmake_cmd ~= "" and { cmake_cmd } or nil,
+			})
+
+			vim.lsp.config("yamlls", {
+				capabilities = capabilities,
+			})
+
+			vim.lsp.config("jsonls", {
+				capabilities = capabilities,
+			})
+
+			vim.lsp.config("taplo", {
+				capabilities = capabilities,
+			})
+
+			vim.lsp.config("bashls", {
+				capabilities = capabilities,
+			})
+
+			vim.lsp.config("marksman", {
+				capabilities = capabilities,
+			})
+
+			vim.lsp.config("lua_ls", {
+				capabilities = capabilities,
+				settings = {
+					Lua = {
+						telemetry = { enable = false },
+						workspace = { checkThirdParty = false },
+					},
+				},
+			})
+
 			-- Finally, enable (start) the clients for these configs
-			vim.lsp.enable({ "clangd", "pyright" })
+			vim.lsp.enable({
+				"bashls",
+				"clangd",
+				"cmake",
+				"jsonls",
+				"lua_ls",
+				"marksman",
+				"pyright",
+				"ruff",
+				"taplo",
+				"yamlls",
+			})
+		end,
+	},
+
+	{
+		"WhoIsSethDaniel/mason-tool-installer.nvim",
+		event = { "BufReadPre", "BufNewFile" },
+		dependencies = { "williamboman/mason.nvim" },
+		config = function()
+			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
+			local ensure_tools = {
+				"bashls",
+				"clangd",
+				"clang-format",
+				"jsonls",
+				"lua_ls",
+				"marksman",
+				"markdownlint-cli2",
+				"pyright",
+				"ruff",
+				"shellcheck",
+				"shfmt",
+				"stylua",
+				"taplo",
+				"yamlls",
+			}
+
+			if not has_cmake_language_server then
+				table.insert(ensure_tools, "cmake")
+			end
+
+			require("mason-tool-installer").setup({
+				ensure_installed = ensure_tools,
+				run_on_start = true,
+			})
 		end,
 	},
 }
