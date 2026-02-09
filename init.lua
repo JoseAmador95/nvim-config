@@ -173,8 +173,8 @@ vim.api.nvim_create_autocmd("TermOpen", {
 
 -- Navigate tabs with JK
 vim.cmd([[
-nnoremap J <Cmd>Tabprevious<CR>
-nnoremap K <Cmd>Tabnext<CR>
+nnoremap J <Cmd>tabprevious<CR>
+nnoremap K <Cmd>tabnext<CR>
 ]])
 
 -- Enhancements -------------------------------------------------------------
