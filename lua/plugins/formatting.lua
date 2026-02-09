@@ -5,7 +5,7 @@ return {
 			return not vim.g.vscode
 		end,
 		event = { "BufWritePre" },
-		cmd = { "ConformInfo", "Format", "FormatToggle" },
+		cmd = { "ConformInfo", "FormatFile", "FormatToggle" },
 		init = function()
 			vim.g.conform_format_on_save = false
 		end,
@@ -40,7 +40,7 @@ return {
 			local conform = require("conform")
 			conform.setup(opts)
 
-			vim.api.nvim_create_user_command("Format", function()
+			vim.api.nvim_create_user_command("FormatFile", function()
 				conform.format({ async = true, lsp_format = "fallback" })
 			end, { desc = "Format current buffer" })
 

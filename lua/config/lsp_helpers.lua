@@ -5,10 +5,6 @@ function M.CodeActions()
 	vim.lsp.buf.code_action()
 end
 
-function M.FormatFile()
-	vim.lsp.buf.format({ async = true })
-end
-
 -- === Extra helpers you might want from earlier steps ===
 -- Toggle inline diagnostics (virtual text) on/off
 function M.ToggleInlineDiagnostics()
