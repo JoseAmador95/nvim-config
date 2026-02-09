@@ -59,9 +59,9 @@ vim.opt.smarttab = true -- Smart indentation
 vim.opt.smartindent = true
 --
 -- use custom tab names
-local tabnames = require("config.tabnames")
-vim.o.showtabline = 2
-vim.o.tabline = "%!v:lua.require'config.tabnames_tabline'.tabline()"
+require("config.tabnames")
+vim.opt.showtabline = 2
+vim.opt.tabline = "%!v:lua.require'config.tabnames_tabline'.tabline()"
 
 -- File Management and Auto-commands -----------------------------------------
 
