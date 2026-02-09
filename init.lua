@@ -172,34 +172,10 @@ vim.keymap.set("n", "K", "<Cmd>tabnext<CR>", {
   desc = "Next tab",
 })
 
--- Visual mode enhancements for searching with *
-vim.keymap.set("v", "*", [[:<C-u>call VisualSelection('', '')<CR>/<C-R>=@/<CR><CR>]], {
-  noremap = true,
-  silent = true,
-  desc = "Search for visual selection",
-})
-
-vim.keymap.set("v", "#", [[:<C-u>call VisualSelection('', '')<CR>?<C-R>=@/<CR><CR>]], {
-  noremap = true,
-  silent = true,
-  desc = "Search backward for visual selection",
-})
-
 -- Terminal Configuration ----------------------------------------------------
 
 -- Enable mouse support in all modes
 vim.opt.mouse = "a"
-
--- Terminal settings
-vim.api.nvim_create_autocmd("TermOpen", {
-	callback = function()
-		-- Disable line numbers in terminal
-		vim.opt_local.number = false
-		vim.opt_local.relativenumber = false
-		-- Start in insert mode
-		vim.cmd("startinsert")
-	end,
-})
 
 -- Enhancements -------------------------------------------------------------
 
