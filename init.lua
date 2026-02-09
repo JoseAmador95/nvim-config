@@ -179,6 +179,9 @@ vim.api.nvim_create_user_command("ReloadConfig", "source $MYVIMRC", {})
 
 -- Plugins --------------------------------------------------------------------
 
+require("config.diagnostics")
+require("config.lsp_helpers")
+require("config.lsp_commands")
 require("config.lazy")
 
 if vim.g.vscode then
@@ -186,3 +189,5 @@ if vim.g.vscode then
 else
 	require("editor.terminal")
 end
+
+require("config.clangd_commands")
