@@ -9,6 +9,26 @@ return {
 		keys = {
 			{ "<leader>e", "<cmd>NvimTreeToggle<CR>", desc = "Toggle file explorer" },
 		},
+		init = function()
+			-- Auto-open nvim-tree when opening a directory like `nvim .`
+			vim.api.nvim_create_autocmd("VimEnter", {
+				callback = function(data)
+					-- `data.file` is the file or directory passed on the CLI
+					local dir = data.file
+					if dir == "" then
+						-- If no argument was passed, but `nvim` started in a directory,
+						-- check if argc() is 0 and current dir has files; optional behavior:
+						return
+					end
+					if vim.fn.isdirectory(dir) == 1 then
+						-- Change to the directory
+						vim.cmd.cd(dir)
+						-- Open the tree
+						require("nvim-tree.api").tree.open()
+					end
+				end,
+			})
+		end,
 		opts = function()
 			local api = require("nvim-tree.api")
 
