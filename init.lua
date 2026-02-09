@@ -180,6 +180,7 @@ vim.api.nvim_create_user_command("ReloadConfig", "source $MYVIMRC", {})
 -- Plugins --------------------------------------------------------------------
 
 require("config.diagnostics")
+require("config.devcontainer_tools").setup()
 require("config.lsp_helpers")
 require("config.lsp_commands")
 require("config.lazy")

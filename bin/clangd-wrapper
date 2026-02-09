@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+set -eu
+
+mode="${NVIM_DEVCONTAINER_MODE:-auto}"
+
+if [ "$mode" = "off" ] || ! command -v devcontainer >/dev/null 2>&1; then
+	exec clangd "$@"
+fi
+
+workspace="${NVIM_DEVCONTAINER_WORKSPACE:-}"
+if [ -z "$workspace" ]; then
+	dir="$PWD"
+	while [ "$dir" != "/" ]; do
+		if [ -f "$dir/.devcontainer/devcontainer.json" ] || [ -f "$dir/.devcontainer.json" ]; then
+			workspace="$dir"
+			break
+		fi
+		dir="$(dirname "$dir")"
+	done
+fi
+
+if [ "$mode" = "on" ] && [ -z "$workspace" ]; then
+	workspace="$PWD"
+fi
+
+if [ -n "$workspace" ]; then
+	exec devcontainer exec --workspace-folder "$workspace" -- clangd "$@"
+fi
+
+exec clangd "$@"

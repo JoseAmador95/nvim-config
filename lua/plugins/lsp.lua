@@ -24,6 +24,7 @@ return {
 		},
 		config = function()
 			local mlsp = require("mason-lspconfig")
+			local devcontainer_tools = require("config.devcontainer_tools")
 			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
 
 			local ensure_servers = {
@@ -119,14 +120,13 @@ return {
 			-- C/C++: clangd
 			vim.lsp.config("clangd", {
 				capabilities = capabilities,
-				cmd = {
-					"clangd",
+				cmd = devcontainer_tools.clangd_cmd({
 					"--background-index",
 					"--clang-tidy",
 					"--cross-file-rename",
 					"--completion-style=detailed",
 					"--header-insertion=never",
-				},
+				}),
 				-- filetypes/root_markers are provided by lspconfig's clangd config; we can
 				-- override here if needed.
 			})
