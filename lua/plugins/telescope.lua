@@ -18,6 +18,37 @@ return {
 
 		opts = function()
 			local actions = require("telescope.actions")
+			local action_state = require("telescope.actions.state")
+
+			-- ⭐ Custom smart-tab opener
+			local function smart_open(prompt_bufnr)
+				local entry = action_state.get_selected_entry()
+				local filepath = entry.path or entry.filename
+
+				actions.close(prompt_bufnr)
+
+				-- Normalize path to avoid mismatches
+				filepath = vim.fn.fnamemodify(filepath, ":p")
+
+				-- 1. Loop through tabs and check ONLY the main window of each tab
+				for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
+					local win = vim.api.nvim_tabpage_get_win(tabpage)
+					local buf = vim.api.nvim_win_get_buf(win)
+					local name = vim.api.nvim_buf_get_name(buf)
+
+					-- Normalize tab buffer filepath
+					name = vim.fn.fnamemodify(name, ":p")
+
+					if name == filepath then
+						-- File is open as the MAIN buffer of this tab → reuse tab
+						vim.api.nvim_set_current_tabpage(tabpage)
+						return
+					end
+				end
+
+				-- 2. File may be open in a split or not open at all → create new tab
+				vim.cmd("tabedit " .. vim.fn.fnameescape(filepath))
+			end
 
 			return {
 				defaults = {
@@ -32,8 +63,8 @@ return {
 							["<C-l>"] = "move_selection_next",
 							["<C-q>"] = "close",
 
-							-- ⭐ Open in NEW TAB by default (Insert mode)
-							["<CR>"] = actions.select_tab,
+							-- ⭐ Replace default Enter action with smart tab reuse
+							["<CR>"] = smart_open,
 						},
 						n = {
 							["j"] = "move_selection_next",
@@ -42,8 +73,8 @@ return {
 							["l"] = "move_selection_next",
 							["q"] = "close",
 
-							-- ⭐ Open in NEW TAB by default (Normal mode)
-							["<CR>"] = actions.select_tab,
+							-- ⭐ Same in normal mode
+							["<CR>"] = smart_open,
 						},
 					},
 				},
