@@ -8,6 +8,8 @@ return {
 		dependencies = {
 			"nvim-lua/plenary.nvim",
 			"nvim-tree/nvim-web-devicons",
+			"nvim-telescope/telescope-smart-history.nvim",
+			"tami5/sqlite.lua",
 		},
 		keys = {
 			{ "<leader>ff", "<cmd>Telescope find_files<cr>", desc = "Find files" },
@@ -17,8 +19,17 @@ return {
 		},
 
 		opts = function()
+			local history_path = vim.fn.stdpath("data") .. "/databases/telescope_history.sqlite3"
+			vim.fn.mkdir(vim.fn.fnamemodify(history_path, ":h"), "p")
+
 			local actions = require("telescope.actions")
 			local action_state = require("telescope.actions.state")
+
+			local function append_history(prompt_bufnr)
+				action_state
+					.get_current_history()
+					:append(action_state.get_current_line(), action_state.get_current_picker(prompt_bufnr))
+			end
 
 			-- ⭐ Custom smart-tab opener
 			local function smart_open(prompt_bufnr)
@@ -27,6 +38,7 @@ return {
 				local lnum = tonumber(entry.lnum) or tonumber(entry.line) or 1
 				local col = tonumber(entry.col) or 1
 
+				append_history(prompt_bufnr)
 				actions.close(prompt_bufnr)
 
 				-- Normalize path to avoid mismatches
@@ -67,6 +79,11 @@ return {
 				defaults = {
 					cwd = vim.fn.getcwd(),
 					file_ignore_patterns = { "node_modules", ".git" },
+					history = {
+						path = history_path,
+						limit = 100,
+						cycle_wrap = true,
+					},
 
 					mappings = {
 						i = {
@@ -75,6 +92,10 @@ return {
 							["<C-h>"] = "move_selection_previous",
 							["<C-l>"] = "move_selection_next",
 							["<C-q>"] = "close",
+							["<C-p>"] = actions.cycle_history_prev,
+							["<C-n>"] = actions.cycle_history_next,
+							["<C-Up>"] = actions.cycle_history_prev,
+							["<C-Down>"] = actions.cycle_history_next,
 
 							-- ⭐ Replace default Enter action with smart tab reuse
 							["<CR>"] = smart_open,
@@ -85,6 +106,10 @@ return {
 							["h"] = "move_selection_previous",
 							["l"] = "move_selection_next",
 							["q"] = "close",
+							["<C-p>"] = actions.cycle_history_prev,
+							["<C-n>"] = actions.cycle_history_next,
+							["<C-Up>"] = actions.cycle_history_prev,
+							["<C-Down>"] = actions.cycle_history_next,
 
 							-- ⭐ Same in normal mode
 							["<CR>"] = smart_open,
@@ -104,6 +129,10 @@ return {
 					},
 				},
 			}
+		end,
+		config = function(_, opts)
+			require("telescope").setup(opts)
+			require("telescope").load_extension("smart_history")
 		end,
 	},
 }
