@@ -14,36 +14,8 @@ return {
 		keys = {
 			{ "<leader>e", "<cmd>Neotree toggle filesystem left<CR>", desc = "Toggle file explorer" },
 		},
-		init = function()
-			-- Auto-open tree when opening a directory like `nvim .`
-			vim.api.nvim_create_autocmd("VimEnter", {
-				callback = function(data)
-					local dir = data.file
-					local show_tree = function()
-						require("neo-tree.command").execute({
-							action = "show",
-							source = "filesystem",
-							position = "left",
-							dir = vim.loop.cwd(),
-						})
-					end
-
-					-- Case: `nvim <directory>`
-					if dir ~= "" and vim.fn.isdirectory(dir) == 1 then
-						vim.cmd.cd(dir)
-						show_tree()
-						return
-					end
-
-					-- Case: `nvim` inside a directory (optional behavior)
-					if dir == "" and vim.fn.argc() == 0 then
-						show_tree()
-					end
-				end,
-			})
-		end,
 		opts = {
-			close_if_last_window = true,
+			close_if_last_window = false,
 			enable_git_status = true,
 			enable_diagnostics = true,
 			default_component_configs = {
