@@ -18,6 +18,20 @@ vim.g.maplocalleader = "," -- Set a local leader key
 vim.opt.undofile = true
 vim.opt.undodir = vim.fn.stdpath("config") .. "/.undodir"
 
+local function prepend_path(path)
+	if not path or path == "" then
+		return
+	end
+	local current = vim.env.PATH or ""
+	if not string.find(current, path, 1, true) then
+		vim.env.PATH = path .. ":" .. current
+	end
+end
+
+local mason_root = vim.fn.stdpath("data") .. "/mason"
+prepend_path(mason_root .. "/bin")
+prepend_path(mason_root .. "/build")
+
 -- Command Pallete -----------------------------------------------------------
 
 vim.opt.wildmode = { "longest:full" }
@@ -149,6 +163,7 @@ end, { desc = "Reload config and plugin specs" })
 
 require("config.diagnostics")
 require("config.devcontainer_tools").setup()
+require("config.indent")
 require("config.lsp_helpers")
 require("config.lsp_commands")
 require("config.lazy")

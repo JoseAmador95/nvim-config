@@ -100,6 +100,7 @@ return {
 				"pyright",
 				"ruff",
 				"taplo",
+				"ts_ls",
 				"yamlls",
 			}
 
@@ -240,6 +241,10 @@ return {
 				capabilities = capabilities,
 			})
 
+			vim.lsp.config("ts_ls", {
+				capabilities = capabilities,
+			})
+
 			vim.lsp.config("bashls", {
 				capabilities = capabilities,
 			})
@@ -274,6 +279,7 @@ return {
 				"pyright",
 				"ruff",
 				"taplo",
+				"ts_ls",
 				"yamlls",
 			})
 		end,
@@ -302,6 +308,7 @@ return {
 				"shfmt",
 				"stylua",
 				"taplo",
+				"ts_ls",
 				"yamlls",
 			}
 

@@ -28,12 +28,3 @@ end, { desc = "Jump to previous diagnostic" })
 vim.api.nvim_create_user_command("ToggleInlayHints", function()
 	H.ToggleInlayHints()
 end, { desc = "Toggle LSP inlay hints for current buffer" })
-
--- Point clangd to a compile_commands directory (with :command completion)
-vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
-	H.ClangdSetCompileCommands(opts.args)
-end, {
-	nargs = 1,
-	complete = "dir",
-	desc = "Point clangd to a compile_commands.json directory",
-})
