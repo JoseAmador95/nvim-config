@@ -57,6 +57,8 @@ vim.opt.relativenumber = false -- Show relative line numbers
 vim.opt.ruler = true -- Show the cursor position in the status line
 vim.opt.showmatch = true -- Highlight matching brackets
 vim.opt.wildmenu = true -- Enhanced command-line completion
+vim.opt.signcolumn = "yes" -- Keep sign column visible
+vim.opt.updatetime = 250 -- Faster CursorHold events
 
 -- Search settings
 vim.opt.ignorecase = true -- Ignore case in search
