@@ -8,7 +8,24 @@ return {
 		config = function()
 			local max_filesize = 200 * 1024
 			require("nvim-treesitter").setup({
-				ensure_installed = { "c", "cpp", "lua", "vim", "vimdoc", "query" },
+				ensure_installed = {
+					"bash",
+					"c",
+					"cmake",
+					"cpp",
+					"javascript",
+					"json",
+					"lua",
+					"markdown",
+					"python",
+					"query",
+					"toml",
+					"tsx",
+					"typescript",
+					"vim",
+					"vimdoc",
+					"yaml",
+				},
 				auto_install = false,
 				sync_install = false,
 				highlight = {

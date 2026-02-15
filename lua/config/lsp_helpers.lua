@@ -38,31 +38,4 @@ function M.ToggleInlayHints()
 	print("Inlay hints: " .. ((not currently) and "ON" or "OFF"))
 end
 
--- Dynamically point clangd to a compile_commands directory
--- Example: :ClangdSetCompileCommands build
-function M.ClangdSetCompileCommands(dir)
-	local full = vim.fn.fnamemodify(dir, ":p")
-
-	-- Stop all clangd clients (use modern API)
-	for _, client in ipairs(vim.lsp.get_clients()) do
-		if client.name == "clangd" then
-			vim.lsp.stop_client(client.id)
-		end
-	end
-
-	-- Re-register clangd and re-enable it
-	vim.lsp.config("clangd", {
-		cmd = {
-			"clangd",
-			"--compile-commands-dir=" .. full,
-			"--background-index",
-			"--cross-file-rename",
-			"--completion-style=detailed",
-			"--header-insertion=never",
-		},
-	})
-	vim.lsp.enable("clangd")
-	print("clangd now using compile_commands from: " .. full)
-end
-
 return M
