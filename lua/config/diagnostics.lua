@@ -10,6 +10,10 @@ vim.diagnostic.config({
 	},
 })
 
+if vim.g.vscode then
+	return
+end
+
 -- Open diagnostics in a floating inline window
 vim.keymap.set("n", "<leader>ld", function()
 	vim.diagnostic.open_float(nil, { border = "rounded", focusable = false })

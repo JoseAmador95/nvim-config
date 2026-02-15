@@ -4,9 +4,11 @@ return {
 	cond = function()
 		return not vim.g.vscode
 	end,
+	keys = {
+		{ "<leader>t", "<cmd>ToggleTerm<cr>", desc = "Toggle terminal" },
+	},
 	config = function()
 		require("toggleterm").setup({
-			open_mapping = [[<leader>t]],
 			direction = "horizontal",
 			start_in_insert = true,
 			insert_mappings = true,
