@@ -6,6 +6,7 @@ return {
 	end,
 	keys = {
 		{ "<leader>t", "<cmd>ToggleTerm<cr>", desc = "Toggle terminal" },
+		{ "<leader>t", "<C-\\><C-n><cmd>ToggleTerm<cr>", mode = "t", desc = "Toggle terminal" },
 	},
 	config = function()
 		require("toggleterm").setup({

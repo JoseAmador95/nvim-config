@@ -37,6 +37,12 @@ vim.keymap.set("i", "jj", "<Esc>", {
 	desc = "Exit insert mode",
 })
 
+vim.keymap.set("t", "jj", "<C-\\><C-n>", {
+	noremap = true,
+	silent = true,
+	desc = "Exit terminal mode",
+})
+
 vim.keymap.set("n", "<leader>w", ":w!<CR>", {
 	noremap = true,
 	silent = true,
