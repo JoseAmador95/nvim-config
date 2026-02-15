@@ -45,6 +45,18 @@ vim.keymap.set("n", "<leader>e", call("workbench.view.explorer"), {
 	desc = "Explorer",
 })
 
+vim.keymap.set("n", "<leader>ff", call("workbench.action.quickOpen"), {
+	noremap = true,
+	silent = true,
+	desc = "Find files",
+})
+
+vim.keymap.set("n", "<leader>fg", call("workbench.action.findInFiles"), {
+	noremap = true,
+	silent = true,
+	desc = "Find in files",
+})
+
 vim.keymap.set("n", "J", call("workbench.action.previousEditor"), {
 	noremap = true,
 	silent = true,
