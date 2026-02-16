@@ -22,6 +22,7 @@ return {
 					"toml",
 					"vim",
 					"vimdoc",
+					"xml",
 					"yaml",
 				},
 				auto_install = false,

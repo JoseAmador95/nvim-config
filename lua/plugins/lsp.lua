@@ -95,6 +95,7 @@ return {
 				"bashls",
 				"clangd",
 				"jsonls",
+				"lemminx",
 				"lua_ls",
 				"marksman",
 				"pyright",
@@ -263,12 +264,17 @@ return {
 				},
 			})
 
+			vim.lsp.config("lemminx", {
+				capabilities = capabilities,
+			})
+
 			-- Finally, enable (start) the clients for these configs
 			vim.lsp.enable({
 				"bashls",
 				"clangd",
 				"cmake",
 				"jsonls",
+				"lemminx",
 				"lua_ls",
 				"marksman",
 				"pyright",
@@ -293,6 +299,8 @@ return {
 				"clangd",
 				"clang-format",
 				"jsonls",
+				"jq",
+				"lemminx",
 				"lua_ls",
 				"marksman",
 				"markdownlint-cli2",
