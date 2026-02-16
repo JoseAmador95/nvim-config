@@ -168,6 +168,7 @@ require("config.devcontainer_tools").setup()
 require("config.indent")
 require("config.lsp_helpers")
 require("config.lsp_commands")
+require("config.viewer_commands")
 require("config.lazy")
 
 if vim.g.vscode then
