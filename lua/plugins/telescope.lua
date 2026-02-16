@@ -9,7 +9,7 @@ return {
 			"nvim-lua/plenary.nvim",
 			"nvim-tree/nvim-web-devicons",
 			"nvim-telescope/telescope-smart-history.nvim",
-			"tami5/sqlite.lua",
+			"kkharji/sqlite.lua",
 		},
 		keys = {
 			{ "<leader>ff", "<cmd>Telescope find_files<cr>", desc = "Find files" },
