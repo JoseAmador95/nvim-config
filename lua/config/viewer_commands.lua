@@ -99,6 +99,17 @@ vim.api.nvim_create_user_command("JsonTree", function()
 	vim.cmd("JqxList")
 end, { desc = "JSON tree view" })
 
+vim.api.nvim_create_user_command("MenuOpen", function()
+	local ok, menu = pcall(require, "config.menu")
+	if not ok then
+		notify("Menu config not available", vim.log.levels.WARN)
+		return
+	end
+	menu.open()
+end, { desc = "Open menu" })
+
+vim.keymap.set("n", "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open menu" })
+
 vim.api.nvim_create_user_command("YamlOutline", function()
 	if not ensure_filetype({ "yaml" }) then
 		return
