@@ -20,25 +20,22 @@ local function on_filetype(pattern, callback)
 	})
 end
 
-on_filetype({
-	"lua",
-	"json",
-	"jsonc",
-	"yaml",
-	"toml",
-	"markdown",
-	"sh",
-	"bash",
-	"zsh",
-	"vim",
-	"vimdoc",
-	"javascript",
-	"javascriptreact",
-	"typescript",
-	"typescriptreact",
-}, function()
-	set_spaces(2)
-end)
+	on_filetype({
+		"lua",
+		"json",
+		"jsonc",
+		"yaml",
+		"toml",
+		"markdown",
+		"sh",
+		"bash",
+		"zsh",
+		"vim",
+		"vimdoc",
+		"javascript",
+	}, function()
+		set_spaces(2)
+	end)
 
 on_filetype({ "c", "cpp", "python", "cmake" }, function()
 	set_spaces(4)
