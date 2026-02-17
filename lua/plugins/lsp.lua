@@ -118,6 +118,99 @@ return {
 			--------------------------------------------------------------------------
 			local capabilities = require("cmp_nvim_lsp").default_capabilities()
 			local has_schemastore, schemastore = pcall(require, "schemastore")
+			local plantuml_lsp_warned = false
+			local plantuml_lsp_installing = false
+			local plantuml_lsp_available = vim.fn.executable("plantuml-lsp") == 1
+			local plantuml_lsp_auto_install = vim.g.plantuml_lsp_auto_install ~= false
+
+			local function plantuml_root(fname)
+				local root = vim.fs.find({ ".git" }, { path = fname, upward = true })[1]
+				if root then
+					return vim.fs.dirname(root)
+				end
+				return vim.fs.dirname(fname)
+			end
+
+			local function notify_missing_lsp()
+				if plantuml_lsp_warned then
+					return
+				end
+				plantuml_lsp_warned = true
+				vim.notify(
+					"plantuml-lsp not found in PATH. Install: go install github.com/ptdewey/plantuml-lsp@latest",
+					vim.log.levels.WARN,
+					{ title = "LSP" }
+				)
+			end
+
+			local function enable_plantuml_lsp()
+				vim.lsp.enable({ "plantuml_lsp" })
+			end
+
+			local function install_plantuml_lsp()
+				if plantuml_lsp_installing then
+					return
+				end
+				local go_cmd = vim.fn.exepath("go")
+				if go_cmd == "" then
+					vim.notify(
+						"Go not found in PATH. Install Go to use plantuml-lsp auto-install.",
+						vim.log.levels.WARN,
+						{ title = "LSP" }
+					)
+					return
+				end
+
+				plantuml_lsp_installing = true
+				vim.notify("Installing plantuml-lsp with Go...", vim.log.levels.INFO, { title = "LSP" })
+				vim.system(
+					{ go_cmd, "install", "github.com/ptdewey/plantuml-lsp@latest" },
+					{ text = true },
+					vim.schedule_wrap(function(result)
+						plantuml_lsp_installing = false
+						if result.code ~= 0 then
+							local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
+							if msg == "" then
+								msg = "plantuml-lsp install failed"
+							end
+							vim.notify(msg, vim.log.levels.ERROR, { title = "LSP" })
+							return
+						end
+						if vim.fn.executable("plantuml-lsp") ~= 1 then
+							vim.notify(
+								"plantuml-lsp installed, but not found in PATH. Add your Go bin directory to PATH.",
+								vim.log.levels.WARN,
+								{ title = "LSP" }
+							)
+							return
+						end
+						plantuml_lsp_available = true
+						vim.notify("plantuml-lsp installed", vim.log.levels.INFO, { title = "LSP" })
+						enable_plantuml_lsp()
+					end)
+				)
+			end
+
+			vim.api.nvim_create_user_command("PlantumlLspInstall", function()
+				install_plantuml_lsp()
+			end, { desc = "Install PlantUML LSP (Go)" })
+
+			if not plantuml_lsp_available then
+				vim.api.nvim_create_autocmd("FileType", {
+					group = vim.api.nvim_create_augroup("PlantumlLspMissing", { clear = true }),
+					pattern = "plantuml",
+					callback = function()
+						if plantuml_lsp_available then
+							return
+						end
+						if plantuml_lsp_auto_install then
+							install_plantuml_lsp()
+						else
+							notify_missing_lsp()
+						end
+					end,
+				})
+			end
 
 			-- Global on_attach-style keymaps (recommended with new API)
 			-- Use LspAttach so it applies to any server that attaches later.
@@ -268,8 +361,15 @@ return {
 				capabilities = capabilities,
 			})
 
+			vim.lsp.config("plantuml_lsp", {
+				capabilities = capabilities,
+				cmd = { "plantuml-lsp", "--exec-path=plantuml" },
+				filetypes = { "plantuml" },
+				root_dir = plantuml_root,
+			})
+
 			-- Finally, enable (start) the clients for these configs
-			vim.lsp.enable({
+			local enabled_servers = {
 				"bashls",
 				"clangd",
 				"cmake",
@@ -281,7 +381,11 @@ return {
 				"ruff",
 				"taplo",
 				"yamlls",
-			})
+			}
+			if plantuml_lsp_available then
+				table.insert(enabled_servers, "plantuml_lsp")
+			end
+			vim.lsp.enable(enabled_servers)
 		end,
 	},
 

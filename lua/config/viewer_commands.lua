@@ -1,3 +1,9 @@
+local log_patterns = require("config.log_patterns")
+local plantuml_ascii = require("config.plantuml_ascii")
+local plantuml_preview = require("config.plantuml_preview")
+
+log_patterns.setup()
+
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "Viewer" })
 end
@@ -109,6 +115,26 @@ vim.api.nvim_create_user_command("MenuOpen", function()
 end, { desc = "Open menu" })
 
 vim.keymap.set("n", "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open menu" })
+
+vim.api.nvim_create_user_command("LogHlAdd", function(opts)
+	log_patterns.add("exact", opts)
+end, { nargs = "+", complete = log_patterns.complete_colors, desc = "Add log highlight (exact)" })
+
+vim.api.nvim_create_user_command("LogHlRegex", function(opts)
+	log_patterns.add("regex", opts)
+end, { nargs = "+", complete = log_patterns.complete_colors, desc = "Add log highlight (regex)" })
+
+vim.api.nvim_create_user_command("LogHlClear", function(opts)
+	log_patterns.clear(opts)
+end, { nargs = "?", complete = log_patterns.complete_colors, desc = "Clear log highlights" })
+
+vim.api.nvim_create_user_command("PlantumlAscii", function()
+	plantuml_ascii.render()
+end, { desc = "Render PlantUML ASCII preview" })
+
+vim.api.nvim_create_user_command("PlantumlPreview", function()
+	plantuml_preview.preview()
+end, { desc = "Preview PlantUML diagram in browser" })
 
 vim.api.nvim_create_user_command("YamlOutline", function()
 	if not ensure_filetype({ "yaml" }) then
