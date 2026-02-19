@@ -32,6 +32,22 @@ return {
 			local mlsp = require("mason-lspconfig")
 			local devcontainer_tools = require("config.devcontainer_tools")
 
+			local function telescope_lsp_picker(method, title, telescope_fn)
+				return function()
+					local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
+					if not clients or #clients == 0 then
+						vim.notify((title or "LSP") .. ": no active client for method", vim.log.levels.INFO)
+						return
+					end
+					local ok, builtin = pcall(require, "telescope.builtin")
+					if ok then
+						telescope_fn()
+					else
+						vim.notify("Telescope not available", vim.log.levels.WARN)
+					end
+				end
+			end
+
 			local function safe_lsp_jump(method, title)
 				return function()
 					local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
@@ -63,8 +79,7 @@ return {
 							return
 						end
 
-						local client = ctx and ctx.client_id and vim.lsp.get_client_by_id(ctx.client_id) or nil
-						local response_encoding = client and client.offset_encoding or position_encoding
+						local client = ctx and ctx.client_id and vim.lsp.get_client_by_id(ctx.client_id)
 
 						local location = is_list(result) and result[1] or result
 						local uri = location.uri or location.targetUri
@@ -73,21 +88,19 @@ return {
 							return
 						end
 
+						local filepath = vim.uri_to_fname(uri)
 						if vim.startswith(uri, "file://") then
-							local file = vim.uri_to_fname(uri)
 							local current = vim.api.nvim_buf_get_name(0)
 							local start_dir = current ~= "" and vim.fs.dirname(current) or vim.loop.cwd()
-							local mapped = devcontainer_tools.container_path_to_host(file, start_dir)
-							local mapped_uri = vim.uri_from_fname(mapped)
-							if location.uri then
-								location.uri = mapped_uri
-							end
-							if location.targetUri then
-								location.targetUri = mapped_uri
-							end
+							filepath = devcontainer_tools.container_path_to_host(filepath, start_dir)
 						end
 
-						vim.lsp.util.show_document(location, response_encoding, { reuse_win = true, focus = true })
+						local range = location.range or location.targetSelectionRange or location.selectionRange
+						local start_pos = range and range.start or { line = 0, character = 0 }
+						local lnum = start_pos.line + 1
+						local col = start_pos.character + 1
+
+						require("config.editor").open_file_in_tab(filepath, { lnum = lnum, col = col })
 					end)
 				end
 			end
@@ -242,13 +255,17 @@ return {
 					vim.keymap.set(
 						"n",
 						"gi",
-						vim.lsp.buf.implementation,
+						telescope_lsp_picker("textDocument/implementation", "Go to implementation", function()
+							require("telescope.builtin").lsp_implementations({ jump_type = "never" })
+						end),
 						{ buffer = ev.buff, silent = true, desc = "Go to implementation" }
 					)
 					vim.keymap.set(
 						"n",
 						"gr",
-						vim.lsp.buf.references,
+						telescope_lsp_picker("textDocument/references", "References", function()
+							require("telescope.builtin").lsp_references({ jump_type = "never" })
+						end),
 						{ buffer = ev.buff, silent = true, desc = "References" }
 					)
 

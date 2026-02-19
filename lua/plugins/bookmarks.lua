@@ -36,8 +36,10 @@ return {
 						end
 
 						if node.type == "bookmark" and node.location then
-							vim.cmd("tabedit " .. vim.fn.fnameescape(node.location.path))
-							vim.api.nvim_win_set_cursor(0, { node.location.line, node.location.col or 0 })
+							require("config.editor").open_file_in_tab(node.location.path, {
+								lnum = node.location.line,
+								col = node.location.col or 0,
+							})
 						elseif node.type == "list" then
 							Operate.toggle()
 						end
