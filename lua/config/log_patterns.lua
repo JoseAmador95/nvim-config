@@ -276,13 +276,13 @@ function M.setup()
 		group = group,
 		callback = function(args)
 			local buf = args.buf
-		local ok, state = pcall(vim.api.nvim_buf_get_var, buf, "log_pattern_state")
-		if not ok or type(state) ~= "table" then
-			return
-		end
-		apply_all_to_window(buf, vim.api.nvim_get_current_win(), state)
-		vim.api.nvim_buf_set_var(buf, "log_pattern_state", state)
-	end,
+			local ok, state = pcall(vim.api.nvim_buf_get_var, buf, "log_pattern_state")
+			if not ok or type(state) ~= "table" then
+				return
+			end
+			apply_all_to_window(buf, vim.api.nvim_get_current_win(), state)
+			vim.api.nvim_buf_set_var(buf, "log_pattern_state", state)
+		end,
 	})
 end
 

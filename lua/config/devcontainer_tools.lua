@@ -225,7 +225,13 @@ function M.container_path_to_host(path, start_dir)
 					add_candidate(vim.fs.joinpath(host_workspace, rel_tail))
 				end
 
-				if rel_head and rel_head ~= "" and string.lower(rel_head) == basename_lower and rel_tail and rel_tail ~= "" then
+				if
+					rel_head
+					and rel_head ~= ""
+					and string.lower(rel_head) == basename_lower
+					and rel_tail
+					and rel_tail ~= ""
+				then
 					add_candidate(vim.fs.joinpath(host_workspace, rel_tail))
 				end
 
@@ -368,7 +374,8 @@ function M.setup()
 		end
 
 		local workspace = find_workspace(uv.cwd())
-		local shell_bootstrap = [[if [ -n "$SHELL" ] && [ -x "$SHELL" ]; then exec "$SHELL" -l; elif command -v bash >/dev/null 2>&1; then exec bash -l; elif command -v zsh >/dev/null 2>&1; then exec zsh -l; else exec sh; fi]]
+		local shell_bootstrap =
+			[[if [ -n "$SHELL" ] && [ -x "$SHELL" ]; then exec "$SHELL" -l; elif command -v bash >/dev/null 2>&1; then exec bash -l; elif command -v zsh >/dev/null 2>&1; then exec zsh -l; else exec sh; fi]]
 		local cmd = "devcontainer exec --workspace-folder "
 			.. vim.fn.shellescape(workspace)
 			.. " -- sh -lc "
