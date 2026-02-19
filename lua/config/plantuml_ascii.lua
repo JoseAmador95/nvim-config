@@ -70,11 +70,15 @@ local function schedule_render(source_buf)
 	set_buf_var(source_buf, "plantuml_ascii_timer", timer)
 	local anchor_win = get_buf_var(source_buf, "plantuml_ascii_anchor_win")
 
-	timer:start(1000, 0, vim.schedule_wrap(function()
-		M.render({ buf = source_buf, anchor_win = anchor_win })
-		stop_timer(timer)
-		set_buf_var(source_buf, "plantuml_ascii_timer", nil)
-	end))
+	timer:start(
+		1000,
+		0,
+		vim.schedule_wrap(function()
+			M.render({ buf = source_buf, anchor_win = anchor_win })
+			stop_timer(timer)
+			set_buf_var(source_buf, "plantuml_ascii_timer", nil)
+		end)
+	)
 end
 
 local function setup_autocmds(source_buf)

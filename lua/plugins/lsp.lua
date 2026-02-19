@@ -51,7 +51,10 @@ return {
 						end
 
 						if err then
-							vim.notify((title or "LSP") .. ": " .. (err.message or "request failed"), vim.log.levels.ERROR)
+							vim.notify(
+								(title or "LSP") .. ": " .. (err.message or "request failed"),
+								vim.log.levels.ERROR
+							)
 							return
 						end
 

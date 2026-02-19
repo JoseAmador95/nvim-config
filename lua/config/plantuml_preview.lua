@@ -36,8 +36,8 @@ local function write_html(html_path, png_path)
 		"<!doctype html>",
 		"<html>",
 		"<head>",
-		"  <meta charset=\"utf-8\">",
-		"  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+		'  <meta charset="utf-8">',
+		'  <meta name="viewport" content="width=device-width, initial-scale=1">',
 		"  <title>PlantUML Preview</title>",
 		"  <style>",
 		"    body { margin: 0; padding: 16px; background: #111; color: #ddd; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }",
@@ -45,7 +45,7 @@ local function write_html(html_path, png_path)
 		"  </style>",
 		"</head>",
 		"<body>",
-		"  <img id=\"diagram\" src=\"" .. png_name .. "\" alt=\"PlantUML\">",
+		'  <img id="diagram" src="' .. png_name .. '" alt="PlantUML">',
 		"  <script>",
 		"    const img = document.getElementById('diagram');",
 		"    setInterval(() => { img.src = '" .. png_name .. "?ts=' + Date.now(); }, 1000);",
@@ -110,11 +110,15 @@ local function schedule_render(buf)
 
 	timer = uv.new_timer()
 	set_buf_var(buf, "plantuml_preview_timer", timer)
-	timer:start(1000, 0, vim.schedule_wrap(function()
-		M.render({ buf = buf })
-		stop_timer(timer)
-		set_buf_var(buf, "plantuml_preview_timer", nil)
-	end))
+	timer:start(
+		1000,
+		0,
+		vim.schedule_wrap(function()
+			M.render({ buf = buf })
+			stop_timer(timer)
+			set_buf_var(buf, "plantuml_preview_timer", nil)
+		end)
+	)
 end
 
 local function setup_autocmds(buf)

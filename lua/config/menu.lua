@@ -170,7 +170,11 @@ local function menu_items()
 
 	local lsp_items = {
 		{ name = "Go to Definition", cmd = lsp_action("textDocument/definition", vim.lsp.buf.definition), rtxt = "gd" },
-		{ name = "Go to Declaration", cmd = lsp_action("textDocument/declaration", vim.lsp.buf.declaration), rtxt = "gD" },
+		{
+			name = "Go to Declaration",
+			cmd = lsp_action("textDocument/declaration", vim.lsp.buf.declaration),
+			rtxt = "gD",
+		},
 		{ name = "References", cmd = lsp_action("textDocument/references", vim.lsp.buf.references) },
 		{ name = "Implementation", cmd = lsp_action("textDocument/implementation", vim.lsp.buf.implementation) },
 		{ name = "Type Definition", cmd = lsp_action("textDocument/typeDefinition", vim.lsp.buf.type_definition) },
@@ -187,27 +191,73 @@ local function menu_items()
 	}
 
 	local view_items = {
-		{ name = "Neo-tree Toggle", cmd = function()
-			local ok = pcall(vim.cmd, "Neotree toggle")
-			if not ok then
-				pcall(vim.cmd, "Neotree")
-			end
-		end },
-		{ name = "ToggleTerm", cmd = function()
-			local ok = pcall(vim.cmd, "ToggleTerm")
-			if not ok then
-				notify("ToggleTerm not available", vim.log.levels.WARN)
-			end
-		end },
+		{
+			name = "Neo-tree Toggle",
+			cmd = function()
+				local ok = pcall(vim.cmd, "Neotree toggle")
+				if not ok then
+					pcall(vim.cmd, "Neotree")
+				end
+			end,
+		},
+		{
+			name = "ToggleTerm",
+			cmd = function()
+				local ok = pcall(vim.cmd, "ToggleTerm")
+				if not ok then
+					notify("ToggleTerm not available", vim.log.levels.WARN)
+				end
+			end,
+		},
 		{ name = "Diagnostics", cmd = telescope_action("diagnostics") },
-		{ name = "JSON Tree", cmd = function() vim.cmd("JsonTree") end },
-		{ name = "YAML Outline", cmd = function() vim.cmd("YamlOutline") end },
-		{ name = "XML Outline", cmd = function() vim.cmd("XmlOutline") end },
-		{ name = "Fold Open All", cmd = function() vim.cmd("FoldOpenAll") end },
-		{ name = "Fold Close All", cmd = function() vim.cmd("FoldCloseAll") end },
-		{ name = "Toggle Wrap", cmd = function() toggle_window_option("wrap", "Wrap") end },
-		{ name = "Toggle Spell", cmd = function() toggle_window_option("spell", "Spell") end },
-		{ name = "Toggle Relative Number", cmd = function() toggle_window_option("relativenumber", "Relative number") end },
+		{
+			name = "JSON Tree",
+			cmd = function()
+				vim.cmd("JsonTree")
+			end,
+		},
+		{
+			name = "YAML Outline",
+			cmd = function()
+				vim.cmd("YamlOutline")
+			end,
+		},
+		{
+			name = "XML Outline",
+			cmd = function()
+				vim.cmd("XmlOutline")
+			end,
+		},
+		{
+			name = "Fold Open All",
+			cmd = function()
+				vim.cmd("FoldOpenAll")
+			end,
+		},
+		{
+			name = "Fold Close All",
+			cmd = function()
+				vim.cmd("FoldCloseAll")
+			end,
+		},
+		{
+			name = "Toggle Wrap",
+			cmd = function()
+				toggle_window_option("wrap", "Wrap")
+			end,
+		},
+		{
+			name = "Toggle Spell",
+			cmd = function()
+				toggle_window_option("spell", "Spell")
+			end,
+		},
+		{
+			name = "Toggle Relative Number",
+			cmd = function()
+				toggle_window_option("relativenumber", "Relative number")
+			end,
+		},
 		{ name = "Toggle Paste", cmd = toggle_paste },
 	}
 
@@ -233,7 +283,6 @@ local function reset_menu_config()
 		state.config = nil
 	end
 end
-
 
 function M.open()
 	local menu = ensure_menu()
