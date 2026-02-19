@@ -7,8 +7,7 @@ function M.open_entry_in_tab()
 		return
 	end
 
-	vim.cmd("tabnew " .. vim.fn.fnameescape(entry.filename))
-	pcall(vim.api.nvim_win_set_cursor, 0, { entry.lnum, entry.col })
+	require("config.editor").open_file_in_tab(entry.filename, { lnum = entry.lnum, col = entry.col })
 end
 
 return M

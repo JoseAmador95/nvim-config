@@ -23,6 +23,7 @@ return {
 
 			local actions = require("telescope.actions")
 			local action_state = require("telescope.actions.state")
+			local editor = require("config.editor")
 
 			local function append_history(prompt_bufnr)
 				action_state
@@ -30,7 +31,6 @@ return {
 					:append(action_state.get_current_line(), action_state.get_current_picker(prompt_bufnr))
 			end
 
-			-- ⭐ Custom smart-tab opener
 			local function smart_open(prompt_bufnr)
 				local entry = action_state.get_selected_entry()
 				local filepath = entry.path or entry.filename
@@ -40,38 +40,7 @@ return {
 				append_history(prompt_bufnr)
 				actions.close(prompt_bufnr)
 
-				-- Normalize path to avoid mismatches
-				filepath = vim.fn.fnamemodify(filepath, ":p")
-
-				-- 1. Loop through tabs and check ONLY the main window of each tab
-				for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
-					local win = vim.api.nvim_tabpage_get_win(tabpage)
-					local buf = vim.api.nvim_win_get_buf(win)
-					local name = vim.api.nvim_buf_get_name(buf)
-
-					-- Normalize tab buffer filepath
-					name = vim.fn.fnamemodify(name, ":p")
-
-					if name == filepath then
-						-- File is open as the MAIN buffer of this tab → reuse tab
-						vim.api.nvim_set_current_tabpage(tabpage)
-						local line_count = vim.api.nvim_buf_line_count(buf)
-						local target_line = math.max(1, math.min(lnum, line_count))
-						local line = vim.api.nvim_buf_get_lines(buf, target_line - 1, target_line, false)[1] or ""
-						local target_col = math.max(0, math.min(col - 1, #line))
-						vim.api.nvim_win_set_cursor(win, { target_line, target_col })
-						return
-					end
-				end
-
-				-- 2. File may be open in a split or not open at all → create new tab
-				vim.cmd("tabedit " .. vim.fn.fnameescape(filepath))
-				local current_buf = vim.api.nvim_get_current_buf()
-				local line_count = vim.api.nvim_buf_line_count(current_buf)
-				local target_line = math.max(1, math.min(lnum, line_count))
-				local line = vim.api.nvim_buf_get_lines(current_buf, target_line - 1, target_line, false)[1] or ""
-				local target_col = math.max(0, math.min(col - 1, #line))
-				vim.api.nvim_win_set_cursor(0, { target_line, target_col })
+				editor.open_file_in_tab(filepath, { lnum = lnum, col = col })
 			end
 
 			return {
@@ -96,7 +65,6 @@ return {
 							["<C-Up>"] = actions.cycle_history_prev,
 							["<C-Down>"] = actions.cycle_history_next,
 
-							-- ⭐ Replace default Enter action with smart tab reuse
 							["<CR>"] = smart_open,
 						},
 						n = {
@@ -110,7 +78,6 @@ return {
 							["<C-Up>"] = actions.cycle_history_prev,
 							["<C-Down>"] = actions.cycle_history_next,
 
-							-- ⭐ Same in normal mode
 							["<CR>"] = smart_open,
 						},
 					},

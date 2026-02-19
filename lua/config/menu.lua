@@ -44,14 +44,18 @@ local function format_buffer()
 	vim.lsp.buf.format()
 end
 
-local function telescope_action(action)
+local function telescope_action(action, opts)
 	return function()
 		local ok, builtin = pcall(require, "telescope.builtin")
 		if not ok or not builtin[action] then
 			notify("Telescope action not available", vim.log.levels.WARN)
 			return
 		end
-		builtin[action]()
+		if opts then
+			builtin[action](opts)
+		else
+			builtin[action]()
+		end
 	end
 end
 
@@ -175,9 +179,9 @@ local function menu_items()
 			cmd = lsp_action("textDocument/declaration", vim.lsp.buf.declaration),
 			rtxt = "gD",
 		},
-		{ name = "References", cmd = lsp_action("textDocument/references", vim.lsp.buf.references) },
-		{ name = "Implementation", cmd = lsp_action("textDocument/implementation", vim.lsp.buf.implementation) },
-		{ name = "Type Definition", cmd = lsp_action("textDocument/typeDefinition", vim.lsp.buf.type_definition) },
+		{ name = "References", cmd = telescope_action("lsp_references", { jump_type = "never" }) },
+		{ name = "Implementation", cmd = telescope_action("lsp_implementations", { jump_type = "never" }) },
+		{ name = "Type Definition", cmd = telescope_action("lsp_type_definitions", { jump_type = "never" }) },
 		{ name = "Rename", cmd = lsp_action("textDocument/rename", vim.lsp.buf.rename) },
 		{ name = "Code Actions", cmd = lsp_action("textDocument/codeAction", vim.lsp.buf.code_action) },
 		{ name = "Format", cmd = format_buffer },

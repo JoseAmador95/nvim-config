@@ -147,6 +147,29 @@ vim.keymap.set("n", "H", "^", {
 	desc = "Beginning of indentation",
 })
 
+-- Open file under cursor in new tab
+vim.keymap.set("n", "gf", function()
+	local file = vim.fn.expand("<cfile>")
+	local line = 1
+	local col = 1
+
+	local f, l, c = file:match("^(.-):(%d+):(%d+)$")
+	if f then
+		file, line, col = f, l, c
+	else
+		f, l = file:match("^(.-):(%d+)$")
+		if f then
+			file, line = f, l
+		end
+	end
+
+	require("config.editor").open_file_in_tab(file, { lnum = tonumber(line) or 1, col = tonumber(col) or 1 })
+end, { desc = "Open file under cursor in new tab" })
+
+vim.keymap.set("n", "gF", function()
+	vim.api.nvim_feedkeys("gf", "n", false)
+end, { desc = "Open file under cursor in new tab (same as gf)" })
+
 -- Terminal Configuration ----------------------------------------------------
 
 -- Enable mouse support in all modes
