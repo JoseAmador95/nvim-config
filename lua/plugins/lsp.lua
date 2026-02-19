@@ -123,12 +123,18 @@ return {
 			local plantuml_lsp_available = vim.fn.executable("plantuml-lsp") == 1
 			local plantuml_lsp_auto_install = vim.g.plantuml_lsp_auto_install ~= false
 
-			local function plantuml_root(fname)
+			local function plantuml_root(bufnr, on_dir)
+				local fname = vim.api.nvim_buf_get_name(bufnr)
+				if fname == "" then
+					on_dir(nil)
+					return
+				end
 				local root = vim.fs.find({ ".git" }, { path = fname, upward = true })[1]
 				if root then
-					return vim.fs.dirname(root)
+					on_dir(vim.fs.dirname(root))
+				else
+					on_dir(vim.fs.dirname(fname))
 				end
-				return vim.fs.dirname(fname)
 			end
 
 			local function notify_missing_lsp()

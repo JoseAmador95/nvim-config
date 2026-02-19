@@ -31,6 +31,9 @@ local function ensure_preview_buffer(source_buf)
 	vim.api.nvim_buf_set_option(buf, "swapfile", false)
 	vim.api.nvim_buf_set_option(buf, "modifiable", false)
 	vim.api.nvim_buf_set_option(buf, "filetype", "plantuml_ascii")
+	vim.api.nvim_buf_call(buf, function()
+		vim.wo.wrap = false
+	end)
 	set_buf_var(source_buf, "plantuml_ascii_buf", buf)
 	return buf
 end
@@ -109,35 +112,38 @@ local function render_buffer(source_buf, anchor_win)
 		return
 	end
 
-	local restore_win = vim.api.nvim_get_current_win()
 	local input = table.concat(vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "\n")
 	if input == "" then
 		notify("Buffer is empty", vim.log.levels.WARN)
 		return
 	end
 
-	local result = vim.system({ "plantuml", "-ttxt", "-pipe" }, { text = true, stdin = input }):wait()
-	if result.code ~= 0 then
-		local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
-		if msg == "" then
-			msg = "plantuml failed"
-		end
-		notify(msg, vim.log.levels.ERROR)
-		return
-	end
+	vim.system({ "plantuml", "-ttxt", "-pipe" }, { text = true, stdin = input }, function(result)
+		vim.schedule(function()
+			if not vim.api.nvim_buf_is_valid(source_buf) then
+				return
+			end
 
-	local output = result.stdout or ""
-	local lines = vim.split(output, "\n", { plain = true })
+			if result.code ~= 0 then
+				local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
+				if msg == "" then
+					msg = "plantuml failed"
+				end
+				notify(msg, vim.log.levels.ERROR)
+				return
+			end
 
-	local preview_buf = ensure_preview_buffer(source_buf)
-	local preview_win = ensure_preview_window(source_buf, anchor_win)
-	vim.api.nvim_win_set_buf(preview_win, preview_buf)
-	vim.api.nvim_buf_set_option(preview_buf, "modifiable", true)
-	vim.api.nvim_buf_set_lines(preview_buf, 0, -1, false, lines)
-	vim.api.nvim_buf_set_option(preview_buf, "modifiable", false)
-	if restore_win and vim.api.nvim_win_is_valid(restore_win) then
-		vim.api.nvim_set_current_win(restore_win)
-	end
+			local output = result.stdout or ""
+			local lines = vim.split(output, "\n", { plain = true })
+
+			local preview_buf = ensure_preview_buffer(source_buf)
+			local preview_win = ensure_preview_window(source_buf, anchor_win)
+			vim.api.nvim_win_set_buf(preview_win, preview_buf)
+			vim.api.nvim_buf_set_option(preview_buf, "modifiable", true)
+			vim.api.nvim_buf_set_lines(preview_buf, 0, -1, false, lines)
+			vim.api.nvim_buf_set_option(preview_buf, "modifiable", false)
+		end)
+	end)
 end
 
 function M.render(opts)
