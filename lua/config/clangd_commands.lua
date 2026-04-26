@@ -23,7 +23,7 @@ vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
 	-- Re-enable clangd so it attaches again
 	vim.lsp.enable("clangd")
 
-	print("clangd now using compile_commands from: " .. dir)
+	vim.notify("clangd now using compile_commands from: " .. dir, vim.log.levels.INFO, { title = "LSP" })
 end, {
 	nargs = 1,
 	complete = "dir",

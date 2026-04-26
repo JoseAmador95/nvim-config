@@ -1,5 +1,9 @@
 local M = {}
 
+local function notify(msg)
+	vim.notify(msg, vim.log.levels.INFO, { title = "LSP" })
+end
+
 -- === LSP actions you already asked for ===
 function M.CodeActions()
 	vim.lsp.buf.code_action()
@@ -13,7 +17,7 @@ function M.ToggleInlineDiagnostics()
 	-- `virtual_text` may be a table or boolean; normalize to boolean
 	local enabled = (type(current) == "table") and true or (current ~= false)
 	vim.diagnostic.config({ virtual_text = not enabled })
-	print("Inline diagnostics: " .. ((not enabled) and "ON" or "OFF"))
+	notify("Inline diagnostics: " .. ((not enabled) and "ON" or "OFF"))
 end
 
 -- Show diagnostics at cursor in a small float
@@ -35,7 +39,7 @@ function M.ToggleInlayHints()
 	local buf = vim.api.nvim_get_current_buf()
 	local currently = vim.lsp.inlay_hint.is_enabled({ bufnr = buf })
 	vim.lsp.inlay_hint.enable(not currently, { bufnr = buf })
-	print("Inlay hints: " .. ((not currently) and "ON" or "OFF"))
+	notify("Inlay hints: " .. ((not currently) and "ON" or "OFF"))
 end
 
 return M

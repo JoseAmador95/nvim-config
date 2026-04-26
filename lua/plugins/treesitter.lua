@@ -7,6 +7,7 @@ return {
 		build = ":TSUpdate",
 		config = function()
 			local max_filesize = 200 * 1024
+			local uv = vim.uv or vim.loop
 			require("nvim-treesitter").setup({
 				ensure_installed = {
 					"bash",
@@ -31,7 +32,7 @@ return {
 				highlight = {
 					enable = true,
 					disable = function(_, buf)
-						local ok, stats = pcall(vim.loop.fs_stat, vim.api.nvim_buf_get_name(buf))
+						local ok, stats = pcall(uv.fs_stat, vim.api.nvim_buf_get_name(buf))
 						return ok and stats and stats.size > max_filesize
 					end,
 				},
