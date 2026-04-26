@@ -76,11 +76,7 @@ vim.opt.tabstop = 4 -- Number of spaces per tab
 vim.opt.shiftwidth = 4 -- Indentation width
 vim.opt.smarttab = true -- Smart indentation
 vim.opt.smartindent = true
---
--- use custom tab names
-require("config.tabnames")
 vim.opt.showtabline = 2
-vim.opt.tabline = "%!v:lua.require'config.tabnames_tabline'.tabline()"
 
 -- File Management and Auto-commands -----------------------------------------
 
