@@ -79,13 +79,13 @@ vim.keymap.set("n", "<leader>x", ":x<CR>", {
 	desc = "Save & quit",
 })
 
-vim.keymap.set("n", "J", "<Cmd>tabprevious<CR>", {
+vim.keymap.set("n", "<leader>j", "<Cmd>tabprevious<CR>", {
 	noremap = true,
 	silent = true,
 	desc = "Previous tab",
 })
 
-vim.keymap.set("n", "K", "<Cmd>tabnext<CR>", {
+vim.keymap.set("n", "<leader>k", "<Cmd>tabnext<CR>", {
 	noremap = true,
 	silent = true,
 	desc = "Next tab",
