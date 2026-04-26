@@ -101,12 +101,28 @@ local function open_neotree_tab()
 		end
 	else
 		vim.cmd("tabnew")
-		require("neo-tree.command").execute({
-			action = "show",
-			source = "filesystem",
-			position = "current",
-			dir = get_initial_dir(),
-		})
+
+		local current_file = vim.api.nvim_buf_get_name(0)
+		local is_real_file = current_file ~= "" and vim.bo.buftype == ""
+		local initial = get_initial_dir()
+		local is_child = is_real_file and vim.startswith(current_file, initial .. "/")
+
+		if is_child then
+			require("neo-tree.command").execute({
+				action = "show",
+				source = "filesystem",
+				position = "current",
+				dir = initial,
+				reveal_file = current_file,
+			})
+		else
+			require("neo-tree.command").execute({
+				action = "show",
+				source = "filesystem",
+				position = "current",
+				dir = initial,
+			})
+		end
 		state.neo_tree_tab = vim.api.nvim_get_current_tabpage()
 	end
 
