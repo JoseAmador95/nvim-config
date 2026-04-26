@@ -57,13 +57,13 @@ vim.keymap.set("n", "<leader>fg", call("workbench.action.findInFiles"), {
 	desc = "Find in files",
 })
 
-vim.keymap.set("n", "J", call("workbench.action.previousEditor"), {
+vim.keymap.set("n", "<leader>j", call("workbench.action.previousEditor"), {
 	noremap = true,
 	silent = true,
 	desc = "Previous editor",
 })
 
-vim.keymap.set("n", "K", call("workbench.action.nextEditor"), {
+vim.keymap.set("n", "<leader>k", call("workbench.action.nextEditor"), {
 	noremap = true,
 	silent = true,
 	desc = "Next editor",
