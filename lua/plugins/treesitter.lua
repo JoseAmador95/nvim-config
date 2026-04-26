@@ -59,7 +59,7 @@ return {
 
 	{
 		"HiPhish/rainbow-delimiters.nvim",
-		event = "VeryLazy",
+		event = "FileType",
 		config = function()
 			local rd = require("rainbow-delimiters")
 
@@ -83,6 +83,21 @@ return {
 					"RainbowDelimiterCyan",
 				},
 			})
+
+			-- Patch rainbow-delimiters lib to safely handle missing parsers
+			local lib = require("rainbow-delimiters.lib")
+			local original_attach = lib.attach
+			lib.attach = function(bufnr, lang)
+				-- Safely attempt to attach, notify on errors
+				local ok, err = pcall(original_attach, bufnr, lang)
+				if not ok then
+					vim.notify(
+						"rainbow-delimiters error for buffer " .. bufnr .. ": " .. tostring(err),
+						vim.log.levels.WARN
+					)
+				end
+				return ok
+			end
 		end,
 		cond = function()
 			return not vim.g.vscode
