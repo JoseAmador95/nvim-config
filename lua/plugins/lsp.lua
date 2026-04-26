@@ -1,4 +1,6 @@
 -- lua/plugins/lsp.lua (Neovim 0.11+ style)
+local uv = vim.uv or vim.loop
+
 return {
 	-- Mason core: install/manage LSP servers & tools
 	{
@@ -91,7 +93,7 @@ return {
 						local filepath = vim.uri_to_fname(uri)
 						if vim.startswith(uri, "file://") then
 							local current = vim.api.nvim_buf_get_name(0)
-							local start_dir = current ~= "" and vim.fs.dirname(current) or vim.loop.cwd()
+							local start_dir = current ~= "" and vim.fs.dirname(current) or uv.cwd()
 							filepath = devcontainer_tools.container_path_to_host(filepath, start_dir)
 						end
 

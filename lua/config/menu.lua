@@ -1,4 +1,5 @@
 local M = {}
+local uv = vim.uv or vim.loop
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "Menu" })
@@ -38,7 +39,7 @@ end
 local function format_buffer()
 	local ok, conform = pcall(require, "conform")
 	if ok then
-		conform.format({ lsp_fallback = true })
+		conform.format({ lsp_format = "fallback" })
 		return
 	end
 	vim.lsp.buf.format()
@@ -140,7 +141,7 @@ local function spectre_open_file()
 		return
 	end
 
-	if vim.loop.os_uname().sysname == "Windows_NT" then
+	if uv.os_uname().sysname == "Windows_NT" then
 		path = vim.fn.substitute(path, "\\", "/", "g")
 	end
 
