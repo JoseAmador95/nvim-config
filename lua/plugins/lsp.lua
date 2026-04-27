@@ -428,8 +428,10 @@ return {
 			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
 			local ensure_tools = {
 				"bashls",
+				"codelldb",
 				"clangd",
 				"clang-format",
+				"debugpy",
 				"jsonls",
 				"jq",
 				"lemminx",
