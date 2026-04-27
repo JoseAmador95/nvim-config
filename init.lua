@@ -99,18 +99,19 @@ vim.api.nvim_create_autocmd("BufWritePost", {
 	command = "source $MYVIMRC",
 })
 
--- Automatically remove trailing whitespace on save for specific file types
-function CleanExtraSpaces()
-	local save_cursor = vim.fn.getpos(".")
-	local old_query = vim.fn.getreg("/")
-	vim.cmd([[silent! %s/\s\+$//e]])
-	vim.fn.setpos(".", save_cursor)
-	vim.fn.setreg("/", old_query)
-end
-
+-- Automatically remove trailing whitespace on save for all modifiable buffers
 vim.api.nvim_create_autocmd("BufWritePre", {
-	pattern = { "*.txt", "*.js", "*.py", "*.wiki", "*.sh", "*.coffee" },
-	callback = CleanExtraSpaces,
+	group = vim.api.nvim_create_augroup("trim_whitespace", { clear = true }),
+	callback = function(event)
+		if vim.bo[event.buf].buftype ~= "" or not vim.bo[event.buf].modifiable then
+			return
+		end
+		local cursor = vim.api.nvim_win_get_cursor(0)
+		local search = vim.fn.getreg("/")
+		vim.cmd([[silent! %s/\s\+$//e]])
+		vim.api.nvim_win_set_cursor(0, cursor)
+		vim.fn.setreg("/", search)
+	end,
 })
 
 -- Key Mappings -------------------------------------------------------------
