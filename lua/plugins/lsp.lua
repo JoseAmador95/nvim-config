@@ -396,8 +396,18 @@ return {
 				root_dir = plantuml_root,
 			})
 
+			-- Assembly: asm-lsp (supports x86, ARM/Thumb-2, RISC-V, etc.)
+			vim.lsp.config("asm_lsp", {
+				capabilities = capabilities,
+				cmd = { "asm-lsp" },
+				filetypes = { "asm", "vmasm" },
+				root_markers = { ".asm-lsp.toml", ".git" },
+				single_file_support = true,
+			})
+
 			-- Finally, enable (start) the clients for these configs
 			local enabled_servers = {
+				"asm_lsp",
 				"bashls",
 				"clangd",
 				"cmake",
@@ -427,6 +437,7 @@ return {
 		config = function()
 			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
 			local ensure_tools = {
+				"asm-lsp",
 				"bashls",
 				"codelldb",
 				"clangd",
