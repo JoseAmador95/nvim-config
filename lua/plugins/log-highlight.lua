@@ -1,9 +1,12 @@
 return {
 	"fei6409/log-highlight.nvim",
-	lazy = false,
+	event = "FileType",
 	cond = function()
 		return not vim.g.vscode
 	end,
+	opts = {
+		pattern = { "*.log", "*.txt" },
+	},
 	opts = {
 		keyword = {
 			error = { "ERROR", "FATAL", "CRITICAL" },
