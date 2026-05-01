@@ -1,5 +1,6 @@
 return {
   "mfussenegger/nvim-dap",
+  cmd = { "DapContinue", "DapToggleBreakpoint", "DapStepOver", "DapStepInto", "DapStepOut", "DapTerminate" },
   cond = function() return not vim.g.vscode end,
   dependencies = {
     "nvim-neotest/nvim-nio",

@@ -1,5 +1,6 @@
 return {
   "rcarriga/nvim-notify",
+  event = "UIEnter",
   cond = function() return not vim.g.vscode end,
   config = function()
     vim.notify = require("notify")

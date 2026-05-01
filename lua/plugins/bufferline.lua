@@ -1,6 +1,7 @@
 return {
   "akinsho/bufferline.nvim",
   version = "*",
+  event = "UIEnter",
   cond = function() return not vim.g.vscode end,
   dependencies = { "nvim-tree/nvim-web-devicons" },
   config = function()
