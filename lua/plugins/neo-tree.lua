@@ -70,6 +70,30 @@ local function find_first_non_neotree_tab()
 	return nil
 end
 
+local function is_buffer_visible(buf)
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		if vim.api.nvim_win_get_buf(win) == buf then
+			return true
+		end
+	end
+	return false
+end
+
+local function cleanup_tabnew_placeholder(buf)
+	if not buf or not vim.api.nvim_buf_is_valid(buf) then
+		return
+	end
+	if vim.api.nvim_buf_get_name(buf) ~= "" or vim.bo[buf].buftype ~= "" or vim.bo[buf].modified then
+		return
+	end
+
+	vim.bo[buf].buflisted = false
+	vim.bo[buf].bufhidden = "wipe"
+	if not is_buffer_visible(buf) then
+		pcall(vim.api.nvim_buf_delete, buf, { force = true })
+	end
+end
+
 local function open_neotree_tab()
 	local current_tab = vim.api.nvim_get_current_tabpage()
 	local in_neotree = tab_has_neotree(current_tab)
@@ -100,10 +124,12 @@ local function open_neotree_tab()
 			vim.api.nvim_set_current_win(win)
 		end
 	else
-		vim.cmd("tabnew")
-
 		local current_file = vim.api.nvim_buf_get_name(0)
 		local is_real_file = current_file ~= "" and vim.bo.buftype == ""
+
+		vim.cmd("tabnew")
+		local placeholder_buf = vim.api.nvim_get_current_buf()
+
 		local initial = get_initial_dir()
 		local is_child = is_real_file and vim.startswith(current_file, initial .. "/")
 
@@ -123,6 +149,7 @@ local function open_neotree_tab()
 				dir = initial,
 			})
 		end
+		cleanup_tabnew_placeholder(placeholder_buf)
 		state.neo_tree_tab = vim.api.nvim_get_current_tabpage()
 	end
 
