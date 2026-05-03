@@ -32,7 +32,6 @@ return {
 		},
 		config = function()
 			local mlsp = require("mason-lspconfig")
-			local devcontainer_tools = require("config.devcontainer_tools")
 
 			local function telescope_lsp_picker(method, title, telescope_fn)
 				return function()
@@ -91,11 +90,6 @@ return {
 						end
 
 						local filepath = vim.uri_to_fname(uri)
-						if vim.startswith(uri, "file://") then
-							local current = vim.api.nvim_buf_get_name(0)
-							local start_dir = current ~= "" and vim.fs.dirname(current) or uv.cwd()
-							filepath = devcontainer_tools.container_path_to_host(filepath, start_dir)
-						end
 
 						local range = location.range or location.targetSelectionRange or location.selectionRange
 						local start_pos = range and range.start or { line = 0, character = 0 }
@@ -306,13 +300,14 @@ return {
 			-- C/C++: clangd
 			vim.lsp.config("clangd", {
 				capabilities = capabilities,
-				cmd = devcontainer_tools.clangd_cmd({
+				cmd = {
+					"clangd",
 					"--background-index",
 					"--clang-tidy",
 					"--cross-file-rename",
 					"--completion-style=detailed",
 					"--header-insertion=never",
-				}),
+				},
 				-- filetypes/root_markers are provided by lspconfig's clangd config; we can
 				-- override here if needed.
 			})

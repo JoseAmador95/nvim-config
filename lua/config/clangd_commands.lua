@@ -1,8 +1,7 @@
 vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
 	local dir = vim.fn.fnamemodify(opts.args, ":p")
-	local devcontainer_tools = require("config.devcontainer_tools")
 
-	-- Stop all running clangd clients (new API: vim.lsp.get_clients)
+	-- Stop all running clangd clients
 	for _, client in ipairs(vim.lsp.get_clients()) do
 		if client.name == "clangd" then
 			vim.lsp.stop_client(client.id)
@@ -11,13 +10,14 @@ vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
 
 	-- Re-register clangd with the new compilation database directory
 	vim.lsp.config("clangd", {
-		cmd = devcontainer_tools.clangd_cmd({
-			"--compile-commands-dir=" .. dir, -- official clangd flag
+		cmd = {
+			"clangd",
+			"--compile-commands-dir=" .. dir,
 			"--background-index",
 			"--cross-file-rename",
 			"--completion-style=detailed",
 			"--header-insertion=never",
-		}),
+		},
 	})
 
 	-- Re-enable clangd so it attaches again

@@ -186,7 +186,7 @@ end, { desc = "Reload config and plugin specs" })
 -- Plugins --------------------------------------------------------------------
 
 require("config.diagnostics")
-require("config.devcontainer_tools").setup()
+require("config.devcontainer_shell").setup()
 require("config.indent")
 require("config.lsp_helpers")
 require("config.lsp_commands")
