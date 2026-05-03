@@ -47,7 +47,7 @@ end
 
 return {
 	"rmagatti/auto-session",
-	event = "VimEnter",
+	lazy = false,
 	cond = function()
 		return not vim.g.vscode
 	end,
