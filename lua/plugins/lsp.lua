@@ -230,6 +230,9 @@ return {
 				})
 			end
 
+			-- Hover popup with rounded border and title (Neovim 0.12: pass config directly to hover)
+			local hover_opts = { border = "rounded" }
+
 			-- Global on_attach-style keymaps (recommended with new API)
 			-- Use LspAttach so it applies to any server that attaches later.
 			vim.api.nvim_create_autocmd("LspAttach", {
@@ -266,12 +269,12 @@ return {
 					)
 
 					-- DOCUMENTATION (HOVER)
-					vim.keymap.set(
-						"n",
-						"<leader>.",
-						vim.lsp.buf.hover,
-						{ buffer = ev.buf, silent = true, desc = "Hover symbol documentation" }
-					) --
+				vim.keymap.set(
+					"n",
+					"<leader>.",
+					function() vim.lsp.buf.hover(hover_opts) end,
+					{ buffer = ev.buf, silent = true, desc = "Hover symbol documentation" }
+				) --
 
 					-- SIGNATURE HELP
 					vim.keymap.set(
