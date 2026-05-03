@@ -13,6 +13,7 @@ return {
 				"c",
 				"cmake",
 				"cpp",
+				"go",
 				"javascript",
 				"json",
 				"lua",
@@ -20,7 +21,9 @@ return {
 				"markdown_inline",
 				"python",
 				"query",
+				"rust",
 				"toml",
+				"typescript",
 				"vim",
 				"vimdoc",
 				"xml",
@@ -35,7 +38,7 @@ return {
 				installable[lang] = true
 			end
 
-			local indent_disabled = { c = true, cpp = true }
+			local indent_disabled = { }
 			vim.api.nvim_create_autocmd("FileType", {
 				group = vim.api.nvim_create_augroup("TreesitterStart", { clear = true }),
 				callback = function(args)
