@@ -2,6 +2,9 @@ return {
 	{
 		"LintaoAmons/bookmarks.nvim",
 		tag = "v4.0.0",
+		cond = function()
+			return not vim.g.vscode
+		end,
 		dependencies = {
 			{ "kkharji/sqlite.lua" },
 			{ "nvim-telescope/telescope.nvim" },
