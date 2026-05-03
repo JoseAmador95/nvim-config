@@ -8,38 +8,52 @@ return {
 		config = function()
 			local max_filesize = 200 * 1024
 			local uv = vim.uv or vim.loop
-			require("nvim-treesitter").setup({
-				ensure_installed = {
-					"bash",
-					"c",
-					"cmake",
-					"cpp",
-					"javascript",
-					"json",
-					"lua",
-					"markdown",
-					"markdown_inline",
-					"python",
-					"query",
-					"toml",
-					"vim",
-					"vimdoc",
-					"xml",
-					"yaml",
-				},
-				auto_install = false,
-				sync_install = false,
-				highlight = {
-					enable = true,
-					disable = function(_, buf)
-						local ok, stats = pcall(uv.fs_stat, vim.api.nvim_buf_get_name(buf))
-						return ok and stats and stats.size > max_filesize
-					end,
-				},
-				indent = {
-					enable = true,
-					disable = { "c", "cpp" },
-				},
+			local ensure_installed = {
+				"bash",
+				"c",
+				"cmake",
+				"cpp",
+				"javascript",
+				"json",
+				"lua",
+				"markdown",
+				"markdown_inline",
+				"python",
+				"query",
+				"toml",
+				"vim",
+				"vimdoc",
+				"xml",
+				"yaml",
+			}
+
+			require("nvim-treesitter").setup()
+			require("nvim-treesitter").install(ensure_installed, { summary = false })
+
+			local installable = {}
+			for _, lang in ipairs(ensure_installed) do
+				installable[lang] = true
+			end
+
+			local indent_disabled = { c = true, cpp = true }
+			vim.api.nvim_create_autocmd("FileType", {
+				group = vim.api.nvim_create_augroup("TreesitterStart", { clear = true }),
+				callback = function(args)
+					local name = vim.api.nvim_buf_get_name(args.buf)
+					local ok, stats = pcall(uv.fs_stat, name)
+					if ok and stats and stats.size > max_filesize then
+						return
+					end
+
+					local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype) or vim.bo[args.buf].filetype
+					if not installable[lang] then
+						return
+					end
+
+					if pcall(vim.treesitter.start, args.buf, lang) and not indent_disabled[lang] then
+						vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+					end
+				end,
 			})
 		end,
 		-- If you want to skip inside VSCode:
