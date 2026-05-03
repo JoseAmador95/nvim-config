@@ -8,7 +8,7 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		cmd = { "Mason", "MasonUpdate" },
+		cmd = { "Mason", "MasonInstall", "MasonUninstall", "MasonUninstallAll", "MasonUpdate", "MasonLog" },
 		build = ":MasonUpdate",
 		config = function()
 			require("mason").setup()

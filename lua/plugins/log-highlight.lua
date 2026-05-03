@@ -6,8 +6,6 @@ return {
 	end,
 	opts = {
 		pattern = { "*.log", "*.txt" },
-	},
-	opts = {
 		keyword = {
 			error = { "ERROR", "FATAL", "CRITICAL" },
 			warning = { "WARN", "WARNING" },

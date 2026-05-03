@@ -66,7 +66,7 @@ return {
 				mc.feedkeys("a")
 			end, { desc = "Start cursors on the right" })
 			k({ "n", "x" }, "mA", function()
-				mc.feedkeys("a")
+				mc.feedkeys("A")
 			end, { desc = "Start cursors on the right" })
 			k({ "n" }, "[mc", mc.prevCursor, { desc = "Goto prev cursor" })
 			k({ "n" }, "]mc", mc.nextCursor, { desc = "Goto next cursor" })
