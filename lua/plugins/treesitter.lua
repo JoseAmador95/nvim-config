@@ -45,7 +45,8 @@ return {
 						return
 					end
 
-					local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype) or vim.bo[args.buf].filetype
+					local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype)
+						or vim.bo[args.buf].filetype
 					if not installable[lang] then
 						return
 					end
