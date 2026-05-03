@@ -265,7 +265,12 @@ local function lsp_items()
 		{ name = "Outgoing Calls", cmd = lsp_action("callHierarchy/outgoingCalls", vim.lsp.buf.outgoing_calls) },
 		{ name = "Rename", cmd = lsp_action("textDocument/rename", vim.lsp.buf.rename) },
 		{ name = "Code Actions", cmd = lsp_action("textDocument/codeAction", vim.lsp.buf.code_action) },
-		{ name = "Generate Docs", cmd = function() vim.cmd("Neogen") end },
+		{
+			name = "Generate Docs",
+			cmd = function()
+				vim.cmd("Neogen")
+			end,
+		},
 		{
 			name = "Toggle Inlay Hints",
 			cmd = function()
@@ -490,8 +495,20 @@ end
 
 local function bookmark_items()
 	return {
-		{ name = "Add Bookmark", cmd = function() vim.cmd("BookmarksMark") end, rtxt = "<leader>ba" },
-		{ name = "Bookmarks Tree", cmd = function() vim.cmd("BookmarksTree") end, rtxt = "<leader>bm" },
+		{
+			name = "Add Bookmark",
+			cmd = function()
+				vim.cmd("BookmarksMark")
+			end,
+			rtxt = "<leader>ba",
+		},
+		{
+			name = "Bookmarks Tree",
+			cmd = function()
+				vim.cmd("BookmarksTree")
+			end,
+			rtxt = "<leader>bm",
+		},
 	}
 end
 
@@ -529,8 +546,18 @@ local function view_items()
 			end,
 		},
 		{ name = "Diagnostics", cmd = telescope_action("diagnostics") },
-		{ name = "Fold Open All", cmd = function() vim.cmd("FoldOpenAll") end },
-		{ name = "Fold Close All", cmd = function() vim.cmd("FoldCloseAll") end },
+		{
+			name = "Fold Open All",
+			cmd = function()
+				vim.cmd("FoldOpenAll")
+			end,
+		},
+		{
+			name = "Fold Close All",
+			cmd = function()
+				vim.cmd("FoldCloseAll")
+			end,
+		},
 		{
 			name = "Peek Fold",
 			cmd = function()
@@ -542,12 +569,37 @@ local function view_items()
 				end
 			end,
 		},
-		{ name = "Toggle Wrap", cmd = function() toggle_window_option("wrap", "Wrap") end },
-		{ name = "Toggle Spell", cmd = function() toggle_window_option("spell", "Spell") end },
-		{ name = "Toggle Relative Number", cmd = function() toggle_window_option("relativenumber", "Relative number") end },
+		{
+			name = "Toggle Wrap",
+			cmd = function()
+				toggle_window_option("wrap", "Wrap")
+			end,
+		},
+		{
+			name = "Toggle Spell",
+			cmd = function()
+				toggle_window_option("spell", "Spell")
+			end,
+		},
+		{
+			name = "Toggle Relative Number",
+			cmd = function()
+				toggle_window_option("relativenumber", "Relative number")
+			end,
+		},
 		{ name = "Toggle Paste", cmd = toggle_paste },
-		{ name = "Reload Config", cmd = function() vim.cmd("ReloadConfig") end },
-		{ name = "Mason", cmd = function() vim.cmd("Mason") end },
+		{
+			name = "Reload Config",
+			cmd = function()
+				vim.cmd("ReloadConfig")
+			end,
+		},
+		{
+			name = "Mason",
+			cmd = function()
+				vim.cmd("Mason")
+			end,
+		},
 	}
 end
 
@@ -556,13 +608,28 @@ end
 local filetype_items = {
 	plantuml = function()
 		return {
-			{ name = "PlantUML ASCII", cmd = function() vim.cmd("PlantumlAscii") end },
-			{ name = "PlantUML Preview", cmd = function() vim.cmd("PlantumlPreview") end },
+			{
+				name = "PlantUML ASCII",
+				cmd = function()
+					vim.cmd("PlantumlAscii")
+				end,
+			},
+			{
+				name = "PlantUML Preview",
+				cmd = function()
+					vim.cmd("PlantumlPreview")
+				end,
+			},
 		}
 	end,
 	json = function()
 		return {
-			{ name = "JSON Tree", cmd = function() vim.cmd("JsonTree") end },
+			{
+				name = "JSON Tree",
+				cmd = function()
+					vim.cmd("JsonTree")
+				end,
+			},
 			{
 				name = "JQX Query",
 				cmd = function()
@@ -577,17 +644,32 @@ local filetype_items = {
 	end,
 	yaml = function()
 		return {
-			{ name = "YAML Outline", cmd = function() vim.cmd("YamlOutline") end },
+			{
+				name = "YAML Outline",
+				cmd = function()
+					vim.cmd("YamlOutline")
+				end,
+			},
 		}
 	end,
 	xml = function()
 		return {
-			{ name = "XML Outline", cmd = function() vim.cmd("XmlOutline") end },
+			{
+				name = "XML Outline",
+				cmd = function()
+					vim.cmd("XmlOutline")
+				end,
+			},
 		}
 	end,
 	markdown = function()
 		return {
-			{ name = "Markdown Preview Toggle", cmd = function() vim.cmd("MarkdownPreviewToggle") end },
+			{
+				name = "Markdown Preview Toggle",
+				cmd = function()
+					vim.cmd("MarkdownPreviewToggle")
+				end,
+			},
 			{
 				name = "Render Markdown Toggle",
 				cmd = function()

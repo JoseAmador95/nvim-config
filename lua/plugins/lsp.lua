@@ -240,13 +240,13 @@ return {
 						"n",
 						"gd",
 						safe_lsp_jump("textDocument/definition", "Go to definition"),
-						{ buffer = ev.buff, silent = true, desc = "Go to definition" }
+						{ buffer = ev.buf, silent = true, desc = "Go to definition" }
 					)
 					vim.keymap.set(
 						"n",
 						"gD",
 						safe_lsp_jump("textDocument/declaration", "Go to declaration"),
-						{ buffer = ev.buff, silent = true, desc = "Go to declaration" }
+						{ buffer = ev.buf, silent = true, desc = "Go to declaration" }
 					)
 					vim.keymap.set(
 						"n",
@@ -254,7 +254,7 @@ return {
 						telescope_lsp_picker("textDocument/implementation", "Go to implementation", function()
 							require("telescope.builtin").lsp_implementations({ jump_type = "never" })
 						end),
-						{ buffer = ev.buff, silent = true, desc = "Go to implementation" }
+						{ buffer = ev.buf, silent = true, desc = "Go to implementation" }
 					)
 					vim.keymap.set(
 						"n",
@@ -262,7 +262,7 @@ return {
 						telescope_lsp_picker("textDocument/references", "References", function()
 							require("telescope.builtin").lsp_references({ jump_type = "never" })
 						end),
-						{ buffer = ev.buff, silent = true, desc = "References" }
+						{ buffer = ev.buf, silent = true, desc = "References" }
 					)
 
 					-- DOCUMENTATION (HOVER)
@@ -270,7 +270,7 @@ return {
 						"n",
 						"<leader>.",
 						vim.lsp.buf.hover,
-						{ buffer = ev.buff, silent = true, desc = "Hover symbol documentation" }
+						{ buffer = ev.buf, silent = true, desc = "Hover symbol documentation" }
 					) --
 
 					-- SIGNATURE HELP
@@ -278,7 +278,7 @@ return {
 						"n",
 						"<C-k>",
 						vim.lsp.buf.signature_help,
-						{ buffer = ev.buff, silent = true, desc = "Signature help" }
+						{ buffer = ev.buf, silent = true, desc = "Signature help" }
 					)
 
 					-- SYMBOL RENAME
@@ -286,7 +286,7 @@ return {
 						"n",
 						"<leader>rn",
 						vim.lsp.buf.rename,
-						{ buffer = ev.buff, silent = true, desc = "Rename" }
+						{ buffer = ev.buf, silent = true, desc = "Rename" }
 					)
 				end,
 			})

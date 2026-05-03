@@ -72,7 +72,8 @@ local function next_scratch_name(ft)
 end
 
 local function try_lsp_start()
-	vim.cmd("silent! LspStart")
+	-- Trigger FileType so Neovim 0.11+ native LSP handlers re-evaluate the buffer.
+	vim.api.nvim_exec_autocmds("FileType", { buffer = 0 })
 	vim.defer_fn(function()
 		local clients = vim.lsp.get_clients({ bufnr = 0 })
 		if not clients or #clients == 0 then

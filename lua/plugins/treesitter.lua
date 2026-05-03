@@ -38,7 +38,7 @@ return {
 				installable[lang] = true
 			end
 
-			local indent_disabled = { }
+			local indent_disabled = {}
 			vim.api.nvim_create_autocmd("FileType", {
 				group = vim.api.nvim_create_augroup("TreesitterStart", { clear = true }),
 				callback = function(args)

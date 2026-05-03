@@ -186,7 +186,7 @@ return {
 						path = vim.api.nvim_buf_get_name(ev.buf)
 					end
 					if vim.fn.isdirectory(path) == 1 then
-						vim.api.nvim_buf_set_option(ev.buf, "buftype", "")
+						vim.bo[ev.buf].buftype = ""
 						vim.api.nvim_buf_set_name(ev.buf, "")
 						vim.api.nvim_buf_delete(ev.buf, { force = true })
 						vim.cmd("enew")

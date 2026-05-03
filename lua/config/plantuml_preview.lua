@@ -2,6 +2,9 @@ local M = {}
 
 local uv = vim.uv or vim.loop
 
+-- Lua-side storage for uv timer handles (cannot survive buf-var round-trips)
+local timers = {}
+
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "PlantumlPreview" })
 end
@@ -68,11 +71,28 @@ local function open_in_browser(path)
 	return false
 end
 
-local function stop_timer(timer)
+local function stop_timer(buf)
+	local timer = timers[buf]
 	if timer and not timer:is_closing() then
 		timer:stop()
 		timer:close()
 	end
+	timers[buf] = nil
+end
+
+local function schedule_render(buf)
+	stop_timer(buf)
+
+	local timer = uv.new_timer()
+	timers[buf] = timer
+	timer:start(
+		1000,
+		0,
+		vim.schedule_wrap(function()
+			M.render({ buf = buf })
+			stop_timer(buf)
+		end)
+	)
 end
 
 local function render_png(buf, png_path)
@@ -104,23 +124,6 @@ local function render_png(buf, png_path)
 	return true
 end
 
-local function schedule_render(buf)
-	local timer = get_buf_var(buf, "plantuml_preview_timer")
-	stop_timer(timer)
-
-	timer = uv.new_timer()
-	set_buf_var(buf, "plantuml_preview_timer", timer)
-	timer:start(
-		1000,
-		0,
-		vim.schedule_wrap(function()
-			M.render({ buf = buf })
-			stop_timer(timer)
-			set_buf_var(buf, "plantuml_preview_timer", nil)
-		end)
-	)
-end
-
 local function setup_autocmds(buf)
 	local existing = get_buf_var(buf, "plantuml_preview_group")
 	if existing and type(existing) == "number" then
@@ -142,8 +145,7 @@ local function setup_autocmds(buf)
 		group = group,
 		buffer = buf,
 		callback = function()
-			local timer = get_buf_var(buf, "plantuml_preview_timer")
-			stop_timer(timer)
+			stop_timer(buf)
 			set_buf_var(buf, "plantuml_preview_group", nil)
 		end,
 	})
