@@ -3,7 +3,6 @@
 ## Commands
 
 - There is no repo-local build script, lint script, test suite, Makefile, or GitHub Actions workflow in this checkout.
-- Repo-level validation: `./bin/validate-config`
 - Startup smoke check from the repo root: `nvim --headless "+quitall"`
 - Formatting is configured inside Neovim through Conform, not a root-level CLI script:
   - Current buffer: `:FormatFile`
