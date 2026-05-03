@@ -8,12 +8,4 @@ return {
 		end,
 		opts = {},
 	},
-	{
-		"stevearc/resession.nvim",
-		lazy = true,
-		cond = function()
-			return not vim.g.vscode
-		end,
-		opts = {},
-	}, -- you referenced it via cokeline requires
 }

@@ -45,9 +45,7 @@ return {
 				desc = "Close search panel",
 			},
 		},
-		open_cmd = function()
-			vim.cmd("tabnew")
-		end,
+		open_cmd = "tabnew",
 		find_engine = {
 			rg = {
 				options = {

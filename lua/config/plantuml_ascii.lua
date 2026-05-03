@@ -2,6 +2,9 @@ local M = {}
 
 local uv = vim.uv or vim.loop
 
+-- Lua-side storage for uv timer handles (cannot survive buf-var round-trips)
+local timers = {}
+
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "PlantumlAscii" })
 end
@@ -26,11 +29,11 @@ local function ensure_preview_buffer(source_buf)
 
 	buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_name(buf, "PlantumlAscii://" .. source_buf)
-	vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
-	vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
-	vim.api.nvim_buf_set_option(buf, "swapfile", false)
-	vim.api.nvim_buf_set_option(buf, "modifiable", false)
-	vim.api.nvim_buf_set_option(buf, "filetype", "plantuml_ascii")
+	vim.bo[buf].buftype = "nofile"
+	vim.bo[buf].bufhidden = "wipe"
+	vim.bo[buf].swapfile = false
+	vim.bo[buf].modifiable = false
+	vim.bo[buf].filetype = "plantuml_ascii"
 	vim.api.nvim_buf_call(buf, function()
 		vim.wo.wrap = false
 	end)
@@ -55,28 +58,28 @@ local function ensure_preview_window(source_buf, anchor_win)
 	return win
 end
 
-local function stop_timer(timer)
+local function stop_timer(buf)
+	local timer = timers[buf]
 	if timer and not timer:is_closing() then
 		timer:stop()
 		timer:close()
 	end
+	timers[buf] = nil
 end
 
 local function schedule_render(source_buf)
-	local timer = get_buf_var(source_buf, "plantuml_ascii_timer")
-	stop_timer(timer)
+	stop_timer(source_buf)
 
-	timer = uv.new_timer()
-	set_buf_var(source_buf, "plantuml_ascii_timer", timer)
 	local anchor_win = get_buf_var(source_buf, "plantuml_ascii_anchor_win")
+	local timer = uv.new_timer()
+	timers[source_buf] = timer
 
 	timer:start(
 		1000,
 		0,
 		vim.schedule_wrap(function()
 			M.render({ buf = source_buf, anchor_win = anchor_win })
-			stop_timer(timer)
-			set_buf_var(source_buf, "plantuml_ascii_timer", nil)
+			stop_timer(source_buf)
 		end)
 	)
 end
@@ -98,8 +101,7 @@ local function setup_autocmds(source_buf)
 		group = group,
 		buffer = source_buf,
 		callback = function()
-			local timer = get_buf_var(source_buf, "plantuml_ascii_timer")
-			stop_timer(timer)
+			stop_timer(source_buf)
 			set_buf_var(source_buf, "plantuml_ascii_group", nil)
 		end,
 	})
@@ -143,9 +145,9 @@ local function render_buffer(source_buf, anchor_win)
 			local preview_buf = ensure_preview_buffer(source_buf)
 			local preview_win = ensure_preview_window(source_buf, anchor_win)
 			vim.api.nvim_win_set_buf(preview_win, preview_buf)
-			vim.api.nvim_buf_set_option(preview_buf, "modifiable", true)
+			vim.bo[preview_buf].modifiable = true
 			vim.api.nvim_buf_set_lines(preview_buf, 0, -1, false, lines)
-			vim.api.nvim_buf_set_option(preview_buf, "modifiable", false)
+			vim.bo[preview_buf].modifiable = false
 		end)
 	end)
 end

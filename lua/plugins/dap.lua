@@ -89,7 +89,5 @@ return {
 		else
 			vim.notify("codelldb not found. Install with :MasonInstall codelldb", vim.log.levels.WARN)
 		end
-
-		vim.notify("DAP ready", vim.log.levels.INFO, { title = "Debug" })
 	end,
 }
