@@ -16,7 +16,9 @@ vim.g.maplocalleader = " " -- Set a local leader key
 
 -- Enable persistent undo and set undo file directory
 vim.opt.undofile = true
-vim.opt.undodir = vim.fn.stdpath("config") .. "/.undodir"
+local undodir = vim.fn.stdpath("config") .. "/.undodir"
+vim.opt.undodir = undodir
+vim.fn.mkdir(undodir, "p")
 
 local function prepend_path(path)
 	if not path or path == "" then
