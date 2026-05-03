@@ -17,10 +17,7 @@ return {
 			return not vim.g.vscode
 		end,
 		opts = function()
-			local devcontainer_tools = require("config.devcontainer_tools")
 			return {
-				cmake_command = devcontainer_tools.wrapper("cmake"),
-				ctest_command = devcontainer_tools.wrapper("ctest"),
 				cmake_use_preset = true,
 				cmake_regenerate_on_save = true,
 				cmake_generate_options = { "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" },
