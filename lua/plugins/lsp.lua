@@ -34,9 +34,6 @@ return {
 			local mlsp = require("mason-lspconfig")
 			local devcontainer_tools = require("config.devcontainer_tools")
 
-			-- Enable LSP semantic tokens for richer syntax highlighting
-			pcall(vim.lsp.semantic_tokens.enable, vim.lsp.semantic_tokens, true)
-
 			local function telescope_lsp_picker(method, title, telescope_fn)
 				return function()
 					local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
