@@ -269,12 +269,9 @@ return {
 					)
 
 					-- DOCUMENTATION (HOVER)
-				vim.keymap.set(
-					"n",
-					"<leader>.",
-					function() vim.lsp.buf.hover(hover_opts) end,
-					{ buffer = ev.buf, silent = true, desc = "Hover symbol documentation" }
-				) --
+					vim.keymap.set("n", "<leader>.", function()
+						vim.lsp.buf.hover(hover_opts)
+					end, { buffer = ev.buf, silent = true, desc = "Hover symbol documentation" }) --
 
 					-- SIGNATURE HELP
 					vim.keymap.set(
