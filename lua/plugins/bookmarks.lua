@@ -17,18 +17,19 @@ return {
 		config = function()
 			require("bookmarks").setup({})
 
-			local Repo = require("bookmarks.domain.repo")
-			local Operate = require("bookmarks.tree.operate")
+			local Repo = require("bookmarks.domain.repo") ---@diagnostic disable-line: missing-fields
+			local Operate = require("bookmarks.tree.operate") ---@diagnostic disable-line: missing-fields
 
 			vim.api.nvim_create_autocmd("FileType", {
 				pattern = "BookmarksTree",
 				callback = function()
 					vim.keymap.set("n", "o", function()
 						local line_no = vim.api.nvim_win_get_cursor(0)[1]
-						local ctx = vim.g.bookmark_tree_view_ctx
+						local ctx = vim.g.bookmark_tree_view_ctx ---@type any
 						if not ctx then
 							return
 						end
+						---@diagnostic disable-next-line: undefined-field
 						local line_ctx = ctx.lines_ctx.lines_ctx[line_no]
 						if not line_ctx then
 							return

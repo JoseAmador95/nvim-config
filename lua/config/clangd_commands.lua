@@ -4,7 +4,7 @@ vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
 	-- Stop all running clangd clients
 	for _, client in ipairs(vim.lsp.get_clients()) do
 		if client.name == "clangd" then
-			vim.lsp.stop_client(client.id)
+			client:stop()
 		end
 	end
 

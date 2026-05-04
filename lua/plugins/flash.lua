@@ -4,6 +4,7 @@ return {
 		return not vim.g.vscode
 	end,
 	event = "VeryLazy",
+	---@diagnostic disable-next-line: undefined-doc-name
 	---@type Flash.Config
 	opts = {},
 	keys = {

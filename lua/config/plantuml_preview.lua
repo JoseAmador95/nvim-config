@@ -1,6 +1,6 @@
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 -- Lua-side storage for uv timer handles (cannot survive buf-var round-trips)
 local timers = {}

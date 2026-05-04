@@ -82,6 +82,7 @@ return {
 			if vim.g.SessionLoad then
 				return true
 			end
+			---@diagnostic disable-next-line: undefined-field
 			return autosession.restore_in_progress
 		end
 

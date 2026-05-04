@@ -2,7 +2,7 @@
 -- Bootstrap lazy.nvim and load plugin specs from lua/plugins/
 
 local fn = vim.fn
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local lazypath = fn.stdpath("data") .. "/lazy/lazy.nvim"
 
 if not uv.fs_stat(lazypath) then

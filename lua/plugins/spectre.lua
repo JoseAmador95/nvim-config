@@ -8,7 +8,7 @@ return {
 		{
 			"<leader>fg",
 			function()
-				local state = require("spectre.state")
+				local state = require("spectre.state") ---@diagnostic disable-line: missing-fields
 				if state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
 					if vim.bo[state.bufnr].filetype == "spectre_panel" then
 						require("spectre").close()

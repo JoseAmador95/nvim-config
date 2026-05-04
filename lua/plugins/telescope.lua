@@ -26,6 +26,7 @@ return {
 			local editor = require("config.editor")
 
 			local function append_history(prompt_bufnr)
+				---@diagnostic disable-next-line: missing-parameter
 				action_state
 					.get_current_history()
 					:append(action_state.get_current_line(), action_state.get_current_picker(prompt_bufnr))
@@ -33,8 +34,11 @@ return {
 
 			local function smart_open(prompt_bufnr)
 				local entry = action_state.get_selected_entry()
+				---@diagnostic disable-next-line: undefined-field
 				local filepath = entry.path or entry.filename
+				---@diagnostic disable-next-line: undefined-field
 				local lnum = tonumber(entry.lnum) or tonumber(entry.line) or 1
+				---@diagnostic disable-next-line: undefined-field
 				local col = tonumber(entry.col) or 1
 
 				append_history(prompt_bufnr)

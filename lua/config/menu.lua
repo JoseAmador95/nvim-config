@@ -1,5 +1,5 @@
 local M = {}
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "Menu" })
@@ -104,6 +104,7 @@ local function dap_action(action, ...)
 			notify("DAP action not available: " .. action, vim.log.levels.WARN)
 			return
 		end
+		---@diagnostic disable-next-line: redundant-parameter
 		dap[action](unpack(args))
 	end
 end
@@ -136,7 +137,7 @@ local function spectre_open_all()
 		return
 	end
 
-	local state = require("spectre.state")
+	local state = require("spectre.state") ---@diagnostic disable-line: missing-fields
 	if state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
 		if vim.bo[state.bufnr].filetype == "spectre_panel" then
 			spectre.close()
@@ -745,16 +746,16 @@ end
 -- ── Helpers ──────────────────────────────────────────────────────────────────
 
 local function delete_old_menus()
-	local ok, utils = pcall(require, "menu.utils")
-	if ok and utils and utils.delete_old_menus then
-		utils.delete_old_menus()
+	local ok, utils = pcall(require, "menu.utils") ---@diagnostic disable-line: missing-fields
+	if ok and utils and utils.delete_old_menus then ---@diagnostic disable-line: undefined-field
+		utils.delete_old_menus() ---@diagnostic disable-line: undefined-field
 	end
 end
 
 local function reset_menu_config()
-	local ok, state = pcall(require, "menu.state")
+	local ok, state = pcall(require, "menu.state") ---@diagnostic disable-line: missing-fields
 	if ok and state then
-		state.config = nil
+		state.config = nil ---@diagnostic disable-line: undefined-field
 	end
 end
 
