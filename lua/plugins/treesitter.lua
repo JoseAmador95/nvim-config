@@ -7,7 +7,7 @@ return {
 		build = ":TSUpdate",
 		config = function()
 			local max_filesize = 200 * 1024
-			local uv = vim.uv or vim.loop
+			local uv = vim.uv
 			local ensure_installed = {
 				"bash",
 				"c",

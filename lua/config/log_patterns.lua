@@ -45,7 +45,7 @@ local function split_cmdline(cmdline)
 	return parts, vim.trim(raw_args), raw_args:match("%s$") ~= nil
 end
 
-local function complete_color(arglead, cmdline)
+local function complete_color(arglead, cmdline, _cursorpos)
 	local parts, _, has_trailing_space = split_cmdline(cmdline)
 	if #parts > 1 or (#parts == 1 and has_trailing_space) then
 		return {}
@@ -191,8 +191,8 @@ local function build_pattern(kind, text)
 	return normalize_pattern(text)
 end
 
-function M.complete_colors(arglead, cmdline)
-	return complete_color(arglead, cmdline)
+function M.complete_colors(arglead, cmdline, cursorpos)
+	return complete_color(arglead, cmdline, cursorpos)
 end
 
 function M.add(kind, opts)

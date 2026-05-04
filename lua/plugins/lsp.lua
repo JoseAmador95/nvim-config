@@ -1,5 +1,5 @@
 -- lua/plugins/lsp.lua (Neovim 0.11+ style)
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 return {
 	-- Mason core: install/manage LSP servers & tools
@@ -40,7 +40,7 @@ return {
 						vim.notify((title or "LSP") .. ": no active client for method", vim.log.levels.INFO)
 						return
 					end
-					local ok, builtin = pcall(require, "telescope.builtin")
+					local ok, _builtin = pcall(require, "telescope.builtin")
 					if ok then
 						telescope_fn()
 					else
@@ -59,7 +59,7 @@ return {
 
 					local position_encoding = clients[1].offset_encoding or "utf-16"
 					local params = vim.lsp.util.make_position_params(0, position_encoding)
-					vim.lsp.buf_request(0, method, params, function(err, result, ctx)
+					vim.lsp.buf.request(method, params, function(err, result, ctx)
 						local function is_list(value)
 							if vim.islist then
 								return vim.islist(value)
@@ -80,7 +80,7 @@ return {
 							return
 						end
 
-						local client = ctx and ctx.client_id and vim.lsp.get_client_by_id(ctx.client_id)
+						local _client = ctx and ctx.client_id and vim.lsp.get_client_by_id(ctx.client_id)
 
 						local location = is_list(result) and result[1] or result
 						local uri = location.uri or location.targetUri
@@ -162,7 +162,7 @@ return {
 			end
 
 			local function enable_plantuml_lsp()
-				vim.lsp.enable({ "plantuml_lsp" })
+				vim.lsp.enable("plantuml_lsp")
 			end
 
 			local function install_plantuml_lsp()

@@ -179,7 +179,9 @@ vim.opt.mouse = "a"
 -- Custom command to reload configuration
 vim.api.nvim_create_user_command("ReloadConfig", function()
 	vim.cmd("source $MYVIMRC")
-	pcall(vim.cmd, "Lazy reload")
+	pcall(function()
+		vim.cmd("Lazy reload")
+	end)
 	vim.notify("Neovim config reloaded", vim.log.levels.INFO, { title = "Config" })
 end, { desc = "Reload config and plugin specs" })
 

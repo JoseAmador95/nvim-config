@@ -22,16 +22,16 @@ end
 
 -- Show diagnostics at cursor in a small float
 function M.ShowDiagnosticsFloat()
-	vim.diagnostic.open_float(nil, { border = "rounded", focusable = false })
+	vim.diagnostic.open_float({ border = "rounded", focusable = false })
 end
 
 -- Next/prev diagnostic
 function M.NextDiagnostic()
-	vim.diagnostic.goto_next()
+	vim.diagnostic.jump({ count = 1 })
 end
 
 function M.PrevDiagnostic()
-	vim.diagnostic.goto_prev()
+	vim.diagnostic.jump({ count = -1 })
 end
 
 -- Toggle inlay hints (handy for C/C++)

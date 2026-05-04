@@ -1,5 +1,5 @@
 local M = {}
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local devcontainer_shell_term
 
 local function notify(msg, level)
