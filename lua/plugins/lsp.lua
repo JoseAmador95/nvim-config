@@ -57,9 +57,10 @@ return {
 						return
 					end
 
-					local position_encoding = clients[1].offset_encoding or "utf-16"
+					local client = clients[1]
+					local position_encoding = client.offset_encoding or "utf-16"
 					local params = vim.lsp.util.make_position_params(0, position_encoding)
-					vim.lsp.buf.request(method, params, function(err, result, ctx)
+					client:request(method, params, function(err, result, ctx)
 						local function is_list(value)
 							if vim.islist then
 								return vim.islist(value)
