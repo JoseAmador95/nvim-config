@@ -107,6 +107,7 @@ return {
 			local ensure_servers = {
 				"bashls",
 				"clangd",
+				"docker_language_server",
 				"jsonls",
 				"lemminx",
 				"lua_ls",
@@ -439,6 +440,7 @@ return {
 				"clangd",
 				"clang-format",
 				"debugpy",
+				"hadolint",
 				"jsonls",
 				"jq",
 				"lemminx",
