@@ -14,7 +14,7 @@ local function toggle_log_highlight()
 	vim.b[bufnr].log_highlight_enabled = true
 end
 
-local function toggle_log_wrap()
+local function toggle_line_wrap()
 	vim.wo.wrap = not vim.wo.wrap
 	vim.wo.linebreak = vim.wo.wrap
 end
@@ -27,8 +27,8 @@ vim.api.nvim_create_user_command("ToggleLogHighlight", toggle_log_highlight, {
 	desc = "Toggle log highlighting",
 })
 
-vim.api.nvim_create_user_command("ToggleLogWrap", toggle_log_wrap, {
-	desc = "Toggle log wrap",
+vim.api.nvim_create_user_command("ToggleWrap", toggle_line_wrap, {
+	desc = "Toggle line wrap",
 })
 
 vim.keymap.set("i", "jj", "<Esc>", {
