@@ -1,7 +1,14 @@
 -- lua/config/obsidian_vaults.lua
 -- Reads the list of Obsidian vaults from ~/.nvim.config (a small owner-defined
--- YAML: a sequence of maps with name/path). Neovim ships no YAML parser, so
--- this handles just that minimal subset. Missing file -> empty list (no error).
+-- YAML). The vaults live under a top-level `obsidian:` field as a sequence of
+-- maps with name/path. Neovim ships no YAML parser, so this handles just that
+-- minimal subset. Missing file -> empty list (no error).
+--
+--   obsidian:
+--     - name: personal
+--       path: ~/Obsidian
+--     - name: work
+--       path: ~/notes/work
 
 local M = {}
 
@@ -24,9 +31,24 @@ function M.read(path)
 
 	local entries = {}
 	local cur = nil
+	local in_section = false
+	local section_indent = nil
+
 	for line in f:lines() do
+		local indent = #(line:match("^(%s*)") or "")
 		local stripped = trim(line)
-		if stripped ~= "" and stripped:sub(1, 1) ~= "#" then
+		if stripped == "" or stripped:sub(1, 1) == "#" then
+			-- skip blanks and comments
+		elseif not in_section then
+			-- Look for the top-level `obsidian:` field.
+			if stripped:match("^obsidian:%s*$") then
+				in_section = true
+				section_indent = indent
+			end
+		elseif indent <= section_indent then
+			-- A line indented no further than the field ends the section.
+			in_section = false
+		else
 			local item = stripped:match("^%-%s*(.*)$")
 			if item then
 				cur = {}
