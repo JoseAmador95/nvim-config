@@ -8,10 +8,13 @@ vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
 		end
 	end
 
+	-- Per-host clangd binary override from ~/.nvim-local.lua.
+	local clangd = require("config.local_config").get("clangd", {})
+
 	-- Re-register clangd with the new compilation database directory
 	vim.lsp.config("clangd", {
 		cmd = {
-			"clangd",
+			clangd.path or "clangd",
 			"--compile-commands-dir=" .. dir,
 			"--background-index",
 			"--cross-file-rename",

@@ -10,6 +10,17 @@ return {
 			--------------------------------------------------------------
 			-- Theme painter (repaint-guarded).
 			--------------------------------------------------------------
+			-- Per-host overrides from ~/.nvim-local.lua (see config.local_config).
+			local theme = require("config.local_config").get("theme", {})
+			local transparent = theme.transparent
+			if transparent == nil then
+				transparent = false
+			end
+			local italic_comments = theme.italic_comments
+			if italic_comments == nil then
+				italic_comments = true
+			end
+
 			local last_style = nil
 
 			local function apply(bg)
@@ -27,10 +38,17 @@ return {
 
 				vscode.setup({
 					style = style,
-					transparent = false,
-					italic_comments = true,
+					transparent = transparent,
+					italic_comments = italic_comments,
 				})
 				vim.cmd("colorscheme vscode")
+			end
+
+			-- A host can pin the background; then we skip OSC 11 auto-detection.
+			if theme.background == "light" or theme.background == "dark" then
+				vim.o.background = theme.background
+				apply(theme.background)
+				return
 			end
 
 			-- Paint once with whatever Neovim detected (works on a normal boot).
