@@ -23,6 +23,9 @@
 --       { name = "personal", path = "~/Obsidian" },
 --     },
 --     clangd = { path = "clangd" },
+--     path = { "~/bin" },          -- dirs prepended to $PATH
+--     env = { FOO = "bar" },       -- environment variables to export
+--     plugins_dir = { "~/.nvim-plugins" }, -- dirs of extra lazy.nvim specs
 --   }
 --
 -- Override the host path with $NVIM_CONFIG_FILE (for testing).
@@ -57,6 +60,21 @@ local SCHEMA = {
 		fields = {
 			path = { type = "string", default = "clangd" },
 		},
+	},
+	path = {
+		type = "list",
+		default = {},
+		item = { type = "string" },
+	},
+	env = {
+		type = "map",
+		default = {},
+		value = { type = "string" },
+	},
+	plugins_dir = {
+		type = "list",
+		default = {},
+		item = { type = "string" },
 	},
 }
 
@@ -194,6 +212,10 @@ function validate_value(spec, value, path, errors)
 		if value == nil then
 			return spec.default or {}
 		end
+		-- Accept a bare string where a list of strings is expected.
+		if type(value) == "string" and spec.item and spec.item.type == "string" then
+			value = { value }
+		end
 		if type(value) ~= "table" then
 			errors[#errors + 1] = string.format("%s: expected list, got %s", path, type(value))
 			return spec.default or {}
@@ -205,6 +227,28 @@ function validate_value(spec, value, path, errors)
 			-- Drop any item that produced an error rather than keep it half-valid.
 			if #errors == before then
 				out[#out + 1] = v
+			end
+		end
+		return out
+	end
+
+	if t == "map" then
+		local v = value == nil and {} or value
+		if type(v) ~= "table" then
+			errors[#errors + 1] = string.format("%s: expected table, got %s", path, type(v))
+			return spec.default or {}
+		end
+		local out = {}
+		for key, item in pairs(v) do
+			if type(key) ~= "string" then
+				errors[#errors + 1] = string.format("%s: keys must be strings", path)
+			else
+				local before = #errors
+				local vv = validate_value(spec.value, item, path .. "." .. key, errors)
+				-- Drop any entry that produced an error rather than keep it invalid.
+				if #errors == before then
+					out[key] = vv
+				end
 			end
 		end
 		return out
@@ -287,6 +331,30 @@ function M.reload()
 	return M.read()
 end
 
+-- Prepend a directory to $PATH (idempotent), mirroring init.lua's prepend_path.
+local function prepend_path(dir)
+	dir = vim.fn.expand(dir)
+	if dir == "" then
+		return
+	end
+	local current = vim.env.PATH or ""
+	if not string.find(current, dir, 1, true) then
+		vim.env.PATH = dir .. ":" .. current
+	end
+end
+
+-- Apply $PATH and environment overrides. Call early in init.lua so they are in
+-- place before plugins/mason rely on them.
+function M.apply_env()
+	local cfg = M.read()
+	for _, dir in ipairs(cfg.path or {}) do
+		prepend_path(dir)
+	end
+	for key, value in pairs(cfg.env or {}) do
+		vim.env[key] = value
+	end
+end
+
 -- Introspection for :NvimConfigDump and :checkhealth.
 function M.sources()
 	M.read()
@@ -316,6 +384,22 @@ return {
 
   -- Override the clangd binary on this host.
   clangd = { path = "clangd" },
+
+  -- Directories prepended to $PATH (expanded).
+  path = {
+    -- "~/bin",
+  },
+
+  -- Environment variables exported on startup.
+  env = {
+    -- PKG_CONFIG_PATH = "/opt/x/lib/pkgconfig",
+  },
+
+  -- Directories of extra lazy.nvim plugin specs (like lua/plugins, but external).
+  -- Each *.lua file returns a spec or list of specs; loaded via a trust prompt.
+  plugins_dir = {
+    -- "~/.nvim-plugins",
+  },
 }
 ]]
 
@@ -358,6 +442,16 @@ function M.setup()
 		end
 		notify("Wrote local config template to " .. path, vim.log.levels.INFO)
 	end, { bang = true, desc = "Create a local config template in $HOME" })
+
+	vim.api.nvim_create_user_command("NvimConfigEdit", function()
+		local path = home_path()
+		vim.cmd.edit(vim.fn.fnameescape(path))
+		-- Seed a fresh (on-disk-absent) buffer with the template as a starting
+		-- point; nothing is written until the user saves.
+		if vim.fn.filereadable(path) ~= 1 and vim.api.nvim_buf_line_count(0) <= 1 then
+			vim.api.nvim_buf_set_lines(0, 0, -1, false, vim.split(TEMPLATE, "\n", { plain = true }))
+		end
+	end, { desc = "Open the host local config (~/.nvim-local.lua) for editing" })
 
 	vim.api.nvim_create_user_command("NvimConfigReload", function()
 		M.reload()
