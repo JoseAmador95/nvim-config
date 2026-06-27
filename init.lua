@@ -187,6 +187,7 @@ end, { desc = "Reload config and plugin specs" })
 
 -- Plugins --------------------------------------------------------------------
 
+require("config.local_config").setup()
 require("config.diagnostics")
 require("config.devcontainer_shell").setup()
 require("config.indent")
