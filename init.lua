@@ -34,6 +34,10 @@ local mason_root = vim.fn.stdpath("data") .. "/mason"
 prepend_path(mason_root .. "/bin")
 prepend_path(mason_root .. "/build")
 
+-- Apply per-host $PATH and environment overrides from ~/.nvim-local.lua early,
+-- before plugins and mason rely on them.
+require("config.local_config").apply_env()
+
 -- Command Pallete -----------------------------------------------------------
 
 vim.opt.wildmode = { "longest:full" }

@@ -17,7 +17,32 @@ if not uv.fs_stat(lazypath) then
 end
 vim.opt.rtp:prepend(lazypath)
 
-require("lazy").setup("plugins", {
+-- Native specs from lua/plugins, plus any external dirs from ~/.nvim-local.lua.
+local specs = { { import = "plugins" } }
+for _, dir in ipairs(require("config.local_config").get("plugins_dir", {})) do
+	dir = fn.expand(dir)
+	if fn.isdirectory(dir) == 1 then
+		for _, file in ipairs(fn.glob(dir .. "/*.lua", true, true)) do
+			-- External specs are arbitrary code that also installs plugins, so
+			-- gate each file on a trust prompt (vim.secure.read).
+			local contents = vim.secure.read(file)
+			if contents then
+				local chunk = load(contents, "@" .. file)
+				local ok, spec
+				if chunk then
+					ok, spec = pcall(chunk)
+				end
+				if ok and type(spec) == "table" then
+					specs[#specs + 1] = spec -- lazy flattens nested spec lists
+				else
+					vim.notify("Failed to load plugin spec " .. file, vim.log.levels.WARN, { title = "nvim.config" })
+				end
+			end
+		end
+	end
+end
+
+require("lazy").setup(specs, {
 	defaults = { lazy = true }, -- lazy-load by default
 	ui = { border = "rounded" },
 	change_detection = { notify = false },
