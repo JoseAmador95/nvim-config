@@ -13,7 +13,7 @@ return {
 			local vaults = require("config.obsidian_vaults").read()
 			if vim.tbl_isempty(vaults) then
 				vim.notify(
-					"No se encontraron vaults en ~/.nvim.config; usando el directorio actual",
+					"No vaults found in ~/.nvim-local.lua; using the current directory",
 					vim.log.levels.WARN,
 					{ title = "obsidian.nvim" }
 				)
