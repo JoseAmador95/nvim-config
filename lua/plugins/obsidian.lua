@@ -21,10 +21,9 @@ return {
 			end
 			return {
 				workspaces = vaults,
-				completion = {
-					nvim_cmp = true,
-					min_chars = 2,
-				},
+				-- Use the new `Obsidian <subcmd>` commands; the keymaps below
+				-- already use that syntax. Silences the legacy_commands warning.
+				legacy_commands = false,
 				-- Keep render-markdown.nvim as the single renderer; obsidian's
 				-- own UI conflicts with it.
 				ui = { enable = false },
