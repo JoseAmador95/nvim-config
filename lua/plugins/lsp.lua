@@ -290,6 +290,14 @@ return {
 						vim.lsp.buf.rename,
 						{ buffer = ev.buf, silent = true, desc = "Rename" }
 					)
+
+					-- CODE ACTION
+					vim.keymap.set(
+						{ "n", "v" },
+						"<leader>ca",
+						vim.lsp.buf.code_action,
+						{ buffer = ev.buf, silent = true, desc = "Code action" }
+					)
 				end,
 			})
 

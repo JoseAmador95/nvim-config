@@ -6,6 +6,9 @@ return {
 		end,
 		event = { "BufWritePre" },
 		cmd = { "ConformInfo", "FormatFile", "FormatToggle" },
+		keys = {
+			{ "<leader>cf", "<cmd>FormatFile<cr>", desc = "Format buffer" },
+		},
 		init = function()
 			vim.g.conform_format_on_save = false
 		end,
