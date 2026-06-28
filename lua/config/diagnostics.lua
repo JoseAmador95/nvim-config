@@ -29,16 +29,6 @@ vim.keymap.set("n", "[d", function()
 	vim.diagnostic.jump({ count = -1 })
 end, { desc = "Prev diagnostic" })
 
--- Show diagnostics for the current line
-vim.keymap.set("n", "<leader>ll", function()
-	vim.diagnostic.open_float({ scope = "line" })
-end, { desc = "Line diagnostics" })
-
--- Show diagnostics for the current cursor position
-vim.keymap.set("n", "<leader>lc", function()
-	vim.diagnostic.open_float({ scope = "cursor" })
-end, { desc = "Cursor diagnostics" })
-
 -- Populate location list with diagnostics
 vim.keymap.set("n", "<leader>lq", vim.diagnostic.setloclist, {
 	desc = "Send diagnostics to location list",

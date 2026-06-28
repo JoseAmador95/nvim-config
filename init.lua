@@ -150,6 +150,11 @@ vim.keymap.set("n", "H", "^", {
 	desc = "Beginning of indentation",
 })
 
+-- Buffer navigation (]c/[c are taken by treesitter; <S-h>/<S-l> by H=^)
+vim.keymap.set("n", "]b", ":bnext<CR>", { silent = true, desc = "Next buffer" })
+vim.keymap.set("n", "[b", ":bprevious<CR>", { silent = true, desc = "Prev buffer" })
+vim.keymap.set("n", "<leader>bd", ":bdelete<CR>", { silent = true, desc = "Delete buffer" })
+
 -- Open file under cursor in new tab
 local function open_file_under_cursor_in_tab()
 	local file = vim.fn.expand("<cfile>")
@@ -192,6 +197,7 @@ end, { desc = "Reload config and plugin specs" })
 -- Plugins --------------------------------------------------------------------
 
 require("config.local_config").setup()
+require("config.cheatsheet")
 require("config.diagnostics")
 require("config.devcontainer_shell").setup()
 require("config.indent")
