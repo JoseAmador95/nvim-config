@@ -14,6 +14,17 @@ local function toggle_lazygit()
 			direction = "float",
 			hidden = true,
 			close_on_exit = true,
+			-- Enter terminal (insert) mode so keystrokes reach lazygit instead of
+			-- moving the Neovim cursor. The global terminal-mode mappings `jj`
+			-- (exit terminal) and `<leader>t` (= <space>t, toggle terminal) would
+			-- otherwise steal lazygit's `j` (navigate) and `<space>` (stage); send
+			-- those through immediately with nowait buffer-local maps.
+			on_open = function(term)
+				vim.cmd("startinsert!")
+				local opts = { buffer = term.bufnr, nowait = true }
+				vim.keymap.set("t", "j", "j", opts)
+				vim.keymap.set("t", "<space>", "<space>", opts)
+			end,
 		})
 	end
 	lazygit_term:toggle()
