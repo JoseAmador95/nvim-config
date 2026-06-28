@@ -393,6 +393,8 @@ return {
   -- Environment variables exported on startup.
   env = {
     -- PKG_CONFIG_PATH = "/opt/x/lib/pkgconfig",
+    -- AI (CodeCompanion via Claude subscription): token from `claude setup-token`.
+    -- CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat...",
   },
 
   -- Directories of extra lazy.nvim plugin specs (like lua/plugins, but external).
