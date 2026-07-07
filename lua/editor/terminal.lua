@@ -73,12 +73,6 @@ vim.keymap.set("n", "<leader>lw", "<cmd>ToggleLogWrap<cr>", {
 	desc = "Toggle log wrap",
 })
 
-vim.keymap.set("n", "<leader>x", ":x<CR>", {
-	noremap = true,
-	silent = true,
-	desc = "Save & quit",
-})
-
 vim.keymap.set("n", "<leader>j", "<Cmd>tabprevious<CR>", {
 	noremap = true,
 	silent = true,
