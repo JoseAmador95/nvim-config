@@ -1,14 +1,14 @@
 local M = {}
 
 local colors = {
-	{ name = "red", bg = "#3b1f1f", ctermbg = 52 },
-	{ name = "orange", bg = "#3b2a1a", ctermbg = 94 },
-	{ name = "yellow", bg = "#3a341b", ctermbg = 100 },
-	{ name = "green", bg = "#243228", ctermbg = 22 },
-	{ name = "cyan", bg = "#1c2f33", ctermbg = 23 },
-	{ name = "blue", bg = "#1f2a3b", ctermbg = 17 },
-	{ name = "purple", bg = "#2d2137", ctermbg = 53 },
-	{ name = "gray", bg = "#2b2f35", ctermbg = 236 },
+	{ name = "red", dark = { bg = "#3b1f1f", ctermbg = 52 }, light = { bg = "#f5c6c6", ctermbg = 217 } },
+	{ name = "orange", dark = { bg = "#3b2a1a", ctermbg = 94 }, light = { bg = "#f6d9b8", ctermbg = 223 } },
+	{ name = "yellow", dark = { bg = "#3a341b", ctermbg = 100 }, light = { bg = "#f0e9a8", ctermbg = 229 } },
+	{ name = "green", dark = { bg = "#243228", ctermbg = 22 }, light = { bg = "#c6e6c6", ctermbg = 194 } },
+	{ name = "cyan", dark = { bg = "#1c2f33", ctermbg = 23 }, light = { bg = "#bfe3e8", ctermbg = 195 } },
+	{ name = "blue", dark = { bg = "#1f2a3b", ctermbg = 17 }, light = { bg = "#c6d4f0", ctermbg = 189 } },
+	{ name = "purple", dark = { bg = "#2d2137", ctermbg = 53 }, light = { bg = "#ddc9ee", ctermbg = 183 } },
+	{ name = "gray", dark = { bg = "#2b2f35", ctermbg = 236 }, light = { bg = "#d9dde2", ctermbg = 253 } },
 }
 
 local color_index = {}
@@ -21,8 +21,10 @@ local function notify(msg, level)
 end
 
 local function apply_highlights()
+	local variant = vim.o.background == "light" and "light" or "dark"
 	for i, entry in ipairs(colors) do
-		vim.api.nvim_set_hl(0, "LogHl" .. i, { bg = entry.bg, ctermbg = entry.ctermbg })
+		local shade = entry[variant]
+		vim.api.nvim_set_hl(0, "LogHl" .. i, { bg = shade.bg, ctermbg = shade.ctermbg })
 	end
 end
 
@@ -270,6 +272,11 @@ function M.setup()
 	local group = vim.api.nvim_create_augroup("LogHighlightColors", { clear = true })
 	vim.api.nvim_create_autocmd("ColorScheme", {
 		group = group,
+		callback = apply_highlights,
+	})
+	vim.api.nvim_create_autocmd("OptionSet", {
+		group = group,
+		pattern = "background",
 		callback = apply_highlights,
 	})
 	vim.api.nvim_create_autocmd("BufWinEnter", {
