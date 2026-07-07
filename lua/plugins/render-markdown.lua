@@ -7,7 +7,7 @@ return {
 	dependencies = { "nvim-treesitter/nvim-treesitter" },
 	opts = {},
 	config = function()
-		require("render-markdown").setup({})
+		require("render-markdown").setup({ render_modes = true })
 
 		-- render-markdown defaults lean dark; override the groups that read
 		-- worst on a light background and hand control back to its generated
