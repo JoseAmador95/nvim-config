@@ -50,7 +50,7 @@ return {
 			return {
 				defaults = {
 					cwd = vim.fn.getcwd(),
-					file_ignore_patterns = { "node_modules", ".git" },
+					file_ignore_patterns = { "node_modules", "%.git/", "%.git$" },
 					history = {
 						path = history_path,
 						limit = 100,
