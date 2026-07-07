@@ -38,41 +38,40 @@ return {
 				installable[lang] = true
 			end
 
-			local indent_disabled = {}
-			vim.api.nvim_create_autocmd("FileType", {
-				group = vim.api.nvim_create_augroup("TreesitterStart", { clear = true }),
-				callback = function(args)
-					local name = vim.api.nvim_buf_get_name(args.buf)
-					local ok, stats = pcall(uv.fs_stat, name)
-					if ok and stats and stats.size > max_filesize then
-						return
-					end
+			-- Highlight and treesitter-based indent are UI concerns that VSCode
+			-- handles itself; in VSCode we only install parsers so the text
+			-- objects below can query the tree.
+			if not vim.g.vscode then
+				local indent_disabled = {}
+				vim.api.nvim_create_autocmd("FileType", {
+					group = vim.api.nvim_create_augroup("TreesitterStart", { clear = true }),
+					callback = function(args)
+						local name = vim.api.nvim_buf_get_name(args.buf)
+						local ok, stats = pcall(uv.fs_stat, name)
+						if ok and stats and stats.size > max_filesize then
+							return
+						end
 
-					local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype)
-						or vim.bo[args.buf].filetype
-					if not installable[lang] then
-						return
-					end
+						local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype)
+							or vim.bo[args.buf].filetype
+						if not installable[lang] then
+							return
+						end
 
-					if pcall(vim.treesitter.start, args.buf, lang) and not indent_disabled[lang] then
-						vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
-					end
-				end,
-			})
+						if pcall(vim.treesitter.start, args.buf, lang) and not indent_disabled[lang] then
+							vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+						end
+					end,
+				})
+			end
 		end,
-		-- If you want to skip inside VSCode:
-		cond = function()
-			return not vim.g.vscode
-		end,
+		-- Loads in VSCode too (parsers only, no highlight) so text objects work.
 	},
 
 	{
 		"nvim-treesitter/nvim-treesitter-textobjects",
 		dependencies = { "nvim-treesitter/nvim-treesitter" },
 		event = "VeryLazy",
-		cond = function()
-			return not vim.g.vscode
-		end,
 		config = function()
 			local select = require("nvim-treesitter-textobjects.select")
 			local move = require("nvim-treesitter-textobjects.move")
