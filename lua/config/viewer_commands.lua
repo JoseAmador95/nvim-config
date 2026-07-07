@@ -1,4 +1,5 @@
 local log_patterns = require("config.log_patterns")
+local log_watch = require("config.log_watch")
 local plantuml_ascii = require("config.plantuml_ascii")
 local plantuml_preview = require("config.plantuml_preview")
 
@@ -128,6 +129,14 @@ end, { nargs = "+", complete = log_patterns.complete_colors, desc = "Add log hig
 vim.api.nvim_create_user_command("LogHlClear", function(opts)
 	log_patterns.clear(opts)
 end, { nargs = "?", complete = log_patterns.complete_colors, desc = "Clear log highlights" })
+
+vim.api.nvim_create_user_command("LogWatchCurrentFile", function(opts)
+	log_watch.command(opts)
+end, {
+	nargs = "?",
+	complete = log_watch.complete,
+	desc = "Follow current log file live (read-only, toggles without argument)",
+})
 
 vim.api.nvim_create_user_command("PlantumlAscii", function()
 	plantuml_ascii.render()
