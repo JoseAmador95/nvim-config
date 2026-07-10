@@ -1,23 +1,23 @@
--- Notas markdown rápidas en ~/Notes (configurable) mediante la CLI `zk`.
--- Independiente de los vaults de obsidian: solo crea/abre notas en un directorio
--- común. Requiere el binario `zk` en el $PATH (https://github.com/zk-org/zk);
--- si falta, los comandos avisan y no rompen nada.
+-- Quick markdown notes in ~/Notes (configurable) via the `zk` CLI.
+-- Independent of the obsidian vaults: it only creates/opens notes in a common
+-- directory. Requires the `zk` binary on $PATH (https://github.com/zk-org/zk);
+-- if it is missing, the commands warn and nothing breaks.
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "note" })
 end
 
--- Directorio de notas: configurable en ~/.nvim-local.lua (notes.dir), default
--- ~/Notes (en $HOME, fuera del repo de config → a salvo de git clean/rebase).
+-- Notes directory: configurable in ~/.nvim-local.lua (notes.dir), default
+-- ~/Notes (in $HOME, outside the config repo -> safe from git clean/rebase).
 local function notes_dir()
 	local cfg = require("config.local_config").get("notes", {})
 	local dir = (cfg.dir and cfg.dir ~= "") and cfg.dir or "~/Notes"
 	dir = vim.fn.fnamemodify(vim.fn.expand(dir), ":p"):gsub("/$", "")
-	-- Guarda: nunca escribir notas dentro del repo de config (se perderían en un
-	-- git clean/rebase). Si notes.dir apunta ahí, se rechaza con aviso.
+	-- Guard: never write notes inside the config repo (they would be lost on a
+	-- git clean/rebase). If notes.dir points there, reject it with a warning.
 	local config = vim.fn.fnamemodify(vim.fn.stdpath("config"), ":p"):gsub("/$", "")
 	if dir == config or dir:sub(1, #config + 1) == config .. "/" then
 		notify(
-			"notes.dir está dentro del repo de config (" .. dir .. "); ajústalo en ~/.nvim-local.lua",
+			"notes.dir is inside the config repo (" .. dir .. "); set it in ~/.nvim-local.lua",
 			vim.log.levels.ERROR
 		)
 		return nil
@@ -25,7 +25,7 @@ local function notes_dir()
 	return dir
 end
 
--- .zk/config.toml declarativo: nombre = fecha-slug, plantilla siembra "# Título".
+-- Declarative .zk/config.toml: filename = date-slug, template seeds "# Title".
 local CONFIG_TOML = [[
 [note]
 filename = "{{format-date now '%Y-%m-%d'}}-{{slug title}}"
@@ -37,8 +37,8 @@ hashtags = true
 ]]
 local DEFAULT_TEMPLATE = "# {{title}}\n\n"
 
--- Crea <dir>/.zk/{config.toml,templates/default.md} si faltan. zk reconoce el
--- notebook por la presencia de .zk, así que no hace falta shell-out a `zk init`.
+-- Create <dir>/.zk/{config.toml,templates/default.md} if missing. zk recognizes
+-- the notebook by the presence of .zk, so there is no need to shell out to `zk init`.
 local function ensure_notebook()
 	local dir = notes_dir()
 	if not dir then
@@ -57,7 +57,7 @@ end
 
 local function has_zk()
 	if vim.fn.executable("zk") ~= 1 then
-		notify("CLI `zk` no encontrada en $PATH. Instálala: https://github.com/zk-org/zk", vim.log.levels.ERROR)
+		notify("`zk` CLI not found on $PATH. Install it: https://github.com/zk-org/zk", vim.log.levels.ERROR)
 		return false
 	end
 	return true
@@ -71,9 +71,9 @@ local function create()
 	if not dir then
 		return
 	end
-	vim.ui.input({ prompt = "Título de la nota: " }, function(title)
+	vim.ui.input({ prompt = "Note title: " }, function(title)
 		if title == nil then
-			return -- cancelado con <Esc>
+			return -- cancelled with <Esc>
 		end
 		require("zk").new({ dir = dir, title = vim.trim(title) })
 	end)
@@ -86,17 +86,17 @@ local function open()
 	if not ensure_notebook() then
 		return
 	end
-	-- ZK_NOTEBOOK_DIR (fijado en init) hace que el picker liste el directorio de notas.
+	-- ZK_NOTEBOOK_DIR (set in init) makes the picker list the notes directory.
 	require("zk").edit({}, { title = "Notes" })
 end
 
--- Ruta del archivo de la nota actual, solo si está dentro del directorio de notas
--- (guarda para no renombrar/borrar archivos ajenos por accidente). Devuelve nil
--- con aviso en caso contrario.
+-- Path of the current note's file, only if it is inside the notes directory
+-- (a guard so rename/delete cannot touch unrelated files by accident). Returns
+-- nil with a warning otherwise.
 local function current_note_path()
 	local file = vim.api.nvim_buf_get_name(0)
 	if file == "" then
-		notify("El buffer actual no es un archivo", vim.log.levels.WARN)
+		notify("The current buffer is not a file", vim.log.levels.WARN)
 		return nil
 	end
 	file = vim.fn.fnamemodify(file, ":p")
@@ -105,14 +105,14 @@ local function current_note_path()
 		return nil
 	end
 	if file:sub(1, #dir + 1) ~= dir .. "/" then
-		notify("La nota actual no está en el directorio de notas (" .. dir .. ")", vim.log.levels.WARN)
+		notify("The current note is not in the notes directory (" .. dir .. ")", vim.log.levels.WARN)
 		return nil
 	end
 	return file
 end
 
--- Renombra el archivo de la nota actual. No reescribe backlinks (zk no lo soporta);
--- es una operación de fichero transparente.
+-- Rename the current note's file. Does not rewrite backlinks (zk has no such
+-- support); it is a plain filesystem operation.
 local function rename()
 	local path = current_note_path()
 	if not path then
@@ -120,9 +120,9 @@ local function rename()
 	end
 	local dir = vim.fn.fnamemodify(path, ":h")
 	local old = vim.fn.fnamemodify(path, ":t")
-	vim.ui.input({ prompt = "Nuevo nombre: ", default = old }, function(input)
+	vim.ui.input({ prompt = "New name: ", default = old }, function(input)
 		if input == nil then
-			return -- cancelado con <Esc>
+			return -- cancelled with <Esc>
 		end
 		input = vim.trim(input)
 		if input == "" or input == old then
@@ -133,7 +133,7 @@ local function rename()
 		end
 		local target = dir .. "/" .. input
 		if vim.fn.filereadable(target) == 1 then
-			notify("Ya existe: " .. input, vim.log.levels.ERROR)
+			notify("Already exists: " .. input, vim.log.levels.ERROR)
 			return
 		end
 		if vim.bo.modified then
@@ -141,33 +141,33 @@ local function rename()
 		end
 		local ok, err = os.rename(path, target)
 		if not ok then
-			notify("No se pudo renombrar: " .. tostring(err), vim.log.levels.ERROR)
+			notify("Could not rename: " .. tostring(err), vim.log.levels.ERROR)
 			return
 		end
 		local oldbuf = vim.api.nvim_get_current_buf()
 		vim.cmd.edit(vim.fn.fnameescape(target))
 		pcall(vim.api.nvim_buf_delete, oldbuf, { force = true })
-		notify("Renombrada a " .. input)
+		notify("Renamed to " .. input)
 	end)
 end
 
--- Borra el archivo de la nota actual (con confirmación) y limpia el buffer.
+-- Delete the current note's file (with confirmation) and wipe the buffer.
 local function delete()
 	local path = current_note_path()
 	if not path then
 		return
 	end
 	local name = vim.fn.fnamemodify(path, ":t")
-	if vim.fn.confirm("¿Borrar la nota '" .. name .. "'?", "&Sí\n&No", 2) ~= 1 then
+	if vim.fn.confirm("Delete note '" .. name .. "'?", "&Yes\n&No", 2) ~= 1 then
 		return
 	end
 	local ok, err = os.remove(path)
 	if not ok then
-		notify("No se pudo borrar: " .. tostring(err), vim.log.levels.ERROR)
+		notify("Could not delete: " .. tostring(err), vim.log.levels.ERROR)
 		return
 	end
 	pcall(vim.api.nvim_buf_delete, 0, { force = true })
-	notify("Borrada " .. name)
+	notify("Deleted " .. name)
 end
 
 return {
@@ -183,8 +183,8 @@ return {
 		{ "<leader>nr", rename, desc = "Rename note" },
 		{ "<leader>nd", delete, desc = "Delete note" },
 	},
-	-- Fija el notebook por defecto en el arranque para que el picker/CLI siempre
-	-- resuelvan el directorio de notas aunque el cwd sea otro. init corre en startup.
+	-- Set the default notebook at startup so the picker/CLI always resolve the
+	-- notes directory even when the cwd is elsewhere. init runs on startup.
 	init = function()
 		if vim.g.vscode then
 			return
@@ -202,7 +202,7 @@ return {
 			local sub = o.fargs[1] or "create"
 			local handler = dispatch[sub]
 			if not handler then
-				notify("Subcomando desconocido '" .. sub .. "' (create|open|rename|delete)", vim.log.levels.WARN)
+				notify("Unknown subcommand '" .. sub .. "' (create|open|rename|delete)", vim.log.levels.WARN)
 				return
 			end
 			handler()
@@ -213,7 +213,7 @@ return {
 					return c:find(lead, 1, true) == 1
 				end, { "create", "open", "rename", "delete" })
 			end,
-			desc = "Crear o abrir una nota markdown",
+			desc = "Create, open, rename or delete a markdown note",
 		})
 	end,
 }
