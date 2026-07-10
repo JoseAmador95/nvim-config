@@ -21,6 +21,7 @@ return {
 			{ "<leader>h", group = "git hunks" },
 			{ "<leader>l", group = "lsp/diagnostics" },
 			{ "<leader>m", group = "markdown" },
+			{ "<leader>n", group = "note" },
 			{ "<leader>o", group = "obsidian" },
 			{ "<leader>s", group = "swap/split/spell" },
 			{ "<leader>t", group = "terminal" },

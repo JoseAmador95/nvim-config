@@ -22,6 +22,7 @@
 --     obsidian = {               -- list of vaults
 --       { name = "personal", path = "~/Obsidian" },
 --     },
+--     notes = { dir = "~/Notes" }, -- directory for :Note create
 --     clangd = { path = "clangd" },
 --     path = { "~/bin" },          -- dirs prepended to $PATH
 --     env = { FOO = "bar" },       -- environment variables to export
@@ -53,6 +54,12 @@ local SCHEMA = {
 				name = { type = "string", required = true },
 				path = { type = "string", required = true },
 			},
+		},
+	},
+	notes = {
+		type = "table",
+		fields = {
+			dir = { type = "string", default = "~/Notes" },
 		},
 	},
 	clangd = {
@@ -381,6 +388,9 @@ return {
   obsidian = {
     -- { name = "personal", path = "~/Obsidian" },
   },
+
+  -- Directory for quick markdown notes created by :Note create (expanded).
+  notes = { dir = "~/Notes" },
 
   -- Override the clangd binary on this host.
   clangd = { path = "clangd" },
