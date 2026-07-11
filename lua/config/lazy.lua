@@ -50,3 +50,20 @@ require("lazy").setup(specs, {
 		rtp = { disabled_plugins = { "gzip", "tarPlugin", "zipPlugin", "netrwPlugin" } },
 	},
 })
+
+-- lazy.nvim's `ft` handlers don't fire for files opened as command-line
+-- arguments: their FileType event is emitted during startup, before lazy has
+-- wired up the handlers, so `ft`-lazy plugins (render-markdown, obsidian, ...)
+-- never load for `nvim some/file.md`. Re-emit FileType for every buffer that
+-- is already loaded once VimEnter fires, which loads those plugins and lets
+-- them attach to the argument buffers (also covers session-restored buffers).
+vim.api.nvim_create_autocmd("VimEnter", {
+	group = vim.api.nvim_create_augroup("lazy_ft_argv_fix", { clear = true }),
+	callback = function()
+		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].filetype ~= "" then
+				vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
+			end
+		end
+	end,
+})
