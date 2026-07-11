@@ -84,6 +84,15 @@ local function try_lsp_start()
 end
 
 local function set_filetype_with_scratch(ft)
+	-- In pager mode the buffer often holds colored CLI output (gh, git, ...);
+	-- strip the ANSI escapes first so the new filetype renders cleanly instead
+	-- of showing the raw sequences as garbage. Guarded to pager mode so we never
+	-- rewrite a real file buffer in normal nvim.
+	local pager = require("config.pager")
+	if pager.active then
+		pager.strip_ansi(0)
+	end
+
 	local name = vim.api.nvim_buf_get_name(0)
 	if name == "" then
 		local scratch = next_scratch_name(ft)
@@ -91,7 +100,12 @@ local function set_filetype_with_scratch(ft)
 	end
 
 	vim.api.nvim_cmd({ cmd = "setfiletype", args = { ft } }, {})
-	try_lsp_start()
+
+	-- No LSP in pager mode; setfiletype already fired FileType so render-markdown
+	-- attaches. Skip the LSP-start probe (and its "no client" warning) there.
+	if not pager.active then
+		try_lsp_start()
+	end
 end
 
 vim.api.nvim_create_user_command("JsonTree", function()
@@ -116,7 +130,10 @@ vim.api.nvim_create_user_command("MenuOpen", function()
 	menu.open()
 end, { desc = "Open menu" })
 
-vim.keymap.set("n", "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open menu" })
+-- The menu plugin is not loaded in pager mode, so don't offer its keymap there.
+if not require("config.pager").active then
+	vim.keymap.set("n", "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open menu" })
+end
 
 vim.api.nvim_create_user_command("LogHlAdd", function(opts)
 	log_patterns.add("exact", opts)
