@@ -17,25 +17,38 @@ if not uv.fs_stat(lazypath) then
 end
 vim.opt.rtp:prepend(lazypath)
 
--- Native specs from lua/plugins, plus any external dirs from ~/.nvim-local.lua.
-local specs = { { import = "plugins" } }
-for _, dir in ipairs(require("config.local_config").get("plugins_dir", {})) do
-	dir = fn.expand(dir)
-	if fn.isdirectory(dir) == 1 then
-		for _, file in ipairs(fn.glob(dir .. "/*.lua", true, true)) do
-			-- External specs are arbitrary code that also installs plugins, so
-			-- gate each file on a trust prompt (vim.secure.read).
-			local contents = vim.secure.read(file)
-			if contents then
-				local chunk = load(contents, "@" .. file)
-				local ok, spec
-				if chunk then
-					ok, spec = pcall(chunk)
-				end
-				if ok and type(spec) == "table" then
-					specs[#specs + 1] = spec -- lazy flattens nested spec lists
-				else
-					vim.notify("Failed to load plugin spec " .. file, vim.log.levels.WARN, { title = "nvim.config" })
+local pager = require("config.pager")
+
+-- In pager mode (nvimpager) load only the minimal allowlist; skip the full
+-- `{ import = "plugins" }` set and any external ~/.nvim-local.lua plugin dirs.
+local specs
+if pager.active then
+	specs = pager.specs()
+else
+	-- Native specs from lua/plugins, plus any external dirs from ~/.nvim-local.lua.
+	specs = { { import = "plugins" } }
+	for _, dir in ipairs(require("config.local_config").get("plugins_dir", {})) do
+		dir = fn.expand(dir)
+		if fn.isdirectory(dir) == 1 then
+			for _, file in ipairs(fn.glob(dir .. "/*.lua", true, true)) do
+				-- External specs are arbitrary code that also installs plugins, so
+				-- gate each file on a trust prompt (vim.secure.read).
+				local contents = vim.secure.read(file)
+				if contents then
+					local chunk = load(contents, "@" .. file)
+					local ok, spec
+					if chunk then
+						ok, spec = pcall(chunk)
+					end
+					if ok and type(spec) == "table" then
+						specs[#specs + 1] = spec -- lazy flattens nested spec lists
+					else
+						vim.notify(
+							"Failed to load plugin spec " .. file,
+							vim.log.levels.WARN,
+							{ title = "nvim.config" }
+						)
+					end
 				end
 			end
 		end
@@ -61,8 +74,16 @@ vim.api.nvim_create_autocmd("VimEnter", {
 	group = vim.api.nvim_create_augroup("lazy_ft_argv_fix", { clear = true }),
 	callback = function()
 		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-			if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].filetype ~= "" then
-				vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
+			if vim.api.nvim_buf_is_loaded(buf) then
+				-- Pager stdin has no filename, so nvimpager leaves the filetype
+				-- empty; honor an explicit NVIMPAGER_FILETYPE before re-emitting
+				-- so render-markdown (and friends) can attach.
+				if pager.active then
+					pager.apply_stdin_filetype(buf)
+				end
+				if vim.bo[buf].filetype ~= "" then
+					vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
+				end
 			end
 		end
 	end,

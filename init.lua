@@ -206,6 +206,9 @@ require("config.lsp_commands")
 require("config.viewer_commands")
 require("config.lazy")
 
+-- Pager-only commands/keymaps (nvimpager); no-op in normal/vscode nvim.
+require("config.pager").setup()
+
 if vim.g.vscode then
 	require("editor.vscode")
 else
