@@ -67,9 +67,9 @@ vim.api.nvim_create_user_command("Cheatsheet", function(opts)
 		return
 	end
 	if what == "commands" then
-		vim.cmd("Telescope commands")
+		Snacks.picker.commands()
 	else
-		vim.cmd("Telescope keymaps")
+		Snacks.picker.keymaps()
 	end
 end, {
 	nargs = "?",

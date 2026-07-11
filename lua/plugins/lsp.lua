@@ -23,7 +23,7 @@ return {
 		end,
 		event = { "BufReadPre", "BufNewFile" }, -- load when editing files
 		dependencies = {
-			"hrsh7th/cmp-nvim-lsp", -- capabilities for nvim-cmp
+			"saghen/blink.cmp", -- capabilities for blink.cmp
 			"b0o/SchemaStore.nvim",
 			-- NOTE: we no longer depend on "neovim/nvim-lspconfig" framework calls.
 			-- nvim-lspconfig is still useful because it ships the server configs in `lsp/`,
@@ -33,18 +33,18 @@ return {
 		config = function()
 			local mlsp = require("mason-lspconfig")
 
-			local function telescope_lsp_picker(method, title, telescope_fn)
+			local function snacks_lsp_picker(method, title, picker_fn)
 				return function()
 					local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
 					if not clients or #clients == 0 then
 						vim.notify((title or "LSP") .. ": no active client for method", vim.log.levels.INFO)
 						return
 					end
-					local ok, _builtin = pcall(require, "telescope.builtin")
+					local ok, _snacks = pcall(require, "snacks")
 					if ok then
-						telescope_fn()
+						picker_fn()
 					else
-						vim.notify("Telescope not available", vim.log.levels.WARN)
+						vim.notify("Snacks picker not available", vim.log.levels.WARN)
 					end
 				end
 			end
@@ -128,9 +128,11 @@ return {
 			})
 
 			--------------------------------------------------------------------------
-			-- nvim-cmp capabilities
+			-- blink.cmp capabilities
 			--------------------------------------------------------------------------
-			local capabilities = require("cmp_nvim_lsp").default_capabilities()
+			local ok_blink, blink = pcall(require, "blink.cmp")
+			local capabilities = ok_blink and blink.get_lsp_capabilities()
+				or vim.lsp.protocol.make_client_capabilities()
 			local has_schemastore, schemastore = pcall(require, "schemastore")
 			local plantuml_lsp_warned = false
 			local plantuml_lsp_installing = false
@@ -256,16 +258,16 @@ return {
 					vim.keymap.set(
 						"n",
 						"gi",
-						telescope_lsp_picker("textDocument/implementation", "Go to implementation", function()
-							require("telescope.builtin").lsp_implementations({ jump_type = "never" })
+						snacks_lsp_picker("textDocument/implementation", "Go to implementation", function()
+							Snacks.picker.lsp_implementations({ confirm = "open_in_tab" })
 						end),
 						{ buffer = ev.buf, silent = true, desc = "Go to implementation" }
 					)
 					vim.keymap.set(
 						"n",
 						"gr",
-						telescope_lsp_picker("textDocument/references", "References", function()
-							require("telescope.builtin").lsp_references({ jump_type = "never" })
+						snacks_lsp_picker("textDocument/references", "References", function()
+							Snacks.picker.lsp_references({ confirm = "open_in_tab" })
 						end),
 						{ buffer = ev.buf, silent = true, desc = "References" }
 					)

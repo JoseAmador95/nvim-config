@@ -21,7 +21,13 @@ return {
 			end,
 			desc = "Prev todo comment",
 		},
-		{ "<leader>ft", "<cmd>TodoTelescope<cr>", desc = "Find todos" },
+		{
+			"<leader>ft",
+			function()
+				Snacks.picker.todo_comments()
+			end,
+			desc = "Find todos",
+		},
 		{ "<leader>xt", "<cmd>Trouble todo toggle<cr>", desc = "Todos (Trouble)" },
 	},
 	opts = {},

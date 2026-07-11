@@ -45,18 +45,39 @@ local function format_buffer()
 	vim.lsp.buf.format()
 end
 
-local function telescope_action(action, opts)
+-- Maps the old Telescope builtin names to their snacks.picker source.
+local PICKER_SOURCES = {
+	find_files = "files",
+	oldfiles = "recent",
+	live_grep = "grep",
+	grep_string = "grep_word",
+	buffers = "buffers",
+	help_tags = "help",
+	command_history = "command_history",
+	git_commits = "git_log",
+	git_bcommits = "git_log_file",
+	diagnostics = "diagnostics",
+	lsp_references = "lsp_references",
+	lsp_implementations = "lsp_implementations",
+	lsp_type_definitions = "lsp_type_definitions",
+	lsp_document_symbols = "lsp_symbols",
+	lsp_workspace_symbols = "lsp_workspace_symbols",
+}
+
+local function picker_action(action)
 	return function()
-		local ok, builtin = pcall(require, "telescope.builtin")
-		if not ok or not builtin[action] then
-			notify("Telescope action not available", vim.log.levels.WARN)
+		local source = PICKER_SOURCES[action] or action
+		local ok, snacks = pcall(require, "snacks")
+		if not ok or not snacks.picker[source] then
+			notify("Picker action not available", vim.log.levels.WARN)
 			return
 		end
-		if opts then
-			builtin[action](opts)
-		else
-			builtin[action]()
+		local opts = {}
+		-- Open LSP location results in a tab, like gr/gi.
+		if source:match("^lsp_") then
+			opts.confirm = "open_in_tab"
 		end
+		snacks.picker[source](opts)
 	end
 end
 
@@ -232,20 +253,20 @@ local function search_items()
 	end
 
 	table.insert(items, { name = "Spectre: Search in File", cmd = spectre_open_file })
-	table.insert(items, { name = "Live Grep", cmd = telescope_action("live_grep") })
-	table.insert(items, { name = "Grep String (cursor)", cmd = telescope_action("grep_string") })
+	table.insert(items, { name = "Live Grep", cmd = picker_action("live_grep") })
+	table.insert(items, { name = "Grep String (cursor)", cmd = picker_action("grep_string") })
 	return items
 end
 
 local function navigation_items()
 	return {
-		{ name = "Find Files", cmd = telescope_action("find_files") },
-		{ name = "Recent Files", cmd = telescope_action("oldfiles") },
-		{ name = "Buffers", cmd = telescope_action("buffers") },
-		{ name = "Help Tags", cmd = telescope_action("help_tags") },
-		{ name = "Command History", cmd = telescope_action("command_history") },
-		{ name = "Git Commits", cmd = telescope_action("git_commits") },
-		{ name = "Git Branches", cmd = telescope_action("git_bcommits") },
+		{ name = "Find Files", cmd = picker_action("find_files") },
+		{ name = "Recent Files", cmd = picker_action("oldfiles") },
+		{ name = "Buffers", cmd = picker_action("buffers") },
+		{ name = "Help Tags", cmd = picker_action("help_tags") },
+		{ name = "Command History", cmd = picker_action("command_history") },
+		{ name = "Git Commits", cmd = picker_action("git_commits") },
+		{ name = "Git Branches", cmd = picker_action("git_bcommits") },
 	}
 end
 
@@ -257,11 +278,11 @@ local function lsp_items()
 			cmd = lsp_action("textDocument/declaration", vim.lsp.buf.declaration),
 			rtxt = "gD",
 		},
-		{ name = "References", cmd = telescope_action("lsp_references", { jump_type = "never" }) },
-		{ name = "Implementation", cmd = telescope_action("lsp_implementations", { jump_type = "never" }) },
-		{ name = "Type Definition", cmd = telescope_action("lsp_type_definitions", { jump_type = "never" }) },
-		{ name = "Document Symbols", cmd = telescope_action("lsp_document_symbols") },
-		{ name = "Workspace Symbols", cmd = telescope_action("lsp_workspace_symbols") },
+		{ name = "References", cmd = picker_action("lsp_references") },
+		{ name = "Implementation", cmd = picker_action("lsp_implementations") },
+		{ name = "Type Definition", cmd = picker_action("lsp_type_definitions") },
+		{ name = "Document Symbols", cmd = picker_action("lsp_document_symbols") },
+		{ name = "Workspace Symbols", cmd = picker_action("lsp_workspace_symbols") },
 		{ name = "Incoming Calls", cmd = lsp_action("callHierarchy/incomingCalls", vim.lsp.buf.incoming_calls) },
 		{ name = "Outgoing Calls", cmd = lsp_action("callHierarchy/outgoingCalls", vim.lsp.buf.outgoing_calls) },
 		{ name = "Rename", cmd = lsp_action("textDocument/rename", vim.lsp.buf.rename) },
@@ -546,7 +567,7 @@ local function view_items()
 				end
 			end,
 		},
-		{ name = "Diagnostics", cmd = telescope_action("diagnostics") },
+		{ name = "Diagnostics", cmd = picker_action("diagnostics") },
 		{
 			name = "Fold Open All",
 			cmd = function()

@@ -23,7 +23,7 @@
   - LSP servers are configured with native Neovim 0.11+ APIs (`vim.lsp.config` / `vim.lsp.enable`), not legacy `lspconfig.setup`.
   - `config.devcontainer_tools` injects wrapper binaries from `bin/` so `clangd`, `cmake`, and `ctest` can transparently run through `devcontainer exec` when editing containerized projects.
   - Container paths returned by tooling are mapped back to host paths before opening files.
-- `lua/config/editor.lua` is the shared navigation primitive: it opens targets in tabs and reuses an existing tab if that file is already open. LSP jumps, Telescope selections, and the custom `gf` flow all rely on it.
+- `lua/config/editor.lua` is the shared navigation primitive: it opens targets in tabs and reuses an existing tab if that file is already open. LSP jumps, snacks.picker selections (via the custom `open_in_tab` confirm action in `lua/plugins/snacks.lua`), and the custom `gf` flow all rely on it.
 - `lua/config/viewer_commands.lua`, `lua/config/lsp_commands.lua`, and related `lua/config/*` modules define the custom user commands that glue plugins together into the editing workflow.
 
 ## Key conventions
