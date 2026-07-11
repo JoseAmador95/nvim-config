@@ -194,7 +194,7 @@ return {
 			vim.env.ZK_NOTEBOOK_DIR = dir
 		end
 	end,
-	opts = { picker = "telescope" },
+	opts = { picker = "snacks_picker" },
 	config = function(_, opts)
 		require("zk").setup(opts)
 		local dispatch = { create = create, open = open, rename = rename, delete = delete }

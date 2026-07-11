@@ -11,12 +11,6 @@ return {
 			"nvim-telescope/telescope-smart-history.nvim",
 			"kkharji/sqlite.lua",
 		},
-		keys = {
-			{ "<leader>ff", "<cmd>Telescope find_files<cr>", desc = "Find files" },
-			{ "<leader>fb", "<cmd>Telescope buffers<cr>", desc = "Buffers" },
-			{ "<leader>fh", "<cmd>Telescope help_tags<cr>", desc = "Help tags" },
-		},
-
 		opts = function()
 			local history_path = vim.fn.stdpath("data") .. "/databases/telescope_history.sqlite3"
 			vim.fn.mkdir(vim.fn.fnamemodify(history_path, ":h"), "p")

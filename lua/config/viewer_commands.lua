@@ -32,9 +32,9 @@ local function open_outline()
 		return
 	end
 
-	local ok, builtin = pcall(require, "telescope.builtin")
+	local ok, snacks = pcall(require, "snacks")
 	if ok then
-		builtin.lsp_document_symbols()
+		snacks.picker.lsp_symbols()
 		return
 	end
 
