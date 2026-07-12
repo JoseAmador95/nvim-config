@@ -46,6 +46,7 @@ function M.specs()
 		require("plugins.noice"), -- fancy command line / messages UI
 		require("plugins.blink"), -- completion (cmdline/buffer/path; loads on demand)
 		require("plugins.render-markdown"), -- activates on ft=markdown
+		require("plugins.mermaid"), -- inline ASCII mermaid diagrams (mmdflux)
 		{
 			-- Slim treesitter: only M.parsers, no textobjects/context/rainbow and
 			-- none of the 19-parser install from lua/plugins/treesitter.lua.

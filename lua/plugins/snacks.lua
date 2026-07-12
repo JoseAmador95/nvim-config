@@ -39,6 +39,15 @@ return {
 	},
 	---@type snacks.Config
 	opts = {
+		image = {
+			-- Enable the image machinery (Kitty graphics protocol; Ghostty). The
+			-- diagram viewer (config.diagram) drives image rendering itself via the
+			-- placement API, so disable the auto doc scanner -- that keeps Snacks
+			-- from ever trying to convert mermaid via mmdc (Chromium) or pulling
+			-- ImageMagick for image links.
+			enabled = true,
+			doc = { enabled = false },
+		},
 		picker = {
 			actions = {
 				-- Open the selection in a tab, reusing an existing one if the file

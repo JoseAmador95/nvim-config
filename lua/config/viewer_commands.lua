@@ -163,6 +163,46 @@ vim.api.nvim_create_user_command("PlantumlPreview", function()
 	plantuml_preview.preview()
 end, { desc = "Preview PlantUML diagram in browser" })
 
+vim.api.nvim_create_user_command("MermaidPreview", function()
+	require("config.mermaid_preview").preview()
+end, { desc = "Preview mermaid diagram (SVG) in browser" })
+
+-- Markdown render toggle (<leader>mr -> :MarkdownRender; skipped in VS Code). The
+-- diagram viewer keymap (<leader>md -> :DiagramShow) lives in config.diagram;
+-- <leader>mp (markdown-preview.nvim, whole doc) in lua/plugins/markdown-preview.lua.
+if not vim.g.vscode then
+	local function toggle_markdown_render()
+		if vim.fn.exists(":MarkdownRender") == 2 then
+			vim.cmd("MarkdownRender")
+		else
+			notify("render-markdown isn't active here (not a markdown buffer)", vim.log.levels.WARN)
+		end
+	end
+	if require("config.pager").active then
+		-- Pager: bind globally so <leader>mr is available on whatever is viewed
+		-- (render-markdown only exists on markdown; the wrapper degrades gracefully).
+		vim.keymap.set("n", "<leader>mr", toggle_markdown_render, { desc = "Toggle markdown render" })
+	else
+		local function map_markdown_keys(buf)
+			vim.keymap.set("n", "<leader>mr", toggle_markdown_render, { buffer = buf, desc = "Toggle markdown render" })
+		end
+		vim.api.nvim_create_autocmd("FileType", {
+			pattern = "markdown",
+			group = vim.api.nvim_create_augroup("MarkdownRenderKeymap", { clear = true }),
+			callback = function(args)
+				map_markdown_keys(args.buf)
+			end,
+		})
+		-- Cover markdown buffers already loaded before this ran (e.g. the file passed
+		-- as a nvim argument, whose FileType may have fired first).
+		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].filetype == "markdown" then
+				map_markdown_keys(buf)
+			end
+		end
+	end
+end
+
 vim.api.nvim_create_user_command("YamlOutline", function()
 	if not ensure_filetype({ "yaml" }) then
 		return
