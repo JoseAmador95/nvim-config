@@ -34,6 +34,11 @@ local mason_root = vim.fn.stdpath("data") .. "/mason"
 prepend_path(mason_root .. "/bin")
 prepend_path(mason_root .. "/build")
 
+-- cargo-installed CLIs (e.g. mmdflux, the mermaid ASCII backend) live in
+-- ~/.cargo/bin, which isn't on the default PATH; add it so nvim and plugins
+-- can find them.
+prepend_path(vim.fn.expand("~/.cargo/bin"))
+
 -- Apply per-host $PATH and environment overrides from ~/.nvim-local.lua early,
 -- before plugins and mason rely on them.
 require("config.local_config").apply_env()
@@ -208,6 +213,9 @@ require("config.lazy")
 
 -- Pager-only commands/keymaps (nvimpager); no-op in normal/vscode nvim.
 require("config.pager").setup()
+
+-- Unified diagram viewer (:DiagramShow / <leader>md) for mermaid + PlantUML.
+require("config.diagram").setup()
 
 if vim.g.vscode then
 	require("editor.vscode")
