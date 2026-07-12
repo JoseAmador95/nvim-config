@@ -44,7 +44,16 @@ return {
 		-- ":" -> cmdline + path, "/" and "?" -> buffer.
 		cmdline = {
 			keymap = { preset = "cmdline" },
-			completion = { menu = { auto_show = true } },
+			completion = {
+				menu = { auto_show = true },
+				-- Don't pre-highlight the first item. Because the menu auto-shows
+				-- while typing, blink's default `preselect = true` would leave item 1
+				-- already selected, so the first <Tab> (which is `select_next`) would
+				-- jump to the SECOND item. With `preselect = false` the menu shows with
+				-- nothing selected and the first <Tab> selects the first item, like
+				-- Vim's classic wildmenu.
+				list = { selection = { preselect = false, auto_insert = true } },
+			},
 		},
 
 		fuzzy = { implementation = "prefer_rust_with_warning" },
