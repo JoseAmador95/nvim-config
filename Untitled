@@ -1,0 +1,42 @@
+```mermaid
+flowchart TB
+  subgraph UI["UI (Svelte) — sin cambios funcionales"]
+    form["Diálogos / sheets (superforms SPA)"]
+    list["Listados / fichas (load → queries.ts)"]
+    banner["Banner offline + estado de sync (reescrito)"]
+    rango["Ajuste de rango de fecha (settings)"]
+  end
+  subgraph Write["Escritura"]
+    op["op.ts — opUpsert / opEliminar (CHOKEPOINT)"]
+  end
+  subgraph Read["Lectura relacional"]
+    fallback["withOfflinePageFallback"]
+    overlay["relational-read.ts (mirror + joins en cliente ⊕ outbox)"]
+  end
+  subgraph Offline["Capa offline (NUEVA) — src/lib/offline"]
+    db[("local-db.ts — IndexedDB (idb)\noutbox · mirror · idmap · meta")]
+    hydrate["replication.ts — hidratación por rango de fecha"]
+    sync["sync-runner.ts"]
+    syncstate["sync-state.svelte.ts (rune)"]
+  end
+  subgraph Net["Red"]
+    sb["Supabase RPC + PostgREST"]
+  end
+
+  form --> op
+  op -- online --> sb
+  op -- offline --> db
+  op --> overlay
+  list --> fallback --> overlay
+  overlay --> db
+  rango --> hydrate
+  syncstate --> banner
+  connection(["connection.online"]) --> sync
+  connection --> hydrate
+  hydrate -- "SELECT por rango + updated_at" --> sb
+  hydrate -- "puebla filas por tabla" --> db
+  sync --> db
+  sync --> sb
+  sync --> syncstate
+  sb -. realtime .-> db
+```
