@@ -4,8 +4,8 @@
 --   svg   -> the rendered diagram as an image (fit to the float), Chromium-free
 --            (mermaid: mmdflux -> rsvg-convert; plantuml: plantuml -tsvg -> rsvg-convert)
 --            zoom/pan in the float: h/j/k/l pan, +/_ (or =/-) zoom, 0 resets to
---            fit, q/<Esc> close. Zoom re-rasterizes an SVG viewBox sub-region, so
---            it stays crisp at any level.
+--            fit, y copies the diagram image to the clipboard, q/<Esc> close.
+--            Zoom re-rasterizes an SVG viewBox sub-region, so it stays crisp.
 --   ascii -> the diagram as text (mermaid: mmdflux; plantuml: plantuml -ttxt)
 -- svg falls back to ascii when the terminal can't display images or an image
 -- dependency is missing; any missing dependency is announced (with its install
@@ -209,6 +209,34 @@ local function render_view(info, view, target, cb)
 	end)
 end
 
+-- Copy a PNG file to the system clipboard as an image (async), calling
+-- on_done(ok, err). macOS -> osascript; Wayland -> wl-copy; X11 -> xclip.
+local function to_clipboard(png, on_done)
+	if vim.fn.has("mac") == 1 then
+		local script = ('set the clipboard to (read (POSIX file "%s") as «class PNGf»)'):format(png)
+		vim.system({ "osascript", "-e", script }, {}, function(r)
+			on_done(r.code == 0, vim.trim(r.stderr or ""))
+		end)
+	elseif vim.fn.executable("wl-copy") == 1 then
+		local data = ""
+		local fd = vim.uv.fs_open(png, "r", 420)
+		if fd then
+			local stat = vim.uv.fs_fstat(fd)
+			data = (stat and vim.uv.fs_read(fd, stat.size, 0)) or ""
+			vim.uv.fs_close(fd)
+		end
+		vim.system({ "wl-copy", "--type", "image/png" }, { stdin = data }, function(r)
+			on_done(r.code == 0, vim.trim(r.stderr or ""))
+		end)
+	elseif vim.fn.executable("xclip") == 1 then
+		vim.system({ "xclip", "-selection", "clipboard", "-t", "image/png", png }, {}, function(r)
+			on_done(r.code == 0, vim.trim(r.stderr or ""))
+		end)
+	else
+		on_done(false, "no image clipboard tool (need osascript, wl-copy or xclip)")
+	end
+end
+
 -- Render `src` to ASCII lines (async), calling cb(lines) on success.
 local function to_text(kind, src, cb)
 	local cmd = kind == "mermaid" and { "mmdflux" } or { "plantuml", "-ttxt", "-pipe" }
@@ -282,7 +310,7 @@ local function show_svg(d)
 		-- the image already in place.
 		render_view(info, can_zoom and view() or nil, can_zoom and disp or size, function(png)
 			local buf, width, height, win = make_float(d.kind .. " (svg)")
-			local placement
+			local placement, shown
 			local rendering, dirty = false, false
 
 			-- Center the current PNG in the float and (re)create the placement.
@@ -323,6 +351,7 @@ local function show_svg(d)
 					max_height = box_h,
 					auto_resize = true,
 				})
+				shown = image
 			end
 
 			local function update_title()
@@ -376,6 +405,31 @@ local function show_svg(d)
 					end
 				end,
 			})
+
+			-- `y` copies the diagram image to the clipboard. When the size is known
+			-- we render a clean, tight, high-res full diagram (not the current zoom);
+			-- otherwise we copy whatever is currently shown.
+			local function copy()
+				local function do_copy(image)
+					to_clipboard(image, function(ok, err)
+						vim.schedule(function()
+							if ok then
+								notify("Diagram copied to clipboard")
+							else
+								notify("Copy to clipboard failed: " .. (err ~= "" and err or "unknown"), vim.log.levels.ERROR)
+							end
+						end)
+					end)
+				end
+				if can_zoom then
+					local s = 2000 / math.max(info.w, info.h)
+					local ct = { width = math.max(1, math.floor(info.w * s)), height = math.max(1, math.floor(info.h * s)) }
+					render_view(info, nil, ct, do_copy)
+				elseif shown then
+					do_copy(shown)
+				end
+			end
+			vim.keymap.set("n", "y", copy, { buffer = buf, nowait = true, desc = "Copy diagram to clipboard" })
 
 			if can_zoom then
 				local function zoom(factor)
