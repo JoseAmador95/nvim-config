@@ -2,7 +2,7 @@
 -- Unified on-demand diagram viewer for mermaid and PlantUML. `:DiagramShow [svg|ascii]`
 -- (default svg) renders the diagram under the cursor in a floating window:
 --   svg   -> the rendered diagram as an image (fit to the float), Chromium-free
---            (mermaid: mmdflux -> rsvg-convert; plantuml: plantuml -tpng)
+--            (mermaid: mmdflux -> rsvg-convert; plantuml: plantuml -tsvg -> rsvg-convert)
 --   ascii -> the diagram as text (mermaid: mmdflux; plantuml: plantuml -ttxt)
 -- svg falls back to ascii when the terminal can't display images or an image
 -- dependency is missing; any missing dependency is announced (with its install
@@ -28,7 +28,7 @@ local INSTALL = {
 -- External tools required per kind and mode.
 local DEPS = {
 	mermaid = { svg = { "mmdflux", "rsvg-convert" }, ascii = { "mmdflux" } },
-	plantuml = { svg = { "plantuml" }, ascii = { "plantuml" } },
+	plantuml = { svg = { "plantuml", "rsvg-convert" }, ascii = { "plantuml" } },
 }
 
 local function missing(kind, mode)
@@ -117,48 +117,54 @@ local function cache_dir()
 	return dir
 end
 
--- Render `src` to a PNG (async), calling cb(png) on success. Cached by hash.
-local function to_png(kind, src, cb)
-	local png = cache_dir() .. "/" .. vim.fn.sha256(kind .. ":" .. src) .. ".png"
+-- Render `src` to a PNG (async) fit to `size` ({ width, height } in pixels),
+-- calling cb(png) on success. Cached by kind + size + hash.
+--
+-- Both kinds render to SVG first and let rsvg-convert rasterize to a PNG sized
+-- to fill the float: Snacks only ever scales images DOWN, so a small native
+-- render (e.g. a simple plantuml diagram) would otherwise show tiny. Going
+-- through SVG keeps it crisp at any size, and rsvg-convert writes the PNG itself
+-- (-o), so there is no manual (fast-context-unsafe) binary file write.
+local function to_png(kind, src, size, cb)
+	local key = ("%s:%dx%d:%s"):format(kind, size.width, size.height, src)
+	local png = cache_dir() .. "/" .. vim.fn.sha256(key) .. ".png"
 	if vim.fn.filereadable(png) == 1 then
 		cb(png)
 		return
 	end
-	if kind == "mermaid" then
-		vim.system({ "mmdflux", "-f", "svg" }, { text = true, stdin = src }, function(r)
-			if r.code ~= 0 or not r.stdout or r.stdout == "" then
-				vim.schedule(function()
-					notify("mmdflux failed to render the diagram", vim.log.levels.ERROR)
-				end)
-				return
-			end
-			vim.system({ "rsvg-convert", "-f", "png", "-o", png }, { stdin = r.stdout }, function(r2)
-				if r2.code == 0 and vim.fn.filereadable(png) == 1 then
-					vim.schedule(function()
-						cb(png)
-					end)
-				else
-					vim.schedule(function()
-						notify("rsvg-convert failed to rasterize the SVG", vim.log.levels.ERROR)
-					end)
-				end
-			end)
-		end)
-	else
-		vim.system({ "plantuml", "-tpng", "-pipe" }, { stdin = src }, function(r)
-			if r.code ~= 0 then
-				vim.schedule(function()
-					local msg = vim.trim(r.stderr or "")
-					notify(msg == "" and "plantuml failed" or msg, vim.log.levels.ERROR)
-				end)
-				return
-			end
-			vim.fn.writefile({ r.stdout or "" }, png, "b")
+	local svg_cmd = kind == "mermaid" and { "mmdflux", "-f", "svg" } or { "plantuml", "-tsvg", "-pipe" }
+	local tool = kind == "mermaid" and "mmdflux" or "plantuml"
+	vim.system(svg_cmd, { text = true, stdin = src }, function(r)
+		if r.code ~= 0 or not r.stdout or r.stdout == "" then
 			vim.schedule(function()
-				cb(png)
+				local msg = vim.trim(r.stderr or "")
+				notify(msg == "" and (tool .. " failed to render the diagram") or msg, vim.log.levels.ERROR)
 			end)
+			return
+		end
+		vim.system({
+			"rsvg-convert",
+			"-f",
+			"png",
+			"-w",
+			tostring(size.width),
+			"-h",
+			tostring(size.height),
+			"--keep-aspect-ratio",
+			"-o",
+			png,
+		}, { stdin = r.stdout }, function(r2)
+			if r2.code == 0 and vim.fn.filereadable(png) == 1 then
+				vim.schedule(function()
+					cb(png)
+				end)
+			else
+				vim.schedule(function()
+					notify("rsvg-convert failed to rasterize the SVG", vim.log.levels.ERROR)
+				end)
+			end
 		end)
-	end
+	end)
 end
 
 -- Render `src` to ASCII lines (async), calling cb(lines) on success.
@@ -179,13 +185,54 @@ local function to_text(kind, src, cb)
 end
 
 local function show_svg(d)
-	to_png(d.kind, d.src, function(png)
+	-- Rasterize to the float's pixel size so the diagram fills it. The float is
+	-- 90% of the editor (see make_float); a terminal cell is cell_width x
+	-- cell_height pixels per Snacks' probe.
+	local cols = math.floor(vim.o.columns * 0.9)
+	local rows = math.floor(vim.o.lines * 0.9)
+	local term = Snacks.image.terminal.size()
+	local size = {
+		width = math.floor(cols * term.cell_width),
+		height = math.floor(rows * term.cell_height),
+	}
+	to_png(d.kind, d.src, size, function(png)
 		local buf, width, height = make_float(d.kind .. " (svg)")
+
+		-- Center the diagram in the float. Snacks fits the image into the window
+		-- preserving aspect (and only ever scales down), so its shown size is the
+		-- largest box with the image's aspect ratio that fits in the cell box.
+		--
+		-- Snacks renders the image as virtual lines *below* an anchor line, and
+		-- Neovim drops the last virtual line when it lands on the window's bottom
+		-- row. So reserve two rows -- one for the anchor above, one as bottom
+		-- slack -- by fitting into `height - 2` rows (and capping Snacks with
+		-- max_height). Otherwise a full-height diagram gets its bottom clipped.
+		-- Pad the leftover as a top margin of blank lines; the left margin is the
+		-- placement column, which Snacks turns into per-line indentation.
+		local box_h = math.max(1, height - 2)
+		local dim = Snacks.image.util.dim(png)
+		local aspect = (dim.width * term.cell_height) / (dim.height * term.cell_width)
+		local iw, ih
+		if aspect > width / box_h then
+			iw, ih = width, math.floor(width / aspect)
+		else
+			iw, ih = math.floor(box_h * aspect), box_h
+		end
+		local top = math.max(1, math.floor((height - ih) / 2))
+		local left = math.max(0, math.floor((width - iw) / 2))
+
+		local pad = {}
+		for _ = 1, top do
+			pad[#pad + 1] = ""
+		end
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, pad)
+		vim.bo[buf].modifiable = false
+
 		Snacks.image.placement.new(buf, png, {
 			inline = true,
-			pos = { 1, 0 },
+			pos = { top, left },
 			max_width = width,
-			max_height = height,
+			max_height = box_h,
 			auto_resize = true,
 		})
 	end)
