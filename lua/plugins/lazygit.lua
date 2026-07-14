@@ -1,6 +1,49 @@
 -- lazygit in a floating terminal (via toggleterm), opened with <leader>gl.
 -- Adds a lazy-loading key to the existing toggleterm spec.
+--
+-- When a file is edited from within lazygit (pressing `e`), it is opened as a
+-- buffer in the *running* Neovim instance instead of lazygit's own float. This
+-- works because Neovim sets `$NVIM` to its RPC socket inside terminal buffers,
+-- so lazygit's `os.edit` command can talk back to Neovim via `--remote-send`.
 local lazygit_term
+
+-- Called by lazygit (through Neovim's RPC socket) to open a file as a buffer.
+-- Closes the lazygit float first so the buffer becomes visible.
+function _G._lazygit_edit(filename, line)
+	if lazygit_term then
+		lazygit_term:close()
+	end
+	vim.cmd("edit " .. vim.fn.fnameescape(filename))
+	if line then
+		pcall(vim.api.nvim_win_set_cursor, 0, { tonumber(line), 0 })
+	end
+end
+
+-- Path to a generated lazygit config that wires `os.edit` to the RPC callback.
+local function ensure_config()
+	local path = vim.fn.stdpath("cache") .. "/lazygit-nvim.yml"
+	if vim.fn.filereadable(path) == 1 then
+		return path
+	end
+	local lines = {
+		"os:",
+		"  edit: 'nvim --server \"$NVIM\" --remote-send \"<C-\\><C-n>:lua _lazygit_edit([==[{{filename}}]==])<CR>\"'",
+		"  editAtLine: 'nvim --server \"$NVIM\" --remote-send \"<C-\\><C-n>:lua _lazygit_edit([==[{{filename}}]==], {{line}})<CR>\"'",
+	}
+	vim.fn.writefile(lines, path)
+	return path
+end
+
+-- Combine the user's own lazygit config (if present) with ours so both apply.
+-- lazygit merges comma-separated config files, later ones taking precedence.
+local function config_files()
+	local ours = ensure_config()
+	local user = (vim.env.XDG_CONFIG_HOME or (vim.env.HOME .. "/.config")) .. "/lazygit/config.yml"
+	if vim.fn.filereadable(user) == 1 then
+		return user .. "," .. ours
+	end
+	return ours
+end
 
 local function toggle_lazygit()
 	if vim.fn.executable("lazygit") ~= 1 then
@@ -14,6 +57,7 @@ local function toggle_lazygit()
 			direction = "float",
 			hidden = true,
 			close_on_exit = true,
+			env = { LG_CONFIG_FILE = config_files() },
 			-- Enter terminal (insert) mode so keystrokes reach lazygit instead of
 			-- moving the Neovim cursor. The global terminal-mode mappings `jj`
 			-- (exit terminal) and `<leader>t` (= <space>t, toggle terminal) would
