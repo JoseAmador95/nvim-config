@@ -29,7 +29,16 @@ return {
 			local function smart_open(prompt_bufnr)
 				local entry = action_state.get_selected_entry()
 				---@diagnostic disable-next-line: undefined-field
-				local filepath = entry.path or entry.filename
+				local filepath = entry and (entry.path or entry.filename)
+
+				-- Non-file pickers (e.g. remote-nvim's "Filter launch options" /
+				-- "Connect to remote host", command pickers) have no file entry, so
+				-- opening a file makes no sense. Fall back to the picker's own default
+				-- action, which such pickers replace with their real behaviour.
+				if not filepath then
+					return actions.select_default(prompt_bufnr)
+				end
+
 				---@diagnostic disable-next-line: undefined-field
 				local lnum = tonumber(entry.lnum) or tonumber(entry.line) or 1
 				---@diagnostic disable-next-line: undefined-field
