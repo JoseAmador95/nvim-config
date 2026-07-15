@@ -18,6 +18,8 @@ return {
 	},
 	opts = {
 		startInInsertMode = true,
+		-- open the search panel in its own full-window tab (not a split)
+		windowCreationCommand = "tabnew",
 		engines = {
 			ripgrep = {
 				-- hidden files ON; .git and node_modules always excluded; .gitignore respected
