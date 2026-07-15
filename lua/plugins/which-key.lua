@@ -11,11 +11,6 @@ return {
 	opts = {
 		preset = "helix",
 		delay = 500,
-		-- grug-far has its own context help (g?); don't pop the full
-		-- which-key cloud (global + buffer maps) inside its buffer.
-		disable = {
-			ft = { "grug-far" },
-		},
 		spec = {
 			{ "<leader>a", group = "ai" },
 			{ "<leader>b", group = "bookmarks/buffer" },
