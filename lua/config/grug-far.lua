@@ -14,15 +14,6 @@ local OPTIONS = {
 -- ripgrep defaults). Kept in sync from toggle_flags' authoritative return.
 local state_by_buf = {}
 
-local function label_for(flag)
-	for _, opt in ipairs(OPTIONS) do
-		if opt.flag == flag then
-			return opt.label
-		end
-	end
-	return flag
-end
-
 -- Build the winbar string: one clickable region per option showing its state.
 local function winbar_string(buf)
 	local state = state_by_buf[buf] or {}
@@ -34,7 +25,6 @@ local function winbar_string(buf)
 		-- %<i>@fn@ ... %X : clicking calls fn(i, ...) via the mouse
 		segs[#segs + 1] = "%" .. i .. "@v:lua.GrugFarWinbarClick@" .. hl .. " " .. box .. " " .. opt.label .. " %*%X"
 	end
-	segs[#segs + 1] = "  %#Comment#(click or <localleader>m to toggle)%*"
 	return table.concat(segs, "")
 end
 
@@ -92,11 +82,6 @@ function M.toggle_option(buf, flag)
 	state_by_buf[buf] = state_by_buf[buf] or {}
 	state_by_buf[buf][flag] = on
 	M.render_winbar(buf)
-	vim.notify(
-		"grug-far: " .. label_for(flag) .. " " .. (on and "ON" or "OFF"),
-		vim.log.levels.INFO,
-		{ title = "Search" }
-	)
 	return on
 end
 
@@ -107,36 +92,6 @@ function M.toggle_index(buf, idx)
 		return
 	end
 	M.toggle_option(buf, opt.flag)
-end
-
--- Keyboard fallback: a checkbox popup (vim.ui.select -> snacks) listing every
--- option with its state. Selecting one toggles it and reopens the menu so
--- several options can be flipped in a row (<Esc> closes it).
-function M.options_menu(buf)
-	buf = buf or vim.api.nvim_get_current_buf()
-	local state = state_by_buf[buf] or {}
-
-	local items = {}
-	for _, opt in ipairs(OPTIONS) do
-		table.insert(items, { flag = opt.flag, label = opt.label, on = state[opt.flag] == true })
-	end
-
-	vim.ui.select(items, {
-		prompt = "Search options",
-		format_item = function(item)
-			return string.format("[%s] %s", item.on and "x" or " ", item.label)
-		end,
-	}, function(choice)
-		if not choice then
-			return
-		end
-		M.toggle_option(buf, choice.flag)
-		vim.schedule(function()
-			if vim.api.nvim_buf_is_valid(buf) then
-				M.options_menu(buf)
-			end
-		end)
-	end)
 end
 
 -- Drop tracked state when a grug-far buffer goes away.
