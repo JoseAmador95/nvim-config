@@ -8,17 +8,20 @@
 local lazygit_term
 
 -- Called by lazygit (through Neovim's RPC socket) to open a file in a new tab.
--- Closes the lazygit float first so the buffer becomes visible.
+-- Invoked via `<Cmd>` from a terminal-mode buffer, so window/tab changes must
+-- be deferred with vim.schedule (they are forbidden while <Cmd> runs).
 function _G._lazygit_edit(filename, line)
-	if lazygit_term then
-		lazygit_term:close()
-	end
-	-- `tab drop` reuses a tab already showing the file, otherwise opens a new
-	-- tab -- so editing never overwrites the tab lazygit was launched from.
-	vim.cmd("tab drop " .. vim.fn.fnameescape(filename))
-	if line then
-		pcall(vim.api.nvim_win_set_cursor, 0, { tonumber(line), 0 })
-	end
+	vim.schedule(function()
+		if lazygit_term then
+			lazygit_term:close()
+		end
+		-- `tab drop` reuses a tab already showing the file, otherwise opens a
+		-- new tab -- so editing never overwrites the tab lazygit launched from.
+		vim.cmd("tab drop " .. vim.fn.fnameescape(filename))
+		if line then
+			pcall(vim.api.nvim_win_set_cursor, 0, { tonumber(line), 0 })
+		end
+	end)
 end
 
 -- Generate the lazygit config that wires `os.edit` to the RPC callback.
@@ -33,8 +36,8 @@ local function ensure_config()
 	local lines = {
 		"promptToReturnFromSubprocess: false",
 		"os:",
-		"  edit: 'nvim --server \"$NVIM\" --remote-send \"<C-\\><C-n>:lua _lazygit_edit([==[{{filename}}]==])<CR>\"'",
-		"  editAtLine: 'nvim --server \"$NVIM\" --remote-send \"<C-\\><C-n>:lua _lazygit_edit([==[{{filename}}]==], {{line}})<CR>\"'",
+		"  edit: 'nvim --server \"$NVIM\" --remote-send \"<Cmd>lua _lazygit_edit([==[{{filename}}]==])<CR>\"'",
+		"  editAtLine: 'nvim --server \"$NVIM\" --remote-send \"<Cmd>lua _lazygit_edit([==[{{filename}}]==], {{line}})<CR>\"'",
 	}
 	vim.fn.writefile(lines, path)
 	return path
