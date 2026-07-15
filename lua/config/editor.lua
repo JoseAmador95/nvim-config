@@ -2,7 +2,7 @@ local M = {}
 
 local SPECIAL_FILETYPES = {
 	["neo-tree"] = true,
-	["spectre_panel"] = true,
+	["grug-far"] = true,
 	["toggleterm"] = true,
 	["terminal"] = true,
 	["quickfix"] = true,

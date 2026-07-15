@@ -1,5 +1,4 @@
 local M = {}
-local uv = vim.uv
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "Menu" })
@@ -151,71 +150,51 @@ local function toggle_paste()
 	notify("Paste: " .. (vim.o.paste and "on" or "off"))
 end
 
-local function spectre_open_all()
-	local ok, spectre = pcall(require, "spectre")
+local function grugfar_open_all()
+	local ok, grug_far = pcall(require, "grug-far")
 	if not ok then
-		notify("Spectre not available", vim.log.levels.WARN)
+		notify("grug-far not available", vim.log.levels.WARN)
 		return
 	end
 
-	local state = require("spectre.state") ---@diagnostic disable-line: missing-fields
-	if state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
-		if vim.bo[state.bufnr].filetype == "spectre_panel" then
-			spectre.close()
-		end
-	end
-	state.bufnr = nil
-	state.is_open = false
-
-	spectre.open({
-		path = "!**/.git/** !**/node_modules/** !**/build/** !**/.cache/**",
-		is_insert_mode = true,
-	})
+	-- toggle_instance keeps the search intact when returning to the panel
+	grug_far.toggle_instance({ instanceName = "far", staticTitle = "Search & Replace" })
 end
 
-local function spectre_open_word()
-	local ok, spectre = pcall(require, "spectre")
+local function grugfar_open_word()
+	local ok, grug_far = pcall(require, "grug-far")
 	if not ok then
-		notify("Spectre not available", vim.log.levels.WARN)
+		notify("grug-far not available", vim.log.levels.WARN)
 		return
 	end
 
-	spectre.open_visual({
-		select_word = true,
-		path = "!**/.git/** !**/node_modules/** !**/build/** !**/.cache/**",
-	})
+	grug_far.open({ prefills = { search = vim.fn.expand("<cword>") } })
 end
 
-local function spectre_open_selection()
-	local ok, spectre = pcall(require, "spectre")
+local function grugfar_open_selection()
+	local ok, grug_far = pcall(require, "grug-far")
 	if not ok then
-		notify("Spectre not available", vim.log.levels.WARN)
+		notify("grug-far not available", vim.log.levels.WARN)
 		return
 	end
 
-	spectre.open_visual({
-		path = "!**/.git/** !**/node_modules/** !**/build/** !**/.cache/**",
-	})
+	grug_far.with_visual_selection()
 end
 
-local function spectre_open_file()
-	local ok, spectre = pcall(require, "spectre")
+local function grugfar_open_file()
+	local ok, grug_far = pcall(require, "grug-far")
 	if not ok then
-		notify("Spectre not available", vim.log.levels.WARN)
+		notify("grug-far not available", vim.log.levels.WARN)
 		return
 	end
 
-	local path = vim.fn.fnameescape(vim.fn.expand("%:p:."))
+	local path = vim.fn.expand("%:p:.")
 	if path == "" then
 		notify("No file path for current buffer", vim.log.levels.WARN)
 		return
 	end
 
-	if uv.os_uname().sysname == "Windows_NT" then
-		path = vim.fn.substitute(path, "\\", "/", "g")
-	end
-
-	spectre.open({ path = path, is_insert_mode = true })
+	grug_far.open({ prefills = { paths = path } })
 end
 
 local function is_visual_mode()
@@ -244,15 +223,15 @@ end
 
 local function search_items()
 	local items = {
-		{ name = "Spectre: Open", cmd = spectre_open_all },
-		{ name = "Spectre: Search Word", cmd = spectre_open_word },
+		{ name = "Search & Replace: Open", cmd = grugfar_open_all },
+		{ name = "Search & Replace: Search Word", cmd = grugfar_open_word },
 	}
 
 	if is_visual_mode() then
-		table.insert(items, { name = "Spectre: Search Selection", cmd = spectre_open_selection })
+		table.insert(items, { name = "Search & Replace: Search Selection", cmd = grugfar_open_selection })
 	end
 
-	table.insert(items, { name = "Spectre: Search in File", cmd = spectre_open_file })
+	table.insert(items, { name = "Search & Replace: Search in File", cmd = grugfar_open_file })
 	table.insert(items, { name = "Live Grep", cmd = picker_action("live_grep") })
 	table.insert(items, { name = "Grep String (cursor)", cmd = picker_action("grep_string") })
 	return items
