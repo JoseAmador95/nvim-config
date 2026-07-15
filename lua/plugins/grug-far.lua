@@ -22,8 +22,13 @@ return {
 		windowCreationCommand = "tabnew",
 		engines = {
 			ripgrep = {
-				-- hidden files ON; .git and node_modules always excluded; .gitignore respected
-				extraArgs = "--hidden --glob=!**/.git/* --glob=!**/node_modules/*",
+				-- .git and node_modules are always excluded (permanent).
+				extraArgs = "--glob=!**/.git/* --glob=!**/node_modules/*",
+				-- no "e.g. ..." example placeholders in the input fields
+				placeholders = { enabled = false },
+				-- --hidden is ON by default but lives in the (toggleable) Flags
+				-- input, so it can be turned off like the other options.
+				defaults = { flags = "--hidden" },
 			},
 		},
 		keymaps = {
@@ -36,6 +41,17 @@ return {
 	config = function(_, opts)
 		require("grug-far").setup(opts)
 
+		-- Search option toggles, grouped under <localleader>g. They flip a
+		-- ripgrep flag in the Flags input (whose current value is visible in
+		-- the panel), so which-key shows them as a discoverable menu.
+		local option_toggles = {
+			{ key = "h", flag = "--hidden", desc = "Hidden files" },
+			{ key = "w", flag = "--word-regexp", desc = "Whole word" },
+			{ key = "c", flag = "--ignore-case", desc = "Ignore case" },
+			{ key = "l", flag = "--fixed-strings", desc = "Literal (no regex)" },
+			{ key = "i", flag = "--no-ignore", desc = "Include ignored" },
+		}
+
 		vim.api.nvim_create_autocmd("FileType", {
 			pattern = "grug-far",
 			callback = function(ev)
@@ -46,14 +62,22 @@ return {
 						return
 					end
 
-					-- Toggle including gitignored files in the current search
-					vim.keymap.set("n", "<leader>ti", function()
-						require("grug-far").get_instance(ev.buf):toggle_flags({ "--no-ignore" })
-					end, { buffer = ev.buf, desc = "Toggle search ignored files" })
+					local gf = require("config.grug-far")
+
+					local wk_ok, wk = pcall(require, "which-key")
+					if wk_ok then
+						wk.add({ { "<localleader>g", group = "search options", buffer = ev.buf } })
+					end
+
+					for _, opt in ipairs(option_toggles) do
+						vim.keymap.set("n", "<localleader>g" .. opt.key, function()
+							gf.toggle_option(ev.buf, opt.flag)
+						end, { buffer = ev.buf, desc = opt.desc })
+					end
 
 					-- Open the match under the cursor in a new tab
 					vim.keymap.set("n", "<cr>", function()
-						require("config.grug-far").open_entry_in_tab(ev.buf)
+						gf.open_entry_in_tab(ev.buf)
 					end, { buffer = ev.buf, desc = "Open match in new tab" })
 				end)
 			end,

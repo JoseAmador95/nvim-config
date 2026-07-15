@@ -23,4 +23,19 @@ function M.open_entry_in_tab(buf)
 	require("config.editor").open_file_in_tab(loc.filename, { lnum = loc.lnum, col = loc.col })
 end
 
+-- Toggle a ripgrep flag in the grug-far Flags input. The current flags are
+-- shown in the panel itself, so no extra feedback is emitted here.
+function M.toggle_option(buf, flag)
+	buf = buf or 0
+	local ok, grug_far = pcall(require, "grug-far")
+	if not ok then
+		return
+	end
+
+	local inst = grug_far.get_instance(buf)
+	if inst then
+		inst:toggle_flags({ flag })
+	end
+end
+
 return M
