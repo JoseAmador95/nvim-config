@@ -80,6 +80,11 @@ return {
 			sources = {
 				files = { hidden = true },
 				grep = { hidden = true },
+				-- `vim.ui.select` (used by e.g. remote-nvim's "Choose Neovim
+				-- version" prompt) runs through the "select" source. The global
+				-- confirm = "open_in_tab" above would hijack its <CR>, find no
+				-- file and drop the choice -- so restore the native confirm here.
+				select = { confirm = "confirm" },
 			},
 			win = {
 				input = {
