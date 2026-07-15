@@ -36,6 +36,16 @@ return {
 	config = function(_, opts)
 		require("grug-far").setup(opts)
 
+		-- Friendly toggle UI for the common search options (case, word, literal,
+		-- ignored) instead of hand-typing ripgrep flags. `go` opens a checkbox
+		-- menu; the direct keys are shortcuts for the same toggles.
+		local option_keys = {
+			gi = "--ignore-case",
+			gw = "--word-regexp",
+			gl = "--fixed-strings",
+			gu = "--no-ignore",
+		}
+
 		vim.api.nvim_create_autocmd("FileType", {
 			pattern = "grug-far",
 			callback = function(ev)
@@ -46,16 +56,34 @@ return {
 						return
 					end
 
-					-- Toggle including gitignored files in the current search
-					vim.keymap.set("n", "<leader>ti", function()
-						require("grug-far").get_instance(ev.buf):toggle_flags({ "--no-ignore" })
-					end, { buffer = ev.buf, desc = "Toggle search ignored files" })
+					local gf = require("config.grug-far")
+
+					-- Options menu (checkbox-style popup)
+					vim.keymap.set("n", "go", function()
+						gf.options_menu(ev.buf)
+					end, { buffer = ev.buf, desc = "Search options menu" })
+
+					-- Direct toggles for each option
+					for lhs, flag in pairs(option_keys) do
+						vim.keymap.set("n", lhs, function()
+							gf.toggle_option(ev.buf, flag)
+						end, { buffer = ev.buf, desc = "Toggle " .. flag })
+					end
 
 					-- Open the match under the cursor in a new tab
 					vim.keymap.set("n", "<cr>", function()
-						require("config.grug-far").open_entry_in_tab(ev.buf)
+						gf.open_entry_in_tab(ev.buf)
 					end, { buffer = ev.buf, desc = "Open match in new tab" })
 				end)
+			end,
+		})
+
+		vim.api.nvim_create_autocmd("BufWipeout", {
+			pattern = "*",
+			callback = function(ev)
+				if vim.bo[ev.buf].filetype == "grug-far" then
+					require("config.grug-far").forget(ev.buf)
+				end
 			end,
 		})
 	end,
