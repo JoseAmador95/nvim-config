@@ -36,21 +36,11 @@ return {
 	config = function(_, opts)
 		require("grug-far").setup(opts)
 
-		-- Friendly toggle UI for the common search options (case, word, literal,
-		-- ignored) instead of hand-typing ripgrep flags. `go` opens a checkbox
-		-- menu; the direct keys are shortcuts for the same toggles.
-		local option_keys = {
-			gi = "--ignore-case",
-			gw = "--word-regexp",
-			gl = "--fixed-strings",
-			gu = "--no-ignore",
-		}
-
 		vim.api.nvim_create_autocmd("FileType", {
 			pattern = "grug-far",
 			callback = function(ev)
-				-- Deferred so these win over grug-far's own buffer-local maps,
-				-- which are set while the buffer is being created.
+				-- Deferred so these run after grug-far has finished building the
+				-- buffer (its actions registry and its own buffer-local maps).
 				vim.schedule(function()
 					if not vim.api.nvim_buf_is_valid(ev.buf) then
 						return
@@ -58,17 +48,10 @@ return {
 
 					local gf = require("config.grug-far")
 
-					-- Options menu (checkbox-style popup)
-					vim.keymap.set("n", "go", function()
-						gf.options_menu(ev.buf)
-					end, { buffer = ev.buf, desc = "Search options menu" })
-
-					-- Direct toggles for each option
-					for lhs, flag in pairs(option_keys) do
-						vim.keymap.set("n", lhs, function()
-							gf.toggle_option(ev.buf, flag)
-						end, { buffer = ev.buf, desc = "Toggle " .. flag })
-					end
+					-- Register the "Search Options" toggle menu as a native
+					-- grug-far action so it shows up in the g? help window
+					-- (bound to <localleader>m), instead of leaking into which-key.
+					gf.register_actions(ev.buf)
 
 					-- Open the match under the cursor in a new tab
 					vim.keymap.set("n", "<cr>", function()

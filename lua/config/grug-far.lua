@@ -102,6 +102,53 @@ function M.options_menu(buf)
 	end)
 end
 
+-- Register our custom actions into grug-far's own action registry so they show
+-- up in the native help window (g?) alongside the built-ins, with their key and
+-- description. This keeps discovery context-local (no which-key, no hidden
+-- prefix) — the user just presses g? to see everything that applies here.
+function M.register_actions(buf)
+	local ok, grug_far = pcall(require, "grug-far")
+	if not ok then
+		return
+	end
+
+	local inst = grug_far.get_instance(buf)
+	if not inst then
+		return
+	end
+
+	local context = inst._context
+	if not context or not context.actions then
+		return
+	end
+
+	local actions = {
+		{
+			text = "Search Options",
+			keymap = { n = "<localleader>m" },
+			description = "Toggle search options: ignore-case, whole-word, literal, include-ignored.",
+			action = function()
+				M.options_menu(buf)
+			end,
+		},
+	}
+
+	local utils = require("grug-far.utils")
+	for _, action in ipairs(actions) do
+		local already = false
+		for _, existing in ipairs(context.actions) do
+			if existing.text == action.text then
+				already = true
+				break
+			end
+		end
+		if not already then
+			table.insert(context.actions, action)
+			utils.setBufKeymap(buf, action.text, action.keymap, action.action)
+		end
+	end
+end
+
 -- Drop tracked state when a grug-far buffer goes away.
 function M.forget(buf)
 	state_by_buf[buf] = nil
