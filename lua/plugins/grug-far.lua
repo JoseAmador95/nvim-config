@@ -40,7 +40,7 @@ return {
 			pattern = "grug-far",
 			callback = function(ev)
 				-- Deferred so these run after grug-far has finished building the
-				-- buffer (its actions registry and its own buffer-local maps).
+				-- buffer and its own window (winbar needs the window to exist).
 				vim.schedule(function()
 					if not vim.api.nvim_buf_is_valid(ev.buf) then
 						return
@@ -48,10 +48,13 @@ return {
 
 					local gf = require("config.grug-far")
 
-					-- Register the "Search Options" toggle menu as a native
-					-- grug-far action so it shows up in the g? help window
-					-- (bound to <localleader>m), instead of leaking into which-key.
-					gf.register_actions(ev.buf)
+					-- Always-visible options bar at the top of the panel, with
+					-- live [x]/[ ] state; click a box (or press <localleader>m)
+					-- to toggle. No which-key / g? needed to discover options.
+					gf.render_winbar(ev.buf)
+					vim.keymap.set("n", "<localleader>m", function()
+						gf.options_menu(ev.buf)
+					end, { buffer = ev.buf, desc = "Search options" })
 
 					-- Open the match under the cursor in a new tab
 					vim.keymap.set("n", "<cr>", function()
