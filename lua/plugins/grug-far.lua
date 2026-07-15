@@ -15,20 +15,39 @@ return {
 			end,
 			desc = "Search in files",
 		},
+		{
+			"<leader>fw",
+			function()
+				require("grug-far").open({ prefills = { search = vim.fn.expand("<cword>") } })
+			end,
+			mode = "n",
+			desc = "Search word in files",
+		},
+		{
+			"<leader>fw",
+			function()
+				require("grug-far").with_visual_selection()
+			end,
+			mode = "x",
+			desc = "Search selection in files",
+		},
 	},
 	opts = {
 		startInInsertMode = true,
 		-- open the search panel in its own full-window tab (not a split)
 		windowCreationCommand = "tabnew",
+		-- more compact inputs header before the results
+		showCompactInputs = true,
 		engines = {
 			ripgrep = {
 				-- .git and node_modules are always excluded (permanent).
 				extraArgs = "--glob=!**/.git/* --glob=!**/node_modules/*",
 				-- no "e.g. ..." example placeholders in the input fields
 				placeholders = { enabled = false },
-				-- --hidden is ON by default but lives in the (toggleable) Flags
-				-- input, so it can be turned off like the other options.
-				defaults = { flags = "--hidden" },
+				-- --hidden and --smart-case are ON by default but live in the
+				-- (toggleable) Flags input. smart-case = case-insensitive unless
+				-- the query contains an uppercase letter.
+				defaults = { flags = "--hidden --smart-case" },
 			},
 		},
 		keymaps = {
