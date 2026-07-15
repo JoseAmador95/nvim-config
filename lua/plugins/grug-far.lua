@@ -20,10 +20,14 @@ return {
 		startInInsertMode = true,
 		-- open the search panel in its own full-window tab (not a split)
 		windowCreationCommand = "tabnew",
+		-- keep the panel clean: no top help line, no "e.g. ..." example
+		-- placeholders in the input fields
+		helpLine = { enabled = false },
 		engines = {
 			ripgrep = {
 				-- hidden files ON; .git and node_modules always excluded; .gitignore respected
 				extraArgs = "--hidden --glob=!**/.git/* --glob=!**/node_modules/*",
+				placeholders = { enabled = false },
 			},
 		},
 		keymaps = {
@@ -49,12 +53,8 @@ return {
 					local gf = require("config.grug-far")
 
 					-- Always-visible options bar at the top of the panel, with
-					-- live [x]/[ ] state; click a box (or press <localleader>m)
-					-- to toggle. No which-key / g? needed to discover options.
+					-- live [x]/[ ] state; click a box to toggle it.
 					gf.render_winbar(ev.buf)
-					vim.keymap.set("n", "<localleader>m", function()
-						gf.options_menu(ev.buf)
-					end, { buffer = ev.buf, desc = "Search options" })
 
 					-- Open the match under the cursor in a new tab
 					vim.keymap.set("n", "<cr>", function()
