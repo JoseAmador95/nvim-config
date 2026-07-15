@@ -36,7 +36,20 @@ Comprueba que conectas a mano antes de seguir: `ssh mi-servidor`.
 ## Paso 2 — conecta
 
 En Neovim (terminal, no VSCode) ejecuta `:RemoteStart` o pulsa `<leader>Rs`.
-Se abre un picker de Telescope con los hosts de tu `~/.ssh/config`; elige uno.
+
+**Ojo — son dos pasos:** `:RemoteStart` **no** muestra tus hosts directamente. Primero
+abre un menú de Telescope titulado **"Filter launch options"** con los *métodos* de
+conexión. Elige **"Remote SSH: Set up configured SSH host"** (escribe `ssh` para filtrar
+y pulsa Enter). Solo entonces se abre el segundo picker, **"Connect to remote host"**,
+con los hosts de tu `~/.ssh/config`; elige uno.
+
+Otras opciones de ese menú:
+- **"Remote SSH: Set up using connection string"** — escribe `usuario@host` a mano.
+- **"Remote Neovim: Connect to existing workspace"** — solo lista hosts a los que ya te
+  conectaste antes.
+
+Atajo: una vez conectado a un host, `:RemoteStart <nombre>` (p.ej. `:RemoteStart media`)
+conecta directo sin pasar por el menú. La primera vez sí hay que usar el menú.
 
 > La **primera vez** contra un host, remote-nvim copia esta config al remoto e instala
 > Neovim + los servers/tools de mason allí. Tarda un rato. Las siguientes veces es
@@ -74,6 +87,18 @@ También aparecen en `:Cheatsheet commands`.
   en el remoto.
 - **Olvidar host**: `:RemoteConfigDel` (`<leader>Rd`) borra la config guardada de un
   host (útil si cambian sus datos de conexión).
+
+## Si no aparecen tus hosts
+
+- **Lo más común:** `:RemoteStart` muestra primero los *métodos* de conexión, no los
+  hosts. Entra en **"Remote SSH: Set up configured SSH host"** para ver los de
+  `~/.ssh/config` (ver [Paso 2](#paso-2--conecta)).
+- Los bloques comodín (`Host *`, `Host *.ejemplo.com`) **no se listan** a propósito;
+  necesitas al menos un alias concreto (`Host mi-servidor`).
+- Solo se leen los bloques `Host` de `~/.ssh/config` (y de los archivos que incluyas con
+  `Include`), **no** de `~/.ssh/known_hosts` ni de conexiones sueltas `ssh usuario@ip`.
+- Si tus hosts están en otro archivo, amplía `ssh_config.ssh_config_file_paths` en
+  `lua/plugins/remote-nvim.lua`.
 
 ## Notas
 
