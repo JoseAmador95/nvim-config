@@ -11,13 +11,24 @@
 --
 -- Commands: :RemoteStart :RemoteStop :RemoteInfo :RemoteCleanup
 --           :RemoteConfigDel :RemoteLog   (also in :Cheatsheet commands)
+-- Keymaps:  <leader>R… — Rs start, Rx stop, Ri info, Rc cleanup,
+--           Rd config-del, Rl log (grouped as "remote" in which-key).
 -- Health:   :checkhealth remote-nvim
+-- Usage:    see docs/remote-nvim.md
 return {
 	"amitds1997/remote-nvim.nvim",
 	cond = function()
 		return not vim.g.vscode
 	end,
 	cmd = { "RemoteStart", "RemoteStop", "RemoteInfo", "RemoteCleanup", "RemoteConfigDel", "RemoteLog" },
+	keys = {
+		{ "<leader>Rs", "<cmd>RemoteStart<cr>", desc = "Remote: iniciar / conectar a host" },
+		{ "<leader>Rx", "<cmd>RemoteStop<cr>", desc = "Remote: detener sesión" },
+		{ "<leader>Ri", "<cmd>RemoteInfo<cr>", desc = "Remote: info de sesión" },
+		{ "<leader>Rc", "<cmd>RemoteCleanup<cr>", desc = "Remote: limpiar host remoto" },
+		{ "<leader>Rd", "<cmd>RemoteConfigDel<cr>", desc = "Remote: borrar config guardada" },
+		{ "<leader>Rl", "<cmd>RemoteLog<cr>", desc = "Remote: ver log" },
+	},
 	dependencies = {
 		"nvim-lua/plenary.nvim",
 		"MunifTanjim/nui.nvim",
