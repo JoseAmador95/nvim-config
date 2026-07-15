@@ -11,6 +11,14 @@ return {
 	opts = {
 		preset = "helix",
 		delay = 500,
+		-- Inside the grug-far panel, only show grug-far's own (buffer-local)
+		-- mappings, not the global leader cloud.
+		filter = function(mapping)
+			if vim.bo.filetype == "grug-far" then
+				return type(mapping.buffer) == "number" and mapping.buffer > 0
+			end
+			return true
+		end,
 		spec = {
 			{ "<leader>a", group = "ai" },
 			{ "<leader>b", group = "bookmarks/buffer" },
