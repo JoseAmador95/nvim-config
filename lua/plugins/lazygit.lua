@@ -44,12 +44,20 @@ local function ensure_config()
 end
 
 -- Combine the user's own lazygit config (if present) with ours so both apply.
--- lazygit merges comma-separated config files, later ones taking precedence.
+-- lazygit merges comma-separated config files, later ones taking precedence, so
+-- our overrides win while every personal setting is preserved.
+--
+-- The config location is resolved by asking lazygit itself
+-- (`lazygit --print-config-dir`) instead of guessing the XDG path, so custom
+-- config dirs are honoured.
 local function config_files()
 	local ours = ensure_config()
-	local user = (vim.env.XDG_CONFIG_HOME or (vim.env.HOME .. "/.config")) .. "/lazygit/config.yml"
-	if vim.fn.filereadable(user) == 1 then
-		return user .. "," .. ours
+	local dir = vim.fn.systemlist({ "lazygit", "--print-config-dir" })[1]
+	if vim.v.shell_error == 0 and dir and dir ~= "" then
+		local user = dir .. "/config.yml"
+		if vim.fn.filereadable(user) == 1 then
+			return user .. "," .. ours
+		end
 	end
 	return ours
 end
