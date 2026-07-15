@@ -7,25 +7,31 @@
 -- so lazygit's `os.edit` command can talk back to Neovim via `--remote-send`.
 local lazygit_term
 
--- Called by lazygit (through Neovim's RPC socket) to open a file as a buffer.
+-- Called by lazygit (through Neovim's RPC socket) to open a file in a new tab.
 -- Closes the lazygit float first so the buffer becomes visible.
 function _G._lazygit_edit(filename, line)
 	if lazygit_term then
 		lazygit_term:close()
 	end
-	vim.cmd("edit " .. vim.fn.fnameescape(filename))
+	-- `tab drop` reuses a tab already showing the file, otherwise opens a new
+	-- tab -- so editing never overwrites the tab lazygit was launched from.
+	vim.cmd("tab drop " .. vim.fn.fnameescape(filename))
 	if line then
 		pcall(vim.api.nvim_win_set_cursor, 0, { tonumber(line), 0 })
 	end
 end
 
--- Path to a generated lazygit config that wires `os.edit` to the RPC callback.
+-- Generate the lazygit config that wires `os.edit` to the RPC callback.
+-- Rewritten on every launch so config changes always take effect.
+--
+-- `promptToReturnFromSubprocess: false` is essential: lazygit suspends its UI
+-- to run the edit command, and the default "press ENTER to return" prompt would
+-- otherwise leave the hidden float stuck on that screen. Since `--remote-send`
+-- returns instantly, lazygit can resume silently.
 local function ensure_config()
 	local path = vim.fn.stdpath("cache") .. "/lazygit-nvim.yml"
-	if vim.fn.filereadable(path) == 1 then
-		return path
-	end
 	local lines = {
+		"promptToReturnFromSubprocess: false",
 		"os:",
 		"  edit: 'nvim --server \"$NVIM\" --remote-send \"<C-\\><C-n>:lua _lazygit_edit([==[{{filename}}]==])<CR>\"'",
 		"  editAtLine: 'nvim --server \"$NVIM\" --remote-send \"<C-\\><C-n>:lua _lazygit_edit([==[{{filename}}]==], {{line}})<CR>\"'",
