@@ -94,10 +94,11 @@ return {
 						end, { buffer = ev.buf, desc = opt.desc })
 					end
 
-					-- Open the match under the cursor in a new tab
+					-- <CR>: toggle the fold on a file path line, or open the
+					-- match under the cursor in a new tab
 					vim.keymap.set("n", "<cr>", function()
-						gf.open_entry_in_tab(ev.buf)
-					end, { buffer = ev.buf, desc = "Open match in new tab" })
+						gf.on_enter(ev.buf)
+					end, { buffer = ev.buf, desc = "Toggle fold / open match in tab" })
 				end)
 			end,
 		})
