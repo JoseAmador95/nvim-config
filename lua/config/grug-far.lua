@@ -1,5 +1,28 @@
 local M = {}
 
+-- Create and enter a centered floating window holding a throwaway scratch
+-- buffer, for grug-far to attach its own buffer to. Wired up as grug-far's
+-- `windowCreationCommand`, so it runs both on the initial open and on every
+-- toggle_instance re-show, keeping the panel floating each time (grug-far's
+-- _createWindow runs this via vim.cmd, then grabs the current window).
+function M.open_float_window()
+	local width = math.floor(vim.o.columns * 0.9)
+	local height = math.floor(vim.o.lines * 0.85)
+	local scratch = vim.api.nvim_create_buf(false, true)
+	-- wiped automatically once grug-far swaps its own buffer into the window
+	vim.bo[scratch].bufhidden = "wipe"
+	vim.api.nvim_open_win(scratch, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = math.floor((vim.o.lines - height) / 2 - 1),
+		col = math.floor((vim.o.columns - width) / 2),
+		border = "rounded",
+		title = " Search & Replace ",
+		title_pos = "center",
+	})
+end
+
 -- Resolve the grug-far result location under the cursor (nil if not on one).
 local function location_at_cursor(buf)
 	local ok, grug_far = pcall(require, "grug-far")
@@ -50,6 +73,15 @@ function M.on_enter(buf)
 		-- file path line (no match line number) -> toggle its fold
 		toggle_file_fold(buf)
 		return
+	end
+
+	-- Close the floating panel before jumping to the match so it doesn't
+	-- linger behind the file. The grug-far buffer is a scratch buffer
+	-- (bufhidden=hide), so closing the window only hides it: the search and
+	-- results persist, and <leader>fg re-floats the same instance intact.
+	local cur = vim.api.nvim_get_current_win()
+	if vim.api.nvim_win_get_config(cur).relative ~= "" then
+		vim.api.nvim_win_close(cur, true)
 	end
 
 	require("config.editor").open_file_in_tab(loc.filename, { lnum = loc.lnum, col = loc.col })
