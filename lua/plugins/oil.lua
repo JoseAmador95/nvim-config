@@ -59,6 +59,16 @@ return {
 			-- Take over directory buffers (replaces neo-tree's BufEnter hack that
 			-- deleted directory buffers by hand).
 			default_file_explorer = true,
+			-- Deletes (dd + :w) go to the system trash instead of an unrecoverable
+			-- rm. Needs a trash backend on the host (gio / trash-cli / ...).
+			delete_to_trash = true,
+			-- Skip the confirmation prompt for trivial renames/creates/moves; real
+			-- deletes still confirm.
+			skip_confirm_for_simple_edits = true,
+			-- Two sign columns for oil-git-status (index + working tree).
+			win_options = {
+				signcolumn = "yes:2",
+			},
 			view_options = {
 				-- Match the old neo-tree behaviour: show dotfiles and gitignored.
 				show_hidden = true,
@@ -85,5 +95,15 @@ return {
 				["q"] = "actions.close",
 			},
 		},
+	},
+	{
+		-- Git status signs in oil's two sign columns (index + working tree).
+		-- This is the one thing oil doesn't do out of the box that neo-tree did.
+		"refractalize/oil-git-status.nvim",
+		cond = function()
+			return not vim.g.vscode
+		end,
+		dependencies = { "stevearc/oil.nvim" },
+		config = true,
 	},
 }
