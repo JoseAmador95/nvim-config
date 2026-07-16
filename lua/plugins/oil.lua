@@ -103,6 +103,11 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
+		-- Not lazy: nothing require()s this plugin, so with the repo's
+		-- `defaults = { lazy = true }` it would install but never load, and its
+		-- `User OilEnter` autocmd would never register (no signs). Load it at
+		-- startup so the autocmd is in place before the first oil buffer opens.
+		lazy = false,
 		dependencies = { "stevearc/oil.nvim" },
 		config = true,
 	},
