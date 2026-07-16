@@ -35,6 +35,15 @@ return {
 		"nvim-telescope/telescope.nvim",
 	},
 	config = function()
+		-- remote-nvim runs devpod inside a PTY; devpod then writes terminal
+		-- capability queries (OSC 11, cursor report) to stdout before its JSON,
+		-- which breaks remote-nvim's json.decode. `scripts/devpod-nvim` wraps
+		-- devpod with TERM=dumb to suppress that. Fall back to plain `devpod`
+		-- if the wrapper isn't executable. (Must be a single executable path:
+		-- remote-nvim asserts `executable(devpod.binary)`.)
+		local devpod_wrapper = vim.fn.stdpath("config") .. "/scripts/devpod-nvim"
+		local devpod_binary = vim.fn.executable(devpod_wrapper) == 1 and devpod_wrapper or "devpod"
+
 		require("remote-nvim").setup({
 			-- Source remote hosts from your personal ~/.ssh/config only.
 			ssh_config = {
@@ -44,6 +53,7 @@ return {
 			-- container runtime: Podman, OrbStack or Docker). See
 			-- docs/remote-nvim.md.
 			devpod = {
+				binary = devpod_binary,
 				-- List stopped containers too, so reconnecting to an existing
 				-- devcontainer doesn't force a rebuild.
 				container_list = "all",

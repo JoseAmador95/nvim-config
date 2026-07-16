@@ -172,6 +172,16 @@ alcanza por SSH, el yank llega a tu portapapeles local. Requiere un terminal que
 soporte OSC52 (iTerm2, kitty, WezTerm, Ghostty, Alacritty). Con tmux:
 `set -g set-clipboard on`.
 
+### Solución de problemas
+
+- **`'Launching devpod workspace' failed … Expected value but found invalid token
+  at character 1`**: remote-nvim ejecuta devpod dentro de un PTY, y devpod sondea
+  el terminal escribiendo secuencias de escape (OSC 11 de color de fondo y el
+  reporte de cursor) en stdout antes de su JSON, lo que rompe el `json.decode`.
+  La config ya lo evita llamando a devpod mediante `scripts/devpod-nvim`, que fija
+  `TERM=dumb`. Si ves este error, confirma que `scripts/devpod-nvim` existe y es
+  ejecutable (`ls -l scripts/devpod-nvim` → debe tener la `x`).
+
 ### Shell rápido (alternativa sin remote-nvim)
 
 Para solo abrir un shell dentro del contenedor sin montar toda la sesión remota,
