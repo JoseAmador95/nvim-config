@@ -1,0 +1,12 @@
+#!/bin/sh
+# Wrapper so remote-nvim can call devpod without breaking its JSON parsing.
+#
+# remote-nvim runs devpod inside a PTY. When devpod detects a TTY it probes the
+# terminal by writing capability queries to stdout (OSC 11 background-color and
+# the cursor-position report, i.e. ESC]11;?ESC\ and ESC[6n) *before* its JSON
+# output. remote-nvim then does json.decode() on that stdout and fails at
+# character 1 (the ESC byte). Forcing TERM=dumb makes devpod treat the output as
+# a dumb terminal and skip the probing, so stdout stays clean JSON.
+#
+# devpod is resolved from PATH; only TERM is overridden.
+exec env TERM=dumb devpod "$@"
