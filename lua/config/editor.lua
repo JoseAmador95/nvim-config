@@ -1,7 +1,7 @@
 local M = {}
 
 local SPECIAL_FILETYPES = {
-	["neo-tree"] = true,
+	["oil"] = true,
 	["grug-far"] = true,
 	["toggleterm"] = true,
 	["terminal"] = true,
