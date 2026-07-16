@@ -117,8 +117,26 @@ contenedor, con esta misma config.
 ### Requisitos
 
 - [`devpod`](https://devpod.sh) >= 0.5.0 en el PATH (`brew install devpod`).
-- Un runtime de contenedores local: **OrbStack** o **Docker Desktop**.
-- Verifica antes de empezar: `devpod version` y `docker ps` responden.
+- Un runtime de contenedores local: **Podman**, **OrbStack** o **Docker Desktop**.
+- Verifica antes de empezar: `devpod version` y `podman ps` (o `docker ps`)
+  responden.
+
+#### Podman
+
+Con podman hay que apuntar **dos** cosas a podman (ambas usan `docker` por
+defecto):
+
+1. **remote-nvim** — ya resuelto en `lua/plugins/remote-nvim.lua`: usa `podman`
+   como `docker_binary` si está instalado (si no, `docker`).
+2. **devpod** — configura una vez su proveedor docker para que use podman. En la
+   GUI de DevPod: pestaña *Providers* → proveedor Docker → opción **Docker Path**
+   → cámbiala de `docker` a `podman` (o la ruta de `which podman`). Por CLI, el
+   equivalente es la opción `DOCKER_PATH` del proveedor docker; confirma el nombre
+   exacto con `devpod provider options docker` y ajústala a `podman`.
+   - Podman **rootless**: si al montar el workspace hay líos de permisos/UID,
+     suele ayudar `--userns=keep-id`, y exponer el socket de podman apuntando
+     `DOCKER_HOST` a él. Ver los enlaces de podman+devcontainers si te topas con
+     esto.
 
 ### Flujo
 

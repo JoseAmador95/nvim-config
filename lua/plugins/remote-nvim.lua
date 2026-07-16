@@ -41,11 +41,16 @@ return {
 				ssh_config_file_paths = { vim.fn.expand("~/.ssh/config") },
 			},
 			-- Devcontainers run through devpod (needs `devpod` >= 0.5.0 and a
-			-- container runtime, e.g. OrbStack/Docker). See docs/remote-nvim.md.
+			-- container runtime: Podman, OrbStack or Docker). See
+			-- docs/remote-nvim.md.
 			devpod = {
 				-- List stopped containers too, so reconnecting to an existing
 				-- devcontainer doesn't force a rebuild.
 				container_list = "all",
+				-- Use podman for remote-nvim's own container calls when it's the
+				-- available runtime, else docker. (devpod itself is pointed at
+				-- podman separately, via its docker provider's DOCKER_PATH.)
+				docker_binary = vim.fn.executable("podman") == 1 and "podman" or "docker",
 			},
 		})
 	end,
