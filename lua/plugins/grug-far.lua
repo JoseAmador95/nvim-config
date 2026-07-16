@@ -34,8 +34,11 @@ return {
 	},
 	opts = {
 		startInInsertMode = true,
-		-- open the search panel in its own full-window tab (not a split)
-		windowCreationCommand = "tabnew",
+		-- open the search panel in a centered floating window (see
+		-- config.grug-far.open_float_window). grug-far runs this via vim.cmd on
+		-- both the initial open and every toggle_instance re-show, so the panel
+		-- is always a float.
+		windowCreationCommand = "lua require('config.grug-far').open_float_window()",
 		-- more compact inputs header before the results
 		showCompactInputs = true,
 		engines = {
