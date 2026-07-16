@@ -529,11 +529,13 @@ end
 local function view_items()
 	return {
 		{
-			name = "Neo-tree Toggle",
+			name = "File Explorer (oil)",
 			cmd = function()
-				local ok = pcall(vim.cmd, "Neotree toggle")
-				if not ok then
-					pcall(vim.cmd, "Neotree")
+				local ok, oil = pcall(require, "oil")
+				if ok then
+					oil.toggle_float()
+				else
+					notify("oil.nvim not available", vim.log.levels.WARN)
 				end
 			end,
 		},

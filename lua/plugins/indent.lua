@@ -72,7 +72,7 @@ return {
 				filetypes = {
 					"help",
 					"dashboard",
-					"neo-tree",
+					"oil",
 					"Trouble",
 					"lazy",
 					"mason",

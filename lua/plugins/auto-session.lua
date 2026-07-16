@@ -58,7 +58,7 @@ return {
 		auto_create = true,
 		auto_restore_last_session = false,
 		show_auto_restore_notif = false,
-		bypass_save_filetypes = { "neo-tree" },
+		bypass_save_filetypes = { "oil" },
 		auto_delete_empty_sessions = true,
 		pre_save_cmds = {
 			function()
