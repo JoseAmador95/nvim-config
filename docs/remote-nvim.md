@@ -100,6 +100,66 @@ También aparecen en `:Cheatsheet commands`.
 - Si tus hosts están en otro archivo, amplía `ssh_config.ssh_config_file_paths` en
   `lua/plugins/remote-nvim.lua`.
 
+## Devcontainers (devpod)
+
+remote-nvim también puede lanzar el Neovim *headless* **dentro de un
+devcontainer** (usando [devpod](https://devpod.sh) por debajo) y conectar tu TUI
+local a él. Así editas con LSP y herramientas que ven las dependencias del
+contenedor, con esta misma config.
+
+### Escenarios
+
+- **Devcontainer local** (Docker/OrbStack en tu máquina) → este flujo (devpod).
+- **Host remoto sin contenedor** → el flujo SSH de arriba (`~/.ssh/config`).
+- **Devcontainer en un host remoto** (anidado) → avanzado: hay que configurar un
+  proveedor Docker remoto en devpod. No cubierto aquí.
+
+### Requisitos
+
+- [`devpod`](https://devpod.sh) >= 0.5.0 en el PATH (`brew install devpod`).
+- Un runtime de contenedores local: **OrbStack** o **Docker Desktop**.
+- Verifica antes de empezar: `devpod version` y `docker ps` responden.
+
+### Flujo
+
+1. Abre Neovim en la **raíz del repo** (donde está `.devcontainer/`). devpod
+   busca el devcontainer en el directorio actual, así que arrancar desde la raíz
+   es lo fiable.
+2. `:RemoteStart` (`<leader>Rs`) → en el menú **"Filter launch options"** elige la
+   opción de **Dev Container** (aparece solo si `devpod` está en el PATH y hay un
+   `.devcontainer/devcontainer.json`).
+3. La **primera vez** devpod construye el contenedor y remote-nvim instala
+   Neovim + los servers/tools de mason **dentro**. Tarda; las siguientes veces es
+   rápido.
+4. Cuando termina, tu TUI está conectada al Neovim del contenedor.
+
+### Reconectar, cerrar y limpiar
+
+- **Reconectar**: `:RemoteStart <workspace>` va directo sin pasar por el menú. Con
+  `container_list = "all"` (configurado en `lua/plugins/remote-nvim.lua`) también
+  se reengancha a contenedores **parados**, sin reconstruir.
+- **Cerrar**: `:RemoteStop` (`<leader>Rx`).
+- **Limpiar**: `:RemoteCleanup` (`<leader>Rc`) elimina lo instalado en el
+  contenedor.
+
+### Si al contenedor le falta una herramienta
+
+Añádela al `devcontainer.json` (un *feature* o un paquete) y reconstruye. Así el
+entorno sigue siendo reproducible, en vez de depender de binarios de tu host.
+
+### Clipboard
+
+Funciona vía **OSC52** (ya configurado en `init.lua`): como el contenedor se
+alcanza por SSH, el yank llega a tu portapapeles local. Requiere un terminal que
+soporte OSC52 (iTerm2, kitty, WezTerm, Ghostty, Alacritty). Con tmux:
+`set -g set-clipboard on`.
+
+### Shell rápido (alternativa sin remote-nvim)
+
+Para solo abrir un shell dentro del contenedor sin montar toda la sesión remota,
+`:DevcontainerShell` sigue disponible (usa `devcontainer exec`; es independiente
+de remote-nvim). `:DevcontainerWorkspace` fija/limpia el workspace que usa.
+
 ## Notas
 
 - El plugin está protegido con `cond = not vim.g.vscode`: dentro de vscode-neovim no se
