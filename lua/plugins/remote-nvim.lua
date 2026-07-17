@@ -11,23 +11,56 @@
 --
 -- Commands: :RemoteStart :RemoteStop :RemoteInfo :RemoteCleanup
 --           :RemoteConfigDel :RemoteLog   (also in :Cheatsheet commands)
+-- Keymaps:  <leader>R… — Rs start, Rx stop, Ri info, Rc cleanup,
+--           Rd config-del, Rl log (grouped as "remote" in which-key).
 -- Health:   :checkhealth remote-nvim
+-- Usage:    see docs/remote-nvim.md
 return {
 	"amitds1997/remote-nvim.nvim",
 	cond = function()
 		return not vim.g.vscode
 	end,
 	cmd = { "RemoteStart", "RemoteStop", "RemoteInfo", "RemoteCleanup", "RemoteConfigDel", "RemoteLog" },
+	keys = {
+		{ "<leader>Rs", "<cmd>RemoteStart<cr>", desc = "Remote: iniciar / conectar a host" },
+		{ "<leader>Rx", "<cmd>RemoteStop<cr>", desc = "Remote: detener sesión" },
+		{ "<leader>Ri", "<cmd>RemoteInfo<cr>", desc = "Remote: info de sesión" },
+		{ "<leader>Rc", "<cmd>RemoteCleanup<cr>", desc = "Remote: limpiar host remoto" },
+		{ "<leader>Rd", "<cmd>RemoteConfigDel<cr>", desc = "Remote: borrar config guardada" },
+		{ "<leader>Rl", "<cmd>RemoteLog<cr>", desc = "Remote: ver log" },
+	},
 	dependencies = {
 		"nvim-lua/plenary.nvim",
 		"MunifTanjim/nui.nvim",
 		"nvim-telescope/telescope.nvim",
 	},
 	config = function()
+		-- remote-nvim runs devpod inside a PTY; devpod then writes terminal
+		-- capability queries (OSC 11, cursor report) to stdout before its JSON,
+		-- which breaks remote-nvim's json.decode. `scripts/devpod-nvim` wraps
+		-- devpod with TERM=dumb to suppress that. Fall back to plain `devpod`
+		-- if the wrapper isn't executable. (Must be a single executable path:
+		-- remote-nvim asserts `executable(devpod.binary)`.)
+		local devpod_wrapper = vim.fn.stdpath("config") .. "/scripts/devpod-nvim"
+		local devpod_binary = vim.fn.executable(devpod_wrapper) == 1 and devpod_wrapper or "devpod"
+
 		require("remote-nvim").setup({
 			-- Source remote hosts from your personal ~/.ssh/config only.
 			ssh_config = {
 				ssh_config_file_paths = { vim.fn.expand("~/.ssh/config") },
+			},
+			-- Devcontainers run through devpod (needs `devpod` >= 0.5.0 and a
+			-- container runtime: Podman, OrbStack or Docker). See
+			-- docs/remote-nvim.md.
+			devpod = {
+				binary = devpod_binary,
+				-- List stopped containers too, so reconnecting to an existing
+				-- devcontainer doesn't force a rebuild.
+				container_list = "all",
+				-- Use podman for remote-nvim's own container calls when it's the
+				-- available runtime, else docker. (devpod itself is pointed at
+				-- podman separately, via its docker provider's DOCKER_PATH.)
+				docker_binary = vim.fn.executable("podman") == 1 and "podman" or "docker",
 			},
 		})
 	end,
