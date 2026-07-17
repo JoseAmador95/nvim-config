@@ -78,6 +78,27 @@ local function toggle_file_fold(buf)
 	pcall(vim.api.nvim_win_set_cursor, win, cursor)
 end
 
+-- Close the floating panel via window/buffer API calls, which dismiss the
+-- float reliably (the :quit ex command sometimes doesn't on this float, but
+-- nvim_win_close / nvim_buf_delete always do). Persistent instances (far) are
+-- only hidden -- their scratch buffer (bufhidden=hide) keeps the search, so
+-- <leader>fg re-floats them intact. Throwaway instances (<leader>fw, "Search
+-- in File") are wiped instead: deleting the buffer closes its float and fires
+-- grug-far's BufUnload cleanup, so hidden grug-far buffers don't accumulate.
+function M.dismiss(buf)
+	if not buf or buf == 0 then
+		buf = vim.api.nvim_get_current_buf()
+	end
+	if PERSISTENT_INSTANCES[instance_name(buf) or ""] then
+		local win = vim.fn.bufwinid(buf)
+		if win ~= -1 then
+			vim.api.nvim_win_close(win, true)
+		end
+	elseif vim.api.nvim_buf_is_valid(buf) then
+		pcall(vim.api.nvim_buf_delete, buf, { force = true })
+	end
+end
+
 -- <CR> handler: on a file path line, toggle that file's results fold; on a
 -- match line, open the match in a new tab (dedupes to an existing tab).
 function M.on_enter(buf)
@@ -96,21 +117,23 @@ function M.on_enter(buf)
 	end
 
 	-- Get the panel out of the way before jumping to the match so it doesn't
-	-- linger behind the file. Persistent instances are only hidden -- the
-	-- scratch buffer (bufhidden=hide) keeps the search, so <leader>fg re-floats
-	-- them intact. Throwaway instances are wiped instead: deleting the buffer
-	-- closes its float and fires grug-far's BufUnload cleanup, so hidden
-	-- grug-far buffers don't accumulate.
-	if PERSISTENT_INSTANCES[instance_name(buf) or ""] then
-		local win = vim.fn.bufwinid(buf)
-		if win ~= -1 then
-			vim.api.nvim_win_close(win, true)
-		end
-	elseif vim.api.nvim_buf_is_valid(buf) then
-		pcall(vim.api.nvim_buf_delete, buf, { force = true })
-	end
+	-- linger behind the file (the search still persists for the "far" instance).
+	M.dismiss(buf)
 
 	require("config.editor").open_file_in_tab(loc.filename, { lnum = loc.lnum, col = loc.col })
+end
+
+-- QuitPre handler for :q / :quit issued from the panel. On this float the ex
+-- command often fails to close the window, so we finish the job from the API
+-- after the command runs: dismiss() force-closes it if it's still open (and is
+-- a no-op / leak cleanup if :quit already closed it).
+function M.on_quit(buf)
+	if not buf or buf == 0 then
+		buf = vim.api.nvim_get_current_buf()
+	end
+	vim.schedule(function()
+		M.dismiss(buf)
+	end)
 end
 
 -- Toggle a ripgrep flag in the grug-far Flags input. The current flags are
