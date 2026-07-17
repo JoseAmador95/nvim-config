@@ -102,6 +102,26 @@ return {
 					vim.keymap.set("n", "<cr>", function()
 						gf.on_enter(ev.buf)
 					end, { buffer = ev.buf, desc = "Toggle fold / open match in tab" })
+
+					-- Close the float from normal mode with `q` or `<Esc>` (in
+					-- addition to <leader>q). These go through the window/buffer
+					-- API, which dismisses the float reliably where :q sometimes
+					-- doesn't.
+					for _, lhs in ipairs({ "q", "<esc>" }) do
+						vim.keymap.set("n", lhs, function()
+							gf.dismiss(ev.buf)
+						end, { buffer = ev.buf, desc = "Close search panel" })
+					end
+
+					-- :q / :quit sometimes fails to close this float; finish the
+					-- job from the API afterwards (and wipe throwaway instances so
+					-- hidden grug-far buffers don't accumulate).
+					vim.api.nvim_create_autocmd("QuitPre", {
+						buffer = ev.buf,
+						callback = function()
+							gf.on_quit(ev.buf)
+						end,
+					})
 				end)
 			end,
 		})
