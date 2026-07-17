@@ -80,6 +80,14 @@ return {
 			sources = {
 				files = { hidden = true },
 				grep = { hidden = true },
+				-- `vim.ui.select` (used by e.g. remote-nvim's "Choose Neovim
+				-- version" prompt) runs through the "select" source, which wires
+				-- its own confirm action to resolve the on_choice callback. The
+				-- global confirm = "open_in_tab" shortcut above would clobber that
+				-- (config.get re-applies the shortcut over actions.confirm), leaving
+				-- the choice dropped. Setting confirm = false disables the shortcut
+				-- for this source so its native confirm survives.
+				select = { confirm = false },
 			},
 			win = {
 				input = {

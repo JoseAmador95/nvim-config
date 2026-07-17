@@ -23,29 +23,6 @@ local function find_workspace(start_dir)
 end
 
 function M.setup()
-	vim.api.nvim_create_user_command("DevcontainerMode", function(opts)
-		local mode = opts.args ~= "" and opts.args or "auto"
-		if mode ~= "auto" and mode ~= "on" and mode ~= "off" then
-			notify("Invalid mode. Use: auto | on | off", vim.log.levels.ERROR)
-			return
-		end
-		vim.env.NVIM_DEVCONTAINER_MODE = mode
-		notify("Mode set to: " .. mode)
-	end, {
-		nargs = "?",
-		complete = function()
-			return { "auto", "on", "off" }
-		end,
-		desc = "Set devcontainer wrapper mode",
-	})
-
-	vim.api.nvim_create_user_command("DevcontainerModeStatus", function()
-		notify("Current mode: " .. (vim.env.NVIM_DEVCONTAINER_MODE or "auto"))
-	end, {
-		nargs = 0,
-		desc = "Show devcontainer wrapper mode",
-	})
-
 	vim.api.nvim_create_user_command("DevcontainerWorkspace", function(opts)
 		if opts.args == "" then
 			vim.env.NVIM_DEVCONTAINER_WORKSPACE = nil

@@ -468,21 +468,15 @@ end
 local function devcontainer_items()
 	return {
 		{
+			name = "Dev in container (remote-nvim)",
+			cmd = function()
+				vim.cmd("RemoteStart")
+			end,
+		},
+		{
 			name = "Shell",
 			cmd = function()
 				vim.cmd("DevcontainerShell")
-			end,
-		},
-		{
-			name = "Toggle Mode",
-			cmd = function()
-				vim.cmd("DevcontainerMode")
-			end,
-		},
-		{
-			name = "Mode Status",
-			cmd = function()
-				vim.cmd("DevcontainerModeStatus")
 			end,
 		},
 		{

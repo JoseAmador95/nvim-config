@@ -58,6 +58,25 @@ vim.g.loaded_ruby_provider = 0
 -- Enable system clipboard integration
 vim.opt.clipboard = "unnamedplus"
 
+-- Over ssh the host clipboard is not the local machine's. OSC52 (built into
+-- Neovim 0.10+) writes to the local clipboard through the terminal, so a yank
+-- on the remote host lands in your local clipboard. Only enabled in remote
+-- sessions; locally the native provider (pbcopy/wl-copy/xclip) is kept.
+if vim.env.SSH_TTY or vim.env.SSH_CONNECTION then
+	local osc52 = require("vim.ui.clipboard.osc52")
+	-- Copy goes through OSC52. Paste returns the last yank (unnamed register)
+	-- instead of querying the terminal, which most emulators refuse or lag on
+	-- for security.
+	local function paste()
+		return { vim.fn.split(vim.fn.getreg(""), "\n"), vim.fn.getregtype("") }
+	end
+	vim.g.clipboard = {
+		name = "OSC52",
+		copy = { ["+"] = osc52.copy("+"), ["*"] = osc52.copy("*") },
+		paste = { ["+"] = paste, ["*"] = paste },
+	}
+end
+
 -- Interface and Display Options ---------------------------------------------
 
 -- Display settings
