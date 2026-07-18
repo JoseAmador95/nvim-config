@@ -123,12 +123,6 @@ vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter" }, {
 	command = "checktime",
 })
 
--- Auto-reload configuration on save
-vim.api.nvim_create_autocmd("BufWritePost", {
-	pattern = "init.lua",
-	command = "source $MYVIMRC",
-})
-
 -- Automatically remove trailing whitespace on save for all modifiable buffers
 vim.api.nvim_create_autocmd("BufWritePre", {
 	group = vim.api.nvim_create_augroup("trim_whitespace", { clear = true }),
