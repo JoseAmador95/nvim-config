@@ -28,8 +28,14 @@
   - `lua/editor/terminal.lua` defines the terminal-Neovim behavior and custom user commands.
   - Most UI-heavy plugins are disabled in VS Code with `cond = function() return not vim.g.vscode end`.
 - LSP/tooling is centered in `lua/plugins/lsp.lua`:
-  - Mason and mason-tool-installer ensure servers and external tools are present.
+  - mason-lspconfig `ensure_installed` manages every LSP server; mason-tool-installer holds only non-LSP tools (formatters, linters, debug adapters). Keep that split when adding tools.
   - LSP servers are configured with native Neovim 0.11+ APIs (`vim.lsp.config` / `vim.lsp.enable`), not legacy `lspconfig.setup`.
+  - To add a language: entry in `ensure_servers` + a `vim.lsp.config(name, { capabilities = capabilities, ... })` block + entry in `enabled_servers`, plus formatters in `lua/plugins/formatting.lua` and parsers in `lua/plugins/treesitter.lua`. Toolchain-managed binaries (rustup's rust-analyzer/rustfmt) are preferred over Mason installs when present.
+- VSCode-project interop (for repos that assume VSCode):
+  - `.vscode/settings.json` merges into LSP server settings via neoconf (`lua/plugins/neoconf.lua`). neoconf's built-in integration only hooks the legacy lspconfig framework, so `lsp.lua` wires it through a wildcard `vim.lsp.config("*", { before_init })` that calls `neoconf.plugins.lspconfig.on_new_config` directly (internal API, pcall-guarded; if it breaks after an update, the fallback is a small module that json-decodes `.vscode/settings.json` and deep-extends `config.settings` from the same hook).
+  - `.vscode/tasks.json` tasks run via overseer (`lua/plugins/overseer.lua`, `<leader>r` group).
+  - `.vscode/launch.json` is auto-loaded by nvim-dap on `dap.continue()`; `lua/plugins/dap.lua` aliases the VSCode adapter types `lldb` and `cppdbg` to codelldb (do not use the deprecated `load_launchjs`).
+- GitHub PR/issue review happens in-editor via octo.nvim (`lua/plugins/octo.lua`, `<leader>gp/gi/gr`; requires `gh auth login`).
 - Devcontainer development runs Neovim inside the container via `remote-nvim.nvim` + `devpod` (`lua/plugins/remote-nvim.lua`, see `docs/remote-nvim.md`); `lua/config/devcontainer_shell.lua` provides `:DevcontainerShell` for a quick shell inside the container.
 - `lua/config/editor.lua` is the shared navigation primitive: it opens targets in tabs and reuses an existing tab if that file is already open. LSP jumps, snacks.picker selections (via the custom `open_in_tab` confirm action in `lua/plugins/snacks.lua`), and the custom `gf` flow all rely on it.
 - `lua/config/viewer_commands.lua`, `lua/config/lsp_commands.lua`, and related `lua/config/*` modules define the custom user commands that glue plugins together into the editing workflow.

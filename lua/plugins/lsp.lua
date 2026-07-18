@@ -4,7 +4,7 @@ local uv = vim.uv
 return {
 	-- Mason core: install/manage LSP servers & tools
 	{
-		"williamboman/mason.nvim",
+		"mason-org/mason.nvim",
 		cond = function()
 			return not vim.g.vscode
 		end,
@@ -17,7 +17,7 @@ return {
 
 	-- Mason bridge for Neovim LSP
 	{
-		"williamboman/mason-lspconfig.nvim",
+		"mason-org/mason-lspconfig.nvim",
 		cond = function()
 			return not vim.g.vscode
 		end,
@@ -25,6 +25,7 @@ return {
 		dependencies = {
 			"saghen/blink.cmp", -- capabilities for blink.cmp
 			"b0o/SchemaStore.nvim",
+			"folke/neoconf.nvim", -- must set up before vim.lsp.enable()
 			-- NOTE: we no longer depend on "neovim/nvim-lspconfig" framework calls.
 			-- nvim-lspconfig is still useful because it ships the server configs in `lsp/`,
 			-- which Neovim 0.11+ auto-merges when you call vim.lsp.config().
@@ -105,9 +106,11 @@ return {
 			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
 
 			local ensure_servers = {
+				"asm_lsp",
 				"bashls",
 				"clangd",
 				"docker_language_server",
+				"gopls",
 				"jsonls",
 				"lemminx",
 				"lua_ls",
@@ -115,11 +118,18 @@ return {
 				"pyright",
 				"ruff",
 				"taplo",
+				"vtsls",
 				"yamlls",
 			}
 
 			if not has_cmake_language_server then
 				table.insert(ensure_servers, "cmake")
+			end
+
+			-- rust-analyzer: prefer the rustup component (matches the active
+			-- toolchain); fall back to a Mason install when absent
+			if vim.fn.executable("rust-analyzer") ~= 1 then
+				table.insert(ensure_servers, "rust_analyzer")
 			end
 
 			-- Ensure the servers exist; Mason will install them if missing
@@ -309,6 +319,20 @@ return {
 			-- nvim-lspconfig in its `lsp/` directory.
 			--------------------------------------------------------------------------
 
+			-- neoconf merges .vscode/settings.json (+ .neoconf.json) into LSP
+			-- settings. Its built-in integration hooks lspconfig.util.on_setup,
+			-- which never fires with the native vim.lsp.config/enable flow -- so
+			-- invoke its merge step ourselves right before each server initializes.
+			vim.lsp.config("*", {
+				before_init = function(_, config)
+					local ok, nc_lsp = pcall(require, "neoconf.plugins.lspconfig")
+					if ok and type(nc_lsp.on_new_config) == "function" then
+						-- 3rd arg (original_config) only provides .settings for backup
+						pcall(nc_lsp.on_new_config, config, config.root_dir, config)
+					end
+				end,
+			})
+
 			-- C/C++: clangd
 			vim.lsp.config("clangd", {
 				capabilities = capabilities,
@@ -396,6 +420,34 @@ return {
 				capabilities = capabilities,
 			})
 
+			-- Rust: rust-analyzer
+			vim.lsp.config("rust_analyzer", {
+				capabilities = capabilities,
+				settings = {
+					["rust-analyzer"] = {
+						check = { command = "clippy" },
+						cargo = { allFeatures = true },
+					},
+				},
+			})
+
+			-- TypeScript/JavaScript: vtsls
+			vim.lsp.config("vtsls", {
+				capabilities = capabilities,
+			})
+
+			-- Go: gopls
+			vim.lsp.config("gopls", {
+				capabilities = capabilities,
+				settings = {
+					gopls = {
+						gofumpt = true,
+						usePlaceholders = true,
+						analyses = { unusedparams = true },
+					},
+				},
+			})
+
 			vim.lsp.config("plantuml_lsp", {
 				capabilities = capabilities,
 				cmd = { "plantuml-lsp", "--exec-path=plantuml" },
@@ -418,13 +470,16 @@ return {
 				"bashls",
 				"clangd",
 				"cmake",
+				"gopls",
 				"jsonls",
 				"lemminx",
 				"lua_ls",
 				"marksman",
 				"pyright",
 				"ruff",
+				"rust_analyzer",
 				"taplo",
+				"vtsls",
 				"yamlls",
 			}
 			if plantuml_lsp_available then
@@ -440,35 +495,25 @@ return {
 			return not vim.g.vscode
 		end,
 		event = "VeryLazy",
-		dependencies = { "williamboman/mason.nvim" },
+		dependencies = { "mason-org/mason.nvim" },
 		config = function()
-			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
+			-- Non-LSP tools only; LSP servers are managed by mason-lspconfig's
+			-- ensure_installed in the spec above.
 			local ensure_tools = {
-				"asm-lsp",
-				"bashls",
 				"codelldb",
-				"clangd",
 				"clang-format",
 				"debugpy",
+				"delve",
+				"gofumpt",
+				"goimports",
 				"hadolint",
-				"jsonls",
 				"jq",
-				"lemminx",
-				"lua_ls",
-				"marksman",
 				"markdownlint-cli2",
-				"pyright",
-				"ruff",
+				"prettierd",
 				"shellcheck",
 				"shfmt",
 				"stylua",
-				"taplo",
-				"yamlls",
 			}
-
-			if not has_cmake_language_server then
-				table.insert(ensure_tools, "cmake")
-			end
 
 			require("mason-tool-installer").setup({
 				ensure_installed = ensure_tools,
