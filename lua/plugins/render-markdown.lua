@@ -7,7 +7,31 @@ return {
 	dependencies = { "nvim-treesitter/nvim-treesitter" },
 	opts = {},
 	config = function()
-		require("render-markdown").setup({ render_modes = true })
+		require("render-markdown").setup({
+			render_modes = true,
+			-- Couple the Obsidian-style reading view (centering + declutter) to
+			-- the render state: render on -> reading view on, render cleared
+			-- (e.g. `:MarkdownRender` toggle) -> back to the normal editor. The
+			-- controller is idempotent since `render` fires on every render.
+			on = {
+				render = function()
+					require("config.markdown_reading").enable()
+				end,
+				clear = function()
+					require("config.markdown_reading").disable()
+				end,
+			},
+			-- Drop the gutter icons render-markdown adds (Obsidian has none).
+			sign = { enabled = false },
+			-- Padded code blocks sized to their content, not the full window.
+			code = {
+				sign = false,
+				width = "block",
+				left_pad = 2,
+				right_pad = 2,
+				border = "thin",
+			},
+		})
 
 		-- render-markdown defaults lean dark; override the groups that read
 		-- worst on a light background and hand control back to its generated
