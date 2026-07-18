@@ -4,7 +4,7 @@ local uv = vim.uv
 return {
 	-- Mason core: install/manage LSP servers & tools
 	{
-		"williamboman/mason.nvim",
+		"mason-org/mason.nvim",
 		cond = function()
 			return not vim.g.vscode
 		end,
@@ -17,7 +17,7 @@ return {
 
 	-- Mason bridge for Neovim LSP
 	{
-		"williamboman/mason-lspconfig.nvim",
+		"mason-org/mason-lspconfig.nvim",
 		cond = function()
 			return not vim.g.vscode
 		end,
@@ -441,7 +441,7 @@ return {
 			return not vim.g.vscode
 		end,
 		event = "VeryLazy",
-		dependencies = { "williamboman/mason.nvim" },
+		dependencies = { "mason-org/mason.nvim" },
 		config = function()
 			-- Non-LSP tools only; LSP servers are managed by mason-lspconfig's
 			-- ensure_installed in the spec above.
