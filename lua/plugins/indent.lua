@@ -78,6 +78,9 @@ return {
 					"mason",
 					"notify",
 					"toggleterm",
+					-- Prose reads cleaner without indent guides (Obsidian-style).
+					"markdown",
+					"text",
 				},
 			},
 		})
