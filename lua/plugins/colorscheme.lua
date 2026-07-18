@@ -36,9 +36,21 @@ return {
 					return
 				end
 
+				-- In light mode, force a transparent background so the editor
+				-- inherits the terminal's own default background instead of
+				-- painting an explicit truecolor #FFFFFF. Some terminals render a
+				-- truecolor #FFFFFF fill with a faint warm ("cream") cast that does
+				-- not match the same terminal's native white default background;
+				-- clearing the fill makes the editor match the terminal exactly.
+				-- Dark mode keeps the per-host `transparent` setting.
+				local effective_transparent = transparent
+				if style == "light" then
+					effective_transparent = true
+				end
+
 				vscode.setup({
 					style = style,
-					transparent = transparent,
+					transparent = effective_transparent,
 					italic_comments = italic_comments,
 				})
 				vim.cmd("colorscheme vscode")
