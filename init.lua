@@ -123,12 +123,6 @@ vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter" }, {
 	command = "checktime",
 })
 
--- Auto-reload configuration on save
-vim.api.nvim_create_autocmd("BufWritePost", {
-	pattern = "init.lua",
-	command = "source $MYVIMRC",
-})
-
 -- Automatically remove trailing whitespace on save for all modifiable buffers
 vim.api.nvim_create_autocmd("BufWritePre", {
 	group = vim.api.nvim_create_augroup("trim_whitespace", { clear = true }),
@@ -201,6 +195,14 @@ end
 vim.keymap.set("n", "gf", open_file_under_cursor_in_tab, { desc = "Open file under cursor in new tab" })
 
 vim.keymap.set("n", "gF", open_file_under_cursor_in_tab, { desc = "Open file under cursor in new tab (same as gf)" })
+
+-- Neovim 0.11+ ships gr-prefixed LSP maps (grr/grn/gri/gra/grt). This config
+-- defines its own equivalents (gr, gi, <leader>rn, <leader>ca in lsp.lua);
+-- the built-ins only add a timeoutlen delay to `gr`. Remove them.
+for _, lhs in ipairs({ "grr", "grn", "gri", "grt" }) do
+	pcall(vim.keymap.del, "n", lhs)
+end
+pcall(vim.keymap.del, { "n", "x" }, "gra")
 
 -- Terminal Configuration ----------------------------------------------------
 
