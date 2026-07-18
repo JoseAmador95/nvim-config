@@ -32,6 +32,7 @@ return {
 			{ "<leader>n", group = "note" },
 			{ "<leader>o", group = "obsidian" },
 			{ "<leader>R", group = "remote" },
+			{ "<leader>r", group = "run/tasks" },
 			{ "<leader>s", group = "swap/split/spell" },
 			{ "<leader>x", group = "trouble" },
 		},
