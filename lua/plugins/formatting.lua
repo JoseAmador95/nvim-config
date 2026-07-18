@@ -37,6 +37,14 @@ return {
 				bash = { "shfmt" },
 				zsh = { "shfmt" },
 				toml = { "taplo" },
+				rust = { "rustfmt" }, -- ships with rustup, not Mason-managed
+				-- goimports handles import add/remove/sort; gofumpt then applies
+				-- strict formatting (matches the gofumpt=true gopls setting)
+				go = { "goimports", "gofumpt" },
+				javascript = { "prettierd", "prettier", stop_after_first = true },
+				typescript = { "prettierd", "prettier", stop_after_first = true },
+				javascriptreact = { "prettierd", "prettier", stop_after_first = true },
+				typescriptreact = { "prettierd", "prettier", stop_after_first = true },
 			},
 		},
 		config = function(_, opts)
