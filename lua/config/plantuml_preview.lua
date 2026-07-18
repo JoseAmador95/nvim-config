@@ -95,33 +95,48 @@ local function schedule_render(buf)
 	)
 end
 
-local function render_png(buf, png_path)
+-- One render per buffer at a time: the 1s debounce must not stack processes
+local rendering = {}
+
+-- Async: PlantUML/Java can take seconds; never block the UI thread.
+-- Calls on_done(ok) (optional) from the main loop when finished.
+local function render_png(buf, png_path, on_done)
+	local function done(ok)
+		if on_done then
+			on_done(ok)
+		end
+	end
+
 	if vim.fn.executable("plantuml") ~= 1 then
 		notify("plantuml not found in PATH", vim.log.levels.ERROR)
-		return false
+		return done(false)
 	end
-	if not vim.api.nvim_buf_is_valid(buf) then
-		return false
+	if not vim.api.nvim_buf_is_valid(buf) or rendering[buf] then
+		return done(false)
 	end
 
 	local input = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
 	if input == "" then
 		notify("Buffer is empty", vim.log.levels.WARN)
-		return false
+		return done(false)
 	end
 
-	local result = vim.system({ "plantuml", "-tpng", "-pipe" }, { text = false, stdin = input }):wait()
-	if result.code ~= 0 then
-		local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
-		if msg == "" then
-			msg = "plantuml failed"
-		end
-		notify(msg, vim.log.levels.ERROR)
-		return false
-	end
-
-	vim.fn.writefile({ result.stdout or "" }, png_path, "b")
-	return true
+	rendering[buf] = true
+	vim.system({ "plantuml", "-tpng", "-pipe" }, { text = false, stdin = input }, function(result)
+		vim.schedule(function()
+			rendering[buf] = nil
+			if result.code ~= 0 then
+				local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
+				if msg == "" then
+					msg = "plantuml failed"
+				end
+				notify(msg, vim.log.levels.ERROR)
+				return done(false)
+			end
+			vim.fn.writefile({ result.stdout or "" }, png_path, "b")
+			done(true)
+		end)
+	end)
 end
 
 local function setup_autocmds(buf)
@@ -179,11 +194,11 @@ function M.preview()
 	set_buf_var(buf, "plantuml_preview_html", html_path)
 	write_html(html_path, png_path)
 
-	if render_png(buf, png_path) then
-		if not open_in_browser(html_path) then
+	render_png(buf, png_path, function(ok)
+		if ok and not open_in_browser(html_path) then
 			notify("No opener found (open/xdg-open)", vim.log.levels.WARN)
 		end
-	end
+	end)
 
 	setup_autocmds(buf)
 end
