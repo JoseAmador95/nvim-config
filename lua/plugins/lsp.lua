@@ -105,6 +105,7 @@ return {
 			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
 
 			local ensure_servers = {
+				"asm_lsp",
 				"bashls",
 				"clangd",
 				"docker_language_server",
@@ -442,33 +443,19 @@ return {
 		event = "VeryLazy",
 		dependencies = { "williamboman/mason.nvim" },
 		config = function()
-			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
+			-- Non-LSP tools only; LSP servers are managed by mason-lspconfig's
+			-- ensure_installed in the spec above.
 			local ensure_tools = {
-				"asm-lsp",
-				"bashls",
 				"codelldb",
-				"clangd",
 				"clang-format",
 				"debugpy",
 				"hadolint",
-				"jsonls",
 				"jq",
-				"lemminx",
-				"lua_ls",
-				"marksman",
 				"markdownlint-cli2",
-				"pyright",
-				"ruff",
 				"shellcheck",
 				"shfmt",
 				"stylua",
-				"taplo",
-				"yamlls",
 			}
-
-			if not has_cmake_language_server then
-				table.insert(ensure_tools, "cmake")
-			end
 
 			require("mason-tool-installer").setup({
 				ensure_installed = ensure_tools,
