@@ -70,7 +70,7 @@ vim.keymap.set("n", "<leader>lh", "<cmd>ToggleLogHighlight<cr>", {
 	desc = "Toggle log highlight",
 })
 
-vim.keymap.set("n", "<leader>lw", "<cmd>ToggleLogWrap<cr>", {
+vim.keymap.set("n", "<leader>lw", "<cmd>ToggleWrap<cr>", {
 	noremap = true,
 	silent = true,
 	desc = "Toggle log wrap",
