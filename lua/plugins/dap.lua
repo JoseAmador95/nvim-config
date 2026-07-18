@@ -52,6 +52,7 @@ return {
 		"nvim-neotest/nvim-nio",
 		"rcarriga/nvim-dap-ui",
 		"mfussenegger/nvim-dap-python",
+		"leoluz/nvim-dap-go",
 	},
 	config = function()
 		local dap = require("dap")
@@ -59,8 +60,22 @@ return {
 
 		dapui.setup()
 
+		-- Open/close the UI with the session (the VSCode-familiar behavior)
+		dap.listeners.after.event_initialized["dapui_config"] = function()
+			dapui.open()
+		end
+		dap.listeners.before.event_terminated["dapui_config"] = function()
+			dapui.close()
+		end
+		dap.listeners.before.event_exited["dapui_config"] = function()
+			dapui.close()
+		end
+
 		-- Python debugging
 		require("dap-python").setup("python")
+
+		-- Go debugging (delve from Mason; also handles launch.json type "go")
+		require("dap-go").setup()
 
 		-- C/C++ debugging with codelldb from Mason
 		local mason_bin = vim.fn.stdpath("data") .. "/mason/bin/"
@@ -95,6 +110,7 @@ return {
 				},
 			}
 			dap.configurations.c = dap.configurations.cpp
+			dap.configurations.rust = dap.configurations.cpp
 		else
 			vim.notify("codelldb not found. Install with :MasonInstall codelldb", vim.log.levels.WARN)
 		end
