@@ -30,8 +30,10 @@ return {
 		snippets = { preset = "default" },
 
 		completion = {
-			-- Preselect the first item so <CR> confirms it (old select = true).
-			list = { selection = { preselect = true, auto_insert = false } },
+			-- Same behavior as cmdline below: show the menu with nothing selected
+			-- so a stray <CR> just inserts a newline; the first <Tab> selects (and
+			-- previews via auto_insert) the first item.
+			list = { selection = { preselect = false, auto_insert = true } },
 			documentation = { auto_show = true },
 		},
 
