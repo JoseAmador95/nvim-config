@@ -80,14 +80,15 @@ local function picker_action(action)
 	end
 end
 
-local function gitsigns_action(action)
+local function gitsigns_action(action, ...)
+	local args = { ... }
 	return function()
 		local ok, gs = pcall(require, "gitsigns")
 		if not ok or type(gs[action]) ~= "function" then
 			notify("Gitsigns action not available", vim.log.levels.WARN)
 			return
 		end
-		gs[action]()
+		gs[action](unpack(args))
 	end
 end
 
@@ -291,16 +292,16 @@ end
 local function git_items()
 	return {
 		{ name = "Preview Hunk", cmd = gitsigns_action("preview_hunk") },
-		{ name = "Stage Hunk", cmd = gitsigns_action("stage_hunk") },
-		{ name = "Undo Stage Hunk", cmd = gitsigns_action("undo_stage_hunk") },
+		-- gitsigns 1.0: stage_hunk toggles (unstages a staged hunk)
+		{ name = "Stage/Unstage Hunk", cmd = gitsigns_action("stage_hunk") },
 		{ name = "Reset Hunk", cmd = gitsigns_action("reset_hunk") },
 		{ name = "Stage Buffer", cmd = gitsigns_action("stage_buffer") },
 		{ name = "Reset Buffer", cmd = gitsigns_action("reset_buffer") },
 		{ name = "Diff This", cmd = gitsigns_action("diffthis") },
 		{ name = "Toggle Deleted", cmd = gitsigns_action("toggle_deleted") },
 		{ name = "Toggle Line Blame", cmd = gitsigns_action("toggle_current_line_blame") },
-		{ name = "Next Hunk", cmd = gitsigns_action("next_hunk"), rtxt = "]c" },
-		{ name = "Prev Hunk", cmd = gitsigns_action("prev_hunk"), rtxt = "[c" },
+		{ name = "Next Hunk", cmd = gitsigns_action("nav_hunk", "next"), rtxt = "]h" },
+		{ name = "Prev Hunk", cmd = gitsigns_action("nav_hunk", "prev"), rtxt = "[h" },
 		{
 			name = "Neogit Status",
 			cmd = function()
