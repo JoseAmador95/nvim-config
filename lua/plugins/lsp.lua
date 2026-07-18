@@ -110,6 +110,7 @@ return {
 				"bashls",
 				"clangd",
 				"docker_language_server",
+				"gopls",
 				"jsonls",
 				"lemminx",
 				"lua_ls",
@@ -117,11 +118,18 @@ return {
 				"pyright",
 				"ruff",
 				"taplo",
+				"vtsls",
 				"yamlls",
 			}
 
 			if not has_cmake_language_server then
 				table.insert(ensure_servers, "cmake")
+			end
+
+			-- rust-analyzer: prefer the rustup component (matches the active
+			-- toolchain); fall back to a Mason install when absent
+			if vim.fn.executable("rust-analyzer") ~= 1 then
+				table.insert(ensure_servers, "rust_analyzer")
 			end
 
 			-- Ensure the servers exist; Mason will install them if missing
@@ -412,6 +420,34 @@ return {
 				capabilities = capabilities,
 			})
 
+			-- Rust: rust-analyzer
+			vim.lsp.config("rust_analyzer", {
+				capabilities = capabilities,
+				settings = {
+					["rust-analyzer"] = {
+						check = { command = "clippy" },
+						cargo = { allFeatures = true },
+					},
+				},
+			})
+
+			-- TypeScript/JavaScript: vtsls
+			vim.lsp.config("vtsls", {
+				capabilities = capabilities,
+			})
+
+			-- Go: gopls
+			vim.lsp.config("gopls", {
+				capabilities = capabilities,
+				settings = {
+					gopls = {
+						gofumpt = true,
+						usePlaceholders = true,
+						analyses = { unusedparams = true },
+					},
+				},
+			})
+
 			vim.lsp.config("plantuml_lsp", {
 				capabilities = capabilities,
 				cmd = { "plantuml-lsp", "--exec-path=plantuml" },
@@ -434,13 +470,16 @@ return {
 				"bashls",
 				"clangd",
 				"cmake",
+				"gopls",
 				"jsonls",
 				"lemminx",
 				"lua_ls",
 				"marksman",
 				"pyright",
 				"ruff",
+				"rust_analyzer",
 				"taplo",
+				"vtsls",
 				"yamlls",
 			}
 			if plantuml_lsp_available then
@@ -464,9 +503,13 @@ return {
 				"codelldb",
 				"clang-format",
 				"debugpy",
+				"delve",
+				"gofumpt",
+				"goimports",
 				"hadolint",
 				"jq",
 				"markdownlint-cli2",
+				"prettierd",
 				"shellcheck",
 				"shfmt",
 				"stylua",
