@@ -25,6 +25,7 @@ return {
 		dependencies = {
 			"saghen/blink.cmp", -- capabilities for blink.cmp
 			"b0o/SchemaStore.nvim",
+			"folke/neoconf.nvim", -- must set up before vim.lsp.enable()
 			-- NOTE: we no longer depend on "neovim/nvim-lspconfig" framework calls.
 			-- nvim-lspconfig is still useful because it ships the server configs in `lsp/`,
 			-- which Neovim 0.11+ auto-merges when you call vim.lsp.config().
@@ -309,6 +310,20 @@ return {
 			-- Neovim 0.11+ will merge these with the canonical configs shipped by
 			-- nvim-lspconfig in its `lsp/` directory.
 			--------------------------------------------------------------------------
+
+			-- neoconf merges .vscode/settings.json (+ .neoconf.json) into LSP
+			-- settings. Its built-in integration hooks lspconfig.util.on_setup,
+			-- which never fires with the native vim.lsp.config/enable flow -- so
+			-- invoke its merge step ourselves right before each server initializes.
+			vim.lsp.config("*", {
+				before_init = function(_, config)
+					local ok, nc_lsp = pcall(require, "neoconf.plugins.lspconfig")
+					if ok and type(nc_lsp.on_new_config) == "function" then
+						-- 3rd arg (original_config) only provides .settings for backup
+						pcall(nc_lsp.on_new_config, config, config.root_dir, config)
+					end
+				end,
+			})
 
 			-- C/C++: clangd
 			vim.lsp.config("clangd", {
