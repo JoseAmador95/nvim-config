@@ -67,16 +67,25 @@ return {
 		local codelldb_path = mason_bin .. "codelldb"
 
 		if vim.fn.executable(codelldb_path) == 1 then
-			dap.adapters.cppdbg = {
-				type = "executable",
-				command = codelldb_path,
-				name = "cppdbg",
+			-- codelldb speaks DAP over a TCP port, not stdio
+			dap.adapters.codelldb = {
+				type = "server",
+				port = "${port}",
+				executable = {
+					command = codelldb_path,
+					args = { "--port", "${port}" },
+				},
 			}
+			-- launch.json interop: the VSCode CodeLLDB extension uses type
+			-- "lldb", cpptools uses "cppdbg"; route both to codelldb
+			-- (cpptools-only keys like MIMode/setupCommands are ignored)
+			dap.adapters.lldb = dap.adapters.codelldb
+			dap.adapters.cppdbg = dap.adapters.codelldb
 
 			dap.configurations.cpp = {
 				{
 					name = "Launch file",
-					type = "cppdbg",
+					type = "codelldb",
 					request = "launch",
 					program = function()
 						return vim.fn.input("Path to executable: ", vim.fn.getcwd() .. "/", "file")
