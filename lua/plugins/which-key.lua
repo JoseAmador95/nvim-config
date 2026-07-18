@@ -33,7 +33,6 @@ return {
 			{ "<leader>o", group = "obsidian" },
 			{ "<leader>R", group = "remote" },
 			{ "<leader>s", group = "swap/split/spell" },
-			{ "<leader>t", group = "terminal" },
 			{ "<leader>x", group = "trouble" },
 		},
 	},
