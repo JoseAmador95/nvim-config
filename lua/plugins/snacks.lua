@@ -36,9 +36,39 @@ return {
 			end,
 			desc = "Undo tree",
 		},
+		{
+			"<leader>z",
+			function()
+				Snacks.zen()
+			end,
+			desc = "Zen: 80-col reading column",
+		},
 	},
+	config = function(_, opts)
+		require("snacks").setup(opts)
+		require("config.markdown_zen").setup()
+	end,
 	---@type snacks.Config
 	opts = {
+		zen = {
+			-- Obsidian-style readable line length; auto-opened for markdown by
+			-- config.markdown_zen, manual toggle on <leader>z.
+			toggles = { dim = false },
+			win = {
+				width = 84, -- ~80 chars of text plus a little breathing room
+				wo = {
+					wrap = true,
+					linebreak = true,
+					breakindent = true,
+					breakindentopt = "list:-1",
+					number = false,
+					relativenumber = false,
+					signcolumn = "no",
+					foldcolumn = "0",
+					colorcolumn = "",
+				},
+			},
+		},
 		image = {
 			-- Enable the image machinery (Kitty graphics protocol; Ghostty). The
 			-- diagram viewer (config.diagram) drives image rendering itself via the
