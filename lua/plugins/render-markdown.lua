@@ -7,33 +7,7 @@ return {
 	dependencies = { "nvim-treesitter/nvim-treesitter" },
 	opts = {},
 	config = function()
-		require("render-markdown").setup({
-			render_modes = true,
-			anti_conceal = {
-				-- Keep the cursor line rendered in normal/visual mode; only
-				-- reveal the raw markdown while actually editing (insert).
-				disabled_modes = { "n", "v", "V", "\22" },
-			},
-			win_options = {
-				-- Same story for Neovim's native conceal (asterisks, #'s,
-				-- link brackets): without this the cursor line un-conceals
-				-- in every mode, which drowns out the anti_conceal setting.
-				concealcursor = { rendered = "nvc" },
-			},
-			heading = {
-				-- Frame headings with virtual lines above/below: vertical
-				-- breathing room without touching the file.
-				border = true,
-				border_virtual = true,
-			},
-			code = {
-				-- Padding inside code blocks so code doesn't sit flush
-				-- against the background edge.
-				left_pad = 2,
-				right_pad = 2,
-				language_pad = 2,
-			},
-		})
+		require("render-markdown").setup({ render_modes = true })
 
 		-- render-markdown defaults lean dark; override the groups that read
 		-- worst on a light background and hand control back to its generated
