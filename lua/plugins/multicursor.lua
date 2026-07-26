@@ -91,6 +91,10 @@ return {
 					end,
 				})
 			end, { desc = "Create selection using flash" })
+
+			-- Poner un cursor en cada ocurrencia de la palabra/selección y editarlas
+			-- a la vez (equivalente modal a Ctrl+Shift+L de VSCode).
+			k({ "n", "x" }, "mM", mc.matchAllAddCursors, { desc = "Cursor en cada ocurrencia (editar todas)" })
 		end,
 	},
 }
