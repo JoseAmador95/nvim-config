@@ -58,8 +58,14 @@ return {
 		auto_create = true,
 		auto_restore_last_session = false,
 		show_auto_restore_notif = false,
-		bypass_save_filetypes = { "oil" },
+		bypass_save_filetypes = { "oil", "snacks_dashboard" },
 		auto_delete_empty_sessions = true,
+		-- Use snacks for the session picker (`:AutoSession search`). Auto-detection
+		-- would otherwise pick Telescope (kept only as a dependency); pin snacks to
+		-- match the rest of the config.
+		session_lens = {
+			picker = "snacks",
+		},
 		pre_save_cmds = {
 			function()
 				if state.force_clear or should_skip_session_save() then
