@@ -48,6 +48,63 @@ return {
 			enabled = true,
 			doc = { enabled = false },
 		},
+		-- Start screen shown only on `nvim` with no args in a directory without a
+		-- saved session (auto-session's auto_restore takes over in known projects).
+		-- Curated as an actionable launcher, not decoration: recent projects/files
+		-- plus a few high-value actions that reuse existing commands/keymaps.
+		dashboard = {
+			enabled = true,
+			sections = {
+				{ section = "header" },
+				{ section = "keys", gap = 1, padding = 1 },
+				{ icon = " ", title = "Projects", section = "projects", padding = 1 },
+				{ icon = " ", title = "Recent", section = "recent_files", padding = 1 },
+				{ section = "startup" },
+			},
+			preset = {
+				keys = {
+					{
+						icon = " ",
+						key = "f",
+						desc = "Find file",
+						action = function()
+							Snacks.picker.files()
+						end,
+					},
+					{
+						icon = " ",
+						key = "g",
+						desc = "Grep",
+						action = function()
+							Snacks.picker.grep()
+						end,
+					},
+					{ icon = " ", key = "s", desc = "Restore session", action = ":AutoSession search" },
+					{
+						icon = " ",
+						key = "c",
+						desc = "Config",
+						action = function()
+							Snacks.picker.files({ cwd = vim.fn.stdpath("config") })
+						end,
+					},
+					{
+						icon = "󰊢",
+						key = "l",
+						desc = "Lazygit",
+						-- Reuse the existing lazygit flow (<leader>gl -> toggle_lazygit
+						-- in lua/plugins/lazygit.lua) instead of reimplementing it.
+						action = function()
+							vim.schedule(function()
+								local keys = vim.api.nvim_replace_termcodes("<leader>gl", true, false, true)
+								vim.api.nvim_feedkeys(keys, "m", false)
+							end)
+						end,
+					},
+					{ icon = " ", key = "q", desc = "Quit", action = ":qa" },
+				},
+			},
+		},
 		picker = {
 			actions = {
 				-- Open the selection in a tab, reusing an existing one if the file
