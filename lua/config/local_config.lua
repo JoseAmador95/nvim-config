@@ -27,6 +27,11 @@
 --     path = { "~/bin" },          -- dirs prepended to $PATH
 --     env = { FOO = "bar" },       -- environment variables to export
 --     plugins_dir = { "~/.nvim-plugins" }, -- dirs of extra lazy.nvim specs
+--     agent_review = {           -- <leader>v agent-review workflow
+--       clipboard = true,        -- also copy the generated prompt to the + register
+--       include_diff = false,    -- embed each hunk's diff in the prompt
+--       ignore = {},             -- Lua patterns; matching paths produce no findings
+--     },
 --   }
 --
 -- Override the host path with $NVIM_CONFIG_FILE (for testing).
@@ -82,6 +87,14 @@ local SCHEMA = {
 		type = "list",
 		default = {},
 		item = { type = "string" },
+	},
+	agent_review = {
+		type = "table",
+		fields = {
+			clipboard = { type = "boolean", default = true },
+			include_diff = { type = "boolean", default = false },
+			ignore = { type = "list", default = {}, item = { type = "string" } },
+		},
 	},
 }
 
@@ -411,6 +424,16 @@ return {
   -- Each *.lua file returns a spec or list of specs; loaded via a trust prompt.
   plugins_dir = {
     -- "~/.nvim-plugins",
+  },
+
+  -- Agent review workflow (<leader>v): snapshot, review, prompt.
+  agent_review = {
+    clipboard = true, -- also copy the generated prompt to the + register
+    include_diff = false, -- embed each hunk's diff in the prompt
+    -- Lua patterns matched against repo-relative paths; matches produce no findings.
+    ignore = {
+      -- "^vendor/",
+    },
   },
 }
 ]]
