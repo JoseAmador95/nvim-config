@@ -161,9 +161,15 @@ function M.build_rows(base)
 		return nil, "not inside a git repository"
 	end
 	state.load(root)
-	base = base or state.base() or git.latest()
 	if not base or base == "" then
-		return nil, "no agent-review snapshot yet"
+		-- Same shared resolver the hunk walker uses: this screen is what the
+		-- human opens FIRST, so silently ranking a week-old snapshot here is
+		-- worse than anywhere else in the feature.
+		local berr
+		base, berr = git.resolve_base(state.base())
+		if not base then
+			return nil, berr or "no agent-review snapshot yet"
+		end
 	end
 
 	local files, err = git.changed_files(base)

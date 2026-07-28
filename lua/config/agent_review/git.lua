@@ -290,6 +290,40 @@ function M.snapshot(opts)
 	return ref, nil
 end
 
+-- Warn at most once per adopted ref, so the message lands when it matters
+-- without turning every BufEnter into a toast.
+local warned_adopted = nil
+
+--- Resolve the base ref for a round: the recorded one, else the newest snapshot.
+---
+--- Adopting a snapshot nobody armed is the one way to review against a stale
+--- baseline and never notice, so it warns. It deliberately does NOT persist the
+--- adopted ref: persisting made `:AgentReviewReset` undo itself on the next
+--- buffer switch, and made `:checkhealth` arm a round as a side effect.
+---@param recorded string|nil the base already recorded for this round
+---@return string|nil base, string|nil err, boolean adopted
+function M.resolve_base(recorded)
+	if recorded and recorded ~= "" then
+		return recorded, nil, false
+	end
+	local latest = M.latest()
+	if not latest then
+		return nil, "no agent-review snapshot yet: take one first (<leader>vs)", false
+	end
+	if warned_adopted ~= latest then
+		warned_adopted = latest
+		local stamp = latest:match("(%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d)$")
+		notify(
+			("No round was armed; showing the newest snapshot %s%s. Run <leader>vs to start a fresh round."):format(
+				latest,
+				stamp and (" (taken " .. stamp .. ")") or ""
+			),
+			vim.log.levels.WARN
+		)
+	end
+	return latest, nil, true
+end
+
 --- The most recent refs/agent-review/* ref, or nil when there is none.
 ---@return string|nil
 function M.latest()
@@ -590,7 +624,12 @@ function M.hunks(base, file)
 	local function flush()
 		if cur then
 			cur.class = classify(cur.lines, ws_only)
-			cur.id = vim.fn.sha256(table.concat(cur.lines, "\n"))
+			-- The path is part of the identity, the position is not. Hashing the
+			-- body alone made an agent's repeated edit -- the same import or the
+			-- same logger line added to eight files -- collapse into one id, so
+			-- reviewing one marked all eight reviewed. Line numbers stay out so a
+			-- hunk that merely shifts keeps its verdict.
+			cur.id = vim.fn.sha256(cur.file .. "\n" .. table.concat(cur.lines, "\n"))
 			hunks[#hunks + 1] = cur
 			cur = nil
 		end
