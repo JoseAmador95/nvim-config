@@ -42,7 +42,8 @@ return {
 			base_branches = { "main", "master", "develop" },
 			layout = {
 				-- The explorer is a file list; the diff is what you actually read.
-				explorer_width = 0.2,
+				-- It stays legible this narrow because of the wrap below.
+				explorer_width = 0.15,
 			},
 		},
 		config = function(_, opts)
@@ -81,6 +82,35 @@ return {
 				callback = apply_overrides,
 			})
 			apply_overrides()
+
+			-- The plugin sizes the explorer once, when it builds the layout, and
+			-- never marks it fixed. So `e` opening its export in a plain
+			-- `botright vsplit` -- a window the layout does not manage -- and
+			-- then being closed leaves Vim to redistribute the width equally,
+			-- and the file tree jumps to half the screen. winfixwidth keeps the
+			-- configured share no matter what windows come and go around it.
+			--
+			-- wrap is what makes a 15% column usable: without it a long path is
+			-- simply cut off, and breakindent keeps the continuation lines
+			-- aligned under the tree so the shape still reads.
+			-- Deferred and applied per window rather than via plain `vim.wo`:
+			-- the plugin sets the filetype while the buffer is still not in its
+			-- window, so at FileType time the current window is the wrong one.
+			vim.api.nvim_create_autocmd("FileType", {
+				group = vim.api.nvim_create_augroup("HunkReviewExplorerWin", { clear = true }),
+				pattern = "hunkreviewexplorer",
+				callback = function(ev)
+					vim.schedule(function()
+						for _, win in ipairs(vim.fn.win_findbuf(ev.buf)) do
+							if vim.api.nvim_win_is_valid(win) then
+								vim.wo[win].winfixwidth = true
+								vim.wo[win].wrap = true
+								vim.wo[win].breakindent = true
+							end
+						end
+					end)
+				end,
+			})
 		end,
 	},
 }
