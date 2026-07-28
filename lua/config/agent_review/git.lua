@@ -209,7 +209,12 @@ local function worktree_tree(root, index_name)
 	if not head then
 		return nil, err
 	end
-	local index = cache_dir() .. "/" .. index_name
+	-- Per-process index name. A fixed one is shared by every Neovim on the
+	-- machine, so two instances open on the same repo raced for its index.lock
+	-- and one of them failed with "Unable to create ... .lock: File exists" --
+	-- routine for this workflow, where the editor sits in one pane and the agent
+	-- in another. state.lua already pid-suffixes its temp file; this matches it.
+	local index = ("%s/%s.%d"):format(cache_dir(), index_name, vim.uv.os_getpid())
 	vim.fn.delete(index)
 	local env = { GIT_INDEX_FILE = index }
 

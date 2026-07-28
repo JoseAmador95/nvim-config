@@ -17,12 +17,28 @@
 -- after `LspAttach` and the first `textDocument/publishDiagnostics`, so there is
 -- no honest synchronous shape for it. It is driven by the `DiagnosticChanged`
 -- autocmd with a bounded overall timeout, never by blocking the UI in
--- `vim.wait`. Two escape hatches keep it snappy:
+-- `vim.wait`. Three escape hatches keep it snappy:
 --   * a buffer that has gained no LSP client by the end of a short attach grace
 --     can never produce diagnostics, so it settles right away (a repo/filetype
 --     with no server configured therefore costs the grace, not the timeout);
+--   * a buffer whose clients were already attached before the pass started has
+--     had its answer delivered -- an EMPTY publish counts -- so it settles at
+--     once instead of waiting for a `DiagnosticChanged` that already happened.
+--     Without this the all-clean run is the slowest one, which is backwards;
 --   * buffers loaded solely to be inspected are wiped afterwards; buffers the
---     user already had open are left completely alone.
+--     user already had open are left completely alone. "Loaded solely to be
+--     inspected" is re-decided at wipe time, seconds after the load: jumping
+--     into a changed file from the quickfix list and typing in it is the
+--     expected workflow, and no unsaved edit is ever thrown away for it.
+--
+-- Runs are independent: each gets its own augroup, so pressing the key twice
+-- inside the timeout does not make the second run tear down the first one's
+-- listeners.
+--
+-- Nothing is capped silently. The LSP pass is bounded (`MAX_LSP_FILES`, and the
+-- overall timeout), and whatever those bounds cut is counted and handed back to
+-- the caller in the third callback argument -- `M.describe_stats` turns it into
+-- a sentence. A partial pass must never read like a clean bill of health.
 --
 -- Findings feed the prompt renderer and the quickfix list. Nothing throws:
 -- `M.run` calls back `nil, err`.
@@ -35,6 +51,13 @@
 ---@field kind     "check"
 ---@field source   "lsp"|"stub"|"deletion"
 ---@field severity integer|nil   -- vim.diagnostic.severity, for quickfix typing
+
+---What the pass did NOT cover. Handed to the caller so a truncated run can be
+---reported as truncated; see `M.describe_stats`.
+---@class ARCheckStats
+---@field lsp_files_checked integer -- files actually handed to the LSP pass
+---@field lsp_files_skipped integer -- changed files dropped by MAX_LSP_FILES
+---@field lsp_files_pending integer -- files still without an answer at the timeout
 
 local M = {}
 
@@ -181,14 +204,63 @@ end
 
 -- Check 3: silent deletions -----------------------------------------------
 
+---Everything the diff ADDS anywhere in one file: the trimmed lines as a set,
+---plus the raw text for pattern matching.
+---
+---This is the unit the deletion check has to reason in. The diffs are taken
+---with `-U0`, so moving a block a few lines down splits it into a removal hunk
+---and a separate addition hunk; comparing removals against the additions of the
+---SAME hunk therefore sees a pure deletion and reports "error handling removed"
+---for code that is still right there. Relocating code is one of the most common
+---things an agent does while "simplifying", and a false positive costs exactly
+---the attention this module exists to save.
+---@param hunks ARHunk[]
+local function added_index(hunks)
+	local set, text = {}, {}
+	for _, hunk in ipairs(hunks) do
+		for _, line in ipairs(hunk.lines or {}) do
+			if line:sub(1, 1) == "+" then
+				local body = line:sub(2)
+				text[#text + 1] = body
+				local trimmed = vim.trim(body)
+				if trimmed ~= "" then
+					set[trimmed] = true
+				end
+			end
+		end
+	end
+	return { set = set, text = table.concat(text, "\n") }
+end
+
+---Did every non-blank line removed here reappear elsewhere in the same file?
+---Then the block moved; that is not a deletion. Compared trimmed, because a
+---relocation usually reindents.
+local function is_relocation(removed, added)
+	local body_lines = 0
+	for _, line in ipairs(removed) do
+		local trimmed = vim.trim(line)
+		if trimmed ~= "" then
+			body_lines = body_lines + 1
+			if not added.set[trimmed] then
+				return false
+			end
+		end
+	end
+	return body_lines > 0
+end
+
 ---@param hunk ARHunk
 ---@param out ARFinding[]
-local function scan_deletions(hunk, out)
+---@param added_all table additions across the whole file, from `added_index`
+local function scan_deletions(hunk, out, added_all)
 	if hunk.class ~= "logic" then
 		return
 	end
 	local added, removed = split_hunk(hunk)
 	if #removed == 0 then
+		return
+	end
+	if is_relocation(removed, added_all) then
 		return
 	end
 
@@ -198,10 +270,11 @@ local function scan_deletions(hunk, out)
 	end
 
 	local removed_text = table.concat(removed, "\n")
-	local added_text = table.concat(added, "\n")
 	local lost = {}
 	for _, entry in ipairs(ERROR_HANDLING) do
-		if removed_text:match(entry.pattern) and not added_text:match(entry.pattern) then
+		-- Matched against the whole file's additions, not this hunk's: the
+		-- replacement for what vanished here is frequently in another hunk.
+		if removed_text:match(entry.pattern) and not added_all.text:match(entry.pattern) then
 			lost[#lost + 1] = entry.name
 		end
 	end
@@ -243,9 +316,10 @@ local function static_checks(base, files)
 			if not hunks then
 				errs[#errs + 1] = ("%s: %s"):format(f.path, err or "unknown error")
 			else
+				local added_all = added_index(hunks)
 				for _, hunk in ipairs(hunks) do
 					scan_stubs(hunk, out)
-					scan_deletions(hunk, out)
+					scan_deletions(hunk, out, added_all)
 				end
 			end
 		end
@@ -293,37 +367,100 @@ local function collect_diagnostics(entry, out)
 	end
 end
 
+---Is this buffer still nothing but our own scratch load?
+---
+---Sampled at WIPE time, not at open time: up to `LSP_TIMEOUT_MS` passes in
+---between, and jumping to a changed file from the quickfix list and typing in
+---it is the expected workflow, not an edge case. A buffer the user has adopted
+---(visible in a window on any tabpage, modified, or now listed) is left alone;
+---the delete is non-forced as a second line of defence, so unsaved work cannot
+---be discarded even if this check is ever wrong.
+local function is_disposable(buf)
+	if not vim.api.nvim_buf_is_valid(buf) then
+		return false
+	end
+	local ok, disposable = pcall(function()
+		-- win_findbuf, not bufwinid: the window may be on another tabpage, and
+		-- this config navigates by tabs.
+		return #vim.fn.win_findbuf(buf) == 0 and not vim.bo[buf].modified and not vim.bo[buf].buflisted
+	end)
+	return ok and disposable
+end
+
+---Have the clients attached to this buffer already answered for it? Only true
+---for a buffer that was already loaded when the pass started: its
+---publishDiagnostics arrived before we subscribed, and an EMPTY publish is an
+---answer too. Waiting for a `DiagnosticChanged` that already fired is what made
+---the all-clean run the slowest one.
+local function clients_responded(entry)
+	if not entry.preloaded then
+		return false
+	end
+	local ok, clients = pcall(vim.lsp.get_clients, { bufnr = entry.buf })
+	if not ok or #clients == 0 then
+		return false
+	end
+	for _, client in ipairs(clients) do
+		for _, request in pairs(client.requests or {}) do
+			if request.type == "pending" and request.bufnr == entry.buf then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+-- Every run gets its own augroup. A fixed name returns the SAME id for a second
+-- run and clears it, so two passes inside the timeout would tear down each
+-- other's listeners and both report too few findings.
+local run_seq = 0
+
+---@return ARCheckStats
+local function empty_stats()
+	return { lsp_files_checked = 0, lsp_files_skipped = 0, lsp_files_pending = 0 }
+end
+
 ---Load every candidate file, wait (asynchronously, bounded) for diagnostics,
 ---then hand back findings. `cb` is always called exactly once.
 ---@param root string
 ---@param files ARChangedFile[]
----@param cb fun(findings: ARFinding[])
+---@param cb fun(findings: ARFinding[], stats: ARCheckStats)
 local function lsp_checks(root, files, cb)
 	local entries = {}
+	local stats = empty_stats()
 	for _, f in ipairs(files) do
-		if (f.status == "A" or f.status == "M") and not f.generated and #entries < MAX_LSP_FILES then
+		if (f.status == "A" or f.status == "M") and not f.generated then
 			local abs = root .. "/" .. f.path
 			if vim.fn.filereadable(abs) == 1 then
-				local existed = vim.fn.bufexists(abs) == 1
-				local buf = vim.fn.bufadd(abs)
-				local ok = pcall(vim.fn.bufload, buf)
-				if ok and vim.api.nvim_buf_is_valid(buf) then
-					entries[#entries + 1] = { buf = buf, path = f.path, temp = not existed }
-				elseif not existed and vim.api.nvim_buf_is_valid(buf) then
-					pcall(vim.api.nvim_buf_delete, buf, { force = true })
+				if #entries >= MAX_LSP_FILES then
+					-- The cap stays -- 40 language servers' worth of loading is
+					-- already a lot -- but it is counted and reported.
+					stats.lsp_files_skipped = stats.lsp_files_skipped + 1
+				else
+					local existed = vim.fn.bufexists(abs) == 1
+					local buf = vim.fn.bufadd(abs)
+					local preloaded = vim.api.nvim_buf_is_loaded(buf)
+					local ok = pcall(vim.fn.bufload, buf)
+					if ok and vim.api.nvim_buf_is_valid(buf) then
+						entries[#entries + 1] = { buf = buf, path = f.path, temp = not existed, preloaded = preloaded }
+					elseif not existed and vim.api.nvim_buf_is_valid(buf) then
+						pcall(vim.api.nvim_buf_delete, buf, { force = true })
+					end
 				end
 			end
 		end
 	end
+	stats.lsp_files_checked = #entries
 
 	if #entries == 0 then
 		vim.schedule(function()
-			cb({})
+			cb({}, stats)
 		end)
 		return
 	end
 
-	local group = vim.api.nvim_create_augroup("AgentReviewChecks", { clear = true })
+	run_seq = run_seq + 1
+	local group = vim.api.nvim_create_augroup(("AgentReviewChecks%d"):format(run_seq), { clear = true })
 	local pending, by_buf = {}, {}
 	local n_pending = 0
 	local done = false
@@ -362,6 +499,8 @@ local function lsp_checks(root, files, cb)
 		end
 		done = true
 		pcall(vim.api.nvim_del_augroup_by_id, group)
+		-- Whatever never answered is exactly what this pass did not check.
+		stats.lsp_files_pending = math.max(n_pending, 0)
 
 		local out = {}
 		for _, entry in ipairs(entries) do
@@ -369,13 +508,15 @@ local function lsp_checks(root, files, cb)
 				collect_diagnostics(entry, out)
 			end
 		end
-		-- Clean up only what we created; a buffer the user already had stays.
+		-- Clean up only what we created AND the user has not adopted since; a
+		-- buffer the user already had stays, and so does one they opened or
+		-- edited while the pass was running.
 		for _, entry in ipairs(entries) do
-			if entry.temp and vim.api.nvim_buf_is_valid(entry.buf) then
-				pcall(vim.api.nvim_buf_delete, entry.buf, { force = true })
+			if entry.temp and is_disposable(entry.buf) then
+				pcall(vim.api.nvim_buf_delete, entry.buf, { force = false })
 			end
 		end
-		cb(out)
+		cb(out, stats)
 	end
 
 	vim.api.nvim_create_autocmd("DiagnosticChanged", {
@@ -398,9 +539,10 @@ local function lsp_checks(root, files, cb)
 		end,
 	})
 
-	-- Buffers that already carry diagnostics (the user had them open) are done.
+	-- Buffers whose answer is already in (the user had them open) are done --
+	-- whether that answer was a list of diagnostics or an empty one.
 	for _, entry in ipairs(entries) do
-		if #vim.diagnostic.get(entry.buf) > 0 then
+		if #vim.diagnostic.get(entry.buf) > 0 or clients_responded(entry) then
 			settle(entry.buf)
 		end
 	end
@@ -425,11 +567,39 @@ end
 
 -- Public API --------------------------------------------------------------
 
+---Turn `ARCheckStats` into a sentence, or nil when the pass was complete.
+---Exported so every caller can append it to its own summary: a pass that
+---skipped files must not be reported as if it had seen everything.
+---@param stats ARCheckStats|nil
+---@return string|nil
+function M.describe_stats(stats)
+	if type(stats) ~= "table" then
+		return nil
+	end
+	local parts = {}
+	if (stats.lsp_files_skipped or 0) > 0 then
+		parts[#parts + 1] = ("%d file(s) past the %d-file LSP cap were not diagnosed"):format(
+			stats.lsp_files_skipped,
+			MAX_LSP_FILES
+		)
+	end
+	if (stats.lsp_files_pending or 0) > 0 then
+		parts[#parts + 1] = ("%d file(s) had not answered after %ds"):format(
+			stats.lsp_files_pending,
+			math.floor(LSP_TIMEOUT_MS / 1000)
+		)
+	end
+	if #parts == 0 then
+		return nil
+	end
+	return "partial pass: " .. table.concat(parts, "; ")
+end
+
 ---Run the whole machine pass against a snapshot ref.
 ---Asynchronous by necessity (LSP diagnostics); `cb` is called exactly once with
----either the findings or `nil, err`.
+---either the findings (plus what the pass could not cover) or `nil, err`.
 ---@param base string|nil snapshot ref; defaults to the most recent one
----@param cb fun(findings: ARFinding[]|nil, err: string|nil)
+---@param cb fun(findings: ARFinding[]|nil, err: string|nil, stats: ARCheckStats|nil)
 function M.run(base, cb)
 	if type(cb) ~= "function" then
 		git.notify("checks.run() needs a callback", vim.log.levels.ERROR)
@@ -464,7 +634,7 @@ function M.run(base, cb)
 	end
 	if #files == 0 then
 		vim.schedule(function()
-			cb({}, nil)
+			cb({}, nil, empty_stats())
 		end)
 		return
 	end
@@ -474,9 +644,9 @@ function M.run(base, cb)
 		git.notify("Some hunks could not be read: " .. static_err, vim.log.levels.WARN)
 	end
 
-	lsp_checks(root, files, function(lsp_findings)
+	lsp_checks(root, files, function(lsp_findings, stats)
 		vim.list_extend(findings, lsp_findings)
-		cb(sort_findings(findings), nil)
+		cb(sort_findings(findings), nil, stats)
 	end)
 end
 
@@ -526,17 +696,21 @@ function M.setup()
 	end
 
 	vim.api.nvim_create_user_command("AgentReviewCheck", function()
-		M.run(nil, function(findings, err)
+		M.run(nil, function(findings, err, stats)
 			if not findings then
 				git.notify("Checks failed: " .. (err or "unknown error"), vim.log.levels.ERROR)
 				return
 			end
+			-- "found nothing" is only true if everything was actually looked at.
+			local partial = M.describe_stats(stats)
+			local suffix = partial and (" — " .. partial) or ""
+			local level = partial and vim.log.levels.WARN or vim.log.levels.INFO
 			if #findings == 0 then
-				git.notify("Automated checks found nothing")
+				git.notify("Automated checks found nothing" .. suffix, level)
 				return
 			end
 			M.to_quickfix(findings)
-			git.notify(("Automated checks: %d findings (%s)"):format(#findings, summarize(findings)))
+			git.notify(("Automated checks: %d findings (%s)%s"):format(#findings, summarize(findings), suffix), level)
 		end)
 	end, {
 		desc = "Run automated checks over the agent's changes and fill the quickfix list",
