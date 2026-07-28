@@ -96,9 +96,11 @@ return {
 			-- Deferred and applied per window rather than via plain `vim.wo`:
 			-- the plugin sets the filetype while the buffer is still not in its
 			-- window, so at FileType time the current window is the wrong one.
-			vim.api.nvim_create_autocmd("FileType", {
-				group = vim.api.nvim_create_augroup("HunkReviewExplorerWin", { clear = true }),
-				pattern = "hunkreviewexplorer",
+			local group = vim.api.nvim_create_augroup("HunkReviewPanes", { clear = true })
+
+			vim.api.nvim_create_autocmd({ "FileType", "BufWinEnter" }, {
+				group = group,
+				pattern = { "hunkreviewexplorer", "hunk-review://explorer" },
 				callback = function(ev)
 					vim.schedule(function()
 						for _, win in ipairs(vim.fn.win_findbuf(ev.buf)) do
@@ -109,6 +111,21 @@ return {
 							end
 						end
 					end)
+				end,
+			})
+
+			-- `<leader>?` cannot reach these panes: the review buffer maps
+			-- `<Space>` itself, with nowait, so leader fires instantly and the
+			-- `?` falls through to search. A buffer-local `?` is what panels
+			-- like this conventionally use for help anyway, and searching
+			-- backwards in a read-only diff is no great loss.
+			vim.api.nvim_create_autocmd("FileType", {
+				group = group,
+				pattern = { "hunkreviewexplorer", "hunkreview" },
+				callback = function(ev)
+					vim.keymap.set("n", "?", function()
+						require("which-key").show({ global = false })
+					end, { buffer = ev.buf, nowait = true, desc = "Show this pane's keymaps" })
 				end,
 			})
 		end,
