@@ -40,6 +40,47 @@ return {
 		},
 		opts = {
 			base_branches = { "main", "master", "develop" },
+			layout = {
+				-- The explorer is a file list; the diff is what you actually read.
+				explorer_width = 0.2,
+			},
 		},
+		config = function(_, opts)
+			require("hunk-review").setup(opts)
+
+			-- The plugin hardcodes near-black backgrounds for the diff
+			-- (#1a1a1a / #1a2e1a / #2e1a1a) and paints them over the whole
+			-- line, so a light theme's dark text lands on an almost-black
+			-- background. It sets them with `default = true`, so ours win.
+			--
+			-- Linking to DiffAdd/DiffDelete is not enough here: vscode.nvim
+			-- ships the *same* dark diff colours for both backgrounds
+			-- (DiffDelete is #6f1313 either way), so light mode would still be
+			-- dark red under dark text. Hence explicit light values and links
+			-- only when dark -- the same trade-off render-markdown.lua makes,
+			-- and its palette, so the two look like one system.
+			--
+			-- The plugin also defines these once at load with no ColorScheme
+			-- autocmd, so a theme change wipes them and nothing restores them.
+			-- Re-applying below fixes that too.
+			local function apply_overrides()
+				local set = vim.api.nvim_set_hl
+				if vim.o.background == "light" then
+					set(0, "HunkReviewAddBg", { bg = "#dceadb" })
+					set(0, "HunkReviewDeleteBg", { bg = "#f0dcdc" })
+					set(0, "HunkReviewDiffBg", { bg = "#e8e8e8" })
+				else
+					set(0, "HunkReviewAddBg", { link = "DiffAdd" })
+					set(0, "HunkReviewDeleteBg", { link = "DiffDelete" })
+					set(0, "HunkReviewDiffBg", { link = "NormalFloat" })
+				end
+			end
+
+			vim.api.nvim_create_autocmd("ColorScheme", {
+				group = vim.api.nvim_create_augroup("HunkReviewBgFollow", { clear = true }),
+				callback = apply_overrides,
+			})
+			apply_overrides()
+		end,
 	},
 }
