@@ -325,8 +325,17 @@ function M.snapshot()
 				-- Still diffing against the OLD base here, so this drops verdicts
 				-- whose hunk vanished from the round that is ending, and keeps the
 				-- ones that carry over by content hash.
-				local hunks = review.all_hunks()
-				local removed = hunks and state.prune(hunks) or 0
+				-- all_hunks() returns hunks AND err together on partial failure, so a
+				-- single file whose diff failed leaves its live hunks out of the list.
+				-- Pruning against that list would delete the verdicts recorded on that
+				-- file and persist it -- irreversibly, while reporting it as routine
+				-- housekeeping. Pruning is a nicety; losing a review is not. When the
+				-- list cannot be trusted, keep everything and say why.
+				local hunks, herr = review.all_hunks()
+				local removed = 0
+				if hunks and not herr then
+					removed = state.prune(hunks)
+				end
 				-- Counted after the prune: `reviewed` only ever counted the verdicts
 				-- with a live hunk, so subtracting the orphans from it would lie.
 				local kept = hunks and select(1, state.progress(hunks)) or verdicts.reviewed
@@ -336,6 +345,15 @@ function M.snapshot()
 						removed > 0 and (", %d orphaned one(s) dropped"):format(removed) or ""
 					)
 				)
+				if herr then
+					notify(
+						"Kept every verdict: the diff failed for some files, so orphans could not be told "
+							.. "apart from live ones ("
+							.. herr
+							.. ")",
+						vim.log.levels.WARN
+					)
+				end
 			end
 
 			local ok, serr = state.set_base(ref)
