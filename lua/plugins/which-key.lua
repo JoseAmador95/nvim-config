@@ -34,6 +34,7 @@ return {
 			{ "<leader>R", group = "remote" },
 			{ "<leader>r", group = "run/tasks" },
 			{ "<leader>s", group = "swap/split/spell" },
+			{ "<leader>v", group = "review" },
 			{ "<leader>x", group = "trouble" },
 		},
 	},
