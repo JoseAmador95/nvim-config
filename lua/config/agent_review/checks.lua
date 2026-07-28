@@ -39,6 +39,7 @@
 local M = {}
 
 local git = require("config.agent_review.git")
+local state = require("config.agent_review.state")
 
 -- Tunables ----------------------------------------------------------------
 
@@ -435,10 +436,19 @@ function M.run(base, cb)
 		return
 	end
 
-	base = base or git.latest()
 	if not base or base == "" then
-		cb(nil, "no snapshot to check against")
-		return
+		-- Shared resolver, so the machine pass cannot quietly check against a
+		-- different baseline than the one the human is reviewing.
+		local root = git.root()
+		if root then
+			state.load(root)
+		end
+		local berr
+		base, berr = git.resolve_base(root and state.base() or nil)
+		if not base then
+			cb(nil, berr or "no snapshot to check against")
+			return
+		end
 	end
 
 	local root = git.root()
