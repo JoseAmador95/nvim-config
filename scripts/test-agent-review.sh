@@ -792,6 +792,106 @@ LUA
 
 run_nvim "$FIX_D" async "$TMPROOT/scripts/group_d.lua" 3
 
+# =========================================================================
+# Group E -- pruning must never run against a partial hunk list
+# =========================================================================
+#
+# Arming a round prunes verdicts whose hunk has vanished. all_hunks() returns
+# hunks AND err together when one file's diff fails, so pruning against that
+# list deletes the verdicts of a file that is merely unreadable -- irreversibly,
+# and reported as routine housekeeping. This is the regression guard.
+
+echo "# group E: prune safety"
+
+FIX_E="$TMPROOT/fixture-e"
+mkdir -p "$FIX_E" "$TMPROOT/shim"
+REAL_GIT="$(command -v git)"
+
+# A git that fails `diff -U0` for one file, but only once AR_BREAK is set, so
+# the first snapshot is taken with a healthy git.
+cat >"$TMPROOT/shim/git" <<SHIM
+#!/bin/sh
+if [ -n "\$AR_BREAK" ]; then
+	case " \$* " in *" -U0 "*breaks.lua*)
+		echo "fatal: simulated diff failure" >&2
+		exit 128
+		;;
+	esac
+fi
+exec "$REAL_GIT" "\$@"
+SHIM
+chmod +x "$TMPROOT/shim/git"
+
+(
+	cd "$FIX_E"
+	git init -q -b main .
+	printf 'local a = 1\n' >keep.lua
+	printf 'local b = 1\n' >breaks.lua
+	git add -A
+	git commit -qm base
+)
+
+{
+	lua_prelude
+	cat <<'LUA'
+local review = require("config.agent_review.review")
+local state = require("config.agent_review.state")
+local agent = require("config.agent_review")
+
+-- Always take the first offered choice: "Write them" / "Keep them".
+vim.ui.select = function(items, _, cb)
+	cb(items[1])
+end
+
+-- Notifications here print without a trailing newline and would glue themselves
+-- onto the next PASS line, which the harness then fails to count.
+vim.notify = function() end
+
+local root = vim.fn.getcwd()
+
+agent.snapshot()
+vim.defer_fn(function()
+	if not state.base() then
+		T.ok("round 1 armed", false, "no base was recorded")
+		T.quit()
+		return
+	end
+
+	-- The agent edits both files.
+	vim.fn.writefile({ "local a = 2" }, root .. "/keep.lua")
+	vim.fn.writefile({ "local b = 2" }, root .. "/breaks.lua")
+
+	local hunks = review.all_hunks() or {}
+	local ids = {}
+	for _, h in ipairs(hunks) do
+		state.set_verdict(h.id, "reject", "review " .. h.file)
+		ids[#ids + 1] = h.id
+	end
+	T.ok("round 1 recorded a verdict on both changed files", #ids == 2, ("%d hunk(s)"):format(#ids))
+
+	-- From here on one file's diff fails, and we arm a new round: the prune runs.
+	vim.env.AR_BREAK = "1"
+	agent.snapshot()
+	vim.defer_fn(function()
+		local alive = 0
+		for _, id in ipairs(ids) do
+			if state.get_verdict(id) then
+				alive = alive + 1
+			end
+		end
+		T.ok(
+			"a file whose diff failed does not lose its verdicts to the prune",
+			alive == #ids,
+			("%d of %d verdict(s) survived"):format(alive, #ids)
+		)
+		T.quit()
+	end, 2000)
+end, 2000)
+LUA
+} >"$TMPROOT/scripts/group_e.lua"
+
+run_nvim "$FIX_E" async "$TMPROOT/scripts/group_e.lua" 2 "PATH=$TMPROOT/shim:$PATH"
+
 # --- summary --------------------------------------------------------------
 
 echo

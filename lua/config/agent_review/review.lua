@@ -127,9 +127,13 @@ end
 --- (risk-ranked): the traversal order of ]v / [v.
 --- A file whose hunks cannot be read is collected and reported (the pattern
 --- checks.lua already uses) instead of being counted as unchanged: `err` is then
---- non-nil ALONGSIDE the hunks that could be read, so a caller that only checks
---- `hunks` still works and one that cares (health) can tell the difference
---- between "nothing to review" and "could not look".
+--- non-nil ALONGSIDE the hunks that could be read, so a caller can tell
+--- "nothing to review" apart from "could not look".
+---
+--- CHECK `err`. The returned list is INCOMPLETE whenever it is set, and treating
+--- a partial list as the whole round is destructive: prune() deleted the
+--- verdicts of a file whose diff had merely failed. Only a caller that is
+--- read-only, or that reports the gap, may ignore it.
 ---@param files? ARChangedFile[] already-computed change list, to skip the diff
 ---@return ARHunk[]|nil hunks, string|nil err
 function M.all_hunks(files)
