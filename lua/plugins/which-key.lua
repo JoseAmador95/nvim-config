@@ -8,6 +8,18 @@ return {
 		vim.o.timeout = true
 		vim.o.timeoutlen = 300
 	end,
+	keys = {
+		-- Plugins with rich buffer-local maps (hunk-review's review pane, oil,
+		-- octo...) never surface in which-key, which only pops up after a
+		-- prefix. This lists whatever the buffer you are standing in defines.
+		{
+			"<leader>?",
+			function()
+				require("which-key").show({ global = false })
+			end,
+			desc = "Buffer-local keymaps",
+		},
+	},
 	opts = {
 		preset = "helix",
 		delay = 500,
