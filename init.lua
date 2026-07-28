@@ -238,6 +238,9 @@ require("config.pager").setup()
 -- Unified diagram viewer (:DiagramShow / <leader>md) for mermaid + PlantUML.
 require("config.diagram").setup()
 
+-- Agent-review workflow (<leader>v...): snapshot, review hunk by hunk, prompt.
+require("config.agent_review").setup()
+
 if vim.g.vscode then
 	require("editor.vscode")
 else

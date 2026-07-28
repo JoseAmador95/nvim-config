@@ -329,6 +329,38 @@ local function git_items()
 	}
 end
 
+-- config.agent_review is optional (it is skipped in VS Code and in the pager),
+-- so resolve it per invocation like the plugin-backed actions above.
+local function agent_review_action(action)
+	return function()
+		local ok, ar = pcall(require, "config.agent_review")
+		if not ok then
+			notify("Agent review not available", vim.log.levels.WARN)
+			return
+		end
+		if type(ar[action]) ~= "function" then
+			notify("Agent review action not available: " .. action, vim.log.levels.WARN)
+			return
+		end
+		ar[action]()
+	end
+end
+
+local function agent_review_items()
+	return {
+		{ name = "Dashboard", cmd = agent_review_action("dashboard"), rtxt = "<leader>vv" },
+		{ name = "Snapshot (arm review)", cmd = agent_review_action("snapshot"), rtxt = "<leader>vs" },
+		{ name = "Next Unreviewed Hunk", cmd = agent_review_action("next_hunk"), rtxt = "]v" },
+		{ name = "Prev Unreviewed Hunk", cmd = agent_review_action("prev_hunk"), rtxt = "[v" },
+		{ name = "Accept Hunk", cmd = agent_review_action("accept"), rtxt = "<leader>va" },
+		{ name = "Reject Hunk (mark only)", cmd = agent_review_action("reject"), rtxt = "<leader>vx" },
+		{ name = "Comment on Hunk", cmd = agent_review_action("comment"), rtxt = "<leader>vc" },
+		{ name = "Machine Pass (checks)", cmd = agent_review_action("machine_pass"), rtxt = "<leader>vf" },
+		{ name = "Build Prompt", cmd = agent_review_action("build_prompt"), rtxt = "<leader>vy" },
+		{ name = "Reset Review", cmd = agent_review_action("reset") },
+	}
+end
+
 local function format_items()
 	return {
 		{ name = "Format Buffer", cmd = format_buffer },
@@ -702,6 +734,9 @@ local function build_items()
 
 	-- Git
 	table.insert(sections, { name = "Git", items = git_items() })
+
+	-- Agent review
+	table.insert(sections, { name = "Agent review", items = agent_review_items() })
 
 	-- Tests
 	table.insert(sections, { name = "Tests", items = test_items() })
