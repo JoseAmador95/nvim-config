@@ -18,21 +18,29 @@
 --     `:Gitsigns change_base <ref>` accept it as a revision;
 --   * being a ref, it survives the agent committing mid-run.
 --
--- Two traps this module exists to avoid (both verified):
+-- Three traps this module exists to avoid (all verified):
 --   1. `git diff <ref>` silently omits untracked files the agent created. So the
 --      change list never uses `git diff <ref>`: a second "now" tree is built the
 --      same throwaway-index way and the two *trees* are diffed.
 --   2. `git diff -w --name-only` does NOT filter whitespace-only files -- it
 --      still lists them. Whitespace-only is therefore decided per file, by
 --      testing that `git diff -w <base_tree> <now_tree> -- <path>` is empty.
+--   3. A binary file has no line counts (--numstat prints "-") and no @@ hunks
+--      at all, so the naive reading is "+0/-0, nothing to review". A swapped
+--      2 MB asset or a checked-in .so is exactly what a human must decide on,
+--      so binaries are flagged and get a synthetic hunk of their own.
 --
--- Nothing throws: every entry point returns `nil, err` on failure.
+-- Nothing throws: every entry point returns `nil, err` on failure, and a failed
+-- per-file probe is reported instead of being folded into a plausible-looking
+-- default (a file quietly losing risk score because git errored is the ranking
+-- lying to the reviewer).
 
 ---@class ARChangedFile
 ---@field path            string   -- relative to repo root, forward slashes
 ---@field status          "A"|"M"|"D"
----@field added           integer
----@field removed         integer
+---@field added           integer  -- 0 for binaries: git reports no line counts
+---@field removed         integer  -- idem
+---@field binary          boolean  -- git reported "-" line counts: no textual diff
 ---@field whitespace_only boolean
 ---@field generated       boolean
 ---@field score           number
@@ -43,7 +51,7 @@
 ---@field old_count integer
 ---@field new_start integer
 ---@field new_count integer
----@field class     "whitespace"|"imports"|"comments"|"logic"
+---@field class     "whitespace"|"imports"|"comments"|"logic"|"binary"
 ---@field id        string    -- stable content hash of the hunk body
 ---@field lines     string[]  -- raw diff body lines, keeping their +/-/space prefix
 
@@ -117,6 +125,17 @@ local function git(root, args, env)
 	return res.stdout or "", nil
 end
 
+-- Same as git(), with `--literal-pathspecs` in front of the subcommand. Used by
+-- every call that passes a user path after `--`: a literal match is tried before
+-- fnmatch, so `app/[slug]/page.tsx` already worked, but this also stops a
+-- glob-matching sibling from being pulled in alongside it and turns a leading
+-- `:` into a plain path instead of "Invalid pathspec magic".
+local function git_path(root, args)
+	local full = { "--literal-pathspecs" }
+	vim.list_extend(full, args)
+	return git(root, full)
+end
+
 local function lines_of(s)
 	local out = {}
 	for line in (s or ""):gmatch("([^\n]*)\n?") do
@@ -142,27 +161,32 @@ local function norm(path)
 	return (path:gsub("\\", "/"))
 end
 
---- Repository root for the current directory, or nil when not in a git repo.
----@return string|nil
+--- Repository root for the current directory.
+--- The error matters: git ≥ 2.35 answers `detected dubious ownership in
+--- repository at '...'` (exit 128) for a repo owned by another uid -- routine in
+--- containers and devcontainers -- and that message names its own fix
+--- (`git config --global --add safe.directory <path>`). Collapsing it into a
+--- bare nil made the whole feature insist you were not in a repository.
+---@return string|nil root, string|nil err
 function M.root()
 	if vim.fn.executable("git") ~= 1 then
-		return nil
+		return nil, "git executable not found"
 	end
-	local out = git(vim.fn.getcwd(), { "rev-parse", "--show-toplevel" })
+	local out, err = git(vim.fn.getcwd(), { "rev-parse", "--show-toplevel" })
 	if not out then
-		return nil
+		return nil, err
 	end
 	local top = vim.trim(out)
 	if top == "" then
-		return nil
+		return nil, "git rev-parse --show-toplevel returned nothing"
 	end
-	return norm(top)
+	return norm(top), nil
 end
 
 local function require_root()
-	local root = M.root()
+	local root, err = M.root()
 	if not root then
-		return nil, "not inside a git repository"
+		return nil, err or "not inside a git repository"
 	end
 	return root, nil
 end
@@ -325,15 +349,18 @@ function M.resolve_base(recorded)
 end
 
 --- The most recent refs/agent-review/* ref, or nil when there is none.
----@return string|nil
+--- Second return value is the git error, when there was one: "no snapshot yet"
+--- and "git refused to look" are not the same answer.
+---@return string|nil ref, string|nil err
 function M.latest()
-	local root = M.root()
+	local root, err = M.root()
 	if not root then
-		return nil
+		return nil, err
 	end
-	local out = git(root, { "for-each-ref", "--format=%(creatordate:unix)\t%(refname)", REF_PREFIX })
+	local out
+	out, err = git(root, { "for-each-ref", "--format=%(creatordate:unix)\t%(refname)", REF_PREFIX })
 	if not out then
-		return nil
+		return nil, "for-each-ref failed: " .. err
 	end
 	local best, best_at
 	for _, line in ipairs(lines_of(out)) do
@@ -345,7 +372,7 @@ function M.latest()
 			end
 		end
 	end
-	return best
+	return best, nil
 end
 
 local function matches_any(s, patterns)
@@ -376,16 +403,23 @@ end
 
 -- `git diff -w` is empty <=> every change in the file is whitespace-only.
 -- (`git diff -w --name-only` would still list the file, hence the per-file test.)
+-- Returns ok, nil or false, err: a git failure must not read as "there is a real
+-- change here" or "this is only whitespace" -- the caller has to say so.
 local function whitespace_only(root, base_tree, new_tree, path)
-	local out = git(root, { "diff", "-w", base_tree, new_tree, "--", path })
-	return out ~= nil and vim.trim(out) == ""
+	local out, err = git_path(root, { "diff", "-w", base_tree, new_tree, "--", path })
+	if not out then
+		return false, err
+	end
+	return vim.trim(out) == "", nil
 end
 
 -- The added ("+") lines of a file's diff, without their prefix.
+-- Returns lines, nil or nil, err: returning {} on failure made the sensitive
+-- content scan find nothing and the file silently drop its +3 risk score.
 local function added_lines(root, base_tree, new_tree, path)
-	local out = git(root, { "diff", "-U0", base_tree, new_tree, "--", path })
+	local out, err = git_path(root, { "diff", "-U0", base_tree, new_tree, "--", path })
 	if not out then
-		return {}
+		return nil, err
 	end
 	local added = {}
 	for _, line in ipairs(lines_of(out)) do
@@ -393,7 +427,7 @@ local function added_lines(root, base_tree, new_tree, path)
 			added[#added + 1] = line:sub(2)
 		end
 	end
-	return added
+	return added, nil
 end
 
 local function score_of(f, sensitive)
@@ -408,6 +442,12 @@ local function score_of(f, sensitive)
 		score = score + math.floor(net / 50)
 	end
 	if sensitive then
+		score = score + 3
+	end
+	-- A binary change carries no line counts, so churn scores it at 0 and it
+	-- would sink to the bottom of the ranking as if nothing had happened. It is
+	-- the opposite: nobody can read it, so a human has to decide on it.
+	if f.binary then
 		score = score + 3
 	end
 	if f.whitespace_only then
@@ -470,6 +510,7 @@ function M.changed_files(base)
 			status = s,
 			added = 0,
 			removed = 0,
+			binary = false,
 			whitespace_only = false,
 			generated = is_generated(path),
 			score = 0,
@@ -488,18 +529,35 @@ function M.changed_files(base)
 		local a, r, path = record:match("^(%S+)\t(%S+)\t(.*)$")
 		local f = path and index[norm(path)]
 		if f then
-			f.added = tonumber(a) or 0 -- "-" for binary files
+			-- "-\t-\t<path>" is how --numstat says "binary": there are no line
+			-- counts to report. tonumber("-") is nil, and the old fallback to 0
+			-- made a swapped 2 MB PNG read as "+0/-0", i.e. as nothing at all.
+			f.binary = a == "-" or r == "-"
+			f.added = tonumber(a) or 0
 			f.removed = tonumber(r) or 0
 		end
 	end
 
+	local probe_errs = {}
 	for _, f in ipairs(files) do
-		f.whitespace_only = whitespace_only(root, base_tree, new_tree, f.path)
+		-- A binary file has no textual diff: `git diff -w` prints "Binary files
+		-- ... differ", which is neither whitespace-only nor scannable content.
+		if not f.binary then
+			local ws, wserr = whitespace_only(root, base_tree, new_tree, f.path)
+			if wserr then
+				probe_errs[#probe_errs + 1] = f.path .. ": " .. wserr
+			end
+			f.whitespace_only = ws
+		end
 		local sensitive = is_sensitive(f.path)
-		if not sensitive and not f.generated then
+		if not sensitive and not f.generated and not f.binary then
 			-- Scanning a lockfile's body for "token"/"auth" is noise, so generated
 			-- files are skipped here; they are dropped by -5 anyway.
-			for _, line in ipairs(added_lines(root, base_tree, new_tree, f.path)) do
+			local added, aerr = added_lines(root, base_tree, new_tree, f.path)
+			if not added then
+				probe_errs[#probe_errs + 1] = f.path .. ": " .. tostring(aerr)
+			end
+			for _, line in ipairs(added or {}) do
 				if is_sensitive(line) then
 					sensitive = true
 					break
@@ -507,6 +565,17 @@ function M.changed_files(base)
 			end
 		end
 		f.score = score_of(f, sensitive)
+	end
+	-- One toast, not one per file: the ranking is now partly guesswork and the
+	-- human has to know which files it could not read.
+	if #probe_errs > 0 then
+		notify(
+			("Risk scoring is incomplete, git failed on %d probe(s): %s"):format(
+				#probe_errs,
+				table.concat(probe_errs, "; ")
+			),
+			vim.log.levels.WARN
+		)
 	end
 
 	table.sort(files, function(a, b)
@@ -614,11 +683,14 @@ function M.hunks(base, file)
 
 	file = norm(file)
 	local out
-	out, err = git(root, { "diff", "-U0", base_tree, new_tree, "--", file })
+	out, err = git_path(root, { "diff", "-U0", base_tree, new_tree, "--", file })
 	if not out then
 		return nil, "diff -U0 failed: " .. err
 	end
-	local ws_only = whitespace_only(root, base_tree, new_tree, file)
+	local ws_only, wserr = whitespace_only(root, base_tree, new_tree, file)
+	if wserr then
+		notify(("Could not test %s for whitespace-only changes: %s"):format(file, wserr), vim.log.levels.WARN)
+	end
 
 	local hunks, cur = {}, nil
 	local function flush()
@@ -635,6 +707,9 @@ function M.hunks(base, file)
 		end
 	end
 
+	-- Binary files produce no @@ header at all, only "Binary files a/x and b/x
+	-- differ" under an `index <old>..<new>` line.
+	local binary_body = nil
 	for _, line in ipairs(lines_of(out)) do
 		-- Counts are omitted when they are 1: "@@ -1 +2 @@" is legal.
 		local os_, oc, ns, nc = line:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
@@ -657,9 +732,39 @@ function M.hunks(base, file)
 			elseif line == "" then
 				cur.lines[#cur.lines + 1] = " "
 			end
+		elseif line:match("^Binary files ") or line == "GIT binary patch" then
+			binary_body = binary_body or {}
+			binary_body[#binary_body + 1] = line
+		elseif line:match("^index ") then
+			-- Kept only if the file turns out to be binary: the blob shas are the
+			-- only thing that changes when the content does, so they carry the
+			-- identity that a textual body would carry elsewhere.
+			binary_body = binary_body or {}
+			binary_body[#binary_body + 1] = line
 		end
 	end
 	flush()
+
+	-- Without this, a replaced binary yields zero hunks, counts as fully
+	-- reviewed, and the round happily announces "No unreviewed hunks left" over
+	-- a 2 MB asset nobody looked at. One synthetic hunk stands for the whole
+	-- file so it joins the ]v queue and needs an explicit verdict; hashing the
+	-- index line means a second replacement invalidates the first verdict.
+	if #hunks == 0 and binary_body then
+		local body = { "Binary file: no textual diff, review the file itself" }
+		vim.list_extend(body, binary_body)
+		hunks[1] = {
+			file = file,
+			old_start = 1,
+			old_count = 1,
+			new_start = 1,
+			new_count = 1,
+			class = "binary",
+			lines = body,
+			id = vim.fn.sha256(file .. "\n" .. table.concat(body, "\n")),
+		}
+	end
+
 	return hunks, nil
 end
 
