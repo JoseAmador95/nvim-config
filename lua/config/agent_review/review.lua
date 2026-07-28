@@ -73,6 +73,17 @@ function M.context()
 		if not base then
 			return nil, NO_SNAPSHOT
 		end
+		-- Adopting a snapshot nobody armed this round is the one way to end up
+		-- reviewing against a stale baseline and never notice, so say it out
+		-- loud. A leftover ref from days ago looks exactly like a fresh one.
+		local stamp = base:match("(%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d)$")
+		notify(
+			("No round was armed; adopting the newest snapshot %s%s. Run <leader>vs to start a fresh round."):format(
+				base,
+				stamp and (" (taken " .. stamp .. ")") or ""
+			),
+			vim.log.levels.WARN
+		)
 		state.set_base(base)
 	end
 	return { root = root, base = base }, nil

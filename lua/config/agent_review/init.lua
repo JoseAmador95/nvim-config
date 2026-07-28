@@ -384,8 +384,8 @@ function M.setup()
 	if vim.g.vscode or require("config.pager").active then
 		return
 	end
-	-- setup() is reachable both from init.lua and from the lazy spec; the maps
-	-- and commands below must be installed exactly once.
+	-- Guard against a double require: the maps and commands below must be
+	-- installed exactly once.
 	if did_setup then
 		return
 	end
@@ -408,6 +408,13 @@ function M.setup()
 	vim.api.nvim_create_user_command("AgentReviewReset", function()
 		M.reset()
 	end, { desc = "Agent review: clear every verdict and the base ref" })
+
+	-- prompt.setup() above registered an :AgentReviewPrompt that only re-renders
+	-- the last finding set. Override it so the command and <leader>vy do the same
+	-- thing: an asymmetry here reads as "no findings" on a round that has plenty.
+	vim.api.nvim_create_user_command("AgentReviewPrompt", function()
+		M.build_prompt()
+	end, { desc = "Agent review: build the prompt for the agent" })
 
 	local maps = {
 		{ "<leader>vs", M.snapshot, "Agent review: snapshot (arm the review)" },
