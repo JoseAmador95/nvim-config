@@ -12,9 +12,11 @@
 --
 -- `present` ALWAYS opens the buffer first and only then tries the clipboard, so
 -- the prompt is on screen even when the clipboard is unconfigured (ssh, no
--- provider). OSC52 gives no acknowledgement, so a copy can never be reported as
--- confirmed — the notification names the active provider instead and points at
--- the buffer for a manual yank.
+-- provider). Opening the window is itself guarded so a failure of either half
+-- cannot cost both. OSC52 gives no acknowledgement, so a copy can never be
+-- reported as confirmed -- the notification names the active provider instead
+-- and points at the buffer for a manual yank; with no provider at all it says
+-- exactly that, because "written to +" would be a plain lie over bare ssh.
 local M = {}
 
 local function notify(msg, level)
@@ -34,6 +36,11 @@ local KIND_TEXT = {
 	comment = "comentario",
 	check = "revisar",
 }
+
+-- Placeholder for a finding that carries no path: `string.format("%s", nil)`
+-- throws under plain Lua 5.1 (where `render` is exercised) and an empty "## "
+-- heading tells the agent nothing anyway.
+local UNKNOWN_FILE = "(archivo desconocido)"
 
 -- Collapse any run of whitespace/newlines into a single space, then trim.
 local function one_line(s)
@@ -60,13 +67,46 @@ local function bullet_text(finding)
 	return KIND_TEXT[finding.kind] or "revisar"
 end
 
-local function location(finding)
-	local lnum = finding.lnum or 1
-	local last = finding.end_lnum
-	if type(last) == "number" and last > lnum then
-		return string.format("%s:%d-%d", finding.file, lnum, last)
+-- The one place a finding's path is normalised: grouping and the bullet's
+-- location must agree, otherwise a heading and its bullets name different files.
+local function file_of(finding)
+	local file = finding.file
+	if type(file) ~= "string" or file == "" then
+		return UNKNOWN_FILE
 	end
-	return string.format("%s:%d", finding.file, lnum)
+	return file
+end
+
+-- Line 1 is the floor: `path:0` (or a negative) is not a location a human or an
+-- agent can open, and findings arrive from several producers.
+local function lnum_of(value)
+	local lnum = tonumber(value)
+	if not lnum or lnum < 1 then
+		return 1
+	end
+	return math.floor(lnum)
+end
+
+local function location(finding)
+	local lnum = lnum_of(finding.lnum)
+	local last = tonumber(finding.end_lnum)
+	if last and math.floor(last) > lnum then
+		return string.format("%s:%d-%d", file_of(finding), lnum, math.floor(last))
+	end
+	return string.format("%s:%d", file_of(finding), lnum)
+end
+
+-- `opts.header = ""` (or `false`) means "no header", which the older
+-- `x ~= nil and x or default` idiom could never express: it fell back to the
+-- default for every falsy value.
+local function section(value, default)
+	if value == nil then
+		return default
+	end
+	if type(value) ~= "string" then
+		return ""
+	end
+	return value
 end
 
 ---Render findings as a markdown prompt. Pure.
@@ -79,13 +119,13 @@ function M.render(findings, opts)
 	end
 	opts = opts or {}
 
-	local header = opts.header ~= nil and opts.header or DEFAULT_HEADER
-	local footer = opts.footer ~= nil and opts.footer or DEFAULT_FOOTER
+	local header = section(opts.header, DEFAULT_HEADER)
+	local footer = section(opts.footer, DEFAULT_FOOTER)
 
 	-- Group by file, keeping a sorted list of the file paths.
 	local by_file, files = {}, {}
 	for _, f in ipairs(findings) do
-		local path = f.file or ""
+		local path = file_of(f)
 		if not by_file[path] then
 			by_file[path] = {}
 			files[#files + 1] = path
@@ -107,11 +147,11 @@ function M.render(findings, opts)
 		local bucket = by_file[path]
 		-- Deterministic order: line, then end line, then the (collapsed) text.
 		table.sort(bucket, function(a, b)
-			local al, bl = a.lnum or 0, b.lnum or 0
+			local al, bl = lnum_of(a.lnum), lnum_of(b.lnum)
 			if al ~= bl then
 				return al < bl
 			end
-			local ae, be = a.end_lnum or a.lnum or 0, b.end_lnum or b.lnum or 0
+			local ae, be = lnum_of(a.end_lnum or a.lnum), lnum_of(b.end_lnum or b.lnum)
 			if ae ~= be then
 				return ae < be
 			end
@@ -149,12 +189,47 @@ end
 
 -- Present -----------------------------------------------------------------
 
+-- Which provider `setreg("+", ...)` would actually go through, or nil when
+-- there is none.
+--
+-- `vim.g.clipboard` is ONLY set by an explicit user override: Neovim's built-in
+-- detection (pbcopy, xclip/xsel, wl-copy, win32yank, OSC52) leaves it nil, so
+-- reading it alone cannot tell "a provider works" from "there is no provider at
+-- all". Same probe as lua/agent_review/health.lua: provider#clipboard#Executable()
+-- is the autoload function that resolves the built-in choice and returns "" when
+-- nothing was found. `setreg` does not throw without a provider, so this is the
+-- only thing standing between the user and a false "copied!" over bare ssh.
 local function clipboard_provider()
 	local cb = vim.g.clipboard
 	if type(cb) == "table" and type(cb.name) == "string" and cb.name ~= "" then
 		return cb.name
 	end
+	local ok, provider = pcall(vim.fn["provider#clipboard#Executable"])
+	provider = ok and vim.trim(tostring(provider or "")) or ""
+	if provider ~= "" then
+		return provider
+	end
 	return nil
+end
+
+-- Report the outcome of a register write without ever claiming delivery.
+---@param buf_open boolean whether the prompt buffer is on screen
+local function report_copy(buf_open)
+	local provider = clipboard_provider()
+	if not provider then
+		local msg = "No clipboard provider found: the + register never leaves Neovim, nothing was copied."
+		if buf_open then
+			msg = msg .. " The prompt is open in this buffer — copy it from the terminal."
+		end
+		notify(msg .. " Install pbcopy/xclip/wl-copy, or enable OSC52.", vim.log.levels.WARN)
+		return
+	end
+	local msg = ("Prompt written to the + register via %s;"):format(provider)
+		.. " delivery is never acknowledged, so paste once to check."
+	if buf_open then
+		msg = msg .. " Buffer open — <leader>y re-yanks it."
+	end
+	notify(msg)
 end
 
 ---Show the prompt in a scratch buffer and then try to copy it.
@@ -170,53 +245,65 @@ function M.present(text, opts)
 	local want_clipboard = opts.clipboard ~= false
 
 	-- 1. Buffer first: whatever happens with the clipboard, the prompt is visible.
-	vim.cmd("new")
-	local buf = vim.api.nvim_get_current_buf()
-	vim.bo[buf].buftype = "nofile"
-	vim.bo[buf].bufhidden = "wipe"
-	vim.bo[buf].swapfile = false
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, split_lines((text:gsub("\n$", ""))))
-	vim.bo[buf].filetype = "markdown"
-	-- Left modifiable on purpose: the prompt is a draft, tweaking it before
-	-- pasting is part of the workflow.
-	vim.bo[buf].modifiable = true
-	vim.bo[buf].modified = false
-	pcall(vim.api.nvim_buf_set_name, buf, "agent-review://prompt")
+	--    `:new` can still fail (E36 with a large winminheight, E11 from the
+	--    cmdline window), and letting that propagate would take the clipboard
+	--    half down with it and leave the user with nothing at all.
+	local buf = nil
+	local opened, werr = pcall(vim.cmd, "new")
+	if opened then
+		buf = vim.api.nvim_get_current_buf()
+		vim.bo[buf].buftype = "nofile"
+		-- NOT "wipe": the buffer is modifiable on purpose (tweaking the prompt
+		-- before pasting is part of the workflow) and "wipe" plus the forced
+		-- `modified = false` below would throw those edits away on the next
+		-- `:bnext`/`:e`, with no E37 and no warning.
+		vim.bo[buf].bufhidden = "hide"
+		vim.bo[buf].swapfile = false
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, split_lines((text:gsub("\n$", ""))))
+		vim.bo[buf].filetype = "markdown"
+		vim.bo[buf].modifiable = true
+		vim.bo[buf].modified = false
+		pcall(vim.api.nvim_buf_set_name, buf, "agent-review://prompt")
 
-	vim.keymap.set("n", "q", function()
-		if not pcall(vim.api.nvim_win_close, 0, true) then
-			pcall(vim.api.nvim_buf_delete, buf, { force = true })
-		end
-	end, { buffer = buf, desc = "Close the review prompt" })
+		vim.keymap.set("n", "q", function()
+			if not pcall(vim.api.nvim_win_close, 0, true) then
+				pcall(vim.api.nvim_buf_delete, buf, { force = true })
+			end
+		end, { buffer = buf, desc = "Close the review prompt" })
 
-	vim.keymap.set("n", "<leader>y", function()
-		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-		local ok, err = pcall(vim.fn.setreg, "+", table.concat(lines, "\n") .. "\n")
-		if ok then
-			notify("Prompt written to the + register")
-		else
-			notify("Could not write the + register: " .. tostring(err), vim.log.levels.ERROR)
-		end
-	end, { buffer = buf, desc = "Yank the whole review prompt to +" })
+		vim.keymap.set("n", "<leader>y", function()
+			local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+			local ok, err = pcall(vim.fn.setreg, "+", table.concat(lines, "\n") .. "\n")
+			if not ok then
+				notify("Could not write the + register: " .. tostring(err), vim.log.levels.ERROR)
+				return
+			end
+			report_copy(true)
+		end, { buffer = buf, desc = "Yank the whole review prompt to +" })
+	else
+		notify(
+			"Could not open the prompt buffer: " .. tostring(werr) .. ". Trying the + register anyway.",
+			vim.log.levels.ERROR
+		)
+	end
 
 	if not want_clipboard then
+		if not buf then
+			notify("The prompt could not be shown anywhere; run it again from another window.", vim.log.levels.WARN)
+		end
 		return
 	end
 
 	-- 2. Clipboard second, and never claimed as confirmed: OSC52 does not
 	-- acknowledge, so Lua cannot know whether the text reached the system
-	-- clipboard. Report the provider and the manual fallback instead.
+	-- clipboard. Report the provider (or its absence) and the manual fallback.
 	local ok, err = pcall(vim.fn.setreg, "+", text)
 	if not ok then
-		notify(
-			"Could not write the + register: " .. tostring(err) .. ". The prompt is open, yank it with <leader>y.",
-			vim.log.levels.ERROR
-		)
+		local tail = buf and " The prompt is open, yank it with <leader>y." or ""
+		notify("Could not write the + register: " .. tostring(err) .. "." .. tail, vim.log.levels.ERROR)
 		return
 	end
-	local provider = clipboard_provider()
-	local who = provider and ("clipboard provider: " .. provider) or "built-in clipboard provider in use"
-	notify("Prompt written to the + register (" .. who .. "). Buffer open — <leader>y re-yanks it.")
+	report_copy(buf ~= nil)
 end
 
 -- Setup -------------------------------------------------------------------
