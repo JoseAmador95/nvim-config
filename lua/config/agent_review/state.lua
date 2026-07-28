@@ -14,10 +14,23 @@
 --
 -- Storage: stdpath("state")/agent-review/<sha256(root):16>/state.json
 -- The plain repo root is stored inside the file so the directory is
--- human-debuggable. Writes are atomic (temp file in the same directory, then
--- rename), so a crash can never destroy previously recorded verdicts.
--- Corrupt JSON degrades to an empty state with a warning; it never throws and
--- never wipes the file behind the user's back.
+-- human-debuggable. Writes are atomic (temp file in the same directory, fsync,
+-- then rename) AND validated: a short write (ENOSPC) or a failed fsync aborts
+-- the save instead of renaming truncated JSON over good verdicts.
+--
+-- Two Neovim instances in the same repo (one per tmux/zellij pane) share this
+-- one file, so "last writer wins" would silently drop a pane's verdicts. Both
+-- the read and the write path therefore stat the file:
+--   * load() reloads when the file changed underneath and MERGES by hunk id
+--     (verdicts are independent keys; the newer `ts` wins on a collision);
+--   * save() detects that the file moved since we loaded it, merges the same
+--     way before writing, and REFUSES to write when the on-disk file cannot be
+--     read or parsed. Nothing is ever lost without a message.
+--
+-- Corrupt JSON degrades to an empty state with a warning that carries the real
+-- decode error, after copying the file aside (state.json.corrupt-<stamp>): it
+-- never throws and never wipes the file behind the user's back. A file written
+-- by a NEWER version of this module is refused, not downgraded.
 --
 -- This module deliberately knows nothing about git: it is fed plain tables.
 --
@@ -64,8 +77,11 @@ end
 -- Paths -------------------------------------------------------------------
 
 ---Absolute, trailing-slash-free repo root.
+--- `fnamemodify(..., ":p")` only: `expand()` would also perform $VAR, wildcard
+--- and backtick expansion, so a root that happens to contain one of those would
+--- hash to a different key and its verdicts would land in another store.
 local function normalize(root)
-	local abs = vim.fn.fnamemodify(vim.fn.expand(root), ":p")
+	local abs = vim.fn.fnamemodify(root, ":p")
 	return (abs:gsub("[\\/]+$", ""))
 end
 
@@ -84,15 +100,39 @@ end
 -- State -------------------------------------------------------------------
 
 local cache = {} -- normalized root -> state table
+local stamps = {} -- normalized root -> file stamp seen when that state was read
+local reported = {} -- normalized root -> last refusal reported, so it is said once
 local current = nil -- normalized root of the most recent load()
 
 local function empty_state(root)
 	return { version = VERSION, root = root, base = nil, verdicts = {} }
 end
 
+---Identity of the file on disk. `false` means "not there".
+--- The inode is part of it on purpose: every save renames a fresh temp file over
+--- the target, so a rewrite changes the inode even when mtime granularity (1 s on
+--- some filesystems) and size would not give it away.
+local function stamp_of(path)
+	local st = vim.uv.fs_stat(path)
+	if not st then
+		return false
+	end
+	return { ino = st.ino, size = st.size, sec = st.mtime.sec, nsec = st.mtime.nsec }
+end
+
+local function same_stamp(a, b)
+	if a == false and b == false then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	return a.ino == b.ino and a.size == b.size and a.sec == b.sec and a.nsec == b.nsec
+end
+
 ---Read the whole file. Returns nil, err (absent files are not an error: nil, nil).
 local function read_file(path)
-	if vim.fn.filereadable(path) ~= 1 then
+	if not vim.uv.fs_stat(path) then
 		return nil, nil
 	end
 	local ok, lines = pcall(vim.fn.readfile, path)
@@ -102,18 +142,48 @@ local function read_file(path)
 	return table.concat(lines, "\n"), nil
 end
 
+---Copy a file that failed to parse aside before anything can overwrite it.
+---@return string|nil backup
+local function back_up(path)
+	local backup = ("%s.corrupt-%s"):format(path, os.date("%Y%m%d-%H%M%S"))
+	local ok = vim.uv.fs_copyfile(path, backup)
+	return ok and backup or nil
+end
+
 ---Turn raw file contents into a state table, repairing anything unexpected.
+--- Returns nil, err only when the file must NOT be touched (a newer format).
+---@return table|nil state, string|nil err
 local function parse(contents, root, path)
 	local ok, decoded = pcall(vim.json.decode, contents)
 	if not ok or type(decoded) ~= "table" then
-		notify("Discarding unreadable review state at " .. path .. " (starting empty)", vim.log.levels.WARN)
-		return empty_state(root)
+		local backup = back_up(path)
+		notify(
+			("Unreadable review state at %s: %s. Starting empty%s."):format(
+				path,
+				tostring(decoded),
+				backup and (" — the old file was copied to " .. backup) or " (no backup could be made)"
+			),
+			vim.log.levels.WARN
+		)
+		return empty_state(root), nil
+	end
+
+	-- A newer format is refused rather than silently downgraded: writing this
+	-- version's shape over it would drop whatever the newer one recorded.
+	if type(decoded.version) == "number" and decoded.version > VERSION then
+		return nil,
+			("%s was written by a newer agent-review (version %d > %d): refusing to use or overwrite it"):format(
+				path,
+				decoded.version,
+				VERSION
+			)
 	end
 
 	local state = empty_state(root)
 	if type(decoded.base) == "string" then
 		state.base = decoded.base
 	end
+	local dropped = 0
 	if type(decoded.verdicts) == "table" then
 		for id, v in pairs(decoded.verdicts) do
 			if type(id) == "string" and type(v) == "table" and VERDICTS[v.verdict] then
@@ -122,16 +192,114 @@ local function parse(contents, root, path)
 					text = type(v.text) == "string" and v.text ~= "" and v.text or nil,
 					ts = type(v.ts) == "number" and v.ts or os.time(),
 				}
+			else
+				dropped = dropped + 1
 			end
 		end
 	end
-	return state
+	if dropped > 0 then
+		local backup = back_up(path)
+		notify(
+			("Dropped %d unusable entry/entries from %s%s"):format(
+				dropped,
+				path,
+				backup and (" — the old file was copied to " .. backup) or ""
+			),
+			vim.log.levels.WARN
+		)
+	end
+	return state, nil
+end
+
+---Read + parse in one step. An absent (or empty) file yields an empty state.
+---@return table|nil state, string|nil err
+local function read_state(path, root)
+	local contents, err = read_file(path)
+	if err then
+		return nil, ("could not read %s: %s"):format(path, err)
+	end
+	if contents == nil or vim.trim(contents) == "" then
+		return empty_state(root), nil
+	end
+	return parse(contents, root, path)
+end
+
+---Fold `from`'s verdicts into `into`. Verdicts are independent keys, so a merge
+---is lossless; the newer timestamp wins when both sides know an id.
+---@return integer added, integer updated
+local function merge_verdicts(into, from)
+	local added, updated = 0, 0
+	for id, v in pairs(from or {}) do
+		local mine = into[id]
+		if mine == nil then
+			into[id] = v
+			added = added + 1
+		elseif (v.ts or 0) > (mine.ts or 0) then
+			into[id] = v
+			updated = updated + 1
+		end
+	end
+	return added, updated
+end
+
+---Reconcile the in-memory state for `root` with the file, which another Neovim
+---instance may have rewritten. Returns false only when the file exists but
+---cannot be used, in which case the caller must not overwrite it.
+---@return boolean ok, string|nil err
+local function sync_from_disk(root)
+	local path = state_file(root)
+	local st = stamp_of(path)
+	if same_stamp(st, stamps[root]) then
+		return true, nil
+	end
+	local disk, err = read_state(path, root)
+	if not disk then
+		return false, err
+	end
+	local mine = cache[root]
+	local added, updated = merge_verdicts(mine.verdicts, disk.verdicts)
+	if disk.base and disk.base ~= mine.base then
+		if mine.base == nil then
+			mine.base = disk.base
+		else
+			notify(
+				("Another Neovim instance armed this repo against %s; keeping this one's base %s"):format(
+					disk.base,
+					mine.base
+				),
+				vim.log.levels.WARN
+			)
+		end
+	end
+	stamps[root] = st
+	if added + updated > 0 then
+		notify(
+			("Merged %d verdict(s) recorded elsewhere for this repo (%d new, %d newer)"):format(
+				added + updated,
+				added,
+				updated
+			),
+			vim.log.levels.WARN
+		)
+	end
+	return true, nil
 end
 
 -- Public API --------------------------------------------------------------
 
+---Report a refusal once per root and per distinct reason: load() runs on every
+---buffer switch, so a broken file must not turn into a toast storm.
+local function report_once(root, err)
+	if reported[root] ~= err then
+		reported[root] = err
+		notify(err, vim.log.levels.ERROR)
+	end
+end
+
 ---Load (and cache) the verdict store for a repo root. Creates an empty state
----when nothing is on disk. Subsequent calls for the same root reuse the cache.
+---when nothing is on disk. Subsequent calls for the same root reuse the cache,
+---but always stat the file first: another Neovim instance in the same repo may
+---have written verdicts since, and those are merged in instead of being lost.
 ---@param root string absolute repo root
 ---@return table|nil state, string|nil err
 function M.load(root)
@@ -143,20 +311,26 @@ function M.load(root)
 	root = normalize(root)
 	current = root
 	if cache[root] then
-		return cache[root]
+		local ok, err = sync_from_disk(root)
+		if not ok then
+			report_once(root, err)
+		end
+		return cache[root], nil
 	end
 
 	local path = state_file(root)
-	local contents, err = read_file(path)
-	if err then
-		notify("Could not read " .. path .. ": " .. err .. " (starting empty)", vim.log.levels.WARN)
-		cache[root] = empty_state(root)
-	elseif contents == nil or vim.trim(contents) == "" then
-		cache[root] = empty_state(root)
-	else
-		cache[root] = parse(contents, root, path)
+	-- Stamped BEFORE the read: if the file changes in between, the stale stamp
+	-- makes the next save notice and merge, which is the safe direction.
+	local st = stamp_of(path)
+	local loaded, err = read_state(path, root)
+	if not loaded then
+		report_once(root, err)
+		return nil, err
 	end
-	return cache[root]
+	reported[root] = nil
+	cache[root] = loaded
+	stamps[root] = st
+	return cache[root], nil
 end
 
 ---The root of the currently loaded state.
@@ -173,11 +347,28 @@ end
 
 ---Persist the current state atomically: write a sibling temp file, fsync it,
 ---then rename it over the target. A half-written file can never replace the
----previous verdicts.
+---previous verdicts -- neither through a crash (the rename is atomic) nor
+---through a short write or a failed fsync (both abort the save).
+---
+---`force` skips the merge with whatever another instance wrote and is reserved
+---for the deliberately destructive :AgentReviewReset.
+---@param force? boolean
 ---@return boolean ok, string|nil err
-function M.save()
+local function write_state(force)
 	if not current or not cache[current] then
 		return false, "no state loaded"
+	end
+
+	if not force then
+		-- Someone else may have rewritten the file since we read it. Merging is
+		-- lossless (verdicts are independent keys); when the file cannot be read
+		-- we refuse rather than clobber it.
+		local ok, serr = sync_from_disk(current)
+		if not ok then
+			local err = "refusing to overwrite " .. state_file(current) .. ": " .. tostring(serr)
+			notify("Failed to save review state: " .. err, vim.log.levels.ERROR)
+			return false, err
+		end
 	end
 
 	local dir = state_dir(current)
@@ -214,19 +405,36 @@ function M.save()
 	if not fd then
 		return fail(tostring(open_err))
 	end
+	-- fs_write returns a BYTE COUNT: on ENOSPC it is positive but short, and
+	-- renaming truncated JSON over the good file would lose the whole round.
 	local written, write_err = vim.uv.fs_write(fd, encoded, 0)
 	if not written then
 		vim.uv.fs_close(fd)
 		return fail(tostring(write_err))
 	end
-	vim.uv.fs_fsync(fd)
+	if written ~= #encoded then
+		vim.uv.fs_close(fd)
+		return fail(("short write: %d of %d bytes (disk full?)"):format(written, #encoded))
+	end
+	local synced, sync_err = vim.uv.fs_fsync(fd)
 	vim.uv.fs_close(fd)
+	if not synced then
+		return fail("fsync failed: " .. tostring(sync_err))
+	end
 
 	local renamed, rename_err = vim.uv.fs_rename(tmp, target)
 	if not renamed then
 		return fail(tostring(rename_err))
 	end
+	-- Remember what we just put there, so the next save can tell our own write
+	-- apart from another instance's.
+	stamps[current] = stamp_of(target)
 	return true, nil
+end
+
+---@return boolean ok, string|nil err
+function M.save()
+	return write_state(false)
 end
 
 ---Record the snapshot ref this review round is diffed against.
@@ -298,15 +506,27 @@ function M.clear_verdict(id)
 end
 
 ---Drop every verdict for this repo (a fresh review round from scratch).
+---Deliberately destructive, so it forces the write: merging back what another
+---instance recorded would resurrect exactly what the user asked to remove. The
+---merge still runs first, so the report below counts everything that is going.
 ---@return boolean ok, string|nil err
 function M.reset()
 	local state = current and cache[current]
 	if not state then
 		return false, "no state loaded"
 	end
+	local ok, serr = sync_from_disk(current)
+	if not ok then
+		notify("Review state on disk could not be read before resetting: " .. tostring(serr), vim.log.levels.WARN)
+	end
+	local n = vim.tbl_count(state.verdicts)
 	state.verdicts = {}
 	state.base = nil
-	return M.save()
+	local saved, err = write_state(true)
+	if saved and n > 0 then
+		notify(("Cleared %d verdict(s) from %s"):format(n, state_file(current)))
+	end
+	return saved, err
 end
 
 ---@param hunks ARHunk[]

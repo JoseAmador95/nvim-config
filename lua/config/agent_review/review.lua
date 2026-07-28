@@ -19,6 +19,12 @@
 -- State (verdicts, base ref) is resolved lazily on first use: setup() only
 -- registers maps/commands so startup stays cheap.
 --
+-- The sign refresh is the one expensive thing here: it goes through git, which
+-- rebuilds a tree object from the working tree (a full re-stat + re-hash). So
+-- the BufEnter/BufWritePost refresh is BOTH debounced per buffer (a burst of
+-- buffer switches costs one refresh) and gated on M.armed() -- a base actually
+-- recorded by <leader>vs. With no round armed it does no git work at all.
+--
 -- Nothing throws and nothing fails silently: every entry point returns
 -- `nil, err` and the interactive wrappers surface `err` through git.notify.
 
@@ -119,32 +125,57 @@ end
 
 --- Every hunk of every changed file, flattened in git.changed_files() order
 --- (risk-ranked): the traversal order of ]v / [v.
+--- A file whose hunks cannot be read is collected and reported (the pattern
+--- checks.lua already uses) instead of being counted as unchanged: `err` is then
+--- non-nil ALONGSIDE the hunks that could be read, so a caller that only checks
+--- `hunks` still works and one that cares (health) can tell the difference
+--- between "nothing to review" and "could not look".
+---@param files? ARChangedFile[] already-computed change list, to skip the diff
 ---@return ARHunk[]|nil hunks, string|nil err
-function M.all_hunks()
+function M.all_hunks(files)
 	local ctx, err = M.context()
 	if not ctx then
 		return nil, err
 	end
-	local files
-	files, err = git.changed_files(ctx.base)
 	if not files then
-		return nil, err
-	end
-	local out = {}
-	for _, f in ipairs(files) do
-		local hunks = git.hunks(ctx.base, f.path)
-		for _, hunk in ipairs(hunks or {}) do
-			out[#out + 1] = hunk
+		files, err = git.changed_files(ctx.base)
+		if not files then
+			return nil, err
 		end
+	end
+	local out, errs = {}, {}
+	for _, f in ipairs(files) do
+		local hunks, herr = git.hunks(ctx.base, f.path)
+		if not hunks then
+			errs[#errs + 1] = ("%s: %s"):format(f.path, herr or "unknown error")
+		else
+			for _, hunk in ipairs(hunks) do
+				out[#out + 1] = hunk
+			end
+		end
+	end
+	if #errs > 0 then
+		local err2 = table.concat(errs, "; ")
+		notify("Some files could not be diffed: " .. err2, vim.log.levels.WARN)
+		return out, err2
 	end
 	return out, nil
 end
 
 --- reviewed / total across every changed file.
----@return integer reviewed, integer total
-function M.progress()
-	local hunks = M.all_hunks()
-	return state.progress(hunks or {})
+---@param hunks? ARHunk[] already-computed hunks, to skip the diff
+---@return integer reviewed, integer total, string|nil err
+function M.progress(hunks)
+	local err
+	if not hunks then
+		hunks, err = M.all_hunks()
+		if not hunks then
+			-- Never report 0/0 (i.e. "nothing to review") for a git failure.
+			return 0, 0, err
+		end
+	end
+	local reviewed, total = state.progress(hunks)
+	return reviewed, total, err
 end
 
 --- The hunk whose new-side range contains `lnum`. Never a neighbour: when no
@@ -216,12 +247,14 @@ function M.refresh_signs(buf)
 		-- new_count == 0 is a pure deletion: mark the surviving line next to it.
 		local last = first + math.max(hunk.new_count or 1, 1) - 1
 		for lnum = first, math.min(last, total) do
-			pcall(vim.api.nvim_buf_set_extmark, buf, NS, lnum - 1, 0, {
+			local ok = pcall(vim.api.nvim_buf_set_extmark, buf, NS, lnum - 1, 0, {
 				sign_text = sign.text,
 				sign_hl_group = sign.hl,
 				priority = sign.priority,
 			})
-			placed = placed + 1
+			if ok then
+				placed = placed + 1
+			end
 		end
 	end
 	return placed, nil
@@ -233,6 +266,112 @@ function M.clear_signs(buf)
 	if vim.api.nvim_buf_is_valid(buf) then
 		vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
 	end
+end
+
+--- Drop the marks from EVERY loaded buffer. :AgentReviewReset needs this: the
+--- verdicts it clears are drawn in every buffer the user has open, not only in
+--- the current one.
+---@return integer buffers
+function M.clear_all_signs()
+	local n = 0
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_loaded(buf) then
+			M.clear_signs(buf)
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-- Debounced refresh --------------------------------------------------------
+
+--- How long a burst of BufEnter/BufWritePost is allowed to coalesce.
+M.refresh_debounce_ms = 200
+
+local timers = {} -- buf -> uv_timer
+
+-- git.root() shells out, which is exactly what the gate below exists to avoid,
+-- so the answer is memoised per cwd. Short-lived on purpose: `git init` (or a
+-- cd into a repo that did not exist yet) must not be invisible forever.
+local root_cache = { cwd = nil, root = nil, at = 0 }
+local ROOT_TTL_MS = 30000
+
+local function repo_root()
+	local cwd = vim.fn.getcwd()
+	local now = vim.uv.hrtime() / 1e6
+	if root_cache.cwd ~= cwd or (now - root_cache.at) > ROOT_TTL_MS then
+		root_cache = { cwd = cwd, root = git.root(), at = now }
+	end
+	return root_cache.root
+end
+
+--- Is a review round actually armed here?
+---
+--- The test is a RECORDED base, not "some refs/agent-review/* ref exists": those
+--- refs are never deleted, so the mere existence of one would keep the BufEnter
+--- refresh -- nine git subprocesses, one of them re-hashing the whole worktree --
+--- running on every buffer switch forever. git.resolve_base() deliberately does
+--- not persist the snapshot it adopts, which is what makes this test meaningful.
+---@return boolean
+function M.armed()
+	local root = repo_root()
+	if not root then
+		return false
+	end
+	if not state.load(root) then
+		return false
+	end
+	local base = state.base()
+	return base ~= nil and base ~= ""
+end
+
+local function cancel_timer(buf)
+	local timer = timers[buf]
+	timers[buf] = nil
+	if timer then
+		timer:stop()
+		if not timer:is_closing() then
+			timer:close()
+		end
+	end
+end
+
+--- Coalesce a burst of buffer switches (`:cnext` through a 40-item quickfix
+--- list, a tab walk) into ONE refresh per buffer, and skip it entirely while no
+--- round is armed. Every git call happens behind both of those.
+---@param buf? integer
+---@param delay? integer milliseconds
+function M.schedule_refresh(buf, delay)
+	buf = (buf == nil or buf == 0) and vim.api.nvim_get_current_buf() or buf
+	cancel_timer(buf)
+
+	local function run()
+		if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].buftype ~= "" then
+			return
+		end
+		if not M.armed() then
+			return
+		end
+		M.refresh_signs(buf)
+	end
+
+	local timer = vim.uv.new_timer()
+	if not timer then
+		-- Out of handles: better an undebounced refresh than none at all.
+		vim.schedule(run)
+		return
+	end
+	timers[buf] = timer
+	timer:start(delay or M.refresh_debounce_ms, 0, function()
+		cancel_timer(buf)
+		vim.schedule(run)
+	end)
+end
+
+--- Drop a pending refresh (a buffer being wiped has nothing left to draw).
+---@param buf integer
+function M.cancel_refresh(buf)
+	cancel_timer(buf)
 end
 
 -- Verdicts -----------------------------------------------------------------
@@ -357,6 +496,12 @@ function M.goto_next(backwards)
 	end
 
 	local start = cursor_index(ctx, hunks)
+	-- start == 0 means "before the first hunk" (or a buffer outside the change
+	-- set). Forward that reads as hunk 1; backwards it must wrap to the LAST
+	-- hunk, and (start - offset - 1) % n would land on the second-to-last.
+	if backwards and start == 0 then
+		start = #hunks + 1
+	end
 	local target, missing
 	for offset = 1, #hunks do
 		local i = backwards and ((start - offset - 1) % #hunks) + 1 or ((start + offset - 1) % #hunks) + 1
@@ -484,20 +629,23 @@ function M.setup()
 		end, { desc = m[3] })
 	end
 
-	-- Marks are per buffer and cheap to rebuild, so they are refreshed when a
-	-- buffer is entered (and after every verdict, from record()).
+	-- Marks are per buffer, but rebuilding them is NOT cheap: it re-hashes the
+	-- working tree through git. So the refresh is debounced (a burst of buffer
+	-- switches costs one refresh) and gated on an armed round (no round, no git).
+	local group = vim.api.nvim_create_augroup(AUGROUP, { clear = true })
 	vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost" }, {
-		group = vim.api.nvim_create_augroup(AUGROUP, { clear = true }),
+		group = group,
 		callback = function(a)
-			-- Deferred: BufEnter fires on every tab jump and each refresh shells
-			-- out to git; keep the jump itself snappy.
-			vim.schedule(function()
-				if vim.api.nvim_buf_is_valid(a.buf) then
-					M.refresh_signs(a.buf)
-				end
-			end)
+			M.schedule_refresh(a.buf)
 		end,
-		desc = "Refresh agent-review verdict marks",
+		desc = "Refresh agent-review verdict marks (debounced)",
+	})
+	vim.api.nvim_create_autocmd({ "BufWipeout", "BufDelete" }, {
+		group = group,
+		callback = function(a)
+			M.cancel_refresh(a.buf)
+		end,
+		desc = "Drop the pending agent-review refresh of a closing buffer",
 	})
 end
 

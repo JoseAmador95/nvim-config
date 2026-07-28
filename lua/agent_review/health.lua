@@ -103,9 +103,35 @@ function M.check()
 		check_clipboard()
 		return
 	end
-	local got, reviewed, total = pcall(review.progress)
+	-- `files` was just computed above: handing it over avoids re-running the whole
+	-- diff (which rebuilds a tree object from the working tree) a second time.
+	local got, hunks, herr = pcall(review.all_hunks, files)
 	if not got then
-		health.error("could not compute review progress: " .. tostring(reviewed))
+		health.error("could not compute review progress: " .. tostring(hunks))
+		check_clipboard()
+		return
+	end
+	if not hunks then
+		-- A git failure used to fall through to state.progress({}) -> 0, 0 and be
+		-- reported as "no hunks to review": a clean bill of health for a breakage.
+		health.error("could not read the hunks of the changed files: " .. tostring(herr), {
+			"the review progress is unknown, not zero",
+			"check that the snapshot ref still resolves: git rev-parse " .. base,
+		})
+		check_clipboard()
+		return
+	end
+	local reviewed, total = review.progress(hunks)
+	if herr then
+		-- Partial failure: some files were read, some were not. "0/0" here would
+		-- read as "nothing to review" when the truth is "could not look".
+		health.error(("some files could not be diffed: %s"):format(herr), {
+			("their hunks are missing from the review queue and from the count (%d/%d over the rest)"):format(
+				reviewed,
+				total
+			),
+			"check that the snapshot ref still resolves: git rev-parse " .. base,
+		})
 	elseif total == 0 then
 		health.ok("no hunks to review")
 	elseif reviewed == total then
