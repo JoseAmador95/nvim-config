@@ -5,9 +5,7 @@ return {
 		return not vim.g.vscode
 	end,
 	opts = {
-		-- `*.dump` es el volcado de scrollback de Zellij: EditScrollback escribe en
-		-- $TMPDIR/<uuid>.dump y abre este nvim ahí, sin extensión que dispare un filetype.
-		pattern = { "*.log", "*.txt", "*.dump" },
+		pattern = { "*.log", "*.txt" },
 		keyword = {
 			error = { "ERROR", "FATAL", "CRITICAL" },
 			warning = { "WARN", "WARNING" },
