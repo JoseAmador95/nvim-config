@@ -62,10 +62,7 @@ vim.opt.clipboard = "unnamedplus"
 -- Neovim 0.10+) writes to the local clipboard through the terminal, so a yank
 -- on the remote host lands in your local clipboard. Only enabled in remote
 -- sessions; locally the native provider (pbcopy/wl-copy/xclip) is kept.
--- Inside Zellij ($ZELLIJ) too: yanking from the scrollback dump is the whole
--- point of opening it, and on a host with no pbcopy/wl-copy/xclip the native
--- provider silently drops the yank. Zellij forwards OSC52 to the terminal.
-if vim.env.SSH_TTY or vim.env.SSH_CONNECTION or vim.env.ZELLIJ then
+if vim.env.SSH_TTY or vim.env.SSH_CONNECTION then
 	local osc52 = require("vim.ui.clipboard.osc52")
 	-- Copy goes through OSC52. Paste returns the last yank (unnamed register)
 	-- instead of querying the terminal, which most emulators refuse or lag on
