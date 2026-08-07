@@ -48,10 +48,19 @@ return {
 					effective_transparent = true
 				end
 
+				-- `transparent` is narrower than its name suggests: vscode.nvim's
+				-- config.lua turns it into exactly one override, vscBack = NONE.
+				-- Floats and popups do not read vscBack — NormalFloat and Pmenu
+				-- paint vscPopupBack, which is #F8F8F8 on light against a #FFFFFF
+				-- buffer. That is the off-white cast that survived clearing the
+				-- buffer background; it is a genuinely different colour, not a
+				-- rendering artefact. Null it through the same documented
+				-- mechanism so one switch governs every surface.
 				vscode.setup({
 					style = style,
 					transparent = effective_transparent,
 					italic_comments = italic_comments,
+					color_overrides = effective_transparent and { vscPopupBack = "NONE" } or nil,
 				})
 				vim.cmd("colorscheme vscode")
 			end
