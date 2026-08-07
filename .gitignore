@@ -1,1 +1,5 @@
 .undodir
+
+# Machine-local theme selection, written by :Theme.
+# The versioned starting point is lua/config/theme_default.lua.
+lua/localconfig/theme.lua

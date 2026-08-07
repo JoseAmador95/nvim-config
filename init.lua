@@ -230,6 +230,7 @@ require("config.indent")
 require("config.lsp_helpers")
 require("config.lsp_commands")
 require("config.viewer_commands")
+require("config.theme").setup()
 require("config.lazy")
 
 -- Pager-only commands/keymaps (nvimpager); no-op in normal/vscode nvim.

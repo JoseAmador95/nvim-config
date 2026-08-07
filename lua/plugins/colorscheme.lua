@@ -10,6 +10,14 @@ return {
 			--------------------------------------------------------------
 			-- Theme painter (repaint-guarded).
 			--------------------------------------------------------------
+			-- This file no longer decides WHICH colorscheme runs: that is
+			-- config.theme's job, chosen with :Theme and persisted per machine.
+			-- What stays here is the vscode-specific painter (a setup() call plus
+			-- a light/dark variant) and OSC 11 detection, which is generic — it
+			-- only sets 'background' and asks config.theme to repaint whatever is
+			-- selected, so a different theme keeps following the terminal.
+			local selector = require("config.theme")
+
 			-- Per-host overrides from ~/.nvim-local.lua (see config.local_config).
 			local theme = require("config.local_config").get("theme", {})
 			local transparent = theme.transparent
@@ -23,9 +31,12 @@ return {
 
 			local last_style = nil
 
-			local function apply(bg)
+			selector.register("vscode", function(bg)
 				local style = bg == "light" and "light" or "dark"
-				if style == last_style then
+				-- Skip a redundant repaint, but only while vscode is still the
+				-- colorscheme in effect: after :Theme moved away and back the
+				-- style is unchanged yet the paint has to happen again.
+				if style == last_style and vim.g.colors_name == "vscode" then
 					return
 				end
 				last_style = style
@@ -63,17 +74,17 @@ return {
 					color_overrides = effective_transparent and { vscPopupBack = "NONE" } or nil,
 				})
 				vim.cmd("colorscheme vscode")
-			end
+			end)
 
 			-- A host can pin the background; then we skip OSC 11 auto-detection.
 			if theme.background == "light" or theme.background == "dark" then
 				vim.o.background = theme.background
-				apply(theme.background)
+				selector.repaint()
 				return
 			end
 
 			-- Paint once with whatever Neovim detected (works on a normal boot).
-			apply(vim.o.background)
+			selector.repaint()
 
 			local group = vim.api.nvim_create_augroup("VscodeBgFollow", { clear = true })
 
@@ -87,7 +98,7 @@ return {
 					if vim.g.vscode then
 						return
 					end
-					apply(vim.v.option_new)
+					selector.repaint()
 				end,
 			})
 
