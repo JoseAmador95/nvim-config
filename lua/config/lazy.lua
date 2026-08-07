@@ -37,7 +37,10 @@ end
 vim.opt.rtp:prepend(lazypath)
 
 local pager = require("config.pager")
-local lazy_argv = require("config.lazy_argv")
+local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve config.lazy source")
+source = vim.uv.fs_realpath(source) or vim.fn.fnamemodify(source, ":p")
+local repo_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
+local lockfile = require("config.lazy_lock").resolve(repo_root, pager.active)
 
 -- In pager mode (nvimpager) load only the minimal allowlist; skip the full
 -- `{ import = "plugins" }` set and any external ~/.nvim-local.lua plugin dirs.
@@ -77,14 +80,13 @@ end
 
 require("lazy").setup(specs, {
 	defaults = { lazy = true }, -- lazy-load by default
+	lockfile = lockfile,
 	ui = { border = "rounded" },
 	change_detection = { notify = false },
 	performance = {
-		rtp = { disabled_plugins = { "gzip", "tarPlugin", "zipPlugin", "netrwPlugin" } },
+		rtp = {
+			paths = { repo_root },
+			disabled_plugins = { "gzip", "tarPlugin", "zipPlugin", "netrwPlugin" },
+		},
 	},
 })
-
--- Neovim 0.12 can read argv buffers before lazy.nvim installs event handlers.
--- Recover only the missed Lazy/plugin groups; existing FileType observers are
--- deliberately not replayed.
-lazy_argv.setup(pager)

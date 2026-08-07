@@ -24,6 +24,11 @@
 --     },
 --     notes = { dir = "~/Notes" }, -- directory for :Note create
 --     clangd = { path = "clangd" },
+--     codecompanion = {
+--       oauth_token = "sk-ant-oat...", -- token from `claude setup-token`
+--     },
+--     log_watch = { max_lines = 100000, max_bytes = 67108864 },
+--     diagram_cache = { max_age_seconds = 2592000, max_bytes = 268435456 },
 --     path = { "~/bin" },          -- dirs prepended to $PATH
 --     env = { FOO = "bar" },       -- environment variables to export
 --     plugins_dir = { "~/.nvim-plugins" }, -- dirs of extra lazy.nvim specs
@@ -68,6 +73,26 @@ local SCHEMA = {
 			path = { type = "string", default = "clangd" },
 		},
 	},
+	codecompanion = {
+		type = "table",
+		fields = {
+			oauth_token = { type = "string", sensitive = true },
+		},
+	},
+	log_watch = {
+		type = "table",
+		fields = {
+			max_lines = { type = "number", default = 100000 },
+			max_bytes = { type = "number", default = 64 * 1024 * 1024 },
+		},
+	},
+	diagram_cache = {
+		type = "table",
+		fields = {
+			max_age_seconds = { type = "number", default = 30 * 24 * 60 * 60 },
+			max_bytes = { type = "number", default = 256 * 1024 * 1024 },
+		},
+	},
 	path = {
 		type = "list",
 		default = {},
@@ -77,6 +102,7 @@ local SCHEMA = {
 		type = "map",
 		default = {},
 		value = { type = "string" },
+		sensitive = true,
 	},
 	plugins_dir = {
 		type = "list",
@@ -88,6 +114,20 @@ local SCHEMA = {
 local cache = nil
 local sources = {}
 local last_errors = {}
+local legacy_oauth_warning_sent = false
+
+local function warn_legacy_oauth_token()
+	if legacy_oauth_warning_sent then
+		return
+	end
+	legacy_oauth_warning_sent = true
+	vim.notify(
+		"env.CLAUDE_CODE_OAUTH_TOKEN is deprecated; move it to codecompanion.oauth_token. "
+			.. "The legacy value is no longer exported to Neovim's environment.",
+		vim.log.levels.WARN,
+		{ title = TITLE }
+	)
+end
 
 -- Paths -------------------------------------------------------------------
 
@@ -333,6 +373,24 @@ function M.get(key, default)
 	return v
 end
 
+-- Keep the Claude OAuth credential out of Neovim's process environment. The
+-- legacy env entry is read only as a migration fallback and is handed directly
+-- to CodeCompanion's ACP child process by lua/plugins/codecompanion.lua.
+function M.codecompanion_oauth_token()
+	local cfg = M.read()
+	local token = cfg.codecompanion and cfg.codecompanion.oauth_token
+	if token and token ~= "" then
+		return token
+	end
+
+	local legacy = cfg.env and cfg.env.CLAUDE_CODE_OAUTH_TOKEN
+	if legacy ~= nil then
+		warn_legacy_oauth_token()
+		return legacy ~= "" and legacy or nil
+	end
+	return nil
+end
+
 function M.reload()
 	cache = nil
 	return M.read()
@@ -358,7 +416,11 @@ function M.apply_env()
 		prepend_path(dir)
 	end
 	for key, value in pairs(cfg.env or {}) do
-		vim.env[key] = value
+		if key == "CLAUDE_CODE_OAUTH_TOKEN" then
+			warn_legacy_oauth_token()
+		else
+			vim.env[key] = value
+		end
 	end
 end
 
@@ -373,15 +435,52 @@ function M.errors()
 	return last_errors
 end
 
--- Return a safe snapshot for diagnostics. Environment variable names are useful
--- when checking which overrides won, but their values may be credentials. Work
--- on a deep copy so displaying or modifying this table cannot affect runtime.
-function M.display_config()
-	local cfg = vim.deepcopy(M.read())
-	for key in pairs(cfg.env or {}) do
-		cfg.env[key] = "<redacted>"
+local function redact_all(value)
+	if type(value) ~= "table" then
+		return "<redacted>"
 	end
-	return cfg
+	local out = {}
+	for key, child in pairs(value) do
+		out[key] = redact_all(child)
+	end
+	return out
+end
+
+local function redact_value(spec, value)
+	if value == nil then
+		return nil
+	end
+	if spec.sensitive then
+		return redact_all(value)
+	end
+	if type(value) ~= "table" then
+		return value
+	end
+
+	local out = {}
+	if spec.type == "table" then
+		for key, child in pairs(value) do
+			local child_spec = spec.fields[key]
+			out[key] = child_spec and redact_value(child_spec, child) or vim.deepcopy(child)
+		end
+	elseif spec.type == "list" then
+		for index, child in ipairs(value) do
+			out[index] = redact_value(spec.item, child)
+		end
+	elseif spec.type == "map" then
+		for key, child in pairs(value) do
+			out[key] = redact_value(spec.value, child)
+		end
+	else
+		return vim.deepcopy(value)
+	end
+	return out
+end
+
+-- Return a safe, recursively redacted snapshot for diagnostics. Work on a new
+-- table so displaying or modifying it cannot affect the runtime cache.
+function M.display_config()
+	return redact_value({ type = "table", fields = SCHEMA }, M.read())
 end
 
 -- Template written by :NvimConfigInit.
@@ -406,6 +505,16 @@ return {
   -- Override the clangd binary on this host.
   clangd = { path = "clangd" },
 
+  -- Claude subscription token used only by CodeCompanion's ACP child process.
+  -- Generate it with `claude setup-token`.
+  codecompanion = {
+    -- oauth_token = "sk-ant-oat...",
+  },
+
+  -- Safety bounds for incremental log following and rendered-diagram cache.
+  log_watch = { max_lines = 100000, max_bytes = 64 * 1024 * 1024 },
+  diagram_cache = { max_age_seconds = 30 * 24 * 60 * 60, max_bytes = 256 * 1024 * 1024 },
+
   -- Directories prepended to $PATH (expanded).
   path = {
     -- "~/bin",
@@ -414,8 +523,6 @@ return {
   -- Environment variables exported on startup.
   env = {
     -- PKG_CONFIG_PATH = "/opt/x/lib/pkgconfig",
-    -- AI (CodeCompanion via Claude subscription): token from `claude setup-token`.
-    -- CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat...",
   },
 
   -- Directories of extra lazy.nvim plugin specs (like lua/plugins, but external).

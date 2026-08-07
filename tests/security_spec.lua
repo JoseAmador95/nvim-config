@@ -28,9 +28,11 @@ test("local config diagnostics redact environment values without mutating cache"
 	local root = temp_dir()
 	local config_path = root .. "/host.lua"
 	local secret = "security-spec-secret-value"
+	local oauth_secret = "security-spec-oauth-value"
 	assert(vim.fn.writefile({
 		"return {",
 		"  theme = { background = 'light' },",
+		"  codecompanion = { oauth_token = '" .. oauth_secret .. "' },",
 		"  env = { CONFIG_SECRET = '" .. secret .. "', EMPTY_SECRET = '' },",
 		"}",
 	}, config_path) == 0, "could not write temporary local config")
@@ -45,8 +47,10 @@ test("local config diagnostics redact environment values without mutating cache"
 	assert(display ~= runtime, "display helper returned the runtime cache")
 	assert(display.env.CONFIG_SECRET == "<redacted>", "secret value was not redacted")
 	assert(display.env.EMPTY_SECRET == "<redacted>", "empty environment value was not redacted")
+	assert(display.codecompanion.oauth_token == "<redacted>", "nested OAuth token was not redacted")
 	assert(runtime.env.CONFIG_SECRET == secret, "display helper mutated the cached secret")
 	assert(runtime.env.EMPTY_SECRET == "", "display helper mutated the cached empty value")
+	assert(runtime.codecompanion.oauth_token == oauth_secret, "display helper mutated the cached OAuth token")
 	display.theme.background = "dark"
 	assert(local_config.read().theme.background == "light", "display snapshot shares nested runtime tables")
 
@@ -61,6 +65,7 @@ test("local config diagnostics redact environment values without mutating cache"
 	assert(dump:find("CONFIG_SECRET", 1, true), "dump removed the environment key")
 	assert(dump:find("<redacted>", 1, true), "dump omitted the redaction marker")
 	assert(not dump:find(secret, 1, true), "dump disclosed a secret value")
+	assert(not dump:find(oauth_secret, 1, true), "dump disclosed the nested OAuth token")
 
 	vim.cmd("NvimConfigReload")
 	local message = notifications[#notifications] or ""
@@ -69,6 +74,94 @@ test("local config diagnostics redact environment values without mutating cache"
 
 	vim.notify = original_notify
 	vim.env.NVIM_CONFIG_FILE = original_override
+	vim.fn.delete(root, "rf")
+end)
+
+test("legacy OAuth config is isolated from vim.env and warns once", function()
+	local root = temp_dir()
+	local config_path = root .. "/host.lua"
+	local legacy_token = "security-spec-legacy-oauth"
+	assert(vim.fn.writefile({
+		"return { env = {",
+		"  CLAUDE_CODE_OAUTH_TOKEN = '" .. legacy_token .. "',",
+		"  SECURITY_SPEC_PUBLIC = 'applied',",
+		"} }",
+	}, config_path) == 0, "could not write temporary legacy config")
+
+	local original_override = vim.env.NVIM_CONFIG_FILE
+	local original_oauth = vim.env.CLAUDE_CODE_OAUTH_TOKEN
+	local original_public = vim.env.SECURITY_SPEC_PUBLIC
+	local original_notify = vim.notify
+	local notifications = {}
+	vim.env.NVIM_CONFIG_FILE = config_path
+	vim.env.CLAUDE_CODE_OAUTH_TOKEN = nil
+	vim.env.SECURITY_SPEC_PUBLIC = nil
+	vim.notify = function(message)
+		notifications[#notifications + 1] = tostring(message)
+	end
+
+	package.loaded["config.local_config"] = nil
+	local local_config = require("config.local_config")
+	local_config.apply_env()
+	assert(vim.env.CLAUDE_CODE_OAUTH_TOKEN == nil, "legacy OAuth token leaked into vim.env")
+	assert(vim.env.SECURITY_SPEC_PUBLIC == "applied", "ordinary environment entry was not applied")
+	assert(local_config.codecompanion_oauth_token() == legacy_token, "legacy OAuth fallback was not returned")
+	assert(#notifications == 1, string.format("legacy fallback warned %d times instead of once", #notifications))
+	assert(notifications[1]:find("deprecated", 1, true), "legacy warning is not actionable")
+	assert(local_config.display_config().env.CLAUDE_CODE_OAUTH_TOKEN == "<redacted>", "legacy token was not redacted")
+
+	vim.notify = original_notify
+	vim.env.NVIM_CONFIG_FILE = original_override
+	vim.env.CLAUDE_CODE_OAUTH_TOKEN = original_oauth
+	vim.env.SECURITY_SPEC_PUBLIC = original_public
+	vim.fn.delete(root, "rf")
+end)
+
+test("CodeCompanion keeps OAuth credentials in the ACP child adapter", function()
+	local root = temp_dir()
+	local config_path = root .. "/host.lua"
+	local token = "security-spec-child-only-token"
+	assert(vim.fn.writefile({
+		"return { codecompanion = { oauth_token = '" .. token .. "' } }",
+	}, config_path) == 0, "could not write temporary CodeCompanion config")
+
+	local original_override = vim.env.NVIM_CONFIG_FILE
+	local original_oauth = vim.env.CLAUDE_CODE_OAUTH_TOKEN
+	local original_adapters = package.loaded["codecompanion.adapters"]
+	vim.env.NVIM_CONFIG_FILE = config_path
+	vim.env.CLAUDE_CODE_OAUTH_TOKEN = nil
+	package.loaded["config.local_config"] = nil
+	package.loaded["plugins.codecompanion"] = nil
+	package.loaded["codecompanion.adapters"] = {
+		extend = function(_, overrides)
+			return overrides
+		end,
+	}
+
+	local spec = require("plugins.codecompanion")[1]
+	local adapter = spec.opts.adapters.acp.claude_code()
+	assert(spec.opts.interactions ~= nil, "CodeCompanion interactions config is missing")
+	assert(spec.opts.strategies == nil, "deprecated CodeCompanion strategies config remains")
+	assert(
+		vim.deep_equal(adapter.commands.default, {
+			"npx",
+			"--yes",
+			"@agentclientprotocol/claude-agent-acp@0.66.0",
+		}),
+		"default ACP command is not pinned exactly"
+	)
+	assert(adapter.commands.yolo[#adapter.commands.yolo] == "--yolo", "ACP yolo command lost its mode flag")
+	assert(adapter.env.CLAUDE_CODE_OAUTH_TOKEN == token, "OAuth token was not attached to adapter.env")
+	assert(vim.env.CLAUDE_CODE_OAUTH_TOKEN == nil, "building the ACP adapter mutated vim.env")
+
+	adapter.env_replaced = { CLAUDE_CODE_OAUTH_TOKEN = token }
+	assert(adapter.handlers.auth(adapter), "ACP auth override rejected the child token")
+	assert(vim.env.CLAUDE_CODE_OAUTH_TOKEN == nil, "ACP auth override mutated vim.env")
+
+	package.loaded["codecompanion.adapters"] = original_adapters
+	package.loaded["plugins.codecompanion"] = nil
+	vim.env.NVIM_CONFIG_FILE = original_override
+	vim.env.CLAUDE_CODE_OAUTH_TOKEN = original_oauth
 	vim.fn.delete(root, "rf")
 end)
 

@@ -1,47 +1,75 @@
--- Loaded with --cmd, before init.lua, so its VimEnter callback runs before the
--- argv recovery callback registered by the configuration.
+-- Loaded with --cmd before init.lua. Extend argv here; the VimEnter assertions
+-- then prove there is no delayed configuration-level lifecycle replay.
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
-local filetype_events = 0
+local existing_path = vim.fn.tempname() .. ".md"
+local new_path = vim.fn.tempname() .. ".md"
+assert(vim.fn.writefile({ "# second argument", "", "startup fixture" }, existing_path) == 0)
+vim.fn.delete(new_path)
+vim.cmd.argadd({ args = { existing_path, new_path } })
+
+local filetype_events = {}
+local observer = vim.api.nvim_create_augroup("StartupSpecObserver", { clear = true })
+vim.api.nvim_create_autocmd("FileType", {
+	group = observer,
+	callback = function(args)
+		filetype_events[args.buf] = (filetype_events[args.buf] or 0) + 1
+	end,
+})
+
+local function cleanup()
+	vim.fn.delete(existing_path)
+	vim.fn.delete(new_path)
+end
 
 local function fail(message)
+	cleanup()
 	vim.api.nvim_err_writeln("startup_spec: " .. message)
 	vim.cmd("cquit")
+end
+
+local function same_path(left, right)
+	local function canonical(path)
+		return vim.fs.normalize(vim.fn.resolve(vim.fn.fnamemodify(path, ":p")))
+	end
+	return canonical(left) == canonical(right)
+end
+
+local function assert_markdown_argument(label)
+	local buf = vim.api.nvim_get_current_buf()
+	assert(vim.bo[buf].filetype == "markdown", label .. " did not detect markdown")
+	assert(
+		filetype_events[buf] == 1,
+		string.format("%s emitted FileType %d times (expected 1)", label, filetype_events[buf] or 0)
+	)
+	assert(require("render-markdown.core.manager").attached(buf), label .. " did not attach render-markdown")
 end
 
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,
 	callback = function()
-		local observer = vim.api.nvim_create_augroup("StartupSpecObserver", { clear = true })
-		vim.api.nvim_create_autocmd("FileType", {
-			group = observer,
-			callback = function()
-				filetype_events = filetype_events + 1
-			end,
-		})
-		vim.api.nvim_exec_autocmds("FileType", {
-			buffer = vim.api.nvim_get_current_buf(),
-			group = observer,
-			modeline = false,
-		})
-
 		vim.schedule(function()
 			local ok, err = xpcall(function()
-				assert(
-					filetype_events == 1,
-					string.format("FileType observer ran %d times (expected 1)", filetype_events)
-				)
-				assert(vim.b.lazy_argv_recovered == true, "argv buffer was not marked as recovered")
+				assert(#vim.fn.argv() == 3, "startup fixture did not create a three-file argument list")
+				assert_markdown_argument("first existing argv buffer")
+				assert(package.loaded.gitsigns, "BufReadPre plugin did not load for the first argv buffer")
+				assert(package.loaded["todo-comments"], "BufReadPost plugin did not load for the first argv buffer")
 
-				local plugins = require("lazy.core.config").plugins
-				assert(plugins["gitsigns.nvim"]._.loaded, "BufReadPre plugin did not load for argv buffer")
-				assert(plugins["todo-comments.nvim"]._.loaded, "BufReadPost plugin did not load for argv buffer")
-				assert(plugins["render-markdown.nvim"]._.loaded, "Markdown ft plugin did not load for argv buffer")
+				vim.cmd("next")
 				assert(
-					require("render-markdown.core.manager").attached(vim.api.nvim_get_current_buf()),
-					"render-markdown did not attach to the argv buffer"
+					same_path(vim.api.nvim_buf_get_name(0), existing_path),
+					"second argv buffer was not selected: " .. vim.api.nvim_buf_get_name(0)
 				)
+				assert_markdown_argument("second existing argv buffer")
+
+				vim.cmd("next")
+				assert(
+					same_path(vim.api.nvim_buf_get_name(0), new_path),
+					"new argv buffer was not selected: " .. vim.api.nvim_buf_get_name(0)
+				)
+				assert(vim.fn.filereadable(new_path) == 0, "new argv fixture unexpectedly exists on disk")
+				assert_markdown_argument("new argv buffer")
 			end, debug.traceback)
 
 			if not ok then
@@ -49,7 +77,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				return
 			end
 
-			print("startup_spec: 1 test passed")
+			cleanup()
+			print("startup_spec: 3 tests passed")
 			vim.cmd("quitall!")
 		end)
 	end,

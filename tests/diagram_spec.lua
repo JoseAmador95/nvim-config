@@ -5,6 +5,16 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
+local test_cache_home = vim.fn.tempname()
+vim.fn.mkdir(test_cache_home, "p")
+vim.env.XDG_CACHE_HOME = test_cache_home
+
+package.loaded["config.local_config"] = {
+	get = function(_, default)
+		return default
+	end,
+}
+
 local failures = {}
 local count = 0
 
@@ -154,8 +164,167 @@ test("binary writer preserves embedded NUL bytes and replaces atomically", funct
 	assert(vim.uv.fs_close(fd))
 	equal(second, actual, "binary contents changed")
 	equal({}, vim.fn.glob(path .. ".tmp.*", false, true), "temporary files were left behind")
+	assert(fs.temp_path(path) ~= fs.temp_path(path), "renderer temporary paths collided")
 
 	vim.fn.delete(path)
+end)
+
+test("async runner ignores stale results, cancels safely, and coalesces pending work", function()
+	local callbacks = {}
+	local started = {}
+	local killed = {}
+	local delivered = {}
+	local finished = {}
+	local function spawn(command, _, callback)
+		started[#started + 1] = command[1]
+		callbacks[command[1]] = callback
+		local handle = {}
+		function handle:kill(signal)
+			killed[#killed + 1] = { command[1], signal }
+		end
+		return handle
+	end
+	local runner = require("config.async_runner").new({
+		spawn = spawn,
+		schedule = function(callback)
+			callback()
+		end,
+	})
+	local function request(name)
+		runner:request({
+			command = { name },
+			on_result = function()
+				delivered[#delivered + 1] = name
+			end,
+			on_finish = function(_, current, reason)
+				finished[#finished + 1] = { name, current, reason }
+			end,
+		})
+	end
+
+	request("first")
+	request("second")
+	request("third")
+	equal({ "first" }, started, "superseded requests started concurrently")
+	equal({ { "first", 15 } }, killed, "active process was not cancelled exactly once")
+	callbacks.first({ code = 143 })
+	equal({ "first", "third" }, started, "latest queued request did not start")
+	callbacks.third({ code = 0, stdout = "newest" })
+	equal({ "third" }, delivered, "stale process result was delivered")
+	equal("second", finished[1][1], "superseded pending request was not cleaned up")
+	equal(false, finished[1][2], "superseded pending request was marked current")
+
+	request("late")
+	runner:close()
+	callbacks.late({ code = 0 })
+	equal({ "third" }, delivered, "closed runner delivered a late callback")
+end)
+
+test("async runner invalidates active work at debounce time", function()
+	local process_callbacks = {}
+	local timer_callback
+	local delivered = {}
+	local runner = require("config.async_runner").new({
+		spawn = function(command, _, callback)
+			process_callbacks[command[1]] = callback
+			return { kill = function() end }
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+		new_timer = function()
+			return {
+				start = function(_, _, _, callback)
+					timer_callback = callback
+				end,
+				stop = function() end,
+				is_closing = function()
+					return false
+				end,
+				close = function() end,
+			}
+		end,
+	})
+	runner:request({
+		command = { "old" },
+		on_result = function()
+			delivered[#delivered + 1] = "old"
+		end,
+	})
+	runner:debounce(10, function()
+		return {
+			command = { "new" },
+			on_result = function()
+				delivered[#delivered + 1] = "new"
+			end,
+		}
+	end)
+	process_callbacks.old({ code = 0 })
+	equal({}, delivered, "old result landed during the debounce window")
+	timer_callback()
+	assert(
+		vim.wait(1000, function()
+			return process_callbacks["new"] ~= nil
+		end, 10),
+		"debounced process did not start"
+	)
+	process_callbacks["new"]({ code = 0 })
+	equal({ "new" }, delivered, "debounced latest render was not delivered")
+end)
+
+test("diagram cache identity covers source, mode, argv, and renderer signal", function()
+	local cache = require("config.diagram_cache")
+	local base = { source = "A --> B", mode = "mermaid:svg", argv = { "mmdflux", "-f", "svg" }, version_signal = "v1" }
+	local first = cache.key(base)
+	equal(first, cache.key(base), "identical cache material changed key")
+	assert(first ~= cache.key(vim.tbl_extend("force", base, { source = "A --> C" })), "source was omitted from key")
+	assert(first ~= cache.key(vim.tbl_extend("force", base, { mode = "mermaid:ascii" })), "mode was omitted from key")
+	assert(
+		first ~= cache.key(vim.tbl_extend("force", base, { argv = { "mmdflux" } })),
+		"renderer argv was omitted from key"
+	)
+	assert(
+		first ~= cache.key(vim.tbl_extend("force", base, { version_signal = "v2" })),
+		"renderer version signal was omitted from key"
+	)
+end)
+
+test("diagram cache validates PNGs and never prunes retained images", function()
+	local cache = require("config.diagram_cache")
+	local fs = require("config.fs")
+	local dir = cache.dir()
+	local png = "\137PNG\r\n\26\n"
+		.. "\0\0\0\13IHDR"
+		.. "\0\0\0\1\0\0\0\1\8\6\0\0\0"
+		.. "\0\0\0\0"
+		.. "\0\0\0\0IEND\0\0\0\0"
+	local valid = dir .. "/valid.png"
+	local invalid = dir .. "/invalid.png"
+	assert(fs.write_binary_atomic(valid, png))
+	assert(fs.write_binary_atomic(invalid, png:sub(1, 20)))
+	equal(true, cache.is_valid_png(valid), "valid PNG was rejected")
+	equal(false, cache.is_valid_png(invalid), "truncated PNG was accepted")
+
+	local old = dir .. "/old.txt"
+	local retained = dir .. "/retained.png"
+	local newer = dir .. "/newer.txt"
+	assert(fs.write_binary_atomic(old, string.rep("o", 12)))
+	assert(fs.write_binary_atomic(retained, png))
+	assert(fs.write_binary_atomic(newer, string.rep("n", 12)))
+	local now = os.time()
+	assert(vim.uv.fs_utime(old, now - 100, now - 100))
+	assert(vim.uv.fs_utime(retained, now - 100, now - 100))
+	assert(vim.uv.fs_utime(valid, now - 2, now - 2))
+	assert(vim.uv.fs_utime(newer, now - 1, now - 1))
+	cache.retain(retained)
+	cache.prune({ max_age_seconds = 10, max_bytes = #png + 15 })
+	equal(0, vim.fn.filereadable(old), "expired cache entry survived")
+	equal(1, vim.fn.filereadable(retained), "retained image was pruned")
+	equal(1, vim.fn.filereadable(newer), "newest entry was removed before older entries")
+
+	cache.release(retained)
+	cache.prune({ max_age_seconds = 10, max_bytes = 1024 })
+	equal(0, vim.fn.filereadable(retained), "released expired image was not pruned")
 end)
 
 test("pager restores mutability only for input buffers", function()
@@ -184,4 +353,5 @@ if #failures > 0 then
 end
 
 print(string.format("diagram_spec: %d tests passed", count))
+vim.fn.delete(test_cache_home, "rf")
 vim.cmd("quitall!")

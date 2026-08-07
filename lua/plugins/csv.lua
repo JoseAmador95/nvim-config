@@ -4,7 +4,7 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		ft = { "csv", "tsv" },
+		event = { "BufReadPre", "BufNewFile" },
 		config = function()
 			require("rainbow_csv").setup()
 		end,

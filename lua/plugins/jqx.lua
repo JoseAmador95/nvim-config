@@ -4,7 +4,6 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		ft = { "json" },
 		cmd = { "JqxList", "JqxQuery" },
 	},
 }

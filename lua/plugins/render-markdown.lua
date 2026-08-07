@@ -1,6 +1,8 @@
 return {
 	"MeanderingProgrammer/render-markdown.nvim",
-	ft = "markdown",
+	-- Must register its FileType observer before the first event. Loading this
+	-- eagerly also covers Markdown piped to nvimpager, which has no BufReadPre.
+	lazy = false,
 	cond = function()
 		return not vim.g.vscode
 	end,

@@ -1,21 +1,13 @@
 local M = {}
 
-local uv = vim.uv
+local async_runner = require("config.async_runner")
+local cache = require("config.diagram_cache")
 local fs = require("config.fs")
 
--- Lua-side storage for uv timer handles (cannot survive buf-var round-trips)
-local timers = {}
+local states = {}
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "PlantumlPreview" })
-end
-
-local function get_buf_var(buf, name)
-	local ok, value = pcall(vim.api.nvim_buf_get_var, buf, name)
-	if ok then
-		return value
-	end
-	return nil
 end
 
 local function set_buf_var(buf, name, value)
@@ -29,9 +21,9 @@ local function ensure_cache_dir()
 end
 
 local function preview_paths(buf)
+	local stem = ("plantuml-preview-%d-%d"):format(vim.uv.os_getpid(), buf)
 	local dir = ensure_cache_dir()
-	local id = tostring(buf)
-	return dir .. "/plantuml-preview-" .. id .. ".png", dir .. "/plantuml-preview-" .. id .. ".html"
+	return dir .. "/" .. stem .. ".png", dir .. "/" .. stem .. ".html"
 end
 
 local function write_html(html_path, png_path)
@@ -57,7 +49,7 @@ local function write_html(html_path, png_path)
 		"</body>",
 		"</html>",
 	}
-	vim.fn.writefile(lines, html_path)
+	return fs.write_binary_atomic(html_path, table.concat(lines, "\n") .. "\n")
 end
 
 local function open_in_browser(path)
@@ -72,163 +64,134 @@ local function open_in_browser(path)
 	return false
 end
 
-local function stop_timer(buf)
-	local timer = timers[buf]
-	if timer and not timer:is_closing() then
-		timer:stop()
-		timer:close()
+local function render_spec(state)
+	if not vim.api.nvim_buf_is_valid(state.buf) then
+		return nil
 	end
-	timers[buf] = nil
-end
-
-local function schedule_render(buf)
-	stop_timer(buf)
-
-	local timer = uv.new_timer()
-	timers[buf] = timer
-	timer:start(
-		1000,
-		0,
-		vim.schedule_wrap(function()
-			M.render({ buf = buf })
-			stop_timer(buf)
-		end)
-	)
-end
-
--- One render per buffer at a time: the 1s debounce must not stack processes
-local rendering = {}
-
--- Async: PlantUML/Java can take seconds; never block the UI thread.
--- Calls on_done(ok) (optional) from the main loop when finished.
-local function render_png(buf, png_path, on_done)
-	local finished = false
-	local function done(ok)
-		if finished then
-			return
-		end
-		finished = true
-		if on_done then
-			on_done(ok)
-		end
-	end
-
 	if vim.fn.executable("plantuml") ~= 1 then
 		notify("plantuml not found in PATH", vim.log.levels.ERROR)
-		return done(false)
+		return nil
 	end
-	if not vim.api.nvim_buf_is_valid(buf) or rendering[buf] then
-		return done(false)
-	end
-
-	local input = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+	local input = table.concat(vim.api.nvim_buf_get_lines(state.buf, 0, -1, false), "\n")
 	if input == "" then
 		notify("Buffer is empty", vim.log.levels.WARN)
-		return done(false)
+		return nil
 	end
 
-	rendering[buf] = true
-	local started, start_err = pcall(
-		vim.system,
-		{ "plantuml", "-tpng", "-pipe" },
-		{ text = false, stdin = input },
-		function(result)
-			vim.schedule(function()
-				rendering[buf] = nil
-				if result.code ~= 0 then
-					local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
-					if msg == "" then
-						msg = "plantuml failed"
-					end
-					notify(msg, vim.log.levels.ERROR)
-					return done(false)
+	return {
+		command = { "plantuml", "-tpng", "-pipe" },
+		options = { text = false, stdin = input },
+		on_result = function(result)
+			if not vim.api.nvim_buf_is_valid(state.buf) then
+				return
+			end
+			if result.code ~= 0 then
+				local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
+				notify(msg == "" and "plantuml failed" or msg, vim.log.levels.ERROR)
+				return
+			end
+			local output = result.stdout or ""
+			if not cache.is_png_data(output) then
+				notify("plantuml produced an invalid PNG", vim.log.levels.ERROR)
+				return
+			end
+			local written, write_err = fs.write_binary_atomic(state.png_path, output)
+			if not written then
+				notify("Failed to write PNG preview: " .. tostring(write_err), vim.log.levels.ERROR)
+				return
+			end
+			if state.open_pending then
+				state.open_pending = false
+				if not open_in_browser(state.html_path) then
+					notify("No opener found (open/xdg-open)", vim.log.levels.WARN)
 				end
-				local output = result.stdout or ""
-				if output == "" then
-					notify("plantuml produced an empty PNG", vim.log.levels.ERROR)
-					return done(false)
-				end
-				local written, write_err = fs.write_binary_atomic(png_path, output)
-				if not written then
-					notify(
-						"Failed to write PNG preview " .. png_path .. ": " .. tostring(write_err),
-						vim.log.levels.ERROR
-					)
-					return done(false)
-				end
-				done(true)
-			end)
-		end
-	)
-	if not started then
-		rendering[buf] = nil
-		notify("Failed to start plantuml: " .. tostring(start_err), vim.log.levels.ERROR)
-		done(false)
-	end
+			end
+		end,
+	}
 end
 
-local function setup_autocmds(buf)
-	local existing = get_buf_var(buf, "plantuml_preview_group")
-	if existing and type(existing) == "number" then
-		return
+local function schedule_render(state)
+	state.runner:debounce(1000, function()
+		if states[state.buf] ~= state or not state.enabled then
+			return nil
+		end
+		return render_spec(state)
+	end)
+end
+
+local function ensure_state(buf)
+	local state = states[buf]
+	if state then
+		return state
 	end
+	local png_path, html_path = preview_paths(buf)
+	state = {
+		buf = buf,
+		png_path = png_path,
+		html_path = html_path,
+		runner = async_runner.new(),
+		enabled = true,
+	}
+	states[buf] = state
 
 	local group = vim.api.nvim_create_augroup("PlantumlPreview_" .. buf, { clear = true })
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
 		group = group,
 		buffer = buf,
 		callback = function()
-			if not get_buf_var(buf, "plantuml_preview_enabled") then
-				return
+			if states[buf] == state and state.enabled then
+				schedule_render(state)
 			end
-			schedule_render(buf)
 		end,
 	})
 	vim.api.nvim_create_autocmd("BufWipeout", {
 		group = group,
 		buffer = buf,
+		once = true,
 		callback = function()
-			stop_timer(buf)
-			set_buf_var(buf, "plantuml_preview_group", nil)
+			if states[buf] == state then
+				states[buf] = nil
+				state.enabled = false
+				state.runner:close()
+			end
 		end,
 	})
 	set_buf_var(buf, "plantuml_preview_group", group)
+	return state
+end
+
+local function request_render(state)
+	local spec = render_spec(state)
+	if spec then
+		state.runner:request(spec)
+	end
 end
 
 function M.render(opts)
 	local options = opts or {}
 	local buf = options.buf or vim.api.nvim_get_current_buf()
-	if not get_buf_var(buf, "plantuml_preview_enabled") then
+	local state = states[buf]
+	if not state or not state.enabled then
 		return
 	end
-
-	local png_path = get_buf_var(buf, "plantuml_preview_png")
-	local html_path = get_buf_var(buf, "plantuml_preview_html")
-	if not png_path or not html_path then
-		png_path, html_path = preview_paths(buf)
-		set_buf_var(buf, "plantuml_preview_png", png_path)
-		set_buf_var(buf, "plantuml_preview_html", html_path)
-		write_html(html_path, png_path)
-	end
-
-	render_png(buf, png_path)
+	request_render(state)
 end
 
 function M.preview()
 	local buf = vim.api.nvim_get_current_buf()
-	local png_path, html_path = preview_paths(buf)
+	local state = ensure_state(buf)
+	state.enabled = true
+	state.open_pending = true
 	set_buf_var(buf, "plantuml_preview_enabled", true)
-	set_buf_var(buf, "plantuml_preview_png", png_path)
-	set_buf_var(buf, "plantuml_preview_html", html_path)
-	write_html(html_path, png_path)
+	set_buf_var(buf, "plantuml_preview_png", state.png_path)
+	set_buf_var(buf, "plantuml_preview_html", state.html_path)
 
-	render_png(buf, png_path, function(ok)
-		if ok and not open_in_browser(html_path) then
-			notify("No opener found (open/xdg-open)", vim.log.levels.WARN)
-		end
-	end)
-
-	setup_autocmds(buf)
+	local written, write_err = write_html(state.html_path, state.png_path)
+	if not written then
+		notify("Failed to write PlantUML preview page: " .. tostring(write_err), vim.log.levels.ERROR)
+		return
+	end
+	request_render(state)
 end
 
 return M

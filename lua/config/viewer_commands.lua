@@ -1,7 +1,5 @@
 local log_patterns = require("config.log_patterns")
-local log_watch = require("config.log_watch")
-local plantuml_ascii = require("config.plantuml_ascii")
-local plantuml_preview = require("config.plantuml_preview")
+local pager = require("config.pager")
 
 log_patterns.setup()
 
@@ -88,7 +86,6 @@ local function set_filetype_with_scratch(ft)
 	-- strip the ANSI escapes first so the new filetype renders cleanly instead
 	-- of showing the raw sequences as garbage. Guarded to pager mode so we never
 	-- rewrite a real file buffer in normal nvim.
-	local pager = require("config.pager")
 	if pager.active then
 		pager.strip_ansi(0)
 	end
@@ -121,17 +118,18 @@ vim.api.nvim_create_user_command("JsonTree", function()
 	vim.cmd("JqxList")
 end, { desc = "JSON tree view" })
 
-vim.api.nvim_create_user_command("MenuOpen", function()
-	local ok, menu = pcall(require, "config.menu")
-	if not ok then
-		notify("Menu config not available", vim.log.levels.WARN)
-		return
-	end
-	menu.open()
-end, { desc = "Open menu" })
+-- The menu backend and its public entry points belong only to the full terminal
+-- editor profile. The pager never loads the plugin.
+if not pager.active then
+	vim.api.nvim_create_user_command("MenuOpen", function()
+		local ok, menu = pcall(require, "config.menu")
+		if not ok then
+			notify("Menu config not available", vim.log.levels.WARN)
+			return
+		end
+		menu.open()
+	end, { desc = "Open menu" })
 
--- The menu plugin is not loaded in pager mode, so don't offer its keymap there.
-if not require("config.pager").active then
 	vim.keymap.set("n", "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open menu" })
 end
 
@@ -148,19 +146,21 @@ vim.api.nvim_create_user_command("LogHlClear", function(opts)
 end, { nargs = "?", complete = log_patterns.complete_colors, desc = "Clear log highlights" })
 
 vim.api.nvim_create_user_command("LogWatchCurrentFile", function(opts)
-	log_watch.command(opts)
+	require("config.log_watch").command(opts)
 end, {
 	nargs = "?",
-	complete = log_watch.complete,
+	complete = function()
+		return require("config.log_watch").complete()
+	end,
 	desc = "Follow current log file live (read-only, toggles without argument)",
 })
 
 vim.api.nvim_create_user_command("PlantumlAscii", function()
-	plantuml_ascii.render()
+	require("config.plantuml_ascii").render()
 end, { desc = "Render PlantUML ASCII preview" })
 
 vim.api.nvim_create_user_command("PlantumlPreview", function()
-	plantuml_preview.preview()
+	require("config.plantuml_preview").preview()
 end, { desc = "Preview PlantUML diagram in browser" })
 
 vim.api.nvim_create_user_command("MermaidPreview", function()

@@ -11,8 +11,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 	callback = function()
 		vim.schedule(function()
 			local ok, err = xpcall(function()
-				local loader = require("lazy.core.loader")
-				loader.load("nvim-dap", { test = "tooling_ui_spec" })
+				require("lazy").load({ plugins = { "nvim-dap" } })
 
 				local dap = require("dap")
 				local python_adapter
@@ -38,6 +37,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					dap.adapters.codelldb.executable.command == expected_codelldb,
 					"codelldb did not use the resolved or deterministic Mason path"
 				)
+				assert(dap.adapters.lldb == dap.adapters.codelldb, "lldb was not aliased to codelldb")
+				assert(dap.adapters.cppdbg == dap.adapters.codelldb, "cppdbg was not aliased to codelldb")
 
 				assert(vim.g.conform_format_on_save == false, "global autoformat must default to off")
 				local original_notify = vim.notify

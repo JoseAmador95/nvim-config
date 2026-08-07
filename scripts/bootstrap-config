@@ -1,0 +1,115 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+xdg_root=
+install_parsers=1
+
+usage() {
+	printf 'Usage: %s --xdg-root ABSOLUTE_PATH [--skip-parsers]\n' "$0" >&2
+}
+
+while [ "$#" -gt 0 ]; do
+	case $1 in
+		--xdg-root)
+			[ "$#" -ge 2 ] || {
+				usage
+				exit 2
+			}
+			xdg_root=$2
+			shift 2
+			;;
+		--skip-parsers)
+			install_parsers=0
+			shift
+			;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		*)
+			usage
+			exit 2
+			;;
+	esac
+done
+
+case $xdg_root in
+	/*) ;;
+	*)
+		printf '%s\n' '--xdg-root must be an absolute path' >&2
+		exit 2
+		;;
+esac
+if [ "$xdg_root" = "/" ]; then
+	printf '%s\n' 'Refusing to use / as the isolated XDG root' >&2
+	exit 2
+fi
+
+mkdir -p "$xdg_root/data" "$xdg_root/state" "$xdg_root/cache" "$xdg_root/log" "$xdg_root/tmp"
+lock_snapshot=$(mktemp "$xdg_root/tmp/lazy-lock.before.XXXXXX")
+cp "$repo_root/lazy-lock.json" "$lock_snapshot"
+cleanup() {
+	rm -f -- "$lock_snapshot"
+}
+trap cleanup 0 HUP INT TERM
+
+export XDG_DATA_HOME="$xdg_root/data"
+export XDG_STATE_HOME="$xdg_root/state"
+export XDG_CACHE_HOME="$xdg_root/cache"
+export NVIM_LOG_FILE="$xdg_root/log/nvim.log"
+export NVIM_LSP_LOG_FILE="$xdg_root/log/lsp.log"
+export NVIM_CONFIG_FILE="$xdg_root/no-local-config.lua"
+export NVIM_CONFIG_ROOT="$repo_root"
+export NVIM_CONFIG_OFFLINE=1
+export NVIM_CONFIG_XDG_ROOT="$xdg_root"
+export TMPDIR="$xdg_root/tmp"
+unset NVIM_APPNAME NVIMPAGER_FILETYPE
+
+NVIM_BIN=${NVIM_BIN:-nvim}
+if ! command -v "$NVIM_BIN" >/dev/null 2>&1; then
+	printf 'Required command not found: %s\n' "$NVIM_BIN" >&2
+	exit 1
+fi
+
+printf 'Restoring plugins from %s/lazy-lock.json\n' "$repo_root"
+"$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" "+Lazy! restore" \
+	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
+	"+quitall"
+
+printf 'Restoring the nvimpager allowlist from the same lock\n'
+NVIM_APPNAME=nvimpager "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" "+Lazy! restore" \
+	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
+	"+quitall"
+NVIM_APPNAME=nvimpager NVIM_CONFIG_TEST="$repo_root/tests/profile_lock_spec.lua" \
+	"$NVIM_BIN" --headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua"
+
+printf 'Restoring the VSCode-Neovim profile from the same lock\n'
+NVIM_CONFIG_VSCODE_STUB="$repo_root/tests/support/vscode_stub.lua" "$NVIM_BIN" --headless -i NONE \
+	--cmd 'let g:vscode = 1' \
+	--cmd 'lua dofile(vim.env.NVIM_CONFIG_VSCODE_STUB)' \
+	-u "$repo_root/init.lua" "+Lazy! restore" \
+	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
+	"+quitall"
+
+if ! cmp -s "$lock_snapshot" "$repo_root/lazy-lock.json"; then
+	printf '%s\n' 'Plugin bootstrap changed lazy-lock.json; refusing a non-reproducible restore' >&2
+	exit 1
+fi
+
+"$NVIM_BIN" --headless -u NONE -i NONE -l "$repo_root/tests/lock_spec.lua"
+
+if [ "$install_parsers" -eq 1 ]; then
+	printf 'Installing the configured editor Tree-sitter parsers\n'
+	"$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" \
+		-c 'lua local ok, err = require("config.treesitter_runtime").install(nil, { wait = true, timeout = 300000 }); if not ok then error(err) end' \
+		-c 'quitall!'
+
+	printf 'Installing the configured nvimpager Tree-sitter parsers\n'
+	NVIM_APPNAME=nvimpager "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" \
+		-c 'lua local ok, err = require("config.treesitter_runtime").install(nil, { wait = true, timeout = 300000 }); if not ok then error(err) end' \
+		-c 'quitall!'
+fi
+
+printf 'Bootstrap complete. Validate with:\n'
+printf '  NVIM_CONFIG_XDG_ROOT=%s %s/scripts/check-config\n' "$xdg_root" "$repo_root"

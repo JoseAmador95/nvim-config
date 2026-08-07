@@ -1,9 +1,8 @@
 local M = {}
 
-local uv = vim.uv
+local async_runner = require("config.async_runner")
 
--- Lua-side storage for uv timer handles (cannot survive buf-var round-trips)
-local timers = {}
+local states = {}
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "PlantumlAscii" })
@@ -11,10 +10,7 @@ end
 
 local function get_buf_var(buf, name)
 	local ok, value = pcall(vim.api.nvim_buf_get_var, buf, name)
-	if ok then
-		return value
-	end
-	return nil
+	return ok and value or nil
 end
 
 local function set_buf_var(buf, name, value)
@@ -33,10 +29,8 @@ local function ensure_preview_buffer(source_buf)
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].swapfile = false
 	vim.bo[buf].modifiable = false
+	vim.bo[buf].readonly = true
 	vim.bo[buf].filetype = "plantuml_ascii"
-	vim.api.nvim_buf_call(buf, function()
-		vim.wo.wrap = false
-	end)
 	set_buf_var(source_buf, "plantuml_ascii_buf", buf)
 	return buf
 end
@@ -46,119 +40,118 @@ local function ensure_preview_window(source_buf, anchor_win)
 	if win and vim.api.nvim_win_is_valid(win) then
 		return win
 	end
-	local target_win = anchor_win
-	if not target_win or not vim.api.nvim_win_is_valid(target_win) then
-		target_win = vim.api.nvim_get_current_win()
+	local target = anchor_win
+	if not target or not vim.api.nvim_win_is_valid(target) then
+		target = vim.api.nvim_get_current_win()
 	end
-	vim.api.nvim_set_current_win(target_win)
+	vim.api.nvim_set_current_win(target)
 	vim.cmd("vsplit")
 	vim.cmd("wincmd L")
 	win = vim.api.nvim_get_current_win()
+	vim.wo[win].wrap = false
 	set_buf_var(source_buf, "plantuml_ascii_win", win)
 	return win
 end
 
-local function stop_timer(buf)
-	local timer = timers[buf]
-	if timer and not timer:is_closing() then
-		timer:stop()
-		timer:close()
+local function render_spec(state)
+	if not vim.api.nvim_buf_is_valid(state.source_buf) then
+		return nil
 	end
-	timers[buf] = nil
+	if vim.fn.executable("plantuml") ~= 1 then
+		notify("plantuml not found in PATH", vim.log.levels.ERROR)
+		return nil
+	end
+	local input = table.concat(vim.api.nvim_buf_get_lines(state.source_buf, 0, -1, false), "\n")
+	if input == "" then
+		notify("Buffer is empty", vim.log.levels.WARN)
+		return nil
+	end
+
+	return {
+		command = { "plantuml", "-ttxt", "-pipe" },
+		options = { text = true, stdin = input },
+		on_result = function(result)
+			if not vim.api.nvim_buf_is_valid(state.source_buf) then
+				return
+			end
+			if result.code ~= 0 then
+				local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
+				notify(msg == "" and "plantuml failed" or msg, vim.log.levels.ERROR)
+				return
+			end
+
+			local preview_buf = ensure_preview_buffer(state.source_buf)
+			local preview_win = ensure_preview_window(state.source_buf, state.anchor_win)
+			vim.api.nvim_win_set_buf(preview_win, preview_buf)
+			vim.wo[preview_win].wrap = false
+			vim.bo[preview_buf].readonly = false
+			vim.bo[preview_buf].modifiable = true
+			vim.api.nvim_buf_set_lines(
+				preview_buf,
+				0,
+				-1,
+				false,
+				vim.split(result.stdout or "", "\n", { plain = true })
+			)
+			vim.bo[preview_buf].modifiable = false
+			vim.bo[preview_buf].readonly = true
+			vim.bo[preview_buf].modified = false
+		end,
+	}
 end
 
-local function schedule_render(source_buf)
-	stop_timer(source_buf)
-
-	local anchor_win = get_buf_var(source_buf, "plantuml_ascii_anchor_win")
-	local timer = uv.new_timer()
-	timers[source_buf] = timer
-
-	timer:start(
-		1000,
-		0,
-		vim.schedule_wrap(function()
-			M.render({ buf = source_buf, anchor_win = anchor_win })
-			stop_timer(source_buf)
-		end)
-	)
+local function schedule_render(state)
+	state.runner:debounce(1000, function()
+		if states[state.source_buf] ~= state then
+			return nil
+		end
+		return render_spec(state)
+	end)
 end
 
-local function setup_autocmds(source_buf)
-	local existing = get_buf_var(source_buf, "plantuml_ascii_group")
-	if existing and type(existing) == "number" then
-		return
+local function ensure_state(source_buf)
+	local state = states[source_buf]
+	if state then
+		return state
 	end
+	state = { source_buf = source_buf, runner = async_runner.new() }
+	states[source_buf] = state
+
 	local group = vim.api.nvim_create_augroup("PlantumlAscii_" .. source_buf, { clear = true })
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
 		group = group,
 		buffer = source_buf,
 		callback = function()
-			schedule_render(source_buf)
+			if states[source_buf] == state then
+				schedule_render(state)
+			end
 		end,
 	})
 	vim.api.nvim_create_autocmd("BufWipeout", {
 		group = group,
 		buffer = source_buf,
+		once = true,
 		callback = function()
-			stop_timer(source_buf)
-			set_buf_var(source_buf, "plantuml_ascii_group", nil)
+			if states[source_buf] == state then
+				states[source_buf] = nil
+				state.runner:close()
+			end
 		end,
 	})
 	set_buf_var(source_buf, "plantuml_ascii_group", group)
-end
-
-local function render_buffer(source_buf, anchor_win)
-	if vim.fn.executable("plantuml") ~= 1 then
-		notify("plantuml not found in PATH", vim.log.levels.ERROR)
-		return
-	end
-
-	if not vim.api.nvim_buf_is_valid(source_buf) then
-		return
-	end
-
-	local input = table.concat(vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "\n")
-	if input == "" then
-		notify("Buffer is empty", vim.log.levels.WARN)
-		return
-	end
-
-	vim.system({ "plantuml", "-ttxt", "-pipe" }, { text = true, stdin = input }, function(result)
-		vim.schedule(function()
-			if not vim.api.nvim_buf_is_valid(source_buf) then
-				return
-			end
-
-			if result.code ~= 0 then
-				local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
-				if msg == "" then
-					msg = "plantuml failed"
-				end
-				notify(msg, vim.log.levels.ERROR)
-				return
-			end
-
-			local output = result.stdout or ""
-			local lines = vim.split(output, "\n", { plain = true })
-
-			local preview_buf = ensure_preview_buffer(source_buf)
-			local preview_win = ensure_preview_window(source_buf, anchor_win)
-			vim.api.nvim_win_set_buf(preview_win, preview_buf)
-			vim.bo[preview_buf].modifiable = true
-			vim.api.nvim_buf_set_lines(preview_buf, 0, -1, false, lines)
-			vim.bo[preview_buf].modifiable = false
-		end)
-	end)
+	return state
 end
 
 function M.render(opts)
 	local options = opts or {}
 	local source_buf = options.buf or vim.api.nvim_get_current_buf()
-	local anchor_win = options.anchor_win or vim.api.nvim_get_current_win()
-	set_buf_var(source_buf, "plantuml_ascii_anchor_win", anchor_win)
-	setup_autocmds(source_buf)
-	render_buffer(source_buf, anchor_win)
+	local state = ensure_state(source_buf)
+	state.anchor_win = options.anchor_win or vim.api.nvim_get_current_win()
+	set_buf_var(source_buf, "plantuml_ascii_anchor_win", state.anchor_win)
+	local spec = render_spec(state)
+	if spec then
+		state.runner:request(spec)
+	end
 end
 
 return M

@@ -2,7 +2,9 @@ return {
 	{
 		"obsidian-nvim/obsidian.nvim",
 		version = "*",
-		ft = "markdown",
+		-- Load before filetype detection rather than through Lazy's `ft` event,
+		-- whose global replay would run every FileType autocmd more than once.
+		event = { "BufReadPre", "BufNewFile" },
 		cond = function()
 			return not vim.g.vscode
 		end,

@@ -1,34 +1,25 @@
--- lua/config/diagram.lua
--- Unified on-demand diagram viewer for mermaid and PlantUML. `:DiagramShow [svg|ascii]`
--- (default svg) renders the diagram under the cursor in a floating window:
---   svg   -> the rendered diagram as an image (fit to the float), Chromium-free
---            (mermaid: mmdflux -> rsvg-convert; plantuml: plantuml -tsvg -> rsvg-convert)
---            zoom/pan in the float: h/j/k/l pan, +/_ (or =/-) zoom, 0 resets to
---            fit, y copies the diagram image to the clipboard, q/<Esc> close.
---            Zoom re-rasterizes an SVG viewBox sub-region, so it stays crisp.
---   ascii -> the diagram as text (mermaid: mmdflux; plantuml: plantuml -ttxt)
--- svg falls back to ascii when the terminal can't display images or an image
--- dependency is missing; any missing dependency is announced (with its install
--- command) via a notification, so nothing fails silently.
+-- Unified on-demand Mermaid and PlantUML viewer. Rendering is asynchronous and
+-- generation-aware: closing a float or requesting a newer zoom invalidates old
+-- callbacks, and every renderer output is promoted atomically.
 local M = {}
 
+local async_runner = require("config.async_runner")
 local blocks = require("config.diagram_blocks")
+local cache = require("config.diagram_cache")
+local fs = require("config.fs")
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "Diagram" })
 end
 
--- Fenced-code language -> diagram kind.
 local LANGS = { mermaid = "mermaid", plantuml = "plantuml", puml = "plantuml", uml = "plantuml" }
 
--- Manual install command per external tool (announced when missing).
 local INSTALL = {
 	mmdflux = "cargo install mmdflux",
 	["rsvg-convert"] = "brew install librsvg",
 	plantuml = "brew install plantuml",
 }
 
--- External tools required per kind and mode.
 local DEPS = {
 	mermaid = { svg = { "mmdflux", "rsvg-convert" }, ascii = { "mmdflux" } },
 	plantuml = { svg = { "plantuml", "rsvg-convert" }, ascii = { "plantuml" } },
@@ -36,20 +27,20 @@ local DEPS = {
 
 local function missing(kind, mode)
 	local out = {}
-	for _, exe in ipairs(DEPS[kind][mode]) do
-		if vim.fn.executable(exe) ~= 1 then
-			out[#out + 1] = exe
+	for _, executable in ipairs(DEPS[kind][mode]) do
+		if vim.fn.executable(executable) ~= 1 then
+			out[#out + 1] = executable
 		end
 	end
 	return out
 end
 
 local function install_hint(list)
-	local h = {}
-	for _, exe in ipairs(list) do
-		h[#h + 1] = INSTALL[exe] or ("install " .. exe)
+	local hints = {}
+	for _, executable in ipairs(list) do
+		hints[#hints + 1] = INSTALL[executable] or ("install " .. executable)
 	end
-	return table.concat(h, "; ")
+	return table.concat(hints, "; ")
 end
 
 local function image_terminal_ok()
@@ -63,34 +54,42 @@ local function whole_buffer(buf)
 	return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
 end
 
--- The diagram under the cursor: { kind, src } or nil. In a plantuml buffer or a
--- non-markdown buffer the whole buffer is the source; in markdown it's the fenced
--- block under the cursor.
 local function detect(buf)
-	local ft = vim.bo[buf].filetype
-	if ft == "plantuml" then
+	local filetype = vim.bo[buf].filetype
+	if filetype == "plantuml" then
 		return { kind = "plantuml", src = whole_buffer(buf) }
 	end
-	if ft ~= "markdown" then
+	if filetype ~= "markdown" then
 		return { kind = "mermaid", src = whole_buffer(buf) }
 	end
-	local set = {}
-	for k in pairs(LANGS) do
-		set[k] = true
+	local accepted = {}
+	for language in pairs(LANGS) do
+		accepted[language] = true
 	end
-	local b = blocks.under_cursor(buf, set)
-	if not b then
-		return nil
-	end
-	return { kind = LANGS[b.lang], src = b.src }
+	local block = blocks.under_cursor(buf, accepted)
+	return block and { kind = LANGS[block.lang], src = block.src } or nil
 end
 
--- A centered scratch float; q / <Esc> close it. Returns buf, width, height, win.
+local function set_float_lines(buf, lines)
+	if not vim.api.nvim_buf_is_valid(buf) then
+		return
+	end
+	vim.bo[buf].readonly = false
+	vim.bo[buf].modifiable = true
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	vim.bo[buf].modifiable = false
+	vim.bo[buf].readonly = true
+	vim.bo[buf].modified = false
+end
+
+-- A centered, read-only scratch float. q / <Esc> closes it.
 local function make_float(title)
 	local buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[buf].buftype = "nofile"
 	vim.bo[buf].bufhidden = "wipe"
-	local width = math.floor(vim.o.columns * 0.9)
-	local height = math.floor(vim.o.lines * 0.9)
+	vim.bo[buf].swapfile = false
+	local width = math.max(1, math.floor(vim.o.columns * 0.9))
+	local height = math.max(1, math.floor(vim.o.lines * 0.9))
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
 		width = width,
@@ -103,6 +102,7 @@ local function make_float(title)
 		title_pos = "center",
 	})
 	vim.wo[win].wrap = false
+	set_float_lines(buf, { "Rendering…" })
 	local function close()
 		if vim.api.nvim_win_is_valid(win) then
 			vim.api.nvim_win_close(win, true)
@@ -114,391 +114,434 @@ local function make_float(title)
 	return buf, width, height, win
 end
 
-local function cache_dir()
-	local dir = vim.fn.stdpath("cache") .. "/diagram"
-	vim.fn.mkdir(dir, "p")
-	return dir
-end
-
--- Parse the root <svg> element's intrinsic geometry, in the SVG's user units:
--- ox, oy, w, h taken from `viewBox` (falling back to `width`/`height`). Returns
--- nil when neither is present, in which case zoom/pan is disabled.
 local function svg_dims(svg)
 	local root = svg:match("<svg[^>]*>") or svg
-	local ox, oy, w, h = root:match('viewBox="%s*(%-?[%d%.]+)%s+(%-?[%d%.]+)%s+(%-?[%d%.]+)%s+(%-?[%d%.]+)')
-	if w then
-		return tonumber(ox), tonumber(oy), tonumber(w), tonumber(h)
+	local ox, oy, width, height = root:match('viewBox="%s*(%-?[%d%.]+)%s+(%-?[%d%.]+)%s+(%-?[%d%.]+)%s+(%-?[%d%.]+)')
+	if width then
+		return tonumber(ox), tonumber(oy), tonumber(width), tonumber(height)
 	end
-	local ws = root:match('width="(%-?[%d%.]+)')
-	local hs = root:match('height="(%-?[%d%.]+)')
-	if ws and hs then
-		return 0, 0, tonumber(ws), tonumber(hs)
+	local width_string = root:match('width="(%-?[%d%.]+)')
+	local height_string = root:match('height="(%-?[%d%.]+)')
+	if width_string and height_string then
+		return 0, 0, tonumber(width_string), tonumber(height_string)
 	end
 	return nil
 end
 
--- SVG text is generated once per (kind, src) and reused for every zoom/pan view.
-local svg_cache = {}
-
--- Render `src` to its SVG once, parse the root geometry, and cache it. Calls
--- cb({ svg, ox, oy, w, h, kind, src }) on success; w/h are nil when the SVG
--- exposes no size (zoom disabled). mermaid -> mmdflux, plantuml -> plantuml -tsvg.
-local function to_svg(kind, src, cb)
-	local ckey = kind .. "\0" .. src
-	if svg_cache[ckey] then
-		cb(svg_cache[ckey])
-		return
-	end
-	local svg_cmd = kind == "mermaid" and { "mmdflux", "-f", "svg" } or { "plantuml", "-tsvg", "-pipe" }
-	local tool = kind == "mermaid" and "mmdflux" or "plantuml"
-	vim.system(svg_cmd, { text = true, stdin = src }, function(r)
-		if r.code ~= 0 or not r.stdout or r.stdout == "" then
-			vim.schedule(function()
-				local msg = vim.trim(r.stderr or "")
-				notify(msg == "" and (tool .. " failed to render the diagram") or msg, vim.log.levels.ERROR)
-			end)
-			return
-		end
-		local ox, oy, w, h = svg_dims(r.stdout)
-		local info = { svg = r.stdout, ox = ox, oy = oy, w = w, h = h, kind = kind, src = src }
-		svg_cache[ckey] = info
-		vim.schedule(function()
-			cb(info)
-		end)
-	end)
+local function svg_info(kind, src, svg, svg_key)
+	local ox, oy, width, height = svg_dims(svg)
+	return {
+		svg = svg,
+		ox = ox,
+		oy = oy,
+		w = width,
+		h = height,
+		kind = kind,
+		src = src,
+		svg_key = svg_key,
+	}
 end
 
--- Rasterize a view of the SVG to a PNG (async) at `target` ({ width, height } in
--- pixels), calling cb(png) on success. `view` is a { x, y, w, h } sub-region in
--- SVG user units (zoom/pan, whose aspect equals `target`'s) or nil to fit the
--- whole diagram. We rewrite only the root `viewBox` -- rsvg maps it onto the
--- exact -w/-h output -- so every zoom level is re-rasterized from vector and
--- stays crisp. For a view we must NOT pass --keep-aspect-ratio: rsvg would then
--- honor the SVG's *intrinsic* width/height (the diagram's aspect) instead of the
--- viewBox, breaking the fill. The whole-diagram fallback keeps aspect and fills
--- the box (Snacks only scales down, so a small render would otherwise show tiny).
--- The PNG path is content-addressed (kind + target + view + src): distinct views
--- never collide and Snacks' path-keyed image cache stays correct; rsvg writes it.
-local function render_view(info, view, target, cb)
-	local vk = view and ("%g,%g,%g,%g"):format(view.x, view.y, view.w, view.h) or "full"
-	local key = ("%s:%dx%d:%s:%s"):format(info.kind, target.width, target.height, vk, info.src)
-	local png = cache_dir() .. "/" .. vim.fn.sha256(key) .. ".png"
-	if vim.fn.filereadable(png) == 1 then
-		cb(png)
+local function valid_svg(svg)
+	return type(svg) == "string" and svg ~= "" and svg:find("<svg[%s>]") ~= nil
+end
+
+local function to_svg(session, kind, src, callback)
+	local command = kind == "mermaid" and { "mmdflux", "-f", "svg" } or { "plantuml", "-tsvg", "-pipe" }
+	local tool = kind == "mermaid" and "mmdflux" or "plantuml"
+	local key = cache.key({ source = src, mode = kind .. ":svg", argv = command })
+	local path = cache.path(key, "svg")
+	local cached = cache.read(path)
+	if valid_svg(cached) then
+		callback(svg_info(kind, src, cached, key))
 		return
+	elseif cached then
+		pcall(vim.uv.fs_unlink, path)
 	end
+
+	session.runner:request({
+		command = command,
+		options = { text = true, stdin = src },
+		on_result = function(result)
+			if result.code ~= 0 or not valid_svg(result.stdout) then
+				local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
+				notify(msg == "" and (tool .. " failed to render the diagram") or msg, vim.log.levels.ERROR)
+				return
+			end
+			local written, write_err = fs.write_binary_atomic(path, result.stdout)
+			if not written then
+				notify("Could not cache rendered SVG: " .. tostring(write_err), vim.log.levels.ERROR)
+				return
+			end
+			callback(svg_info(kind, src, result.stdout, key))
+		end,
+	})
+end
+
+local function render_view(session, info, view, target, callback)
+	local view_key = view and ("%g,%g,%g,%g"):format(view.x, view.y, view.w, view.h) or "full"
 	local svg = info.svg
-	local cmd = { "rsvg-convert", "-f", "png", "-w", tostring(target.width), "-h", tostring(target.height) }
+	local command = {
+		"rsvg-convert",
+		"-f",
+		"png",
+		"-w",
+		tostring(target.width),
+		"-h",
+		tostring(target.height),
+	}
 	if view then
 		svg = svg:gsub('viewBox="[^"]*"', ('viewBox="%g %g %g %g"'):format(view.x, view.y, view.w, view.h), 1)
 	else
-		cmd[#cmd + 1] = "--keep-aspect-ratio"
+		command[#command + 1] = "--keep-aspect-ratio"
 	end
-	cmd[#cmd + 1] = "-o"
-	cmd[#cmd + 1] = png
-	vim.system(cmd, { stdin = svg }, function(r2)
-		if r2.code == 0 and vim.fn.filereadable(png) == 1 then
-			vim.schedule(function()
-				cb(png)
-			end)
-		else
-			vim.schedule(function()
-				notify("rsvg-convert failed to rasterize the SVG", vim.log.levels.ERROR)
-			end)
+
+	local key_argv = vim.list_extend(vim.deepcopy(command), { "-o", "<output>" })
+	local key = cache.key({
+		source = info.src,
+		mode = ("%s:png:%dx%d:%s"):format(info.kind, target.width, target.height, view_key),
+		argv = key_argv,
+		extra = info.svg_key,
+	})
+	local png = cache.path(key, "png")
+	if cache.is_valid_png(png) then
+		callback(png)
+		return
+	elseif vim.fn.filereadable(png) == 1 then
+		pcall(vim.uv.fs_unlink, png)
+	end
+
+	local temp = fs.temp_path(png)
+	cache.retain(temp)
+	command[#command + 1] = "-o"
+	command[#command + 1] = temp
+	local cleaned = false
+	local function cleanup()
+		if cleaned then
+			return
 		end
-	end)
+		cleaned = true
+		pcall(vim.uv.fs_unlink, temp)
+		cache.release(temp)
+	end
+
+	session.runner:request({
+		command = command,
+		options = { stdin = svg },
+		on_finish = function(_, delivered)
+			if not delivered then
+				cleanup()
+			end
+		end,
+		on_result = function(result)
+			if result.code ~= 0 or not cache.is_valid_png(temp) then
+				cleanup()
+				local msg = vim.trim(result.stderr or "")
+				notify(msg == "" and "rsvg-convert failed to rasterize the SVG" or msg, vim.log.levels.ERROR)
+				return
+			end
+			local replaced, replace_err = fs.replace_atomic(temp, png)
+			cache.release(temp)
+			cleaned = true
+			if not replaced or not cache.is_valid_png(png) then
+				notify("Could not cache rendered PNG: " .. tostring(replace_err or "invalid PNG"), vim.log.levels.ERROR)
+				return
+			end
+			callback(png)
+		end,
+	})
 end
 
--- Copy a PNG file to the system clipboard as an image (async), calling
--- on_done(ok, err). macOS -> osascript; Wayland -> wl-copy; X11 -> xclip.
+local function to_text(session, kind, src, callback)
+	local command = kind == "mermaid" and { "mmdflux" } or { "plantuml", "-ttxt", "-pipe" }
+	local key = cache.key({ source = src, mode = kind .. ":ascii", argv = command })
+	local path = cache.path(key, "txt")
+	local cached = cache.read(path)
+	if cached then
+		callback(vim.split(cached, "\n", { plain = true }))
+		return
+	end
+
+	session.runner:request({
+		command = command,
+		options = { text = true, stdin = src },
+		on_result = function(result)
+			if result.code ~= 0 then
+				local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
+				notify(msg == "" and "diagram render failed" or msg, vim.log.levels.ERROR)
+				return
+			end
+			local output = result.stdout or ""
+			local written, write_err = fs.write_binary_atomic(path, output)
+			if not written then
+				notify("Could not cache rendered text: " .. tostring(write_err), vim.log.levels.ERROR)
+				return
+			end
+			callback(vim.split(output, "\n", { plain = true }))
+		end,
+	})
+end
+
 local function to_clipboard(png, on_done)
 	if vim.fn.has("mac") == 1 then
 		local script = ('set the clipboard to (read (POSIX file "%s") as «class PNGf»)'):format(png)
-		vim.system({ "osascript", "-e", script }, {}, function(r)
-			on_done(r.code == 0, vim.trim(r.stderr or ""))
+		vim.system({ "osascript", "-e", script }, {}, function(result)
+			on_done(result.code == 0, vim.trim(result.stderr or ""))
 		end)
 	elseif vim.fn.executable("wl-copy") == 1 then
-		local data = ""
-		local fd = vim.uv.fs_open(png, "r", 420)
-		if fd then
-			local stat = vim.uv.fs_fstat(fd)
-			data = (stat and vim.uv.fs_read(fd, stat.size, 0)) or ""
-			vim.uv.fs_close(fd)
-		end
-		vim.system({ "wl-copy", "--type", "image/png" }, { stdin = data }, function(r)
-			on_done(r.code == 0, vim.trim(r.stderr or ""))
+		local data = cache.read(png) or ""
+		vim.system({ "wl-copy", "--type", "image/png" }, { stdin = data }, function(result)
+			on_done(result.code == 0, vim.trim(result.stderr or ""))
 		end)
 	elseif vim.fn.executable("xclip") == 1 then
-		vim.system({ "xclip", "-selection", "clipboard", "-t", "image/png", png }, {}, function(r)
-			on_done(r.code == 0, vim.trim(r.stderr or ""))
+		vim.system({ "xclip", "-selection", "clipboard", "-t", "image/png", png }, {}, function(result)
+			on_done(result.code == 0, vim.trim(result.stderr or ""))
 		end)
 	else
 		on_done(false, "no image clipboard tool (need osascript, wl-copy or xclip)")
 	end
 end
 
--- Render `src` to ASCII lines (async), calling cb(lines) on success.
-local function to_text(kind, src, cb)
-	local cmd = kind == "mermaid" and { "mmdflux" } or { "plantuml", "-ttxt", "-pipe" }
-	vim.system(cmd, { text = true, stdin = src }, function(r)
-		if r.code ~= 0 then
-			vim.schedule(function()
-				local msg = vim.trim((r.stderr or "") .. "\n" .. (r.stdout or ""))
-				notify(msg == "" and "diagram render failed" or msg, vim.log.levels.ERROR)
-			end)
-			return
-		end
-		vim.schedule(function()
-			cb(vim.split(r.stdout or "", "\n", { plain = true }))
-		end)
-	end)
-end
+local function show_svg(diagram)
+	local buf, width, height, win = make_float(diagram.kind .. " (svg)")
+	local session = { runner = async_runner.new() }
+	local copy_session = { runner = async_runner.new() }
+	local placement
+	local shown
 
-local function show_svg(d)
-	-- Rasterize to the float's pixel size so the diagram fills it. The float is
-	-- 90% of the editor (see make_float); a terminal cell is cell_width x
-	-- cell_height pixels per Snacks' probe.
-	local cols = math.floor(vim.o.columns * 0.9)
-	local rows = math.floor(vim.o.lines * 0.9)
-	local term = Snacks.image.terminal.size()
-	local size = {
-		width = math.floor(cols * term.cell_width),
-		height = math.floor(rows * term.cell_height),
-	}
+	local function alive()
+		return vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_win_is_valid(win)
+	end
 
-	to_svg(d.kind, d.src, function(info)
-		-- Fill zoom/pan state. The visible region has the float's *display aspect*
-		-- (AF) rather than the diagram's, so the zoomed image uses the WHOLE float;
-		-- panning moves that window over the diagram. Disabled when the SVG has no
-		-- parseable size. `z` is the zoom factor (1 = whole diagram fits); `cx,cy`
-		-- the view center in SVG user units.
-		local can_zoom = info.w and info.h and info.w > 0 and info.h > 0
-		local ZMIN, ZMAX, ZSTEP, PAN = 1, 8, 1.25, 0.2
-		local z, cx, cy = 1, (info.w or 0) / 2, (info.h or 0) / 2
-
-		-- Fill target = the reserved image area (full width x height-2 rows, see
-		-- place()) in pixels; its aspect AF drives the visible region. The base
-		-- region at z=1 is the smallest AF-aspect box containing the diagram
-		-- (letterboxed with the SVG's background at fit).
-		local disp = { width = size.width, height = math.max(1, size.height - 2 * term.cell_height) }
-		local AF = disp.width / disp.height
-		local bw, bh
-		if can_zoom then
-			if info.w / info.h < AF then
-				bh, bw = info.h, info.h * AF
-			else
-				bw, bh = info.w, info.w / AF
-			end
-		end
-
-		local function clamp(v, lo, hi)
-			return math.min(math.max(v, lo), hi)
-		end
-		-- Per axis: if the region is larger than the diagram, center it (whole
-		-- diagram visible with margins); otherwise clamp so it stays inside.
-		local function clamp_center()
-			local w, h = bw / z, bh / z
-			cx = w >= info.w and info.w / 2 or clamp(cx, w / 2, info.w - w / 2)
-			cy = h >= info.h and info.h / 2 or clamp(cy, h / 2, info.h - h / 2)
-		end
-		local function view()
-			local w, h = bw / z, bh / z
-			return { x = info.ox + (cx - w / 2), y = info.oy + (cy - h / 2), w = w, h = h }
-		end
-
-		-- Render the first view, then build the float around it so it appears with
-		-- the image already in place.
-		render_view(info, can_zoom and view() or nil, can_zoom and disp or size, function(png)
-			local buf, width, height, win = make_float(d.kind .. " (svg)")
-			local placement, shown
-			local rendering, dirty = false, false
-
-			-- Center the current PNG in the float and (re)create the placement.
-			-- Snacks fits the image preserving aspect and only scales down; it also
-			-- renders it as virtual lines *below* an anchor line and Neovim drops the
-			-- last one when it hits the window's bottom row, so reserve two rows (the
-			-- anchor above + one slack below) via `height - 2` and max_height. The
-			-- left margin is the placement column, which Snacks turns into per-line
-			-- indentation; the top margin is padded with blank lines.
-			local function place(image)
-				local box_h = math.max(1, height - 2)
-				local dim = Snacks.image.util.dim(image)
-				local aspect = (dim.width * term.cell_height) / (dim.height * term.cell_width)
-				local iw, ih
-				if aspect > width / box_h then
-					iw, ih = width, math.floor(width / aspect)
-				else
-					iw, ih = math.floor(box_h * aspect), box_h
-				end
-				local top = math.max(1, math.floor((height - ih) / 2))
-				local left = math.max(0, math.floor((width - iw) / 2))
-				local pad = {}
-				for _ = 1, top do
-					pad[#pad + 1] = ""
-				end
-				vim.bo[buf].modifiable = true
-				vim.api.nvim_buf_set_lines(buf, 0, -1, false, pad)
-				vim.bo[buf].modifiable = false
-				if placement then
-					pcall(function()
-						placement:close()
-					end)
-				end
-				placement = Snacks.image.placement.new(buf, image, {
-					inline = true,
-					pos = { top, left },
-					max_width = width,
-					max_height = box_h,
-					auto_resize = true,
-				})
-				shown = image
-			end
-
-			local function update_title()
-				local ok, cfg = pcall(vim.api.nvim_win_get_config, win)
-				if not ok then
-					return
-				end
-				cfg.title = can_zoom and (" %s (svg) · %d%% "):format(d.kind, math.floor(z * 100 + 0.5))
-					or (" " .. d.kind .. " (svg) ")
-				cfg.title_pos = "center"
-				pcall(vim.api.nvim_win_set_config, win, cfg)
-			end
-
-			-- Re-render the current view, coalescing rapid key presses: if a render
-			-- is already in flight, mark dirty and render once more when it lands.
-			local function rerender()
-				if not vim.api.nvim_win_is_valid(win) then
-					return
-				end
-				if rendering then
-					dirty = true
-					return
-				end
-				rendering = true
-				update_title()
-				render_view(info, can_zoom and view() or nil, can_zoom and disp or size, function(image)
-					rendering = false
-					if not (vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_win_is_valid(win)) then
-						return
-					end
-					place(image)
-					if dirty then
-						dirty = false
-						rerender()
-					end
+	vim.api.nvim_create_autocmd("BufWipeout", {
+		buffer = buf,
+		once = true,
+		callback = function()
+			session.runner:close()
+			copy_session.runner:close()
+			if placement then
+				pcall(function()
+					placement:close()
 				end)
 			end
+			cache.release(shown)
+			shown = nil
+		end,
+	})
 
-			place(png)
-			update_title()
+	local term = Snacks.image.terminal.size()
+	local size = {
+		width = math.max(1, math.floor(width * term.cell_width)),
+		height = math.max(1, math.floor(height * term.cell_height)),
+	}
 
-			-- Close the image when the float is dismissed (q/<Esc> wipe the buffer).
-			vim.api.nvim_create_autocmd("BufWipeout", {
-				buffer = buf,
-				once = true,
-				callback = function()
-					if placement then
-						pcall(function()
-							placement:close()
-						end)
-					end
-				end,
+	to_svg(session, diagram.kind, diagram.src, function(info)
+		if not alive() then
+			return
+		end
+		local can_zoom = info.w and info.h and info.w > 0 and info.h > 0
+		local zoom_min, zoom_max, zoom_step, pan_step = 1, 8, 1.25, 0.2
+		local zoom = 1
+		local center_x, center_y = (info.w or 0) / 2, (info.h or 0) / 2
+		local display = {
+			width = size.width,
+			height = math.max(1, size.height - 2 * term.cell_height),
+		}
+		local display_aspect = display.width / display.height
+		local base_width, base_height
+		if can_zoom then
+			if info.w / info.h < display_aspect then
+				base_height, base_width = info.h, info.h * display_aspect
+			else
+				base_width, base_height = info.w, info.w / display_aspect
+			end
+		end
+
+		local function clamp(value, lower, upper)
+			return math.min(math.max(value, lower), upper)
+		end
+
+		local function clamp_center()
+			local visible_width, visible_height = base_width / zoom, base_height / zoom
+			center_x = visible_width >= info.w and info.w / 2
+				or clamp(center_x, visible_width / 2, info.w - visible_width / 2)
+			center_y = visible_height >= info.h and info.h / 2
+				or clamp(center_y, visible_height / 2, info.h - visible_height / 2)
+		end
+
+		local function current_view()
+			local visible_width, visible_height = base_width / zoom, base_height / zoom
+			return {
+				x = info.ox + center_x - visible_width / 2,
+				y = info.oy + center_y - visible_height / 2,
+				w = visible_width,
+				h = visible_height,
+			}
+		end
+
+		local function place(image)
+			if not alive() then
+				return
+			end
+			local box_height = math.max(1, height - 2)
+			local dimensions = Snacks.image.util.dim(image)
+			local aspect = (dimensions.width * term.cell_height) / (dimensions.height * term.cell_width)
+			local image_width, image_height
+			if aspect > width / box_height then
+				image_width, image_height = width, math.floor(width / aspect)
+			else
+				image_width, image_height = math.floor(box_height * aspect), box_height
+			end
+			local top = math.max(1, math.floor((height - image_height) / 2))
+			local left = math.max(0, math.floor((width - image_width) / 2))
+			local padding = {}
+			for _ = 1, top do
+				padding[#padding + 1] = ""
+			end
+			set_float_lines(buf, padding)
+
+			cache.retain(image)
+			if placement then
+				pcall(function()
+					placement:close()
+				end)
+			end
+			cache.release(shown)
+			local placed, new_placement = pcall(Snacks.image.placement.new, buf, image, {
+				inline = true,
+				pos = { top, left },
+				max_width = width,
+				max_height = box_height,
+				auto_resize = true,
 			})
+			if not placed then
+				cache.release(image)
+				placement = nil
+				shown = nil
+				notify("Could not display rendered diagram: " .. tostring(new_placement), vim.log.levels.ERROR)
+				return
+			end
+			placement = new_placement
+			shown = image
+		end
 
-			-- `y` copies the diagram image to the clipboard. When the size is known
-			-- we render a clean, tight, high-res full diagram (not the current zoom);
-			-- otherwise we copy whatever is currently shown.
-			local function copy()
-				local function do_copy(image)
-					to_clipboard(image, function(ok, err)
-						vim.schedule(function()
-							if ok then
-								notify("Diagram copied to clipboard")
-							else
-								notify(
-									"Copy to clipboard failed: " .. (err ~= "" and err or "unknown"),
-									vim.log.levels.ERROR
-								)
-							end
-						end)
+		local function update_title()
+			local ok, config = pcall(vim.api.nvim_win_get_config, win)
+			if not ok then
+				return
+			end
+			config.title = can_zoom and (" %s (svg) · %d%% "):format(diagram.kind, math.floor(zoom * 100 + 0.5))
+				or (" " .. diagram.kind .. " (svg) ")
+			config.title_pos = "center"
+			pcall(vim.api.nvim_win_set_config, win, config)
+		end
+
+		local function rerender()
+			if not alive() then
+				return
+			end
+			update_title()
+			render_view(session, info, can_zoom and current_view() or nil, can_zoom and display or size, place)
+		end
+
+		rerender()
+
+		local function copy()
+			local function copy_image(image)
+				to_clipboard(image, function(ok, err)
+					vim.schedule(function()
+						if ok then
+							notify("Diagram copied to clipboard")
+						else
+							notify(
+								"Copy to clipboard failed: " .. (err ~= "" and err or "unknown"),
+								vim.log.levels.ERROR
+							)
+						end
 					end)
-				end
-				if can_zoom then
-					local s = 2000 / math.max(info.w, info.h)
-					local ct =
-						{ width = math.max(1, math.floor(info.w * s)), height = math.max(1, math.floor(info.h * s)) }
-					render_view(info, nil, ct, do_copy)
-				elseif shown then
-					do_copy(shown)
-				end
+				end)
 			end
-			vim.keymap.set("n", "y", copy, { buffer = buf, nowait = true, desc = "Copy diagram to clipboard" })
-
 			if can_zoom then
-				local function zoom(factor)
-					z = clamp(z * factor, ZMIN, ZMAX)
-					clamp_center()
-					rerender()
-				end
-				local function pan(dx, dy)
-					cx = cx + dx * (bw / z) * PAN
-					cy = cy + dy * (bh / z) * PAN
-					clamp_center()
-					rerender()
-				end
-				local maps = {
-					h = function()
-						pan(-1, 0)
-					end,
-					l = function()
-						pan(1, 0)
-					end,
-					k = function()
-						pan(0, -1)
-					end,
-					j = function()
-						pan(0, 1)
-					end,
-					["+"] = function()
-						zoom(ZSTEP)
-					end,
-					["="] = function()
-						zoom(ZSTEP)
-					end,
-					["_"] = function()
-						zoom(1 / ZSTEP)
-					end,
-					["-"] = function()
-						zoom(1 / ZSTEP)
-					end,
-					["0"] = function()
-						z, cx, cy = 1, info.w / 2, info.h / 2
-						rerender()
-					end,
+				local scale = 2000 / math.max(info.w, info.h)
+				local target = {
+					width = math.max(1, math.floor(info.w * scale)),
+					height = math.max(1, math.floor(info.h * scale)),
 				}
-				for lhs, fn in pairs(maps) do
-					vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true, desc = "Diagram zoom/pan" })
-				end
+				render_view(copy_session, info, nil, target, copy_image)
+			elseif shown then
+				copy_image(shown)
 			end
-		end)
+		end
+		vim.keymap.set("n", "y", copy, { buffer = buf, nowait = true, desc = "Copy diagram to clipboard" })
+
+		if can_zoom then
+			local function change_zoom(factor)
+				zoom = clamp(zoom * factor, zoom_min, zoom_max)
+				clamp_center()
+				rerender()
+			end
+			local function pan(dx, dy)
+				center_x = center_x + dx * (base_width / zoom) * pan_step
+				center_y = center_y + dy * (base_height / zoom) * pan_step
+				clamp_center()
+				rerender()
+			end
+			local mappings = {
+				h = function()
+					pan(-1, 0)
+				end,
+				l = function()
+					pan(1, 0)
+				end,
+				k = function()
+					pan(0, -1)
+				end,
+				j = function()
+					pan(0, 1)
+				end,
+				["+"] = function()
+					change_zoom(zoom_step)
+				end,
+				["="] = function()
+					change_zoom(zoom_step)
+				end,
+				["_"] = function()
+					change_zoom(1 / zoom_step)
+				end,
+				["-"] = function()
+					change_zoom(1 / zoom_step)
+				end,
+				["0"] = function()
+					zoom, center_x, center_y = 1, info.w / 2, info.h / 2
+					rerender()
+				end,
+			}
+			for lhs, callback in pairs(mappings) do
+				vim.keymap.set("n", lhs, callback, { buffer = buf, nowait = true, desc = "Diagram zoom/pan" })
+			end
+		end
 	end)
 end
 
-local function show_ascii(d)
-	to_text(d.kind, d.src, function(lines)
-		local buf = make_float(d.kind .. " (ascii)")
-		vim.bo[buf].modifiable = true
-		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-		vim.bo[buf].modifiable = false
+local function show_ascii(diagram)
+	local buf = make_float(diagram.kind .. " (ascii)")
+	local session = { runner = async_runner.new() }
+	vim.api.nvim_create_autocmd("BufWipeout", {
+		buffer = buf,
+		once = true,
+		callback = function()
+			session.runner:close()
+		end,
+	})
+	to_text(session, diagram.kind, diagram.src, function(lines)
+		set_float_lines(buf, lines)
 	end)
 end
 
--- mode: "svg" (default) | "ascii". svg falls back to ascii when unavailable.
 function M.show(mode)
 	mode = mode or "svg"
-	local d = detect(vim.api.nvim_get_current_buf())
-	if not d then
+	local diagram = detect(vim.api.nvim_get_current_buf())
+	if not diagram then
 		notify("No mermaid/plantuml diagram under the cursor", vim.log.levels.WARN)
 		return
 	end
@@ -508,9 +551,9 @@ function M.show(mode)
 		if not image_terminal_ok() then
 			reason = "the terminal has no inline image support (needs the Kitty graphics protocol)"
 		else
-			local miss = missing(d.kind, "svg")
-			if #miss > 0 then
-				reason = "missing " .. table.concat(miss, ", ") .. " (install: " .. install_hint(miss) .. ")"
+			local absent = missing(diagram.kind, "svg")
+			if #absent > 0 then
+				reason = "missing " .. table.concat(absent, ", ") .. " (install: " .. install_hint(absent) .. ")"
 			end
 		end
 		if reason then
@@ -520,21 +563,21 @@ function M.show(mode)
 	end
 
 	if mode == "ascii" then
-		local miss = missing(d.kind, "ascii")
-		if #miss > 0 then
+		local absent = missing(diagram.kind, "ascii")
+		if #absent > 0 then
 			notify(
 				("Cannot render %s as ASCII: missing %s (install: %s)"):format(
-					d.kind,
-					table.concat(miss, ", "),
-					install_hint(miss)
+					diagram.kind,
+					table.concat(absent, ", "),
+					install_hint(absent)
 				),
 				vim.log.levels.ERROR
 			)
 			return
 		end
-		show_ascii(d)
+		show_ascii(diagram)
 	else
-		show_svg(d)
+		show_svg(diagram)
 	end
 end
 
@@ -543,8 +586,8 @@ function M.setup()
 		return
 	end
 
-	vim.api.nvim_create_user_command("DiagramShow", function(o)
-		local mode = vim.trim(o.args or "")
+	vim.api.nvim_create_user_command("DiagramShow", function(options)
+		local mode = vim.trim(options.args or "")
 		if mode == "" then
 			mode = nil
 		end
@@ -561,10 +604,6 @@ function M.setup()
 		desc = "Show diagram under cursor (svg default, ascii fallback)",
 	})
 
-	-- In the pager the content buffer is often not a 'markdown'/'plantuml'
-	-- filetype (piped output, man pages, ...), so bind <leader>md globally to keep
-	-- it available on whatever is being viewed. In the editor keep it buffer-local
-	-- to diagram filetypes.
 	if require("config.pager").active then
 		vim.keymap.set("n", "<leader>md", "<cmd>DiagramShow<cr>", { desc = "Show diagram (SVG/ASCII)" })
 		return
@@ -576,16 +615,15 @@ function M.setup()
 	vim.api.nvim_create_autocmd("FileType", {
 		pattern = { "markdown", "plantuml" },
 		group = vim.api.nvim_create_augroup("DiagramKeymaps", { clear = true }),
-		callback = function(a)
-			map(a.buf)
+		callback = function(args)
+			map(args.buf)
 		end,
 	})
-	-- Cover diagram buffers already loaded before setup ran.
-	for _, b in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.api.nvim_buf_is_loaded(b) then
-			local ft = vim.bo[b].filetype
-			if ft == "markdown" or ft == "plantuml" then
-				map(b)
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_loaded(buf) then
+			local filetype = vim.bo[buf].filetype
+			if filetype == "markdown" or filetype == "plantuml" then
+				map(buf)
 			end
 		end
 	end

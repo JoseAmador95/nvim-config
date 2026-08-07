@@ -1,4 +1,28 @@
 -- lua/plugins/treesitter.lua
+local parsers = {
+	"bash",
+	"c",
+	"cmake",
+	"cpp",
+	"go",
+	"gomod",
+	"javascript",
+	"json",
+	"lua",
+	"markdown",
+	"markdown_inline",
+	"python",
+	"query",
+	"rust",
+	"toml",
+	"tsx",
+	"typescript",
+	"vim",
+	"vimdoc",
+	"xml",
+	"yaml",
+}
+
 return {
 	{
 		"nvim-treesitter/nvim-treesitter",
@@ -6,68 +30,15 @@ return {
 		lazy = false,
 		build = ":TSUpdate",
 		config = function()
-			local max_filesize = 200 * 1024
-			local uv = vim.uv
-			local ensure_installed = {
-				"bash",
-				"c",
-				"cmake",
-				"cpp",
-				"go",
-				"gomod",
-				"javascript",
-				"json",
-				"lua",
-				"markdown",
-				"markdown_inline",
-				"python",
-				"query",
-				"rust",
-				"toml",
-				"tsx",
-				"typescript",
-				"vim",
-				"vimdoc",
-				"xml",
-				"yaml",
-			}
-
 			require("nvim-treesitter").setup()
-			require("nvim-treesitter").install(ensure_installed, { summary = false })
-
-			local installable = {}
-			for _, lang in ipairs(ensure_installed) do
-				installable[lang] = true
-			end
-
-			-- Highlight and treesitter-based indent are UI concerns that VSCode
-			-- handles itself; in VSCode we only install parsers so the text
-			-- objects below can query the tree.
-			if not vim.g.vscode then
-				local indent_disabled = {}
-				vim.api.nvim_create_autocmd("FileType", {
-					group = vim.api.nvim_create_augroup("TreesitterStart", { clear = true }),
-					callback = function(args)
-						local name = vim.api.nvim_buf_get_name(args.buf)
-						local ok, stats = pcall(uv.fs_stat, name)
-						if ok and stats and stats.size > max_filesize then
-							return
-						end
-
-						local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype)
-							or vim.bo[args.buf].filetype
-						if not installable[lang] then
-							return
-						end
-
-						if pcall(vim.treesitter.start, args.buf, lang) and not indent_disabled[lang] then
-							vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
-						end
-					end,
-				})
-			end
+			require("config.treesitter_runtime").setup({
+				parsers = parsers,
+				highlight = not vim.g.vscode,
+				indent = not vim.g.vscode,
+			})
 		end,
-		-- Loads in VSCode too (parsers only, no highlight) so text objects work.
+		-- Loads in VSCode too (installed parsers only, no highlight/indent) so
+		-- text objects can query trees on demand.
 	},
 
 	{
@@ -143,7 +114,9 @@ return {
 
 	{
 		"HiPhish/rainbow-delimiters.nvim",
-		event = "FileType",
+		-- Its plugin file installs the FileType attachment autocmd, so load on
+		-- the preceding buffer lifecycle event without replaying FileType.
+		event = { "BufReadPre", "BufNewFile" },
 		config = function()
 			local rd = require("rainbow-delimiters")
 
@@ -167,21 +140,6 @@ return {
 					"RainbowDelimiterGreen",
 				},
 			})
-
-			-- Patch rainbow-delimiters lib to safely handle missing parsers
-			local lib = require("rainbow-delimiters.lib")
-			local original_attach = lib.attach
-			lib.attach = function(bufnr, lang)
-				-- Safely attempt to attach, notify on errors
-				local ok, err = pcall(original_attach, bufnr, lang)
-				if not ok then
-					vim.notify(
-						"rainbow-delimiters error for buffer " .. bufnr .. ": " .. tostring(err),
-						vim.log.levels.WARN
-					)
-				end
-				return ok
-			end
 		end,
 		cond = function()
 			return not vim.g.vscode

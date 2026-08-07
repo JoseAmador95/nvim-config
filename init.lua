@@ -1,5 +1,5 @@
--- nvim-treesitter's locked `main` branch and this config's startup recovery
--- require the Neovim 0.12 runtime contract.
+-- nvim-treesitter's locked `main` branch requires the Neovim 0.12 runtime
+-- contract.
 if vim.fn.has("nvim-0.12") ~= 1 then
 	local version = vim.version()
 	error(
@@ -11,6 +11,14 @@ if vim.fn.has("nvim-0.12") ~= 1 then
 	)
 end
 
+-- `-u /absolute/path/init.lua` does not add that directory to 'runtimepath',
+-- and NVIM_APPNAME=nvimpager points it at a different config directory. Make
+-- this checkout authoritative so isolated bootstrap/CI and the pager profile
+-- can resolve lua/config and lua/plugins without a home-directory symlink.
+local init_source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve init.lua")
+local config_root = vim.fs.dirname(vim.uv.fs_realpath(init_source) or vim.fs.normalize(init_source))
+vim.opt.runtimepath:prepend(config_root)
+
 -- Core Settings ------------------------------------------------------------
 
 -- Disable netrw
@@ -19,9 +27,6 @@ vim.g.loaded_netrwPlugin = 1
 
 -- optionally enable 24-bit colour
 vim.opt.termguicolors = true
-
--- Enable built-in regex syntax highlight immediately on file open
-vim.cmd("syntax enable")
 
 -- Leader Key
 vim.g.mapleader = " " -- Change to any preferred leader key
@@ -230,24 +235,47 @@ end, { desc = "Restart Neovim to reload config" })
 require("config.local_config").setup()
 require("config.cheatsheet")
 require("config.diagnostics")
-require("config.devcontainer_shell").setup()
-require("config.indent")
-require("config.lsp_helpers")
-require("config.lsp_commands")
-require("config.viewer_commands")
+
+local pager = require("config.pager")
+local is_vscode = vim.g.vscode == 1 or vim.g.vscode == true
+local is_editor = not is_vscode and not pager.active
+
+-- Register profile-owned commands and FileType observers before Lazy and
+-- filetype detection see the first argv buffer. VSCode deliberately keeps only
+-- its action bridge; the pager gets viewer/diagram commands but no IDE tools.
+if is_editor then
+	require("config.devcontainer_shell").setup()
+	require("config.indent")
+	require("config.lsp_helpers")
+	require("config.lsp_commands")
+	require("config.viewer_commands")
+	require("config.diagram").setup()
+	require("config.clangd_commands")
+elseif pager.active then
+	require("config.viewer_commands")
+	require("config.diagram").setup()
+end
+
 require("config.theme").setup()
 require("config.lazy")
 
+-- `:syntax enable` also enables filetype detection and replays it for buffers
+-- that already exist. Lazy must register its documented event handlers first
+-- so argv buffers follow the normal lifecycle without private event replay.
+if pager.active then
+	pager.apply_stdin_filetype(vim.api.nvim_get_current_buf())
+end
+vim.cmd("syntax enable")
+
 -- Pager-only commands/keymaps (nvimpager); no-op in normal/vscode nvim.
-require("config.pager").setup()
+pager.setup()
 
--- Unified diagram viewer (:DiagramShow / <leader>md) for mermaid + PlantUML.
-require("config.diagram").setup()
-
-if vim.g.vscode then
+if is_vscode then
 	require("editor.vscode")
 else
 	require("editor.terminal")
 end
 
-require("config.clangd_commands")
+-- External bootstrap/check scripts use this sentinel because Neovim can report
+-- an init.lua error yet still return a successful process status.
+vim.g.nvim_config_initialized = true

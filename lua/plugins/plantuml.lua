@@ -3,7 +3,7 @@ return {
 	cond = function()
 		return not vim.g.vscode
 	end,
-	ft = { "plantuml" },
+	event = { "BufReadPre", "BufNewFile" },
 	init = function()
 		vim.g.plantuml_set_makeprg = 0
 		vim.filetype.add({

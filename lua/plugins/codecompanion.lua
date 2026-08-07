@@ -2,12 +2,15 @@
 --
 -- CodeCompanion talks to Claude through the `claude_code` ACP adapter, which
 -- authenticates with an OAuth token from `claude setup-token`. Store the token
--- in ~/.nvim-local.lua as env.CLAUDE_CODE_OAUTH_TOKEN (see config.local_config);
--- it is exported early by apply_env, before this plugin loads.
+-- in ~/.nvim-local.lua as codecompanion.oauth_token (see config.local_config).
+-- The credential is passed only to the ACP child process and is never exported
+-- to Neovim's process environment.
 --
 -- External dep: Node with `npx`. The Zed ACP adapter
--- (@zed-industries/claude-agent-acp) is fetched and cached automatically by npx
--- on first use, so there is no manual `npm install -g` step.
+-- (@agentclientprotocol/claude-agent-acp) is fetched and cached automatically
+-- by npx on first use, so there is no manual `npm install -g` step.
+local acp_package = "@agentclientprotocol/claude-agent-acp@" .. require("config.toolchain").versions.claude_acp
+
 return {
 	{
 		"olimorris/codecompanion.nvim",
@@ -34,29 +37,44 @@ return {
 			adapters = {
 				acp = {
 					claude_code = function()
+						local token = require("config.local_config").codecompanion_oauth_token()
 						return require("codecompanion.adapters").extend("claude_code", {
 							-- Run the ACP adapter through npx so it auto-installs and
-							-- caches on first use (no global npm install needed).
+							-- caches this reviewed version on first use.
 							commands = {
-								default = { "npx", "-y", "@zed-industries/claude-agent-acp" },
-								yolo = { "npx", "-y", "@zed-industries/claude-agent-acp", "--yolo" },
+								default = { "npx", "--yes", acp_package },
+								yolo = {
+									"npx",
+									"--yes",
+									acp_package,
+									"--yolo",
+								},
 							},
 							env = {
-								CLAUDE_CODE_OAUTH_TOKEN = vim.env.CLAUDE_CODE_OAUTH_TOKEN,
+								CLAUDE_CODE_OAUTH_TOKEN = token,
+							},
+							handlers = {
+								-- Upstream's handler copies the token into vim.env. The ACP
+								-- process already receives adapter.env, so authentication only
+								-- needs to confirm that the child credential was resolved.
+								auth = function(self)
+									local child_token = self.env_replaced and self.env_replaced.CLAUDE_CODE_OAUTH_TOKEN
+									return child_token ~= nil and child_token ~= ""
+								end,
 							},
 						})
 					end,
 				},
 			},
-			strategies = {
+			interactions = {
 				chat = { adapter = "claude_code" },
 				inline = { adapter = "claude_code" },
 			},
 		},
 		config = function(_, opts)
-			if not vim.env.CLAUDE_CODE_OAUTH_TOKEN or vim.env.CLAUDE_CODE_OAUTH_TOKEN == "" then
+			if not require("config.local_config").codecompanion_oauth_token() then
 				vim.notify(
-					"CodeCompanion: set env.CLAUDE_CODE_OAUTH_TOKEN in ~/.nvim-local.lua "
+					"CodeCompanion: set codecompanion.oauth_token in ~/.nvim-local.lua "
 						.. "(run `claude setup-token`) to enable the Claude subscription adapter.",
 					vim.log.levels.WARN,
 					{ title = "codecompanion" }

@@ -1,18 +1,19 @@
+local function full_terminal_editor()
+	local pager = require("config.pager")
+	return not vim.g.vscode and not pager.active
+end
+
 return {
 	{
 		"nvzone/volt",
 		name = "volt",
-		cond = function()
-			return not vim.g.vscode
-		end,
+		cond = full_terminal_editor,
 		lazy = true,
 	},
 	{
 		"nvzone/menu",
 		name = "menu",
-		cond = function()
-			return not vim.g.vscode
-		end,
+		cond = full_terminal_editor,
 		lazy = true,
 		dependencies = { "volt" },
 		init = function()

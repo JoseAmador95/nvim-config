@@ -1,564 +1,91 @@
--- lua/plugins/lsp.lua (Neovim 0.11+ style)
-local uv = vim.uv
-local neoconf_wrappers = setmetatable({}, { __mode = "k" })
+-- Native Neovim 0.12 LSP setup. Mason decides what to install, while the
+-- catalog and server modules decide what to configure and explicitly enable.
+
+local function offline()
+	return vim.env.NVIM_CONFIG_OFFLINE == "1"
+end
+
+local function host_context()
+	local cmake_path = vim.fn.exepath("cmake-language-server")
+	return {
+		has_cmake_language_server = cmake_path ~= "",
+		cmake_language_server_path = cmake_path,
+		has_rust_analyzer = vim.fn.executable("rust-analyzer") == 1,
+		has_plantuml_lsp = require("config.plantuml_lsp").available(),
+	}
+end
+
+local function setup_mason_lsp(options)
+	if not offline() then
+		require("mason-lspconfig").setup(options)
+		return
+	end
+
+	-- mason-lspconfig.setup() unconditionally refreshes the Mason registry. In
+	-- offline validation, replace that one refresh with a successful no-op while
+	-- still letting setup register its commands and other public APIs.
+	options.ensure_installed = {}
+	local registry = require("mason-registry")
+	local original_refresh = registry.refresh
+	registry.refresh = function(callback)
+		vim.schedule(function()
+			callback(true, {})
+		end)
+	end
+	local ok, error_message = pcall(require("mason-lspconfig").setup, options)
+	registry.refresh = original_refresh
+	if not ok then
+		error(error_message)
+	end
+end
 
 return {
-	-- Mason core: install/manage LSP servers & tools
 	{
 		"mason-org/mason.nvim",
 		cond = function()
 			return not vim.g.vscode
 		end,
 		cmd = { "Mason", "MasonInstall", "MasonUninstall", "MasonUninstallAll", "MasonUpdate", "MasonLog" },
-		build = ":MasonUpdate",
+		build = function()
+			if not offline() then
+				vim.cmd("MasonUpdate")
+			end
+		end,
+		init = function()
+			require("config.tool_installer").setup()
+		end,
 		config = function()
 			require("mason").setup()
 		end,
 	},
 
-	-- Mason bridge for Neovim LSP
 	{
 		"mason-org/mason-lspconfig.nvim",
 		cond = function()
 			return not vim.g.vscode
 		end,
-		event = { "BufReadPre", "BufNewFile" }, -- load when editing files
+		event = { "BufReadPre", "BufNewFile" },
 		dependencies = {
-			"saghen/blink.cmp", -- capabilities for blink.cmp
+			"saghen/blink.cmp",
 			"b0o/SchemaStore.nvim",
-			"folke/neoconf.nvim", -- must set up before vim.lsp.enable()
-			-- NOTE: we no longer depend on "neovim/nvim-lspconfig" framework calls.
-			-- nvim-lspconfig is still useful because it ships the server configs in `lsp/`,
-			-- which Neovim 0.11+ auto-merges when you call vim.lsp.config().
+			"folke/neoconf.nvim",
 			"neovim/nvim-lspconfig",
 		},
+		init = function()
+			require("config.plantuml_lsp").setup_install_command()
+		end,
 		config = function()
-			local mlsp = require("mason-lspconfig")
-
-			local function snacks_lsp_picker(method, title, picker_fn)
-				return function()
-					local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
-					if not clients or #clients == 0 then
-						vim.notify((title or "LSP") .. ": no active client for method", vim.log.levels.INFO)
-						return
-					end
-					local ok, _snacks = pcall(require, "snacks")
-					if ok then
-						picker_fn()
-					else
-						vim.notify("Snacks picker not available", vim.log.levels.WARN)
-					end
-				end
-			end
-
-			local function safe_lsp_jump(method, title)
-				return function()
-					local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
-					if not clients or #clients == 0 then
-						vim.notify((title or "LSP") .. ": no active client for method", vim.log.levels.INFO)
-						return
-					end
-
-					local client = clients[1]
-					local position_encoding = client.offset_encoding or "utf-16"
-					local params = vim.lsp.util.make_position_params(0, position_encoding)
-					client:request(method, params, function(err, result, ctx)
-						local function is_list(value)
-							if vim.islist then
-								return vim.islist(value)
-							end
-							return type(value) == "table" and value[1] ~= nil
-						end
-
-						if err then
-							vim.notify(
-								(title or "LSP") .. ": " .. (err.message or "request failed"),
-								vim.log.levels.ERROR
-							)
-							return
-						end
-
-						if not result or (is_list(result) and vim.tbl_isempty(result)) then
-							vim.notify((title or "LSP") .. ": no location found", vim.log.levels.INFO)
-							return
-						end
-
-						local response_client = ctx and ctx.client_id and vim.lsp.get_client_by_id(ctx.client_id)
-							or client
-
-						local location = is_list(result) and result[1] or result
-						local uri = location.uri or location.targetUri
-						if not uri then
-							vim.notify((title or "LSP") .. ": invalid location from server", vim.log.levels.WARN)
-							return
-						end
-
-						local filepath = vim.uri_to_fname(uri)
-
-						local range = location.range or location.targetSelectionRange or location.selectionRange
-						local start_pos = range and range.start or { line = 0, character = 0 }
-						local lnum = start_pos.line + 1
-						local target_buf = vim.uri_to_bufnr(uri)
-						local encoding = response_client.offset_encoding or position_encoding
-						local col = 1
-
-						local loaded, load_err = pcall(vim.fn.bufload, target_buf)
-						if loaded then
-							local converted, byte_col =
-								pcall(vim.lsp.util._get_line_byte_from_position, target_buf, start_pos, encoding)
-							if converted then
-								col = byte_col + 1
-							else
-								vim.notify(
-									(title or "LSP") .. ": could not convert target column: " .. byte_col,
-									vim.log.levels.WARN
-								)
-							end
-						else
-							vim.notify(
-								(title or "LSP") .. ": could not load target buffer: " .. load_err,
-								vim.log.levels.WARN
-							)
-						end
-
-						require("config.editor").open_file_in_tab(filepath, { lnum = lnum, col = col })
-					end)
-				end
-			end
-
-			local has_cmake_language_server = vim.fn.executable("cmake-language-server") == 1
-
-			local ensure_servers = {
-				"asm_lsp",
-				"bashls",
-				"clangd",
-				"docker_language_server",
-				"gopls",
-				"jsonls",
-				"lemminx",
-				"lua_ls",
-				"marksman",
-				"pyright",
-				"ruff",
-				"taplo",
-				"vtsls",
-				"yamlls",
-			}
-
-			if not has_cmake_language_server then
-				table.insert(ensure_servers, "cmake")
-			end
-
-			-- rust-analyzer: prefer the rustup component (matches the active
-			-- toolchain); fall back to a Mason install when absent
-			if vim.fn.executable("rust-analyzer") ~= 1 then
-				table.insert(ensure_servers, "rust_analyzer")
-			end
-
-			-- Ensure the servers exist; Mason will install them if missing
-			mlsp.setup({
-				ensure_installed = ensure_servers,
+			local catalog = require("config.lsp_catalog")
+			local context = host_context()
+			local mason_lsp_options = {
+				ensure_installed = catalog.ensure_installed(context),
 				automatic_enable = false,
-			})
-
-			--------------------------------------------------------------------------
-			-- blink.cmp capabilities
-			--------------------------------------------------------------------------
-			local ok_blink, blink = pcall(require, "blink.cmp")
-			local capabilities = ok_blink and blink.get_lsp_capabilities()
-				or vim.lsp.protocol.make_client_capabilities()
-			local has_schemastore, schemastore = pcall(require, "schemastore")
-			local plantuml_lsp_warned = false
-			local plantuml_lsp_installing = false
-			local plantuml_lsp_available = vim.fn.executable("plantuml-lsp") == 1
-			local plantuml_lsp_auto_install = vim.g.plantuml_lsp_auto_install == true
-
-			local function plantuml_root(bufnr, on_dir)
-				local fname = vim.api.nvim_buf_get_name(bufnr)
-				if fname == "" then
-					on_dir(nil)
-					return
-				end
-				local root = vim.fs.find({ ".git" }, { path = fname, upward = true })[1]
-				if root then
-					on_dir(vim.fs.dirname(root))
-				else
-					on_dir(vim.fs.dirname(fname))
-				end
-			end
-
-			local function notify_missing_lsp()
-				if plantuml_lsp_warned then
-					return
-				end
-				plantuml_lsp_warned = true
-				vim.notify(
-					"plantuml-lsp not found in PATH. Install: go install github.com/ptdewey/plantuml-lsp@latest",
-					vim.log.levels.WARN,
-					{ title = "LSP" }
-				)
-			end
-
-			local function enable_plantuml_lsp()
-				vim.lsp.enable("plantuml_lsp")
-			end
-
-			local function install_plantuml_lsp()
-				if plantuml_lsp_installing then
-					return
-				end
-				local go_cmd = vim.fn.exepath("go")
-				if go_cmd == "" then
-					vim.notify(
-						"Go not found in PATH. Install Go to use plantuml-lsp auto-install.",
-						vim.log.levels.WARN,
-						{ title = "LSP" }
-					)
-					return
-				end
-
-				plantuml_lsp_installing = true
-				vim.notify("Installing plantuml-lsp with Go...", vim.log.levels.INFO, { title = "LSP" })
-				vim.system(
-					{ go_cmd, "install", "github.com/ptdewey/plantuml-lsp@latest" },
-					{ text = true },
-					vim.schedule_wrap(function(result)
-						plantuml_lsp_installing = false
-						if result.code ~= 0 then
-							local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
-							if msg == "" then
-								msg = "plantuml-lsp install failed"
-							end
-							vim.notify(msg, vim.log.levels.ERROR, { title = "LSP" })
-							return
-						end
-						if vim.fn.executable("plantuml-lsp") ~= 1 then
-							vim.notify(
-								"plantuml-lsp installed, but not found in PATH. Add your Go bin directory to PATH.",
-								vim.log.levels.WARN,
-								{ title = "LSP" }
-							)
-							return
-						end
-						plantuml_lsp_available = true
-						vim.notify("plantuml-lsp installed", vim.log.levels.INFO, { title = "LSP" })
-						enable_plantuml_lsp()
-					end)
-				)
-			end
-
-			vim.api.nvim_create_user_command("PlantumlLspInstall", function()
-				install_plantuml_lsp()
-			end, { desc = "Install PlantUML LSP (Go)" })
-
-			if not plantuml_lsp_available then
-				vim.api.nvim_create_autocmd("FileType", {
-					group = vim.api.nvim_create_augroup("PlantumlLspMissing", { clear = true }),
-					pattern = "plantuml",
-					callback = function()
-						if plantuml_lsp_available then
-							return
-						end
-						if plantuml_lsp_auto_install then
-							install_plantuml_lsp()
-						else
-							notify_missing_lsp()
-						end
-					end,
-				})
-			end
-
-			-- Hover popup with rounded border and title (Neovim 0.12: pass config directly to hover)
-			local hover_opts = { border = "rounded" }
-
-			-- Global on_attach-style keymaps (recommended with new API)
-			-- Use LspAttach so it applies to any server that attaches later.
-			vim.api.nvim_create_autocmd("LspAttach", {
-				group = vim.api.nvim_create_augroup("LspKeymaps", { clear = true }),
-				callback = function(ev)
-					-- SYMBOL NAVIGATION
-					vim.keymap.set(
-						"n",
-						"gd",
-						safe_lsp_jump("textDocument/definition", "Go to definition"),
-						{ buffer = ev.buf, silent = true, desc = "Go to definition" }
-					)
-					vim.keymap.set(
-						"n",
-						"gD",
-						safe_lsp_jump("textDocument/declaration", "Go to declaration"),
-						{ buffer = ev.buf, silent = true, desc = "Go to declaration" }
-					)
-					vim.keymap.set(
-						"n",
-						"gi",
-						snacks_lsp_picker("textDocument/implementation", "Go to implementation", function()
-							Snacks.picker.lsp_implementations({ confirm = "open_in_tab" })
-						end),
-						{ buffer = ev.buf, silent = true, desc = "Go to implementation" }
-					)
-					vim.keymap.set(
-						"n",
-						"gr",
-						snacks_lsp_picker("textDocument/references", "References", function()
-							Snacks.picker.lsp_references({ confirm = "open_in_tab" })
-						end),
-						{ buffer = ev.buf, silent = true, desc = "References" }
-					)
-
-					-- DOCUMENTATION (HOVER)
-					vim.keymap.set("n", "<leader>.", function()
-						vim.lsp.buf.hover(hover_opts)
-					end, { buffer = ev.buf, silent = true, desc = "Hover symbol documentation" }) --
-
-					-- SIGNATURE HELP
-					vim.keymap.set(
-						"n",
-						"<C-k>",
-						vim.lsp.buf.signature_help,
-						{ buffer = ev.buf, silent = true, desc = "Signature help" }
-					)
-
-					-- SYMBOL RENAME
-					vim.keymap.set(
-						"n",
-						"<leader>rn",
-						vim.lsp.buf.rename,
-						{ buffer = ev.buf, silent = true, desc = "Rename" }
-					)
-
-					-- CODE ACTION
-					vim.keymap.set(
-						{ "n", "v" },
-						"<leader>ca",
-						vim.lsp.buf.code_action,
-						{ buffer = ev.buf, silent = true, desc = "Code action" }
-					)
-				end,
-			})
-
-			--------------------------------------------------------------------------
-			-- Register server configurations (vim.lsp.config) and enable them
-			-- Neovim 0.11+ will merge these with the canonical configs shipped by
-			-- nvim-lspconfig in its `lsp/` directory.
-			--------------------------------------------------------------------------
-
-			-- C/C++: clangd
-			vim.lsp.config("clangd", {
-				capabilities = capabilities,
-				cmd = {
-					"clangd",
-					"--background-index",
-					"--clang-tidy",
-					"--cross-file-rename",
-					"--completion-style=detailed",
-					"--header-insertion=never",
-				},
-				-- filetypes/root_markers are provided by lspconfig's clangd config; we can
-				-- override here if needed.
-			})
-
-			-- Python: pyright
-			vim.lsp.config("pyright", {
-				capabilities = capabilities,
-				settings = {
-					pyright = {
-						disableOrganizeImports = true,
-					},
-				},
-			})
-
-			vim.lsp.config("ruff", {
-				capabilities = capabilities,
-			})
-
-			local cmake_cmd = vim.fn.exepath("cmake-language-server")
-			vim.lsp.config("cmake", {
-				capabilities = capabilities,
-				cmd = cmake_cmd ~= "" and { cmake_cmd } or nil,
-			})
-
-			vim.lsp.config("yamlls", {
-				capabilities = capabilities,
-				settings = {
-					yaml = {
-						keyOrdering = false,
-						schemaStore = has_schemastore and { enable = false, url = "" } or { enable = true },
-						schemas = has_schemastore and schemastore.yaml.schemas() or {},
-					},
-				},
-			})
-
-			vim.lsp.config("jsonls", {
-				capabilities = capabilities,
-				settings = {
-					json = {
-						validate = { enable = true },
-						schemas = has_schemastore and schemastore.json.schemas() or {},
-					},
-				},
-			})
-
-			vim.lsp.config("taplo", {
-				capabilities = capabilities,
-			})
-
-			vim.lsp.config("bashls", {
-				capabilities = capabilities,
-			})
-
-			vim.lsp.config("marksman", {
-				capabilities = capabilities,
-			})
-
-			vim.lsp.config("lua_ls", {
-				capabilities = capabilities,
-				settings = {
-					Lua = {
-						runtime = { version = "LuaJIT" },
-						diagnostics = { globals = { "vim" } },
-						telemetry = { enable = false },
-						workspace = {
-							checkThirdParty = false,
-							library = vim.api.nvim_get_runtime_file("", true),
-						},
-					},
-				},
-			})
-
-			vim.lsp.config("lemminx", {
-				capabilities = capabilities,
-			})
-
-			-- Rust: rust-analyzer
-			vim.lsp.config("rust_analyzer", {
-				capabilities = capabilities,
-				settings = {
-					["rust-analyzer"] = {
-						check = { command = "clippy" },
-						cargo = { allFeatures = true },
-					},
-				},
-			})
-
-			-- TypeScript/JavaScript: vtsls
-			vim.lsp.config("vtsls", {
-				capabilities = capabilities,
-			})
-
-			-- Go: gopls
-			vim.lsp.config("gopls", {
-				capabilities = capabilities,
-				settings = {
-					gopls = {
-						gofumpt = true,
-						usePlaceholders = true,
-						analyses = { unusedparams = true },
-					},
-				},
-			})
-
-			vim.lsp.config("plantuml_lsp", {
-				capabilities = capabilities,
-				cmd = { "plantuml-lsp", "--exec-path=plantuml" },
-				filetypes = { "plantuml" },
-				root_dir = plantuml_root,
-			})
-
-			-- Assembly: asm-lsp (supports x86, ARM/Thumb-2, RISC-V, etc.)
-			vim.lsp.config("asm_lsp", {
-				capabilities = capabilities,
-				cmd = { "asm-lsp" },
-				filetypes = { "asm", "vmasm" },
-				root_markers = { ".asm-lsp.toml", ".git" },
-				single_file_support = true,
-			})
-
-			-- Finally, enable (start) the clients for these configs
-			local enabled_servers = {
-				"asm_lsp",
-				"bashls",
-				"clangd",
-				"cmake",
-				"docker_language_server",
-				"gopls",
-				"jsonls",
-				"lemminx",
-				"lua_ls",
-				"marksman",
-				"pyright",
-				"ruff",
-				"rust_analyzer",
-				"taplo",
-				"vtsls",
-				"yamlls",
 			}
-			if plantuml_lsp_available then
-				table.insert(enabled_servers, "plantuml_lsp")
-			end
+			setup_mason_lsp(mason_lsp_options)
 
-			-- neoconf's built-in integration only hooks the legacy lspconfig
-			-- framework. Chain its merge into every native config without replacing
-			-- server hooks (notably rust_analyzer's initializationOptions setup).
-			local wrapped_servers = {}
-			local function chain_neoconf_before_init(name)
-				if wrapped_servers[name] then
-					return
-				end
-
-				local resolved = vim.lsp.config[name]
-				if not resolved then
-					vim.notify_once(
-						"Could not resolve LSP config for neoconf: " .. name,
-						vim.log.levels.WARN,
-						{ title = "LSP" }
-					)
-					return
-				end
-
-				local upstream = resolved.before_init
-				if upstream and neoconf_wrappers[upstream] then
-					wrapped_servers[name] = true
-					return
-				end
-
-				local wrapper = function(params, config)
-					local ok_require, nc_lsp = pcall(require, "neoconf.plugins.lspconfig")
-					if not ok_require or type(nc_lsp.on_new_config) ~= "function" then
-						vim.notify_once(
-							"neoconf LSP bridge is unavailable; project LSP settings were not merged",
-							vim.log.levels.WARN,
-							{ title = "LSP" }
-						)
-					else
-						local original = { settings = vim.deepcopy(config.settings or {}) }
-						local ok_merge, merge_err = pcall(nc_lsp.on_new_config, config, config.root_dir, original)
-						if not ok_merge then
-							vim.notify_once(
-								"neoconf could not merge project LSP settings: " .. tostring(merge_err),
-								vim.log.levels.WARN,
-								{ title = "LSP" }
-							)
-						end
-					end
-
-					if upstream then
-						upstream(params, config)
-					end
-				end
-
-				neoconf_wrappers[wrapper] = true
-				vim.lsp.config(name, { before_init = wrapper })
-				wrapped_servers[name] = true
-			end
-
-			for _, name in ipairs(enabled_servers) do
-				chain_neoconf_before_init(name)
-			end
-			-- Keep a later explicit :PlantumlLspInstall on the same hook path even
-			-- when the executable was not present during startup.
-			chain_neoconf_before_init("plantuml_lsp")
-			vim.lsp.enable(enabled_servers)
+			require("config.lsp_navigation").setup()
+			require("config.lsp_servers").setup(context)
+			vim.lsp.enable(catalog.enabled_servers(context))
 		end,
 	},
 
@@ -570,27 +97,10 @@ return {
 		event = "VeryLazy",
 		dependencies = { "mason-org/mason.nvim" },
 		config = function()
-			-- Non-LSP tools only; LSP servers are managed by mason-lspconfig's
-			-- ensure_installed in the spec above.
-			local ensure_tools = {
-				"codelldb",
-				"clang-format",
-				"debugpy",
-				"delve",
-				"gofumpt",
-				"goimports",
-				"hadolint",
-				"jq",
-				"markdownlint-cli2",
-				"prettierd",
-				"shellcheck",
-				"shfmt",
-				"stylua",
-			}
-
+			local ensure_tools = offline() and {} or vim.deepcopy(require("config.lsp_catalog").mason_tools)
 			require("mason-tool-installer").setup({
 				ensure_installed = ensure_tools,
-				run_on_start = true,
+				run_on_start = not offline(),
 			})
 		end,
 	},

@@ -1,0 +1,71 @@
+vim.o.shadafile = "NONE"
+vim.o.swapfile = false
+
+local function fail(message)
+	vim.api.nvim_err_writeln("pager_profile_spec: " .. message)
+	vim.cmd("cquit")
+end
+
+vim.api.nvim_create_autocmd("VimEnter", {
+	once = true,
+	callback = function()
+		vim.schedule(function()
+			local ok, err = xpcall(function()
+				local pager = require("config.pager")
+				assert(pager.active, "pager profile was not selected")
+				assert(vim.bo.filetype == "markdown", "forced pager filetype was not applied")
+
+				for _, command in ipairs({
+					"MenuOpen",
+					"ClangdSetCompileCommands",
+					"DevcontainerShell",
+					"NvimConfigToolsInstall",
+					"Mason",
+				}) do
+					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into the pager profile")
+				end
+				assert(
+					vim.fn.exists(":NvimConfigParsersInstall") == 2,
+					"explicit parser installer is missing from the pager"
+				)
+				assert(vim.fn.exists(":SetFileType") == 2, "pager SetFileType command is missing")
+				assert(vim.fn.exists(":DiagramShow") == 2, "pager diagram command is missing")
+
+				local runtime_paths = vim.api.nvim_list_runtime_paths()
+				local function has_plugin(name)
+					for _, path in ipairs(runtime_paths) do
+						if vim.fn.fnamemodify(path, ":t") == name then
+							return true
+						end
+					end
+					return false
+				end
+				for _, plugin in ipairs({ "mason.nvim", "nvim-lspconfig", "nvim-lint", "remote-nvim.nvim" }) do
+					assert(not has_plugin(plugin), plugin .. " is present in the pager runtime")
+				end
+				assert(has_plugin("render-markdown.nvim"), "render-markdown is missing from the pager")
+				assert(has_plugin("nvim-treesitter"), "Tree-sitter is missing from the pager")
+
+				local installed = {}
+				for _, parser in ipairs(require("nvim-treesitter").get_installed("parsers")) do
+					installed[parser] = true
+				end
+				for _, parser in ipairs(pager.parsers) do
+					assert(installed[parser], "configured pager parser is missing: " .. parser)
+				end
+
+				local menu_map = vim.fn.maparg("<leader><leader>", "n", false, true)
+				assert(vim.tbl_isempty(menu_map), "menu mapping leaked into the pager")
+				local diagram_map = vim.fn.maparg("<leader>md", "n", false, true)
+				assert(not vim.tbl_isempty(diagram_map), "global pager diagram mapping is missing")
+			end, debug.traceback)
+
+			if not ok then
+				fail(err)
+				return
+			end
+			print("pager_profile_spec: profile allowlist and commands are isolated")
+			vim.cmd("quitall!")
+		end)
+	end,
+})

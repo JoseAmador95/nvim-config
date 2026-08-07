@@ -8,22 +8,47 @@ This is a Neovim 0.12+ configuration with a full editor profile and a small
 ## Setup and optional features
 
 Clone the repository as `~/.config/nvim`, start Neovim, and let Lazy/Mason
-install the managed plugins and language tools. Host-specific settings belong
-in `~/.nvim-local.lua`; create a documented template with `:NvimConfigInit`.
+install the managed plugins and language tools. For a reproducible install or
+validation run, prepare pinned validators and restore the committed plugin and
+parser pins into an isolated directory:
+
+```sh
+./scripts/install-ci-tools /absolute/path/to/nvim-config-tools/bin
+./scripts/bootstrap-config --xdg-root /absolute/path/to/nvim-config-xdg
+PATH=/absolute/path/to/nvim-config-tools/bin:$PATH \
+  NVIM_CONFIG_XDG_ROOT=/absolute/path/to/nvim-config-xdg \
+  ./scripts/check-config
+```
+
+The first two commands may use the network on a cold machine. The final gate is
+offline and never mutates plugins, parsers, or the committed lock.
+
+Host-specific settings belong in `~/.nvim-local.lua`; create a documented
+template with `:NvimConfigInit`. Put the Claude subscription credential under
+`codecompanion.oauth_token`, not `env`, so only the pinned ACP child receives
+it. `:NvimConfigDump` recursively redacts both that token and environment
+values.
 
 External tools are optional unless their feature is used:
 
 | Feature | Tools |
 | --- | --- |
-| Mermaid diagrams | `mmdflux` (`cargo install mmdflux`); `rsvg-convert` from librsvg for image mode |
+| Mermaid diagrams | `mmdflux` (`:NvimConfigToolsInstall mmdflux`); `rsvg-convert` from librsvg for image mode |
 | PlantUML diagrams | `plantuml`; `rsvg-convert` for image mode |
+| PlantUML LSP | `:NvimConfigToolsInstall plantuml-lsp` (or `:PlantumlLspInstall`) |
+| Dockerfile/Markdown lint | `hadolint` and `markdownlint-cli2`, managed by Mason |
 | Inline diagram images | A terminal with the Kitty graphics protocol, such as Ghostty |
 | Pager profile | `nvimpager` plus the config symlink below |
 | Remote devcontainers | `devpod` and its container provider |
 | GitHub PR/issue UI | Authenticated `gh` CLI |
+| CodeCompanion Claude ACP | `npx`; first use downloads the pinned `@agentclientprotocol/claude-agent-acp@0.66.0` child |
 
-The unified viewer is `:DiagramShow [svg|ascii]`. Missing diagram tools are
-reported with install hints and SVG mode falls back to ASCII when possible.
+The unified viewer is `:DiagramShow [svg|ascii]`. Rendering is asynchronous,
+superseded work is cancelled, and content-addressed results are bounded under
+`stdpath("cache")/diagram`. Missing tools are reported with install hints and
+SVG mode falls back to ASCII when possible. `:LogWatchCurrentFile` follows
+files incrementally, preserves partial lines, survives rotation, and refuses
+to overwrite unsaved buffer changes.
 
 Enable the lightweight pager profile with:
 
@@ -44,10 +69,19 @@ Run the complete local validation from the repository root:
 ./scripts/check-config
 ```
 
-It runs six focused headless tests, a full startup smoke check, StyLua,
-ShellCheck, and `git diff --check`. Writable state, cache, temporary files, and
-logs are isolated in a temporary directory and removed afterward. Existing
-locked Lazy/Mason installations are reused as dependency inputs.
+It first proves every installed plugin checkout matches `lazy-lock.json`, then
+runs the pure and full-profile specs, startup smoke, StyLua, ShellCheck,
+actionlint, and `git diff --check`. Writable state, cache, temporary files, and
+logs are isolated. The check is offline; only `bootstrap-config` restores
+plugins and parsers, while `install-ci-tools` prepares the exact validator
+versions. Both preparation commands may need network access on a cold cache.
+GitHub Actions runs the same contract on Linux and macOS with Neovim 0.12.4 and
+pinned validation tools.
+
+Tree-sitter never installs parsers implicitly during startup. Install the
+configured set explicitly with `:NvimConfigParsersInstall`; bootstrap uses the
+same API and waits for completion. Lint runs once after opening an existing
+Dockerfile/Markdown file and once per save, never on `InsertLeave`.
 
 Formatting on save is intentionally disabled by default:
 

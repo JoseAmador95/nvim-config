@@ -17,6 +17,8 @@
 -- Usage:    see docs/remote-nvim.md
 return {
 	"amitds1997/remote-nvim.nvim",
+	-- Follow tagged releases only; lazy-lock.json still pins the exact commit.
+	version = "*",
 	cond = function()
 		return not vim.g.vscode
 	end,

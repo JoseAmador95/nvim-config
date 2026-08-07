@@ -1,0 +1,62 @@
+vim.o.shadafile = "NONE"
+vim.o.swapfile = false
+
+local repo = vim.env.NVIM_CONFIG_ROOT or vim.fn.getcwd()
+local vscode_stub = dofile(vim.fs.joinpath(repo, "tests", "support", "vscode_stub.lua"))
+
+local function fail(message)
+	vim.api.nvim_err_writeln("vscode_profile_spec: " .. message)
+	vim.cmd("cquit")
+end
+
+vim.api.nvim_create_autocmd("VimEnter", {
+	once = true,
+	callback = function()
+		vim.schedule(function()
+			local ok, err = xpcall(function()
+				assert(vim.g.vscode, "VSCode profile flag is missing")
+				assert(vim.g.nvim_config_initialized == true, "init.lua did not complete in the VSCode profile")
+				for _, command in ipairs({
+					"MenuOpen",
+					"DiagramShow",
+					"ClangdSetCompileCommands",
+					"DevcontainerShell",
+					"NvimConfigToolsInstall",
+					"LogWatchCurrentFile",
+					"Mason",
+				}) do
+					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into VSCode")
+				end
+
+				require("lazy").load({ plugins = { "vscode-multi-cursor.nvim" } })
+				local runtime_paths = vim.api.nvim_list_runtime_paths()
+				local function has_plugin(name)
+					for _, path in ipairs(runtime_paths) do
+						if vim.fn.fnamemodify(path, ":t") == name then
+							return true
+						end
+					end
+					return false
+				end
+				for _, plugin in ipairs({ "mason.nvim", "nvim-lint", "remote-nvim.nvim", "menu", "vscode.nvim" }) do
+					assert(not has_plugin(plugin), plugin .. " loaded in VSCode")
+				end
+				assert(has_plugin("vscode-multi-cursor.nvim"), "VSCode multi-cursor integration did not load")
+
+				local definition = vim.fn.maparg("gd", "n", false, true)
+				assert(not vim.tbl_isempty(definition), "VSCode definition mapping is missing")
+				assert(type(definition.callback) == "function", "VSCode definition mapping does not call an action")
+				definition.callback()
+				local call = vscode_stub.calls[#vscode_stub.calls]
+				assert(call and call.action == "editor.action.revealDefinition", "VSCode definition action drifted")
+			end, debug.traceback)
+
+			if not ok then
+				fail(err)
+				return
+			end
+			print("vscode_profile_spec: terminal services stay out of VSCode")
+			vim.cmd("quitall!")
+		end)
+	end,
+})

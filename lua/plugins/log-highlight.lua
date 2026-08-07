@@ -1,6 +1,7 @@
 return {
 	"fei6409/log-highlight.nvim",
-	event = "FileType",
+	-- setup() contributes filetype rules and must run before detection.
+	event = { "BufReadPre", "BufNewFile" },
 	cond = function()
 		return not vim.g.vscode
 	end,

@@ -1,34 +1,40 @@
-vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
-	local dir = vim.fn.fnamemodify(opts.args, ":p")
+local M = {}
 
-	-- Stop all running clangd clients
+local function notify(message, level)
+	vim.notify(message, level or vim.log.levels.INFO, { title = "LSP" })
+end
+
+function M.set_compile_commands(argument)
+	local clangd = require("config.clangd")
+	local directory, validation_error = clangd.validate_compile_commands(argument)
+	if not directory then
+		notify("clangd compile database rejected: " .. validation_error, vim.log.levels.ERROR)
+		return false
+	end
+
+	-- Validation deliberately happens before touching any healthy clients.
 	for _, client in ipairs(vim.lsp.get_clients()) do
 		if client.name == "clangd" then
 			client:stop()
 		end
 	end
 
-	-- Per-host clangd binary override from ~/.nvim-local.lua.
-	local clangd = require("config.local_config").get("clangd", {})
-
-	-- Re-register clangd with the new compilation database directory
-	vim.lsp.config("clangd", {
-		cmd = {
-			clangd.path or "clangd",
-			"--compile-commands-dir=" .. dir,
-			"--background-index",
-			"--cross-file-rename",
-			"--completion-style=detailed",
-			"--header-insertion=never",
-		},
-	})
-
-	-- Re-enable clangd so it attaches again
+	vim.lsp.config("clangd", { cmd = clangd.command(directory) })
 	vim.lsp.enable("clangd")
+	notify("clangd now using compile_commands from: " .. directory)
+	return true
+end
 
-	vim.notify("clangd now using compile_commands from: " .. dir, vim.log.levels.INFO, { title = "LSP" })
-end, {
-	nargs = 1,
-	complete = "dir",
-	desc = "Point clangd to a custom compile_commands.json directory",
-})
+function M.setup()
+	vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
+		M.set_compile_commands(opts.args)
+	end, {
+		nargs = 1,
+		complete = "dir",
+		desc = "Point clangd to a validated compile_commands.json directory",
+	})
+end
+
+M.setup()
+
+return M

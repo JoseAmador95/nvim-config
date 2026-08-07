@@ -4,7 +4,6 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		ft = { "markdown" },
 		cmd = { "MarkdownPreview", "MarkdownPreviewStop", "MarkdownPreviewToggle" },
 		build = function()
 			local root = vim.fn.stdpath("data") .. "/lazy/markdown-preview.nvim"

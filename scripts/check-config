@@ -19,8 +19,14 @@ export XDG_CACHE_HOME="$check_tmp/cache"
 export NVIM_LOG_FILE="$check_tmp/log/nvim.log"
 export NVIM_LSP_LOG_FILE="$check_tmp/log/lsp.log"
 export NVIM_CONFIG_FILE="$check_tmp/no-local-config.lua"
+export NVIM_CONFIG_ROOT="$repo_root"
+export NVIM_CONFIG_OFFLINE=1
 export TMPDIR="$check_tmp/tmp"
 unset NVIM_APPNAME NVIMPAGER_FILETYPE
+
+if [ -n "${NVIM_CONFIG_XDG_ROOT:-}" ]; then
+	export XDG_DATA_HOME="$NVIM_CONFIG_XDG_ROOT/data"
+fi
 
 NVIM_BIN=${NVIM_BIN:-nvim}
 if ! command -v "$NVIM_BIN" >/dev/null 2>&1; then
@@ -34,8 +40,15 @@ find_tool() {
 		command -v "$tool_name"
 		return 0
 	fi
-	data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
-	candidate="$data_home/nvim/mason/bin/$tool_name"
+	if [ -n "${XDG_DATA_HOME:-}" ]; then
+		data_root="$XDG_DATA_HOME/nvim"
+	else
+		data_root=$(
+			"$NVIM_BIN" --headless -u NONE -i NONE \
+				-c 'lua io.write(vim.fn.stdpath("data"))' -c 'quitall!'
+		)
+	fi
+	candidate="$data_root/mason/bin/$tool_name"
 	if [ -x "$candidate" ]; then
 		printf '%s\n' "$candidate"
 		return 0
@@ -43,39 +56,135 @@ find_tool() {
 	return 1
 }
 
+toolchain_version() {
+	version_key=$1
+	NVIM_CONFIG_VERSION_KEY=$version_key "$NVIM_BIN" --headless -u NONE -i NONE \
+		--cmd "set runtimepath^=$repo_root" \
+		-c 'lua local value = require("config.toolchain").versions[vim.env.NVIM_CONFIG_VERSION_KEY]; assert(value); io.write(value)' \
+		-c 'quitall!'
+}
+
+require_version() {
+	tool_label=$1
+	expected=$2
+	expected_line=$3
+	shift 3
+	actual=$("$@" 2>&1)
+	if ! printf '%s\n' "$actual" | grep -F -x -- "$expected_line" >/dev/null 2>&1; then
+		printf '%s version mismatch: expected %s, got: %s\n' "$tool_label" "$expected" "$actual" >&2
+		exit 1
+	fi
+}
+
 if ! STYLUA_BIN=$(find_tool stylua); then
-	printf 'Required formatter not found: stylua (install it with Mason)\n' >&2
+	printf 'Required formatter not found: stylua %s\n' "$(toolchain_version stylua)" >&2
 	exit 1
 fi
 if ! SHELLCHECK_BIN=$(find_tool shellcheck); then
-	printf 'Required linter not found: shellcheck (install it with Mason)\n' >&2
+	printf 'Required linter not found: shellcheck %s\n' "$(toolchain_version shellcheck)" >&2
 	exit 1
 fi
+if [ -d .github/workflows ]; then
+	if ! ACTIONLINT_BIN=$(find_tool actionlint); then
+		printf 'Required workflow linter not found: actionlint %s\n' "$(toolchain_version actionlint)" >&2
+		exit 1
+	fi
+fi
 
+stylua_version=$(toolchain_version stylua)
+shellcheck_version=$(toolchain_version shellcheck)
+require_version StyLua "$stylua_version" "stylua $stylua_version" "$STYLUA_BIN" --version
+require_version ShellCheck "$shellcheck_version" "version: $shellcheck_version" "$SHELLCHECK_BIN" --version
+if [ -n "${ACTIONLINT_BIN:-}" ]; then
+	actionlint_version=$(toolchain_version actionlint)
+	require_version actionlint "$actionlint_version" "v$actionlint_version" "$ACTIONLINT_BIN" -version
+fi
+
+check_timeout=${NVIM_CONFIG_CHECK_TIMEOUT:-90}
 run_check() {
 	label=$1
 	shift
 	printf '\n==> %s\n' "$label"
-	"$@"
+	"$@" &
+	check_pid=$!
+	(
+		sleep "$check_timeout"
+		if kill -0 "$check_pid" 2>/dev/null; then
+			printf 'Timed out after %ss: %s\n' "$check_timeout" "$label" >&2
+			kill -TERM "$check_pid" 2>/dev/null || true
+			sleep 2
+			kill -KILL "$check_pid" 2>/dev/null || true
+		fi
+	) &
+	watchdog_pid=$!
+	set +e
+	wait "$check_pid"
+	check_status=$?
+	set -e
+	kill "$watchdog_pid" 2>/dev/null || true
+	wait "$watchdog_pid" 2>/dev/null || true
+	if [ "$check_status" -ne 0 ]; then
+		return "$check_status"
+	fi
+}
+
+run_pure_test() {
+	test_name=$1
+	run_check "$test_name" "$NVIM_BIN" --headless -u NONE -i NONE -l "$repo_root/tests/$test_name.lua"
 }
 
 run_config_test() {
 	test_name=$1
 	test_path=$2
 	run_check "$test_name" env "NVIM_CONFIG_TEST=$test_path" "$NVIM_BIN" \
-		--headless --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
+		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
 }
 
-run_check "core_spec" "$NVIM_BIN" --headless -u NONE -l "$repo_root/tests/core_spec.lua"
-run_check "diagram_spec" "$NVIM_BIN" --headless -u NONE -l "$repo_root/tests/diagram_spec.lua"
-run_check "security_spec" "$NVIM_BIN" --headless -u NONE -l "$repo_root/tests/security_spec.lua"
-run_config_test "startup_spec" "$repo_root/tests/startup_spec.lua"
-run_config_test "tooling_spec" "$repo_root/tests/tooling_spec.lua"
-run_config_test "tooling_ui_spec" "$repo_root/tests/tooling_ui_spec.lua"
+run_pager_test() {
+	run_check "pager_profile_spec" env NVIM_APPNAME=nvimpager NVIMPAGER_FILETYPE=markdown \
+		NVIM_CONFIG_TEST="$repo_root/tests/pager_profile_spec.lua" "$NVIM_BIN" \
+		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
+}
 
-run_check "startup smoke" "$NVIM_BIN" --headless -u "$repo_root/init.lua" "+quitall"
+run_pager_lock_test() {
+	run_check "pager profile lock" env NVIM_APPNAME=nvimpager \
+		NVIM_CONFIG_TEST="$repo_root/tests/profile_lock_spec.lua" "$NVIM_BIN" \
+		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua"
+}
+
+run_vscode_test() {
+	run_check "vscode_profile_spec" env NVIM_CONFIG_TEST="$repo_root/tests/vscode_profile_spec.lua" "$NVIM_BIN" \
+		--headless -i NONE --cmd 'let g:vscode = 1' \
+		--cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
+}
+
+run_pure_test lock_spec
+run_pure_test core_spec
+run_pure_test ci_spec
+run_pure_test diagram_spec
+run_pure_test security_spec
+
+for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint_spec menu_spec toolchain_spec; do
+	run_pure_test "$pure_spec"
+done
+
+run_config_test startup_spec "$repo_root/tests/startup_spec.lua"
+run_config_test tooling_spec "$repo_root/tests/tooling_spec.lua"
+run_config_test tooling_ui_spec "$repo_root/tests/tooling_ui_spec.lua"
+run_config_test dependency_spec "$repo_root/tests/dependency_spec.lua"
+run_pager_lock_test
+run_pager_test
+run_vscode_test
+
+run_check "startup smoke" "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" \
+	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
+	"+quitall"
 run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests
-run_check "ShellCheck" "$SHELLCHECK_BIN" scripts/check-config scripts/devpod-nvim
-run_check "Git whitespace" git diff --check
+run_check "ShellCheck" "$SHELLCHECK_BIN" \
+	scripts/check-config scripts/bootstrap-config scripts/install-ci-tools scripts/devpod-nvim
+if [ -n "${ACTIONLINT_BIN:-}" ]; then
+	run_check "actionlint" "$ACTIONLINT_BIN" -shellcheck="$SHELLCHECK_BIN"
+fi
+run_check "Git whitespace" git diff HEAD --check
 
 printf '\nAll Neovim config checks passed.\n'

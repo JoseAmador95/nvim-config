@@ -57,15 +57,7 @@ return {
 	config = function()
 		local dap = require("dap")
 		local dapui = require("dapui")
-		local mason_bin = vim.fn.stdpath("data") .. "/mason/bin/"
-
-		local function mason_executable(name)
-			local resolved = vim.fn.exepath(name)
-			if resolved ~= "" then
-				return resolved, true
-			end
-			return mason_bin .. name, false
-		end
+		local executables = require("config.dap_executables")
 
 		dapui.setup()
 
@@ -82,7 +74,7 @@ return {
 
 		-- Python debugging. Keep Mason's deterministic path even before the
 		-- first install completes, so the adapter works later without a reload.
-		local debugpy_path, has_debugpy = mason_executable("debugpy-adapter")
+		local debugpy_path, has_debugpy = executables.resolve("debugpy-adapter")
 		require("dap-python").setup(debugpy_path)
 		if not has_debugpy then
 			vim.notify(
@@ -97,7 +89,7 @@ return {
 
 		-- C/C++ debugging with codelldb from Mason. Register it even during a
 		-- first-install race; Mason will create this path when installation ends.
-		local codelldb_path, has_codelldb = mason_executable("codelldb")
+		local codelldb_path, has_codelldb = executables.resolve("codelldb")
 		dap.adapters.codelldb = {
 			type = "server",
 			port = "${port}",

@@ -48,30 +48,18 @@ function M.specs()
 		require("plugins.render-markdown"), -- activates on ft=markdown
 		require("plugins.mermaid"), -- on-demand Mermaid diagrams via :DiagramShow
 		{
-			-- Slim treesitter: only M.parsers, no textobjects/context/rainbow and
-			-- none of the 19-parser install from lua/plugins/treesitter.lua.
+			-- Slim treesitter: only already-installed M.parsers, with no implicit
+			-- network work and no textobjects/context/rainbow.
 			"nvim-treesitter/nvim-treesitter",
 			version = false,
 			lazy = false,
 			build = ":TSUpdate",
 			config = function()
 				require("nvim-treesitter").setup()
-				require("nvim-treesitter").install(M.parsers, { summary = false })
-
-				local installable = {}
-				for _, lang in ipairs(M.parsers) do
-					installable[lang] = true
-				end
-
-				vim.api.nvim_create_autocmd("FileType", {
-					group = vim.api.nvim_create_augroup("PagerTreesitter", { clear = true }),
-					callback = function(args)
-						local lang = vim.treesitter.language.get_lang(vim.bo[args.buf].filetype)
-							or vim.bo[args.buf].filetype
-						if installable[lang] then
-							pcall(vim.treesitter.start, args.buf, lang)
-						end
-					end,
+				require("config.treesitter_runtime").setup({
+					parsers = M.parsers,
+					highlight = true,
+					indent = false,
 				})
 			end,
 		},
