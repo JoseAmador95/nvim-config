@@ -416,14 +416,18 @@ local function show_svg(d)
 							if ok then
 								notify("Diagram copied to clipboard")
 							else
-								notify("Copy to clipboard failed: " .. (err ~= "" and err or "unknown"), vim.log.levels.ERROR)
+								notify(
+									"Copy to clipboard failed: " .. (err ~= "" and err or "unknown"),
+									vim.log.levels.ERROR
+								)
 							end
 						end)
 					end)
 				end
 				if can_zoom then
 					local s = 2000 / math.max(info.w, info.h)
-					local ct = { width = math.max(1, math.floor(info.w * s)), height = math.max(1, math.floor(info.h * s)) }
+					local ct =
+						{ width = math.max(1, math.floor(info.w * s)), height = math.max(1, math.floor(info.h * s)) }
 					render_view(info, nil, ct, do_copy)
 				elseif shown then
 					do_copy(shown)
@@ -444,14 +448,30 @@ local function show_svg(d)
 					rerender()
 				end
 				local maps = {
-					h = function() pan(-1, 0) end,
-					l = function() pan(1, 0) end,
-					k = function() pan(0, -1) end,
-					j = function() pan(0, 1) end,
-					["+"] = function() zoom(ZSTEP) end,
-					["="] = function() zoom(ZSTEP) end,
-					["_"] = function() zoom(1 / ZSTEP) end,
-					["-"] = function() zoom(1 / ZSTEP) end,
+					h = function()
+						pan(-1, 0)
+					end,
+					l = function()
+						pan(1, 0)
+					end,
+					k = function()
+						pan(0, -1)
+					end,
+					j = function()
+						pan(0, 1)
+					end,
+					["+"] = function()
+						zoom(ZSTEP)
+					end,
+					["="] = function()
+						zoom(ZSTEP)
+					end,
+					["_"] = function()
+						zoom(1 / ZSTEP)
+					end,
+					["-"] = function()
+						zoom(1 / ZSTEP)
+					end,
 					["0"] = function()
 						z, cx, cy = 1, info.w / 2, info.h / 2
 						rerender()

@@ -13,7 +13,19 @@ function M.find(buf, langs)
 	local out = {}
 	local open = nil
 	for i = 1, #lines do
-		local ticks, rest = lines[i]:match("^%s*([`~][`~][`~]+)(.*)$")
+		-- Markdown fences are made from one repeated character. Matching each
+		-- variant separately prevents malformed mixed fences such as ```~ from
+		-- opening or closing a block.
+		local ticks, rest = lines[i]:match("^%s*(```+)(.*)$")
+		if ticks and rest:sub(1, 1) == "~" then
+			ticks, rest = nil, nil
+		end
+		if not ticks then
+			ticks, rest = lines[i]:match("^%s*(~~~+)(.*)$")
+			if ticks and rest:sub(1, 1) == "`" then
+				ticks, rest = nil, nil
+			end
+		end
 		if ticks then
 			if not open then
 				local lang = (vim.trim(rest):match("^(%S*)") or ""):lower()
@@ -35,8 +47,38 @@ function M.find(buf, langs)
 end
 
 -- The block under the cursor among `langs`. Returns { s0, e0, lang, src } or nil.
-function M.under_cursor(buf, langs)
-	local row = vim.api.nvim_win_get_cursor(0)[1] -- 1-indexed
+-- `win` may identify the source window explicitly. If it is absent or no longer
+-- displays `buf`, prefer another window displaying the buffer, then fall back to
+-- the buffer's special '.' mark. Never borrow a cursor from an unrelated window.
+function M.under_cursor(buf, langs, win)
+	if not vim.api.nvim_buf_is_valid(buf) then
+		return nil
+	end
+
+	local function row_for_window(candidate)
+		if candidate and vim.api.nvim_win_is_valid(candidate) and vim.api.nvim_win_get_buf(candidate) == buf then
+			return vim.api.nvim_win_get_cursor(candidate)[1]
+		end
+		return nil
+	end
+
+	local row = row_for_window(win)
+	if not row then
+		row = row_for_window(vim.api.nvim_get_current_win())
+	end
+	if not row then
+		for _, candidate in ipairs(vim.fn.win_findbuf(buf)) do
+			row = row_for_window(candidate)
+			if row then
+				break
+			end
+		end
+	end
+	if not row then
+		local mark = vim.api.nvim_buf_get_mark(buf, '"')
+		row = mark[1] > 0 and mark[1] or 1
+	end
+
 	for _, b in ipairs(M.find(buf, langs)) do
 		if row >= b.s0 + 1 and row <= b.e0 + 1 then
 			return b

@@ -102,9 +102,7 @@ return {
 		local function delete_active_session()
 			if vim.v.this_session and vim.v.this_session ~= "" then
 				pcall(autosession.delete_session_file, vim.v.this_session, vim.fn.fnamemodify(vim.v.this_session, ":t"))
-				return
 			end
-			pcall(autosession.delete_session)
 		end
 
 		vim.api.nvim_create_autocmd({

@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+check_base_tmp=${TMPDIR:-/tmp}
+check_tmp=$(mktemp -d "$check_base_tmp/nvim-config-check.XXXXXX")
+cleanup() {
+	if [ -n "${check_tmp:-}" ] && [ -d "$check_tmp" ]; then
+		rm -rf -- "$check_tmp"
+	fi
+}
+trap cleanup 0 HUP INT TERM
+
+mkdir -p "$check_tmp/state" "$check_tmp/cache" "$check_tmp/log" "$check_tmp/tmp"
+export XDG_STATE_HOME="$check_tmp/state"
+export XDG_CACHE_HOME="$check_tmp/cache"
+export NVIM_LOG_FILE="$check_tmp/log/nvim.log"
+export NVIM_LSP_LOG_FILE="$check_tmp/log/lsp.log"
+export NVIM_CONFIG_FILE="$check_tmp/no-local-config.lua"
+export TMPDIR="$check_tmp/tmp"
+unset NVIM_APPNAME NVIMPAGER_FILETYPE
+
+NVIM_BIN=${NVIM_BIN:-nvim}
+if ! command -v "$NVIM_BIN" >/dev/null 2>&1; then
+	printf 'Required command not found: %s\n' "$NVIM_BIN" >&2
+	exit 1
+fi
+
+find_tool() {
+	tool_name=$1
+	if command -v "$tool_name" >/dev/null 2>&1; then
+		command -v "$tool_name"
+		return 0
+	fi
+	data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+	candidate="$data_home/nvim/mason/bin/$tool_name"
+	if [ -x "$candidate" ]; then
+		printf '%s\n' "$candidate"
+		return 0
+	fi
+	return 1
+}
+
+if ! STYLUA_BIN=$(find_tool stylua); then
+	printf 'Required formatter not found: stylua (install it with Mason)\n' >&2
+	exit 1
+fi
+if ! SHELLCHECK_BIN=$(find_tool shellcheck); then
+	printf 'Required linter not found: shellcheck (install it with Mason)\n' >&2
+	exit 1
+fi
+
+run_check() {
+	label=$1
+	shift
+	printf '\n==> %s\n' "$label"
+	"$@"
+}
+
+run_config_test() {
+	test_name=$1
+	test_path=$2
+	run_check "$test_name" env "NVIM_CONFIG_TEST=$test_path" "$NVIM_BIN" \
+		--headless --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
+}
+
+run_check "core_spec" "$NVIM_BIN" --headless -u NONE -l "$repo_root/tests/core_spec.lua"
+run_check "diagram_spec" "$NVIM_BIN" --headless -u NONE -l "$repo_root/tests/diagram_spec.lua"
+run_check "security_spec" "$NVIM_BIN" --headless -u NONE -l "$repo_root/tests/security_spec.lua"
+run_config_test "startup_spec" "$repo_root/tests/startup_spec.lua"
+run_config_test "tooling_spec" "$repo_root/tests/tooling_spec.lua"
+run_config_test "tooling_ui_spec" "$repo_root/tests/tooling_ui_spec.lua"
+
+run_check "startup smoke" "$NVIM_BIN" --headless -u "$repo_root/init.lua" "+quitall"
+run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests
+run_check "ShellCheck" "$SHELLCHECK_BIN" scripts/check-config scripts/devpod-nvim
+run_check "Git whitespace" git diff --check
+
+printf '\nAll Neovim config checks passed.\n'

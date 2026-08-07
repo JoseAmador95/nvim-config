@@ -16,10 +16,7 @@ local function notes_dir()
 	-- git clean/rebase). If notes.dir points there, reject it with a warning.
 	local config = vim.fn.fnamemodify(vim.fn.stdpath("config"), ":p"):gsub("/$", "")
 	if dir == config or dir:sub(1, #config + 1) == config .. "/" then
-		notify(
-			"notes.dir is inside the config repo (" .. dir .. "); set it in ~/.nvim-local.lua",
-			vim.log.levels.ERROR
-		)
+		notify("notes.dir is inside the config repo (" .. dir .. "); set it in ~/.nvim-local.lua", vim.log.levels.ERROR)
 		return nil
 	end
 	return dir

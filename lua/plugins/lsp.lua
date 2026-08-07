@@ -1,5 +1,6 @@
 -- lua/plugins/lsp.lua (Neovim 0.11+ style)
 local uv = vim.uv
+local neoconf_wrappers = setmetatable({}, { __mode = "k" })
 
 return {
 	-- Mason core: install/manage LSP servers & tools
@@ -82,7 +83,8 @@ return {
 							return
 						end
 
-						local _client = ctx and ctx.client_id and vim.lsp.get_client_by_id(ctx.client_id)
+						local response_client = ctx and ctx.client_id and vim.lsp.get_client_by_id(ctx.client_id)
+							or client
 
 						local location = is_list(result) and result[1] or result
 						local uri = location.uri or location.targetUri
@@ -96,7 +98,28 @@ return {
 						local range = location.range or location.targetSelectionRange or location.selectionRange
 						local start_pos = range and range.start or { line = 0, character = 0 }
 						local lnum = start_pos.line + 1
-						local col = start_pos.character + 1
+						local target_buf = vim.uri_to_bufnr(uri)
+						local encoding = response_client.offset_encoding or position_encoding
+						local col = 1
+
+						local loaded, load_err = pcall(vim.fn.bufload, target_buf)
+						if loaded then
+							local converted, byte_col =
+								pcall(vim.lsp.util._get_line_byte_from_position, target_buf, start_pos, encoding)
+							if converted then
+								col = byte_col + 1
+							else
+								vim.notify(
+									(title or "LSP") .. ": could not convert target column: " .. byte_col,
+									vim.log.levels.WARN
+								)
+							end
+						else
+							vim.notify(
+								(title or "LSP") .. ": could not load target buffer: " .. load_err,
+								vim.log.levels.WARN
+							)
+						end
 
 						require("config.editor").open_file_in_tab(filepath, { lnum = lnum, col = col })
 					end)
@@ -135,6 +158,7 @@ return {
 			-- Ensure the servers exist; Mason will install them if missing
 			mlsp.setup({
 				ensure_installed = ensure_servers,
+				automatic_enable = false,
 			})
 
 			--------------------------------------------------------------------------
@@ -147,7 +171,7 @@ return {
 			local plantuml_lsp_warned = false
 			local plantuml_lsp_installing = false
 			local plantuml_lsp_available = vim.fn.executable("plantuml-lsp") == 1
-			local plantuml_lsp_auto_install = vim.g.plantuml_lsp_auto_install ~= false
+			local plantuml_lsp_auto_install = vim.g.plantuml_lsp_auto_install == true
 
 			local function plantuml_root(bufnr, on_dir)
 				local fname = vim.api.nvim_buf_get_name(bufnr)
@@ -319,20 +343,6 @@ return {
 			-- nvim-lspconfig in its `lsp/` directory.
 			--------------------------------------------------------------------------
 
-			-- neoconf merges .vscode/settings.json (+ .neoconf.json) into LSP
-			-- settings. Its built-in integration hooks lspconfig.util.on_setup,
-			-- which never fires with the native vim.lsp.config/enable flow -- so
-			-- invoke its merge step ourselves right before each server initializes.
-			vim.lsp.config("*", {
-				before_init = function(_, config)
-					local ok, nc_lsp = pcall(require, "neoconf.plugins.lspconfig")
-					if ok and type(nc_lsp.on_new_config) == "function" then
-						-- 3rd arg (original_config) only provides .settings for backup
-						pcall(nc_lsp.on_new_config, config, config.root_dir, config)
-					end
-				end,
-			})
-
 			-- C/C++: clangd
 			vim.lsp.config("clangd", {
 				capabilities = capabilities,
@@ -470,6 +480,7 @@ return {
 				"bashls",
 				"clangd",
 				"cmake",
+				"docker_language_server",
 				"gopls",
 				"jsonls",
 				"lemminx",
@@ -485,6 +496,68 @@ return {
 			if plantuml_lsp_available then
 				table.insert(enabled_servers, "plantuml_lsp")
 			end
+
+			-- neoconf's built-in integration only hooks the legacy lspconfig
+			-- framework. Chain its merge into every native config without replacing
+			-- server hooks (notably rust_analyzer's initializationOptions setup).
+			local wrapped_servers = {}
+			local function chain_neoconf_before_init(name)
+				if wrapped_servers[name] then
+					return
+				end
+
+				local resolved = vim.lsp.config[name]
+				if not resolved then
+					vim.notify_once(
+						"Could not resolve LSP config for neoconf: " .. name,
+						vim.log.levels.WARN,
+						{ title = "LSP" }
+					)
+					return
+				end
+
+				local upstream = resolved.before_init
+				if upstream and neoconf_wrappers[upstream] then
+					wrapped_servers[name] = true
+					return
+				end
+
+				local wrapper = function(params, config)
+					local ok_require, nc_lsp = pcall(require, "neoconf.plugins.lspconfig")
+					if not ok_require or type(nc_lsp.on_new_config) ~= "function" then
+						vim.notify_once(
+							"neoconf LSP bridge is unavailable; project LSP settings were not merged",
+							vim.log.levels.WARN,
+							{ title = "LSP" }
+						)
+					else
+						local original = { settings = vim.deepcopy(config.settings or {}) }
+						local ok_merge, merge_err = pcall(nc_lsp.on_new_config, config, config.root_dir, original)
+						if not ok_merge then
+							vim.notify_once(
+								"neoconf could not merge project LSP settings: " .. tostring(merge_err),
+								vim.log.levels.WARN,
+								{ title = "LSP" }
+							)
+						end
+					end
+
+					if upstream then
+						upstream(params, config)
+					end
+				end
+
+				neoconf_wrappers[wrapper] = true
+				vim.lsp.config(name, { before_init = wrapper })
+				wrapped_servers[name] = true
+			end
+
+			for _, name in ipairs(enabled_servers) do
+				chain_neoconf_before_init(name)
+			end
+			-- Keep a later explicit :PlantumlLspInstall on the same hook path even
+			-- when the executable was not present during startup.
+			chain_neoconf_before_init("plantuml_lsp")
 			vim.lsp.enable(enabled_servers)
 		end,
 	},

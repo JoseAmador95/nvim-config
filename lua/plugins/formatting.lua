@@ -1,3 +1,11 @@
+local function autoformat_enabled(bufnr)
+	local override = vim.b[bufnr].conform_format_on_save
+	if override ~= nil then
+		return override == true
+	end
+	return vim.g.conform_format_on_save == true
+end
+
 return {
 	{
 		"stevearc/conform.nvim",
@@ -14,15 +22,11 @@ return {
 		end,
 		opts = {
 			format_on_save = function(bufnr)
-				if not vim.g.conform_format_on_save then
-					return
-				end
-
 				if vim.bo[bufnr].buftype ~= "" then
 					return
 				end
 
-				if vim.b[bufnr].disable_autoformat then
+				if not autoformat_enabled(bufnr) then
 					return
 				end
 
@@ -57,9 +61,15 @@ return {
 
 			vim.api.nvim_create_user_command("FormatToggle", function(args)
 				if args.bang then
-					vim.b.disable_autoformat = not vim.b.disable_autoformat
+					local override = not autoformat_enabled(0)
+					vim.b.conform_format_on_save = override
 					vim.notify(
-						string.format("Autoformat (buffer): %s", vim.b.disable_autoformat and "OFF" or "ON"),
+						string.format(
+							"Autoformat buffer override: %s (effective: %s; global: %s)",
+							override and "ON" or "OFF",
+							autoformat_enabled(0) and "ON" or "OFF",
+							vim.g.conform_format_on_save and "ON" or "OFF"
+						),
 						vim.log.levels.INFO
 					)
 					return
@@ -67,7 +77,11 @@ return {
 
 				vim.g.conform_format_on_save = not vim.g.conform_format_on_save
 				vim.notify(
-					string.format("Autoformat on save (global): %s", vim.g.conform_format_on_save and "ON" or "OFF"),
+					string.format(
+						"Autoformat global: %s (current buffer effective: %s)",
+						vim.g.conform_format_on_save and "ON" or "OFF",
+						autoformat_enabled(0) and "ON" or "OFF"
+					),
 					vim.log.levels.INFO
 				)
 			end, {

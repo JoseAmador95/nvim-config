@@ -5,8 +5,9 @@ local fn = vim.fn
 local uv = vim.uv
 local lazypath = fn.stdpath("data") .. "/lazy/lazy.nvim"
 
-if not uv.fs_stat(lazypath) then
-	fn.system({
+local lazy_stat = uv.fs_stat(lazypath)
+if not lazy_stat then
+	local output = fn.system({
 		"git",
 		"clone",
 		"--filter=blob:none",
@@ -14,10 +15,29 @@ if not uv.fs_stat(lazypath) then
 		"--branch=stable",
 		lazypath,
 	})
+	local exit_code = vim.v.shell_error
+	lazy_stat = uv.fs_stat(lazypath)
+	if exit_code ~= 0 or not lazy_stat then
+		local detail = vim.trim(tostring(output or ""))
+		if detail == "" then
+			detail = "git produced no command output"
+		end
+		error(
+			("Failed to bootstrap lazy.nvim at %s (git exit %d): %s\nCheck Git/network access, then retry."):format(
+				lazypath,
+				exit_code,
+				detail
+			)
+		)
+	end
+end
+if lazy_stat.type ~= "directory" then
+	error("Cannot use lazy.nvim path " .. lazypath .. ": destination is not a directory")
 end
 vim.opt.rtp:prepend(lazypath)
 
 local pager = require("config.pager")
+local lazy_argv = require("config.lazy_argv")
 
 -- In pager mode (nvimpager) load only the minimal allowlist; skip the full
 -- `{ import = "plugins" }` set and any external ~/.nvim-local.lua plugin dirs.
@@ -64,27 +84,7 @@ require("lazy").setup(specs, {
 	},
 })
 
--- lazy.nvim's `ft` handlers don't fire for files opened as command-line
--- arguments: their FileType event is emitted during startup, before lazy has
--- wired up the handlers, so `ft`-lazy plugins (render-markdown, obsidian, ...)
--- never load for `nvim some/file.md`. Re-emit FileType for every buffer that
--- is already loaded once VimEnter fires, which loads those plugins and lets
--- them attach to the argument buffers (also covers session-restored buffers).
-vim.api.nvim_create_autocmd("VimEnter", {
-	group = vim.api.nvim_create_augroup("lazy_ft_argv_fix", { clear = true }),
-	callback = function()
-		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-			if vim.api.nvim_buf_is_loaded(buf) then
-				-- Pager stdin has no filename, so nvimpager leaves the filetype
-				-- empty; honor an explicit NVIMPAGER_FILETYPE before re-emitting
-				-- so render-markdown (and friends) can attach.
-				if pager.active then
-					pager.apply_stdin_filetype(buf)
-				end
-				if vim.bo[buf].filetype ~= "" then
-					vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
-				end
-			end
-		end
-	end,
-})
+-- Neovim 0.12 can read argv buffers before lazy.nvim installs event handlers.
+-- Recover only the missed Lazy/plugin groups; existing FileType observers are
+-- deliberately not replayed.
+lazy_argv.setup(pager)

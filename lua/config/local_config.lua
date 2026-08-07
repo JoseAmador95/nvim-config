@@ -373,6 +373,17 @@ function M.errors()
 	return last_errors
 end
 
+-- Return a safe snapshot for diagnostics. Environment variable names are useful
+-- when checking which overrides won, but their values may be credentials. Work
+-- on a deep copy so displaying or modifying this table cannot affect runtime.
+function M.display_config()
+	local cfg = vim.deepcopy(M.read())
+	for key in pairs(cfg.env or {}) do
+		cfg.env[key] = "<redacted>"
+	end
+	return cfg
+end
+
 -- Template written by :NvimConfigInit.
 local TEMPLATE = [[-- ~/.nvim-local.lua -- per-host Neovim settings (not under version control).
 -- See lua/config/local_config.lua for the full schema. All fields are optional.
@@ -431,7 +442,7 @@ end
 
 function M.setup()
 	vim.api.nvim_create_user_command("NvimConfigDump", function()
-		local cfg = M.read()
+		local cfg = M.display_config()
 		local lines = {}
 		for _, s in ipairs(M.sources()) do
 			lines[#lines + 1] = "-- " .. s.path .. " [" .. s.status .. "]"
@@ -467,8 +478,11 @@ function M.setup()
 
 	vim.api.nvim_create_user_command("NvimConfigReload", function()
 		M.reload()
-		notify("Local config reloaded", vim.log.levels.INFO)
-	end, { desc = "Reload the local config" })
+		notify(
+			"Local config cache reloaded; restart Neovim to apply all runtime, theme, and plugin changes",
+			vim.log.levels.INFO
+		)
+	end, { desc = "Reload local config cache (restart to apply all changes)" })
 
 	vim.api.nvim_create_autocmd("BufWritePost", {
 		group = vim.api.nvim_create_augroup("nvim_local_config", { clear = true }),

@@ -43,9 +43,9 @@ vim.keymap.set("t", "jj", "<C-\\><C-n>", {
 	desc = "Exit terminal mode",
 })
 
--- Saving makes no sense over a read-only pager buffer (and :w! errors on it).
+-- Saving makes no sense over a read-only pager buffer.
 if not require("config.pager").active then
-	vim.keymap.set("n", "<leader>w", ":w!<CR>", {
+	vim.keymap.set("n", "<leader>w", "<cmd>write<CR>", {
 		noremap = true,
 		silent = true,
 		desc = "Save",

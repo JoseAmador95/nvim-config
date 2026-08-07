@@ -46,7 +46,7 @@ function M.specs()
 		require("plugins.noice"), -- fancy command line / messages UI
 		require("plugins.blink"), -- completion (cmdline/buffer/path; loads on demand)
 		require("plugins.render-markdown"), -- activates on ft=markdown
-		require("plugins.mermaid"), -- inline ASCII mermaid diagrams (mmdflux)
+		require("plugins.mermaid"), -- on-demand Mermaid diagrams via :DiagramShow
 		{
 			-- Slim treesitter: only M.parsers, no textobjects/context/rainbow and
 			-- none of the 19-parser install from lua/plugins/treesitter.lua.
@@ -193,6 +193,16 @@ local function in_float(buf)
 	return false
 end
 
+-- nvimpager's blanket read-only handling needs to be undone only for real input
+-- buffers. Result/list/preview floats manage their own mutability and must stay
+-- read-only; Snacks input can briefly be identified by either option below.
+function M.is_input_buffer(buf)
+	if not vim.api.nvim_buf_is_valid(buf) then
+		return false
+	end
+	return vim.bo[buf].buftype == "prompt" or vim.bo[buf].filetype == "snacks_picker_input"
+end
+
 -- Pager-only wiring. No-op outside nvimpager. Called from init.lua.
 function M.setup()
 	if not M.active then
@@ -203,7 +213,8 @@ function M.setup()
 	-- `modifiable=false` and pager scroll maps on EVERY buffer entering a
 	-- window. That breaks plugin float inputs (e.g. the snacks picker: you
 	-- can't type). Run after it (scheduled) and fix things up per buffer:
-	--  - float (plugin UI): restore `modifiable` so its input accepts typing;
+	--  - prompt/input float: restore `modifiable` so it accepts typing;
+	--  - result/list/preview float: leave its own mutability policy untouched;
 	--  - normal window (paged content): keep it read-only but free j/k/arrows
 	--    so they move the cursor instead of scrolling.
 	vim.api.nvim_create_autocmd({ "VimEnter", "BufWinEnter" }, {
@@ -214,11 +225,11 @@ function M.setup()
 				if not vim.api.nvim_buf_is_valid(buf) then
 					return
 				end
-				if in_float(buf) then
+				if in_float(buf) and M.is_input_buffer(buf) then
 					pcall(function()
 						vim.bo[buf].modifiable = true
 					end)
-				else
+				elseif not in_float(buf) then
 					free_cursor_maps(buf)
 				end
 			end)

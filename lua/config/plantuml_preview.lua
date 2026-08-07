@@ -1,6 +1,7 @@
 local M = {}
 
 local uv = vim.uv
+local fs = require("config.fs")
 
 -- Lua-side storage for uv timer handles (cannot survive buf-var round-trips)
 local timers = {}
@@ -101,7 +102,12 @@ local rendering = {}
 -- Async: PlantUML/Java can take seconds; never block the UI thread.
 -- Calls on_done(ok) (optional) from the main loop when finished.
 local function render_png(buf, png_path, on_done)
+	local finished = false
 	local function done(ok)
+		if finished then
+			return
+		end
+		finished = true
 		if on_done then
 			on_done(ok)
 		end
@@ -122,21 +128,43 @@ local function render_png(buf, png_path, on_done)
 	end
 
 	rendering[buf] = true
-	vim.system({ "plantuml", "-tpng", "-pipe" }, { text = false, stdin = input }, function(result)
-		vim.schedule(function()
-			rendering[buf] = nil
-			if result.code ~= 0 then
-				local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
-				if msg == "" then
-					msg = "plantuml failed"
+	local started, start_err = pcall(
+		vim.system,
+		{ "plantuml", "-tpng", "-pipe" },
+		{ text = false, stdin = input },
+		function(result)
+			vim.schedule(function()
+				rendering[buf] = nil
+				if result.code ~= 0 then
+					local msg = vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
+					if msg == "" then
+						msg = "plantuml failed"
+					end
+					notify(msg, vim.log.levels.ERROR)
+					return done(false)
 				end
-				notify(msg, vim.log.levels.ERROR)
-				return done(false)
-			end
-			vim.fn.writefile({ result.stdout or "" }, png_path, "b")
-			done(true)
-		end)
-	end)
+				local output = result.stdout or ""
+				if output == "" then
+					notify("plantuml produced an empty PNG", vim.log.levels.ERROR)
+					return done(false)
+				end
+				local written, write_err = fs.write_binary_atomic(png_path, output)
+				if not written then
+					notify(
+						"Failed to write PNG preview " .. png_path .. ": " .. tostring(write_err),
+						vim.log.levels.ERROR
+					)
+					return done(false)
+				end
+				done(true)
+			end)
+		end
+	)
+	if not started then
+		rendering[buf] = nil
+		notify("Failed to start plantuml: " .. tostring(start_err), vim.log.levels.ERROR)
+		done(false)
+	end
 end
 
 local function setup_autocmds(buf)

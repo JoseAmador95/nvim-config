@@ -80,7 +80,13 @@ return {
 	-- which has no native equivalent.
 	keys = {
 		{ "<leader>fn", "<cmd>messages<cr>", desc = "Messages" },
-		{ "<leader>fN", function() require("noice").cmd("dismiss") end, desc = "Dismiss notifications" },
+		{
+			"<leader>fN",
+			function()
+				require("noice").cmd("dismiss")
+			end,
+			desc = "Dismiss notifications",
+		},
 	},
 	config = function(_, opts)
 		require("noice").setup(opts)

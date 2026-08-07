@@ -28,22 +28,33 @@ local function set_cursor_position(buf, win, lnum, col)
 	vim.api.nvim_win_set_cursor(win, { target_line, target_col })
 end
 
+local function normalized_path(path)
+	local absolute = vim.fn.fnamemodify(path, ":p")
+	return vim.uv.fs_realpath(absolute) or absolute
+end
+
 function M.open_file_in_tab(filepath, opts)
 	opts = opts or {}
 	local lnum = tonumber(opts.lnum) or 1
 	local col = tonumber(opts.col) or 1
 
 	filepath = vim.fn.fnamemodify(filepath, ":p")
+	local target_path = normalized_path(filepath)
 
 	for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
-		local win = vim.api.nvim_tabpage_get_win(tabpage)
-		local buf = vim.api.nvim_win_get_buf(win)
-		if not is_special_buffer(buf) then
-			local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":p")
-			if name == filepath then
-				vim.api.nvim_set_current_tabpage(tabpage)
-				set_cursor_position(buf, win, lnum, col)
-				return
+		for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
+			local win_config = vim.api.nvim_win_get_config(win)
+			if not win_config.relative or win_config.relative == "" then
+				local buf = vim.api.nvim_win_get_buf(win)
+				if not is_special_buffer(buf) then
+					local name = normalized_path(vim.api.nvim_buf_get_name(buf))
+					if name == target_path then
+						vim.api.nvim_set_current_tabpage(tabpage)
+						vim.api.nvim_set_current_win(win)
+						set_cursor_position(buf, win, lnum, col)
+						return
+					end
+				end
 			end
 		end
 	end

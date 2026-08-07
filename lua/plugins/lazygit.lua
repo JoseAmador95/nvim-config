@@ -1,43 +1,22 @@
 -- lazygit in a floating terminal (via toggleterm), opened with <leader>gl.
 -- Adds a lazy-loading key to the existing toggleterm spec.
 --
--- When a file is edited from within lazygit (pressing `e`), it is opened as a
--- buffer in the *running* Neovim instance instead of lazygit's own float. This
--- works because Neovim sets `$NVIM` to its RPC socket inside terminal buffers,
--- so lazygit's `os.edit` command can talk back to Neovim via `--remote-send`.
+-- When a file is edited from within lazygit (pressing `e`), LazyGit's official
+-- `nvim-remote` preset opens it in the parent Neovim instance. The LazyGit
+-- terminal remains available in its original tab.
 local lazygit_term
 
--- Called by lazygit (through Neovim's RPC socket) to open a file in a new tab.
--- Invoked via `<Cmd>` from a terminal-mode buffer, so window/tab changes must
--- be deferred with vim.schedule (they are forbidden while <Cmd> runs).
-function _G._lazygit_edit(filename, line)
-	vim.schedule(function()
-		if lazygit_term then
-			lazygit_term:close()
-		end
-		-- `tab drop` reuses a tab already showing the file, otherwise opens a
-		-- new tab -- so editing never overwrites the tab lazygit launched from.
-		vim.cmd("tab drop " .. vim.fn.fnameescape(filename))
-		if line then
-			pcall(vim.api.nvim_win_set_cursor, 0, { tonumber(line), 0 })
-		end
-	end)
-end
-
--- Generate the lazygit config that wires `os.edit` to the RPC callback.
+-- Generate the lazygit config that selects its parent-Neovim edit preset.
 -- Rewritten on every launch so config changes always take effect.
 --
--- `promptToReturnFromSubprocess: false` is essential: lazygit suspends its UI
--- to run the edit command, and the default "press ENTER to return" prompt would
--- otherwise leave the hidden float stuck on that screen. Since `--remote-send`
--- returns instantly, lazygit can resume silently.
+-- `promptToReturnFromSubprocess: false` lets LazyGit resume without displaying
+-- its default "press ENTER to return" prompt after the edit command.
 local function ensure_config()
 	local path = vim.fn.stdpath("cache") .. "/lazygit-nvim.yml"
 	local lines = {
 		"promptToReturnFromSubprocess: false",
 		"os:",
-		"  edit: 'nvim --server \"$NVIM\" --remote-send \"<Cmd>lua _lazygit_edit([==[{{filename}}]==])<CR>\"'",
-		"  editAtLine: 'nvim --server \"$NVIM\" --remote-send \"<Cmd>lua _lazygit_edit([==[{{filename}}]==], {{line}})<CR>\"'",
+		"  editPreset: nvim-remote",
 	}
 	vim.fn.writefile(lines, path)
 	return path

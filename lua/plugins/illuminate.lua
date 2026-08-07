@@ -54,6 +54,11 @@ return {
 		vim.keymap.set({ "o", "x" }, "ar", illuminate.textobj_select, { desc = "Referencia (illuminate)" })
 
 		-- Freeze: mantener resaltado el símbolo actual aunque muevas el cursor.
-		vim.keymap.set("n", "<leader>li", illuminate.toggle_freeze_buf, { desc = "Fijar/soltar resaltado (illuminate)" })
+		vim.keymap.set(
+			"n",
+			"<leader>li",
+			illuminate.toggle_freeze_buf,
+			{ desc = "Fijar/soltar resaltado (illuminate)" }
+		)
 	end,
 }

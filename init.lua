@@ -1,3 +1,16 @@
+-- nvim-treesitter's locked `main` branch and this config's startup recovery
+-- require the Neovim 0.12 runtime contract.
+if vim.fn.has("nvim-0.12") ~= 1 then
+	local version = vim.version()
+	error(
+		("This config requires Neovim 0.12 or newer (found %d.%d.%d)"):format(
+			version.major,
+			version.minor,
+			version.patch
+		)
+	)
+end
+
 -- Core Settings ------------------------------------------------------------
 
 -- Disable netrw
@@ -16,9 +29,13 @@ vim.g.maplocalleader = " " -- Set a local leader key
 
 -- Enable persistent undo and set undo file directory
 vim.opt.undofile = true
-local undodir = vim.fn.stdpath("config") .. "/.undodir"
-vim.opt.undodir = undodir
-vim.fn.mkdir(undodir, "p")
+local undodir = vim.fn.stdpath("state") .. "/undo"
+vim.fn.mkdir(undodir, "p", tonumber("700", 8))
+local chmod_ok, chmod_err = vim.uv.fs_chmod(undodir, tonumber("700", 8))
+if not chmod_ok then
+	vim.notify("Could not secure undo directory: " .. tostring(chmod_err), vim.log.levels.ERROR, { title = "Config" })
+end
+vim.opt.undodir = undodir .. "//"
 
 local function prepend_path(path)
 	if not path or path == "" then
@@ -120,23 +137,14 @@ vim.opt.swapfile = false
 
 -- Auto-command to check for changes in files when refocusing Neovim
 vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter" }, {
+	group = vim.api.nvim_create_augroup("config_checktime", { clear = true }),
 	command = "checktime",
 })
 
--- Automatically remove trailing whitespace on save for all modifiable buffers
-vim.api.nvim_create_autocmd("BufWritePre", {
-	group = vim.api.nvim_create_augroup("trim_whitespace", { clear = true }),
-	callback = function(event)
-		if vim.bo[event.buf].buftype ~= "" or not vim.bo[event.buf].modifiable then
-			return
-		end
-		local cursor = vim.api.nvim_win_get_cursor(0)
-		local search = vim.fn.getreg("/")
-		vim.cmd([[silent! %s/\s\+$//e]])
-		vim.api.nvim_win_set_cursor(0, cursor)
-		vim.fn.setreg("/", search)
-	end,
-})
+-- Remove incidental trailing whitespace while preserving formats where it has
+-- meaning. Set `vim.b.trim_trailing_whitespace = false` for any other buffer
+-- that must retain it.
+require("config.whitespace").setup()
 
 -- Key Mappings -------------------------------------------------------------
 
@@ -211,14 +219,11 @@ vim.opt.mouse = "a"
 
 -- Enhancements -------------------------------------------------------------
 
--- Custom command to reload configuration
+-- Restarting gives plugins and module state a clean lifecycle; sourcing this
+-- file into a running process cannot safely undo every plugin side effect.
 vim.api.nvim_create_user_command("ReloadConfig", function()
-	vim.cmd("source $MYVIMRC")
-	pcall(function()
-		vim.cmd("Lazy reload")
-	end)
-	vim.notify("Neovim config reloaded", vim.log.levels.INFO, { title = "Config" })
-end, { desc = "Reload config and plugin specs" })
+	vim.cmd("restart")
+end, { desc = "Restart Neovim to reload config" })
 
 -- Plugins --------------------------------------------------------------------
 

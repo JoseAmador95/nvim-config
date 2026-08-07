@@ -1,6 +1,6 @@
 local M = {}
 
--- Per-buffer follow state: buf -> { poll = uv_fs_poll, name = string }
+-- Per-buffer follow state: buf -> watcher
 local watchers = {}
 
 local POLL_INTERVAL_MS = 500
@@ -13,19 +13,40 @@ local function is_watching(buf)
 	return watchers[buf] ~= nil
 end
 
--- Reload the file from disk into the (read-only) buffer, keeping windows that
--- were parked at the bottom pinned to the new last line (tail -f behaviour).
-local function reload(buf)
+local function restore_buffer(watcher)
+	local buf = watcher.buf
 	if not vim.api.nvim_buf_is_valid(buf) then
 		return
 	end
 
-	local name = vim.api.nvim_buf_get_name(buf)
-	if name == "" then
+	local original = watcher.original
+	vim.bo[buf].filetype = original.filetype
+	vim.bo[buf].modifiable = original.modifiable
+	vim.bo[buf].readonly = original.readonly
+	vim.bo[buf].modified = original.modified
+end
+
+local function close_poll(poll)
+	if not poll then
 		return
 	end
 
-	local ok, lines = pcall(vim.fn.readfile, name)
+	pcall(poll.stop, poll)
+	local ok, closing = pcall(poll.is_closing, poll)
+	if not ok or not closing then
+		pcall(poll.close, poll)
+	end
+end
+
+-- Reload the file from disk into the (read-only) buffer, keeping windows that
+-- were parked at the bottom pinned to the new last line (tail -f behaviour).
+local function reload(watcher)
+	local buf = watcher.buf
+	if watchers[buf] ~= watcher or not vim.api.nvim_buf_is_valid(buf) then
+		return
+	end
+
+	local ok, lines = pcall(vim.fn.readfile, watcher.name)
 	if not ok then
 		return
 	end
@@ -49,23 +70,23 @@ local function reload(buf)
 	end
 end
 
-local function stop(buf)
+local function stop(buf, restore)
 	local watcher = watchers[buf]
 	if not watcher then
 		return
 	end
 
-	if watcher.poll then
-		watcher.poll:stop()
-		if not watcher.poll:is_closing() then
-			watcher.poll:close()
-		end
-	end
+	-- Clear ownership first so an already-scheduled callback cannot touch the
+	-- buffer after its original state has been restored.
 	watchers[buf] = nil
+	if watcher.autocmd then
+		pcall(vim.api.nvim_del_autocmd, watcher.autocmd)
+		watcher.autocmd = nil
+	end
+	close_poll(watcher.poll)
 
-	if vim.api.nvim_buf_is_valid(buf) then
-		vim.bo[buf].modifiable = true
-		vim.bo[buf].readonly = false
+	if restore ~= false then
+		restore_buffer(watcher)
 	end
 end
 
@@ -79,48 +100,79 @@ local function start(buf)
 		notify("File is not readable: " .. name, vim.log.levels.ERROR)
 		return false
 	end
-
-	-- Guarantee log-highlight colouring and the :LogHl* helpers make sense here.
-	if vim.bo[buf].filetype ~= "log" then
-		vim.bo[buf].filetype = "log"
-	end
-
-	vim.bo[buf].modifiable = false
-	vim.bo[buf].readonly = true
-
-	local poll = vim.uv.new_fs_poll()
-	if not poll then
-		notify("Could not create file watcher", vim.log.levels.ERROR)
-		vim.bo[buf].modifiable = true
-		vim.bo[buf].readonly = false
+	if vim.bo[buf].modified then
+		notify("Buffer has unsaved changes; save or discard them before following", vim.log.levels.ERROR)
 		return false
 	end
 
-	watchers[buf] = { poll = poll, name = name }
+	local poll, poll_err = vim.uv.new_fs_poll()
+	if not poll then
+		notify("Could not create file watcher: " .. tostring(poll_err), vim.log.levels.ERROR)
+		return false
+	end
 
-	poll:start(
+	local watcher = {
+		buf = buf,
+		poll = poll,
+		name = name,
+		original = {
+			filetype = vim.bo[buf].filetype,
+			modifiable = vim.bo[buf].modifiable,
+			readonly = vim.bo[buf].readonly,
+			modified = vim.bo[buf].modified,
+		},
+	}
+	watchers[buf] = watcher
+
+	local started_ok, start_result, start_err = pcall(
+		poll.start,
+		poll,
 		name,
 		POLL_INTERVAL_MS,
 		vim.schedule_wrap(function(err)
-			if err then
+			if err or watchers[buf] ~= watcher then
 				return
 			end
-			reload(buf)
+			reload(watcher)
 		end)
 	)
+	if not started_ok or start_result == nil then
+		watchers[buf] = nil
+		close_poll(poll)
+		local reason = started_ok and start_err or start_result
+		notify("Could not start file watcher: " .. tostring(reason), vim.log.levels.ERROR)
+		return false
+	end
+
+	-- Guarantee log-highlight colouring and the :LogHl* helpers make sense here.
+	local configured, config_err = pcall(function()
+		if vim.bo[buf].filetype ~= "log" then
+			vim.bo[buf].filetype = "log"
+		end
+		vim.bo[buf].modifiable = false
+		vim.bo[buf].readonly = true
+	end)
+	if not configured then
+		stop(buf)
+		notify("Could not configure buffer for following: " .. tostring(config_err), vim.log.levels.ERROR)
+		return false
+	end
 
 	-- Prime the buffer from disk and jump to the bottom like `tail -f`.
-	reload(buf)
+	reload(watcher)
 	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
 		pcall(vim.api.nvim_win_set_cursor, win, { vim.api.nvim_buf_line_count(buf), 0 })
 	end
 
 	-- Tear the watcher down automatically if the buffer goes away.
-	vim.api.nvim_create_autocmd({ "BufWipeout", "BufDelete" }, {
+	watcher.autocmd = vim.api.nvim_create_autocmd({ "BufWipeout", "BufDelete" }, {
 		buffer = buf,
 		once = true,
 		callback = function()
-			stop(buf)
+			watcher.autocmd = nil
+			if watchers[buf] == watcher then
+				stop(buf, false)
+			end
 		end,
 	})
 

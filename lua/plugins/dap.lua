@@ -57,6 +57,15 @@ return {
 	config = function()
 		local dap = require("dap")
 		local dapui = require("dapui")
+		local mason_bin = vim.fn.stdpath("data") .. "/mason/bin/"
+
+		local function mason_executable(name)
+			local resolved = vim.fn.exepath(name)
+			if resolved ~= "" then
+				return resolved, true
+			end
+			return mason_bin .. name, false
+		end
 
 		dapui.setup()
 
@@ -71,48 +80,59 @@ return {
 			dapui.close()
 		end
 
-		-- Python debugging
-		require("dap-python").setup("python")
+		-- Python debugging. Keep Mason's deterministic path even before the
+		-- first install completes, so the adapter works later without a reload.
+		local debugpy_path, has_debugpy = mason_executable("debugpy-adapter")
+		require("dap-python").setup(debugpy_path)
+		if not has_debugpy then
+			vim.notify(
+				"debugpy-adapter not found. Install with :MasonInstall debugpy",
+				vim.log.levels.WARN,
+				{ title = "DAP" }
+			)
+		end
 
 		-- Go debugging (delve from Mason; also handles launch.json type "go")
 		require("dap-go").setup()
 
-		-- C/C++ debugging with codelldb from Mason
-		local mason_bin = vim.fn.stdpath("data") .. "/mason/bin/"
-		local codelldb_path = mason_bin .. "codelldb"
+		-- C/C++ debugging with codelldb from Mason. Register it even during a
+		-- first-install race; Mason will create this path when installation ends.
+		local codelldb_path, has_codelldb = mason_executable("codelldb")
+		dap.adapters.codelldb = {
+			type = "server",
+			port = "${port}",
+			executable = {
+				command = codelldb_path,
+				args = { "--port", "${port}" },
+			},
+		}
+		-- launch.json interop: the VSCode CodeLLDB extension uses type
+		-- "lldb", cpptools uses "cppdbg"; route both to codelldb
+		-- (cpptools-only keys like MIMode/setupCommands are ignored)
+		dap.adapters.lldb = dap.adapters.codelldb
+		dap.adapters.cppdbg = dap.adapters.codelldb
 
-		if vim.fn.executable(codelldb_path) == 1 then
-			-- codelldb speaks DAP over a TCP port, not stdio
-			dap.adapters.codelldb = {
-				type = "server",
-				port = "${port}",
-				executable = {
-					command = codelldb_path,
-					args = { "--port", "${port}" },
-				},
-			}
-			-- launch.json interop: the VSCode CodeLLDB extension uses type
-			-- "lldb", cpptools uses "cppdbg"; route both to codelldb
-			-- (cpptools-only keys like MIMode/setupCommands are ignored)
-			dap.adapters.lldb = dap.adapters.codelldb
-			dap.adapters.cppdbg = dap.adapters.codelldb
+		dap.configurations.cpp = {
+			{
+				name = "Launch file",
+				type = "codelldb",
+				request = "launch",
+				program = function()
+					return vim.fn.input("Path to executable: ", vim.fn.getcwd() .. "/", "file")
+				end,
+				cwd = "${workspaceFolder}",
+				stopOnEntry = false,
+			},
+		}
+		dap.configurations.c = dap.configurations.cpp
+		dap.configurations.rust = dap.configurations.cpp
 
-			dap.configurations.cpp = {
-				{
-					name = "Launch file",
-					type = "codelldb",
-					request = "launch",
-					program = function()
-						return vim.fn.input("Path to executable: ", vim.fn.getcwd() .. "/", "file")
-					end,
-					cwd = "${workspaceFolder}",
-					stopOnEntry = false,
-				},
-			}
-			dap.configurations.c = dap.configurations.cpp
-			dap.configurations.rust = dap.configurations.cpp
-		else
-			vim.notify("codelldb not found. Install with :MasonInstall codelldb", vim.log.levels.WARN)
+		if not has_codelldb then
+			vim.notify(
+				"codelldb not found. Install with :MasonInstall codelldb",
+				vim.log.levels.WARN,
+				{ title = "DAP" }
+			)
 		end
 	end,
 }
