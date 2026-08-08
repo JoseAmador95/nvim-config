@@ -41,28 +41,138 @@ case $xdg_root in
 		exit 2
 		;;
 esac
-if [ "$xdg_root" = "/" ]; then
+
+# Resolve first: lexical variants such as /tmp/.., /. and // must not bypass
+# the root guard. Creating the requested root itself does not create children.
+mkdir -p "$xdg_root"
+xdg_root=$(CDPATH='' cd -- "$xdg_root" && pwd -P)
+if [ "$xdg_root" = "/" ] || [ "$xdg_root" = "//" ]; then
 	printf '%s\n' 'Refusing to use / as the isolated XDG root' >&2
 	exit 2
 fi
 
-mkdir -p "$xdg_root/data" "$xdg_root/state" "$xdg_root/cache" "$xdg_root/log" "$xdg_root/tmp"
-lock_snapshot=$(mktemp "$xdg_root/tmp/lazy-lock.before.XXXXXX")
-cp "$repo_root/lazy-lock.json" "$lock_snapshot"
-cleanup() {
-	rm -f -- "$lock_snapshot"
-}
-trap cleanup 0 HUP INT TERM
+bootstrap_lock=$xdg_root/.bootstrap-config.lock
+if ! mkdir "$bootstrap_lock" 2>/dev/null; then
+	printf 'Another bootstrap is active, or a stale lock exists: %s\n' "$bootstrap_lock" >&2
+	exit 1
+fi
 
-export XDG_DATA_HOME="$xdg_root/data"
+stage_data=
+safe_cwd=
+local_config=
+lock_snapshot=
+lock_working=
+pin_file=
+nvim_destination=
+pager_destination=
+nvim_backup=
+pager_backup=
+nvim_promoted=0
+pager_promoted=0
+
+cleanup() {
+	cleanup_status=$?
+	trap - 0 HUP INT TERM
+
+	if [ "$pager_promoted" -eq 1 ] && [ -n "$pager_destination" ] && [ -e "$pager_destination" ]; then
+		if [ -n "$stage_data" ] && [ -d "$stage_data" ]; then
+			mv "$pager_destination" "$stage_data/.rollback-nvimpager-lazy" 2>/dev/null || true
+		fi
+	fi
+	if [ -n "$pager_backup" ] && [ -e "$pager_backup" ] && [ -n "$pager_destination" ] && [ ! -e "$pager_destination" ]; then
+		mv "$pager_backup" "$pager_destination" 2>/dev/null || cleanup_status=1
+	fi
+
+	if [ "$nvim_promoted" -eq 1 ] && [ -n "$nvim_destination" ] && [ -e "$nvim_destination" ]; then
+		if [ -n "$stage_data" ] && [ -d "$stage_data" ]; then
+			mv "$nvim_destination" "$stage_data/.rollback-nvim-lazy" 2>/dev/null || true
+		fi
+	fi
+	if [ -n "$nvim_backup" ] && [ -e "$nvim_backup" ] && [ -n "$nvim_destination" ] && [ ! -e "$nvim_destination" ]; then
+		mv "$nvim_backup" "$nvim_destination" 2>/dev/null || cleanup_status=1
+	fi
+
+	[ -z "$stage_data" ] || rm -rf -- "$stage_data"
+	[ -z "$safe_cwd" ] || rm -rf -- "$safe_cwd"
+	[ -z "$local_config" ] || rm -f -- "$local_config"
+	[ -z "$lock_snapshot" ] || rm -f -- "$lock_snapshot"
+	[ -z "$lock_working" ] || rm -f -- "$lock_working"
+	[ -z "$pin_file" ] || rm -f -- "$pin_file"
+	rmdir "$bootstrap_lock" 2>/dev/null || cleanup_status=1
+	exit "$cleanup_status"
+}
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+ensure_directory() {
+	directory_path=$1
+	directory_label=$2
+	if [ -L "$directory_path" ]; then
+		printf 'Refusing symlinked %s: %s\n' "$directory_label" "$directory_path" >&2
+		exit 1
+	fi
+	if [ -e "$directory_path" ]; then
+		if [ ! -d "$directory_path" ]; then
+			printf '%s is not a directory: %s\n' "$directory_label" "$directory_path" >&2
+			exit 1
+		fi
+	else
+		mkdir "$directory_path"
+	fi
+}
+
+ensure_contained_directory() {
+	contained_path=$1
+	contained_label=$2
+	ensure_directory "$contained_path" "$contained_label"
+	contained_physical=$(CDPATH='' cd -- "$contained_path" && pwd -P)
+	case $contained_physical/ in
+		"$xdg_root"/*) ;;
+		*)
+			printf '%s escapes the physical XDG root: %s\n' "$contained_label" "$contained_physical" >&2
+			exit 1
+			;;
+	esac
+}
+
+for xdg_child in data state cache log tmp; do
+	ensure_contained_directory "$xdg_root/$xdg_child" "XDG $xdg_child directory"
+done
+for profile_name in nvim nvimpager; do
+	ensure_contained_directory "$xdg_root/data/$profile_name" "$profile_name data directory"
+	if [ -L "$xdg_root/data/$profile_name/lazy" ]; then
+		printf 'Refusing symlinked %s plugin root: %s\n' "$profile_name" "$xdg_root/data/$profile_name/lazy" >&2
+		exit 1
+	fi
+	if [ -e "$xdg_root/data/$profile_name/lazy" ] && [ ! -d "$xdg_root/data/$profile_name/lazy" ]; then
+		printf '%s plugin root is not a directory: %s\n' "$profile_name" "$xdg_root/data/$profile_name/lazy" >&2
+		exit 1
+	fi
+done
+
+stage_data=$(mktemp -d "$xdg_root/data/.bootstrap-data.XXXXXX")
+safe_cwd=$(mktemp -d "$xdg_root/tmp/bootstrap-cwd.XXXXXX")
+local_config=$(mktemp "$xdg_root/tmp/no-local-config.XXXXXX.lua")
+lock_snapshot=$(mktemp "$xdg_root/tmp/lazy-lock.before.XXXXXX")
+lock_working=$(mktemp "$xdg_root/tmp/lazy-lock.working.XXXXXX")
+pin_file=$(mktemp "$xdg_root/tmp/lazy-lock.pins.XXXXXX")
+printf '%s\n' 'return {}' >"$local_config"
+chmod 600 "$local_config"
+cp "$repo_root/lazy-lock.json" "$lock_snapshot"
+cp "$repo_root/lazy-lock.json" "$lock_working"
+
+export XDG_DATA_HOME="$stage_data"
 export XDG_STATE_HOME="$xdg_root/state"
 export XDG_CACHE_HOME="$xdg_root/cache"
 export NVIM_LOG_FILE="$xdg_root/log/nvim.log"
 export NVIM_LSP_LOG_FILE="$xdg_root/log/lsp.log"
-export NVIM_CONFIG_FILE="$xdg_root/no-local-config.lua"
+export NVIM_CONFIG_FILE="$local_config"
 export NVIM_CONFIG_ROOT="$repo_root"
 export NVIM_CONFIG_OFFLINE=1
 export NVIM_CONFIG_XDG_ROOT="$xdg_root"
+export NVIM_CONFIG_LAZY_LOCKFILE="$lock_working"
 export TMPDIR="$xdg_root/tmp"
 unset NVIM_APPNAME NVIMPAGER_FILETYPE
 
@@ -71,17 +181,115 @@ if ! command -v "$NVIM_BIN" >/dev/null 2>&1; then
 	printf 'Required command not found: %s\n' "$NVIM_BIN" >&2
 	exit 1
 fi
+if ! command -v git >/dev/null 2>&1; then
+	printf '%s\n' 'Required command not found: git' >&2
+	exit 1
+fi
+
+run_nvim() (
+	CDPATH='' cd -- "$safe_cwd"
+	exec "$NVIM_BIN" "$@"
+)
+
+run_pager_nvim() (
+	CDPATH='' cd -- "$safe_cwd"
+	export NVIM_APPNAME=nvimpager
+	exec "$NVIM_BIN" "$@"
+)
+
+git_safe() (
+	unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+	unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+	unset GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT GIT_CEILING_DIRECTORIES
+	unset GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_EXTERNAL_DIFF GIT_DIFF_OPTS GIT_EXEC_PATH
+	unset GIT_PREFIX GIT_SHALLOW_FILE GIT_REPLACE_REF_BASE GIT_NAMESPACE
+	unset GIT_QUARANTINE_PATH GIT_REFLOG_ACTION GIT_SSH GIT_SSH_COMMAND GIT_ASKPASS
+	export GIT_OPTIONAL_LOCKS=0
+	exec git --no-pager \
+		-c core.fsmonitor=false \
+		-c core.hooksPath=/dev/null \
+		-c diff.external= \
+		-c core.attributesFile=/dev/null \
+		"$@"
+)
+
+checkout_is_exact() {
+	checkout_path=$1
+	expected_commit=$2
+	[ -d "$checkout_path" ] && [ ! -L "$checkout_path" ] || return 1
+	checkout_physical=$(CDPATH='' cd -- "$checkout_path" && pwd -P) || return 1
+	checkout_identity=$(git_safe -C "$checkout_path" rev-parse --show-toplevel --verify 'HEAD^{commit}' 2>/dev/null) || return 1
+	checkout_top=$(printf '%s\n' "$checkout_identity" | sed -n '1p')
+	checkout_head=$(printf '%s\n' "$checkout_identity" | sed -n '2p')
+	checkout_top_physical=$(CDPATH='' cd -- "$checkout_top" 2>/dev/null && pwd -P) || return 1
+	[ "$checkout_top_physical" = "$checkout_physical" ] || return 1
+	[ "$checkout_head" = "$expected_commit" ] || return 1
+	checkout_flags=$(git_safe -C "$checkout_path" ls-files -v 2>/dev/null) || return 1
+	if printf '%s\n' "$checkout_flags" | LC_ALL=C grep -Eq '^[a-zS] '; then
+		return 1
+	fi
+	checkout_changes=$(git_safe -C "$checkout_path" status --porcelain=v1 --untracked-files=all --ignored=matching 2>/dev/null) || return 1
+	[ -z "$checkout_changes" ]
+}
+
+export NVIM_CONFIG_PIN_FILE="$pin_file"
+run_nvim --headless -u NONE -i NONE \
+	--cmd 'lua vim.opt.runtimepath:prepend(vim.env.NVIM_CONFIG_ROOT)' \
+	-c 'lua local fs = require("config.fs"); local raw, err = fs.read_binary(vim.fs.joinpath(vim.env.NVIM_CONFIG_ROOT, "lazy-lock.json")); assert(raw, err); local lock = vim.json.decode(raw); local lines = {}; for name, entry in pairs(lock) do assert(type(name) == "string" and name:match("^[%w._-]+$"), "unsafe lock name: " .. tostring(name)); assert(type(entry) == "table" and type(entry.branch) == "string" and entry.branch ~= "" and not entry.branch:find("|", 1, true), "invalid branch for " .. name); assert(type(entry.commit) == "string" and #entry.commit == 40 and entry.commit:match("^[0-9a-f]+$"), "invalid commit for " .. name); lines[#lines + 1] = table.concat({ name, entry.branch, entry.commit }, "|") end; table.sort(lines); assert(vim.fn.writefile(lines, vim.env.NVIM_CONFIG_PIN_FILE) == 0)' \
+	-c 'quitall!'
+unset NVIM_CONFIG_PIN_FILE
+
+seed_profile() {
+	seed_profile_name=$1
+	seed_source_root=$xdg_root/data/$seed_profile_name/lazy
+	seed_target_root=$stage_data/$seed_profile_name/lazy
+	mkdir -p "$seed_target_root"
+	while IFS='|' read -r plugin_name plugin_branch plugin_commit; do
+		[ -n "$plugin_name" ] || continue
+		plugin_source=$seed_source_root/$plugin_name
+		plugin_target=$seed_target_root/$plugin_name
+		if [ -d "$plugin_source" ] && [ ! -L "$plugin_source" ]; then
+			plugin_source_physical=$(CDPATH='' cd -- "$plugin_source" 2>/dev/null && pwd -P) || continue
+			plugin_source_top=$(git_safe -C "$plugin_source" rev-parse --show-toplevel 2>/dev/null) || continue
+			plugin_source_top=$(CDPATH='' cd -- "$plugin_source_top" 2>/dev/null && pwd -P) || continue
+			[ "$plugin_source_top" = "$plugin_source_physical" ] || continue
+			if git_safe clone --local --no-hardlinks --no-checkout "$plugin_source" "$plugin_target" >/dev/null 2>&1 \
+				&& git_safe -C "$plugin_target" checkout --detach "$plugin_commit" >/dev/null 2>&1 \
+				&& git_safe -C "$plugin_target" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$plugin_branch" >/dev/null 2>&1 \
+				&& checkout_is_exact "$plugin_target" "$plugin_commit"; then
+				plugin_origin=$(git_safe -C "$plugin_source" remote get-url origin 2>/dev/null || true)
+				case $plugin_origin in
+					https://github.com/*) git_safe -C "$plugin_target" remote set-url origin "$plugin_origin" ;;
+					*) rm -rf -- "$plugin_target" ;;
+				esac
+			else
+				rm -rf -- "$plugin_target"
+			fi
+		fi
+	done <"$pin_file"
+}
+
+seed_profile nvim
+seed_profile nvimpager
+
+# The editor profile should be fully reusable from an existing exact bootstrap.
+# Validate the staged Git graph before any plugin code can run; a genuinely new
+# XDG root may still rely on Lazy to fetch missing checkouts below.
+if [ -d "$xdg_root/data/nvim/lazy" ]; then
+	NVIM_CONFIG_PLUGIN_ROOT="$stage_data/nvim/lazy" run_nvim --headless -u NONE -i NONE -l "$repo_root/tests/lock_spec.lua"
+fi
 
 toolchain_version() {
 	version_key=$1
-	NVIM_CONFIG_VERSION_KEY=$version_key "$NVIM_BIN" --headless -u NONE -i NONE \
-		--cmd "set runtimepath^=$repo_root" \
+	export NVIM_CONFIG_VERSION_KEY="$version_key"
+	version_value=$(run_nvim --headless -u NONE -i NONE \
+		--cmd 'lua vim.opt.runtimepath:prepend(vim.env.NVIM_CONFIG_ROOT)' \
 		-c 'lua local value = require("config.toolchain").versions[vim.env.NVIM_CONFIG_VERSION_KEY]; assert(value); io.write(value)' \
-		-c 'quitall!'
+		-c 'quitall!')
+	unset NVIM_CONFIG_VERSION_KEY
+	printf '%s' "$version_value"
 }
 
-# Parser compilation needs both the exact CLI used by the lock contract and a
-# host C compiler. Fail before any plugin restore or parser network activity.
 if [ "$install_parsers" -eq 1 ]; then
 	if ! command -v tree-sitter >/dev/null 2>&1; then
 		printf '%s\n' 'Required parser tool not found: tree-sitter' >&2
@@ -99,44 +307,105 @@ if [ "$install_parsers" -eq 1 ]; then
 	fi
 fi
 
-printf 'Restoring plugins from %s/lazy-lock.json\n' "$repo_root"
-"$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" "+Lazy! restore" \
+printf 'Restoring plugins in a clean staging data tree\n'
+run_nvim --headless -i NONE -u "$repo_root/init.lua" \
+	-c 'lua for name, plugin in pairs(require("lazy").plugins()) do if plugin._.installed and not plugin._.is_local and not vim.uv.fs_stat(plugin.dir .. "/.git/HEAD") then error(("staged plugin %s has no Git HEAD at %s"):format(name, plugin.dir)) end end' \
+	"+Lazy! restore" \
 	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
 	"+quitall"
 
-printf 'Restoring the nvimpager allowlist from the same lock\n'
-NVIM_APPNAME=nvimpager "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" "+Lazy! restore" \
-	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
-	"+quitall"
-NVIM_APPNAME=nvimpager NVIM_CONFIG_TEST="$repo_root/tests/profile_lock_spec.lua" \
-	"$NVIM_BIN" --headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua"
+printf 'Restoring the nvimpager allowlist in the clean staging tree\n'
+	run_pager_nvim --headless -i NONE -u "$repo_root/init.lua" "+Lazy! restore" \
+		-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
+		"+quitall"
+	export NVIM_CONFIG_TEST="$repo_root/tests/profile_lock_spec.lua"
+	run_pager_nvim --headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua"
+	unset NVIM_CONFIG_TEST
 
-printf 'Restoring the VSCode-Neovim profile from the same lock\n'
-NVIM_CONFIG_VSCODE_STUB="$repo_root/tests/support/vscode_stub.lua" "$NVIM_BIN" --headless -i NONE \
+printf 'Restoring the VSCode-Neovim profile in the clean staging tree\n'
+	export NVIM_CONFIG_VSCODE_STUB="$repo_root/tests/support/vscode_stub.lua"
+	run_nvim --headless -i NONE \
 	--cmd 'let g:vscode = 1' \
 	--cmd 'lua dofile(vim.env.NVIM_CONFIG_VSCODE_STUB)' \
-	-u "$repo_root/init.lua" "+Lazy! restore" \
+	-u "$repo_root/init.lua" \
+	-c 'lua for name, plugin in pairs(require("lazy").plugins()) do if plugin._.installed and not plugin._.is_local and not vim.uv.fs_stat(plugin.dir .. "/.git/HEAD") then error(("staged VSCode plugin %s has no Git HEAD at %s"):format(name, plugin.dir)) end end' \
+	"+Lazy! restore" \
 	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
 	"+quitall"
+	unset NVIM_CONFIG_VSCODE_STUB
 
 if ! cmp -s "$lock_snapshot" "$repo_root/lazy-lock.json"; then
-	printf '%s\n' 'Plugin bootstrap changed lazy-lock.json; refusing a non-reproducible restore' >&2
+	printf '%s\n' 'Plugin bootstrap changed the committed lazy-lock.json; refusing a non-reproducible restore' >&2
+	exit 1
+fi
+if ! cmp -s "$lock_snapshot" "$lock_working"; then
+	printf '%s\n' 'Plugin bootstrap did not reproduce lazy-lock.json exactly' >&2
 	exit 1
 fi
 
-"$NVIM_BIN" --headless -u NONE -i NONE -l "$repo_root/tests/lock_spec.lua"
+NVIM_CONFIG_PLUGIN_ROOT="$stage_data/nvim/lazy" run_nvim --headless -u NONE -i NONE -l "$repo_root/tests/lock_spec.lua"
 
+nvim_destination=$xdg_root/data/nvim/lazy
+pager_destination=$xdg_root/data/nvimpager/lazy
+nvim_staged=$stage_data/nvim/lazy
+pager_staged=$stage_data/nvimpager/lazy
+[ -d "$nvim_staged" ] || {
+	printf '%s\n' 'Staged editor plugin root is missing' >&2
+	exit 1
+}
+[ -d "$pager_staged" ] || {
+	printf '%s\n' 'Staged pager plugin root is missing' >&2
+	exit 1
+}
+
+# Revalidate every parent immediately before rename. The exclusive lock prevents
+# cooperating bootstrap processes from interleaving promotion.
+ensure_contained_directory "$xdg_root/data/nvim" 'nvim data directory'
+ensure_contained_directory "$xdg_root/data/nvimpager" 'nvimpager data directory'
+for promotion_destination in "$nvim_destination" "$pager_destination"; do
+	if [ -L "$promotion_destination" ]; then
+		printf 'Refusing symlinked plugin root during promotion: %s\n' "$promotion_destination" >&2
+		exit 1
+	fi
+done
+
+if [ -e "$nvim_destination" ]; then
+	nvim_backup=$(mktemp -d "$xdg_root/data/nvim/.lazy.previous.XXXXXX")
+	rmdir "$nvim_backup"
+	mv "$nvim_destination" "$nvim_backup"
+fi
+mv "$nvim_staged" "$nvim_destination"
+nvim_promoted=1
+
+if [ -e "$pager_destination" ]; then
+	pager_backup=$(mktemp -d "$xdg_root/data/nvimpager/.lazy.previous.XXXXXX")
+	rmdir "$pager_backup"
+	mv "$pager_destination" "$pager_backup"
+fi
+mv "$pager_staged" "$pager_destination"
+pager_promoted=1
+
+export XDG_DATA_HOME="$xdg_root/data"
 if [ "$install_parsers" -eq 1 ]; then
 	printf 'Installing the configured editor Tree-sitter parsers\n'
-	"$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" \
+	run_nvim --headless -i NONE -u "$repo_root/init.lua" \
 		-c 'lua local ok, err = require("config.treesitter_runtime").install(nil, { wait = true, timeout = 300000 }); if not ok then error(err) end' \
 		-c 'quitall!'
 
 	printf 'Installing the configured nvimpager Tree-sitter parsers\n'
-	NVIM_APPNAME=nvimpager "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" \
-		-c 'lua local ok, err = require("config.treesitter_runtime").install(nil, { wait = true, timeout = 300000 }); if not ok then error(err) end' \
-		-c 'quitall!'
+	run_pager_nvim --headless -i NONE -u "$repo_root/init.lua" \
+			-c 'lua local ok, err = require("config.treesitter_runtime").install(nil, { wait = true, timeout = 300000 }); if not ok then error(err) end' \
+			-c 'quitall!'
 fi
+
+# The complete staged result is now accepted. Disable rollback before removing
+# backups; cleanup still removes temporary staging and releases the lock.
+nvim_promoted=0
+pager_promoted=0
+[ -z "$nvim_backup" ] || rm -rf -- "$nvim_backup"
+[ -z "$pager_backup" ] || rm -rf -- "$pager_backup"
+nvim_backup=
+pager_backup=
 
 printf 'Bootstrap complete. Validate with:\n'
 printf '  NVIM_CONFIG_XDG_ROOT=%s %s/scripts/check-config\n' "$xdg_root" "$repo_root"

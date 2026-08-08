@@ -27,17 +27,16 @@ PATH=/absolute/path/to/nvim-config-tools/bin:$PATH \
 ```
 
 `install-ci-tools` downloads official StyLua, ShellCheck, actionlint, and
-tree-sitter assets, verifies their manifest SHA-256 values, and never invokes
-Cargo, Go, or npm. The first two commands may use the network on a cold machine.
+tree-sitter assets, verifies their manifest SHA-256 values, and never builds
+validators through a language package manager. The first two commands may use
+the network on a cold machine.
 Parser bootstrap requires the exact pinned `tree-sitter` CLI and a host `cc`;
 `--skip-parsers` skips that preflight. The final gate is offline and never
 mutates plugins, parsers, or the committed lock.
 
 Host-specific settings belong in `~/.nvim-local.lua`; create a documented
-template with `:NvimConfigInit`. Put the Claude subscription credential under
-`codecompanion.oauth_token`, not `env`, so only the pinned ACP child receives
-it. `:NvimConfigDump` recursively redacts both that token and environment
-values.
+template with `:NvimConfigInit`. `:NvimConfigDump` recursively redacts
+environment values.
 
 The effective executable order is deliberate:
 
@@ -55,16 +54,15 @@ order. External tools are optional unless their feature is used:
 | --- | --- |
 | Mermaid diagrams | `mmdflux` (`:NvimConfigToolsInstall mmdflux`); `rsvg-convert` from librsvg for image mode |
 | PlantUML diagrams | `plantuml` (`:NvimConfigToolsInstall plantuml`); `rsvg-convert` for image mode |
-| Go formatting | `gofumpt` (`:NvimConfigToolsInstall gofumpt`) |
+| Rust language intelligence/formatting | Host/user `rust-analyzer` and `rustfmt`; managed and Mason paths are ignored |
 | Dockerfile/Markdown lint | `hadolint` and `markdownlint-cli2`, managed by Mason |
 | Inline diagram images | A terminal with the Kitty graphics protocol, such as Ghostty |
 | Pager profile | `nvimpager` plus the config symlink below |
-| Remote devcontainers | `devpod` and its container provider |
-| GitHub PR/issue UI | Authenticated `gh` CLI |
-| CodeCompanion Claude ACP | `codecompanion.acp_command`, otherwise a host `claude-agent-acp`, otherwise `npx` with Node.js 22+ for pinned `@agentclientprotocol/claude-agent-acp@0.66.0` |
+| Git terminal UI | Host `lazygit` |
+| Devcontainer shell | `devcontainer` CLI and ToggleTerm; see [the focused workflow](docs/devcontainer-shell.md) |
 
-`mmdflux`, `gofumpt`, and PlantUML are installed from pinned official
-precompiled releases with `:NvimConfigToolsInstall [all|mmdflux|gofumpt|plantuml]`;
+`mmdflux` and PlantUML are installed from pinned official precompiled releases
+with `:NvimConfigToolsInstall [all|mmdflux|plantuml]`;
 append `!` to install the managed pin even when an external executable exists
 (the host-first `PATH` order is unchanged). Retry exact
 Mason pins explicitly with `:MasonToolsInstallSync`. Mason's install backends
@@ -72,28 +70,31 @@ and their host prerequisites are:
 
 | Backend | Packages | Host prerequisite |
 | --- | --- | --- |
-| Prebuilt | clangd, Docker LS, lemminx, Lua LS, marksman, ruff, rust-analyzer, taplo, codelldb, hadolint, jq, ShellCheck, shfmt, StyLua, tree-sitter CLI | None for installation; rust-analyzer still needs `cargo` at runtime |
+| Prebuilt | clangd, Docker LS, lemminx, Lua LS, marksman, ruff, taplo, codelldb, hadolint, jq, ShellCheck, shfmt, StyLua, tree-sitter CLI | None |
 | npm | Bash/JSON/TypeScript/YAML language servers, pyright, markdownlint-cli2, prettierd | `node` and `npm` |
-| Go | gopls, delve, goimports | `go` |
 | PyPI | cmake-language-server, clang-format, debugpy | Python with `venv` |
 
-The ASM and PlantUML language servers are intentionally absent. PlantUML
-rendering remains available through the precompiled renderer above.
+Rust remains fully editable even without language tooling. Its LSP and formatter
+activate only for external host/user `rust-analyzer` and `rustfmt` executables;
+`:checkhealth nvimconfig` explains the edit-only state when they are absent. The
+ASM and PlantUML language servers are intentionally absent. PlantUML rendering
+remains available through the precompiled renderer above.
 
 The unified viewer is `:DiagramShow [svg|ascii]`. Rendering is asynchronous,
 superseded work is cancelled, and content-addressed results are bounded under
 `stdpath("cache")/diagram`. Missing tools are reported with install hints and
 SVG mode falls back to ASCII when possible. `:LogWatchCurrentFile` follows
 files incrementally, preserves partial lines, survives rotation, and refuses
-to overwrite unsaved buffer changes.
+to overwrite unsaved buffer changes. Automatic log highlighting applies only
+to the `log` filetype and `*.log`; ordinary `*.txt` files remain untouched.
 
 The tab line uses the active colorscheme's `Visual` background (falling back to
 `PmenuSel`) and bold text for the selected tab. Unmodified tabs have a native
 per-tab X, while modified tabs show the modified marker in its place. The X,
-right or middle click, `<leader>q`, and `:CloseTab` all route safely through
-`config.tabs`. Closing the final work tab preserves user buffers, creates a
-pristine home tab, and opens the main menu; `<leader>Q` remains the explicit
-close-all flow.
+middle click, `<leader>q`, and `:CloseTab` all route safely through `config.tabs`;
+right click opens the hierarchical menu. Closing the final work tab preserves
+user buffers, creates a pristine home tab, and opens the Snacks dashboard;
+`<leader>Q` remains the explicit close-all flow.
 
 Enable the lightweight pager profile with:
 
@@ -126,8 +127,8 @@ pinned validation tools.
 
 Tree-sitter never installs parsers implicitly during startup. Install the
 configured set explicitly with `:NvimConfigParsersInstall`; bootstrap uses the
-same API and waits for completion. Lint runs once after opening an existing
-Dockerfile/Markdown file and once per save, never on `InsertLeave`.
+same API and waits for completion. Dockerfile, Markdown, sh, and Bash lint only
+on `BufWritePost`, never on read, create, or `InsertLeave`.
 
 Formatting on save is intentionally disabled by default:
 
@@ -135,6 +136,9 @@ Formatting on save is intentionally disabled by default:
 - `:FormatToggle` changes the global format-on-save default.
 - `:FormatToggle!` toggles an override for only the current buffer, independent
   of the global default.
+
+All formatting entry points use external Conform formatters only. If none is
+available, the editor warns and never falls back to an LSP formatter.
 
 ## State and reload behavior
 

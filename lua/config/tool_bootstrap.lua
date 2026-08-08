@@ -93,7 +93,15 @@ local function unconsumed(name, entry)
 end
 
 local function tracker()
-	local batch = { claimed = 0, pending = 0, succeeded = 0, failed = 0, sealed = false }
+	local batch = {
+		claimed = 0,
+		pending = 0,
+		succeeded = 0,
+		failed = 0,
+		errors = 0,
+		sealed = false,
+		finished = false,
+	}
 
 	function batch:add()
 		self.claimed = self.claimed + 1
@@ -111,15 +119,25 @@ local function tracker()
 		self:finish_if_ready()
 	end
 
+	function batch:error()
+		self.errors = self.errors + 1
+		self:finish_if_ready()
+	end
+
 	function batch:finish_if_ready()
-		if not self.sealed or self.pending ~= 0 then
+		if self.finished or not self.sealed or self.pending ~= 0 then
 			return
 		end
+		self.finished = true
 		mason_active = false
-		if self.claimed > 0 then
+		local failures = self.failed + self.errors
+		if failures > 0 then
 			M._notify(
-				("Automatic tool bootstrap finished: %d succeeded, %d failed"):format(self.succeeded, self.failed),
-				self.failed > 0 and vim.log.levels.WARN or vim.log.levels.INFO
+				("Automatic tool bootstrap had %d failure%s; run :checkhealth nvimconfig for details"):format(
+					failures,
+					failures == 1 and "" or "s"
+				),
+				vim.log.levels.WARN
 			)
 		end
 	end
@@ -189,19 +207,23 @@ local function start_mason(batch)
 
 	local ok, registry = pcall(M._registry)
 	if not ok or type(registry) ~= "table" or type(registry.refresh) ~= "function" then
+		batch:error()
 		batch:seal()
 		return
 	end
 	local refresh_ok = pcall(registry.refresh, function(success)
 		if not success then
+			batch:error()
 			batch:seal()
 			return
 		end
 		for _, candidate in ipairs(candidates) do
 			local has_ok, has_package = pcall(registry.has_package, candidate.name)
-			if has_ok and not has_package then
+			if not has_ok then
+				fail_candidate(batch, candidate, "mason-registry-query-failed")
+			elseif not has_package then
 				fail_candidate(batch, candidate, "mason-package-unavailable")
-			elseif has_ok and has_package then
+			else
 				local package_ok, pkg = pcall(registry.get_package, candidate.name)
 				if package_ok then
 					local installed_ok, installed = safe_call(pkg, "is_installed")
@@ -247,12 +269,15 @@ local function start_mason(batch)
 							end
 						end
 					end
+				else
+					fail_candidate(batch, candidate, "mason-package-query-failed")
 				end
 			end
 		end
 		batch:seal()
 	end)
 	if not refresh_ok then
+		batch:error()
 		batch:seal()
 	end
 end
@@ -295,7 +320,7 @@ local function manual_managed(target, force)
 	end
 	local names = target == "all" and manifest.managed_order or { target }
 	if target ~= "all" and not manifest.managed_tools[target] then
-		M._notify("Unknown tool '" .. target .. "'. Choose all, mmdflux, gofumpt, or plantuml.", vim.log.levels.ERROR)
+		M._notify("Unknown tool '" .. target .. "'. Choose all, mmdflux, or plantuml.", vim.log.levels.ERROR)
 		return false
 	end
 	for _, name in ipairs(names) do
@@ -368,7 +393,7 @@ function M.setup()
 		nargs = "?",
 		bang = true,
 		complete = function()
-			return { "all", "mmdflux", "gofumpt", "plantuml" }
+			return { "all", "mmdflux", "plantuml" }
 		end,
 		desc = "Install exact managed Neovim release tools",
 	})

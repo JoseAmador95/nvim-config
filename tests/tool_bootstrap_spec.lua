@@ -227,18 +227,6 @@ test("missing package-manager prerequisites stay pending without a claim", funct
 	assert(#notifications == 0)
 end)
 
-test("prebuilt rust-analyzer installs without its cargo runtime", function()
-	consume_all_except("rust-analyzer")
-	local pkg, options = package_fixture({ installed = false, success = true })
-	local registry = registry_for({ ["rust-analyzer"] = pkg })
-	bootstrap._registry = function()
-		return registry
-	end
-	run_auto()
-	assert(options.install_count == 1, "prebuilt rust-analyzer download was blocked by missing cargo")
-	assert(records["rust-analyzer@2026-08-03"].status == "succeeded")
-end)
-
 test("external satisfaction requires the primary runtime executable", function()
 	consume_all_except()
 	external.node = "/host/node"
@@ -277,7 +265,8 @@ test("managed start failure finishes one claim exactly once", function()
 	run_auto()
 	assert(#claims == 1 and finish_count == 1)
 	assert(records["mmdflux@2.6.0"].status == "failed")
-	assert(#notifications == 1 and notifications[1].message:find("1 failed", 1, true))
+	assert(#notifications == 1 and notifications[1].message:find("1 failure", 1, true))
+	assert(notifications[1].message:find(":checkhealth nvimconfig", 1, true))
 end)
 
 test("one refresh records exact installs and installs wrong pins", function()
@@ -295,7 +284,24 @@ test("one refresh records exact installs and installs wrong pins", function()
 	assert(records["lemminx@0.29.3"].status == "succeeded")
 	assert(wrong_options.install_count == 1)
 	assert(wrong_options.install_options.version == "0.29.3")
-	assert(#notifications == 1 and notifications[1].message:find("2 succeeded", 1, true))
+	assert(#notifications == 0, "successful automatic bootstrap emitted a toast")
+end)
+
+test("managed and Mason failures produce one aggregate toast", function()
+	consume_all_except("mmdflux", "clangd")
+	release_plans.mmdflux = true
+	release_failure = true
+	local pkg = package_fixture({ installed = false, success = false })
+	local registry = registry_for({ clangd = pkg })
+	bootstrap._registry = function()
+		return registry
+	end
+	run_auto()
+	assert(records["mmdflux@2.6.0"].status == "failed")
+	assert(records["clangd@22.1.6"].status == "failed")
+	assert(#notifications == 1, "automatic failures did not aggregate into exactly one toast")
+	assert(notifications[1].message:find("2 failures", 1, true))
+	assert(notifications[1].message:find(":checkhealth nvimconfig", 1, true))
 end)
 
 test("failed installs are silent on the second boot", function()
@@ -328,7 +334,7 @@ test("registry refresh failure creates no Mason claims", function()
 	run_auto()
 	assert(registry.refresh_count == 1 and #claims == 0)
 	assert(records["clangd@22.1.6"] == nil)
-	assert(#notifications == 0)
+	assert(#notifications == 1 and notifications[1].message:find(":checkhealth nvimconfig", 1, true))
 end)
 
 test("registry-confirmed unavailable pins are consumed once", function()
@@ -343,7 +349,7 @@ test("registry-confirmed unavailable pins are consumed once", function()
 	assert(records["clangd@22.1.6"].detail == "mason-package-uninstallable")
 	assert(records["lemminx@0.29.3"].status == "failed")
 	assert(records["lemminx@0.29.3"].detail == "mason-package-unavailable")
-	assert(#notifications == 1 and notifications[1].message:find("2 failed", 1, true))
+	assert(#notifications == 1 and notifications[1].message:find("2 failures", 1, true))
 
 	bootstrap._reset_for_tests()
 	notifications = {}

@@ -85,12 +85,14 @@ function M.apply(name)
 			notify("Painter for '" .. name .. "' failed: " .. tostring(err))
 			return false
 		end
+		require("config.palette").apply()
 		return true
 	end
 	if not pcall(vim.cmd.colorscheme, name) then
 		notify("Colorscheme '" .. name .. "' is not installed")
 		return false
 	end
+	require("config.palette").apply()
 	return true
 end
 

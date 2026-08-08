@@ -1,9 +1,8 @@
 -- :Cheatsheet — browse all keymaps (default) or user commands.
 -- A reminder of what's bound when you forget. `<Tab>`-completes the argument.
 --
--- In terminal Neovim it uses Telescope (fuzzy). In VSCode (vscode-neovim) the
--- Telescope/which-key floats don't render, so it opens a plain scratch buffer
--- instead — which VSCode shows as a normal editor tab.
+-- In terminal Neovim it uses the Snacks picker. VSCode opens a plain scratch
+-- buffer instead, which the extension presents as a normal editor tab.
 
 local function open_scratch(lines, name)
 	vim.cmd("new")

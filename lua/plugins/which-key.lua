@@ -20,8 +20,6 @@ return {
 			return true
 		end,
 		spec = {
-			{ "<leader>a", group = "ai" },
-			{ "<leader>b", group = "bookmarks/buffer" },
 			{ "<leader>c", group = "code" },
 			{ "<leader>d", group = "debug" },
 			{ "<leader>f", group = "find" },
@@ -29,10 +27,6 @@ return {
 			{ "<leader>h", group = "git hunks" },
 			{ "<leader>l", group = "lsp/diagnostics" },
 			{ "<leader>m", group = "markdown" },
-			{ "<leader>n", group = "note" },
-			{ "<leader>o", group = "obsidian" },
-			{ "<leader>R", group = "remote" },
-			{ "<leader>r", group = "run/tasks" },
 			{ "<leader>s", group = "swap/split/spell" },
 			{ "<leader>x", group = "trouble" },
 		},

@@ -21,6 +21,7 @@ local function capabilities()
 end
 
 function M.setup(context)
+	context = context or {}
 	local client_capabilities = capabilities()
 	local has_schemastore, schemastore = pcall(require, "schemastore")
 
@@ -74,27 +75,21 @@ function M.setup(context)
 		},
 	})
 	register("lemminx", { capabilities = client_capabilities })
-	register("rust_analyzer", {
-		capabilities = client_capabilities,
-		settings = {
-			["rust-analyzer"] = {
-				check = { command = "clippy" },
-				cargo = { allFeatures = true },
+	if context.rust_analyzer_path then
+		register("rust_analyzer", {
+			capabilities = client_capabilities,
+			cmd = { context.rust_analyzer_path },
+			settings = {
+				["rust-analyzer"] = {
+					check = { command = "clippy" },
+					cargo = { allFeatures = true },
+				},
 			},
-		},
-	})
+		})
+	end
 	register("vtsls", { capabilities = client_capabilities })
-	register("gopls", {
-		capabilities = client_capabilities,
-		settings = {
-			gopls = {
-				gofumpt = true,
-				usePlaceholders = true,
-				analyses = { unusedparams = true },
-			},
-		},
-	})
 	register("docker_language_server", { capabilities = client_capabilities })
+	require("config.rust_tools").setup_missing_analyzer_notice(context.rust_analyzer_path)
 end
 
 return M

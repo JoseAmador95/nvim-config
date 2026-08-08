@@ -1,8 +1,7 @@
 -- lua/config/diagram_blocks.lua
 -- Generic scanner for fenced diagram blocks (```mermaid, ```plantuml, ...) in a
--- markdown buffer. Shared by config.diagram (unified viewer) and
--- config.mermaid_preview (browser preview). The caller decides which languages
--- to look for and handles non-markdown / whole-buffer cases.
+-- markdown buffer. config.diagram decides which languages to look for and
+-- handles non-markdown / whole-buffer cases.
 local M = {}
 
 -- Fenced blocks whose info-string language is a key in `langs` (a set, keys

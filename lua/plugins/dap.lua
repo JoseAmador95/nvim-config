@@ -52,7 +52,6 @@ return {
 		"nvim-neotest/nvim-nio",
 		"rcarriga/nvim-dap-ui",
 		"mfussenegger/nvim-dap-python",
-		"leoluz/nvim-dap-go",
 	},
 	config = function()
 		local dap = require("dap")
@@ -78,14 +77,11 @@ return {
 		require("dap-python").setup(debugpy_path)
 		if not has_debugpy then
 			vim.notify(
-				"debugpy-adapter not found. Install with :MasonInstall debugpy",
+				"debugpy-adapter not found. Retry the exact tool manifest with :MasonToolsInstallSync",
 				vim.log.levels.WARN,
 				{ title = "DAP" }
 			)
 		end
-
-		-- Go debugging (delve from Mason; also handles launch.json type "go")
-		require("dap-go").setup()
 
 		-- C/C++ debugging with codelldb from Mason. Register it even during a
 		-- first-install race; Mason will create this path when installation ends.
@@ -117,11 +113,10 @@ return {
 			},
 		}
 		dap.configurations.c = dap.configurations.cpp
-		dap.configurations.rust = dap.configurations.cpp
 
 		if not has_codelldb then
 			vim.notify(
-				"codelldb not found. Install with :MasonInstall codelldb",
+				"codelldb not found. Retry the exact tool manifest with :MasonToolsInstallSync",
 				vim.log.levels.WARN,
 				{ title = "DAP" }
 			)

@@ -80,8 +80,6 @@ local dap_actions = {
 }
 
 local commands = {
-	bookmark_add = { "BookmarksMark" },
-	bookmark_tree = { "BookmarksTree" },
 	cmake_build = { "CMakeBuild" },
 	cmake_build_target = { "CMakeSelectBuildTarget" },
 	cmake_build_type = { "CMakeSelectBuildType" },
@@ -100,19 +98,15 @@ local commands = {
 	fold_open = { "FoldOpenAll" },
 	format_toggle = { "FormatToggle" },
 	format_toggle_buffer = { "FormatToggle", true },
+	diagram_show = { "DiagramShow" },
 	json_tree = { "JsonTree" },
+	lazygit = { "LazyGit" },
 	log_highlight_clear = { "LogHlClear" },
 	markdown_preview = { "MarkdownPreviewToggle" },
 	mason = { "Mason" },
-	neogen = { "Neogen" },
-	plantuml_ascii = { "PlantumlAscii" },
-	plantuml_preview = { "PlantumlPreview" },
 	reload_config = { "ReloadConfig" },
-	remote_start = { "RemoteStart" },
 	toggle_inlay_hints = { "ToggleInlayHints" },
 	toggle_inline_diagnostics = { "ToggleInlineDiagnostics" },
-	xml_outline = { "XmlOutline" },
-	yaml_outline = { "YamlOutline" },
 }
 
 local function run_picker(name)
@@ -133,6 +127,10 @@ local function run_picker(name)
 end
 
 local function run_lsp(name)
+	if name == "definition" or name == "declaration" then
+		require("config.lsp_navigation")[name]()
+		return
+	end
 	local action = lsp_actions[name]
 	local clients = vim.lsp.get_clients({ bufnr = 0, method = action[1] })
 	if not clients or #clients == 0 then
@@ -200,12 +198,7 @@ local function run_dap(name)
 end
 
 local function format_buffer()
-	local ok, conform = pcall(require, "conform")
-	if ok then
-		conform.format({ lsp_format = "fallback" })
-		return
-	end
-	vim.lsp.buf.format()
+	require("config.formatting").format({ async = true })
 end
 
 local function grug_far()
@@ -254,12 +247,6 @@ local handlers = {
 	end,
 	["format.buffer"] = format_buffer,
 	["lsp.format"] = format_buffer,
-	["git.neogit"] = function()
-		local neogit = require_or_notify("neogit", "Neogit")
-		if neogit then
-			neogit.open()
-		end
-	end,
 	["json.jqx_query"] = function()
 		vim.ui.input({ prompt = "jq query: " }, function(query)
 			if query and query ~= "" then
@@ -278,6 +265,18 @@ local handlers = {
 		if render_markdown then
 			render_markdown.toggle()
 		end
+	end,
+	["session.delete"] = function()
+		command("AutoSession", { "deletePicker" })
+	end,
+	["session.restore"] = function()
+		command("AutoSession", { "restore" })
+	end,
+	["session.save"] = function()
+		command("AutoSession", { "save" })
+	end,
+	["session.search"] = function()
+		command("AutoSession", { "search" })
 	end,
 	["search.file"] = function()
 		local path = vim.fn.expand("%:p:.")

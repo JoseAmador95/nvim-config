@@ -4,8 +4,6 @@ local parsers = {
 	"c",
 	"cmake",
 	"cpp",
-	"go",
-	"gomod",
 	"javascript",
 	"json",
 	"lua",
@@ -119,6 +117,7 @@ return {
 		event = { "BufReadPre", "BufNewFile" },
 		config = function()
 			local rd = require("rainbow-delimiters")
+			require("config.palette").apply()
 
 			require("rainbow-delimiters.setup").setup({
 				strategy = {

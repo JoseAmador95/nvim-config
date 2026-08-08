@@ -7,23 +7,10 @@ return {
 	end,
 	config = function()
 		local hooks = require("ibl.hooks")
-
-		-- Same order as rainbow-delimiters highlight list in treesitter.lua.
-		local rainbow_colors = {
-			"#d7ba7d", -- 1 Yellow
-			"#18a2fe", -- 2 Blue
-			"#ce9178", -- 3 Orange
-			"#646695", -- 4 Violet
-			"#4ec9b0", -- 5 Cyan
-			"#c586c0", -- 6 Magenta
-			"#6a9955", -- 7 Green
-		}
+		local palette = require("config.palette")
 
 		local function apply_hl()
-			vim.api.nvim_set_hl(0, "IblIndent", { fg = "#3b3b3b", nocombine = true })
-			for i, color in ipairs(rainbow_colors) do
-				vim.api.nvim_set_hl(0, "IblRainbow" .. i, { fg = color, nocombine = true })
-			end
+			palette.apply()
 		end
 
 		hooks.register(hooks.type.HIGHLIGHT_SETUP, apply_hl)
@@ -45,7 +32,7 @@ return {
 				depth = depth + 1
 				node = node:parent()
 			end
-			return ((depth - 2) % #rainbow_colors) + 1
+			return ((depth - 2) % #palette.current().rainbow) + 1
 		end)
 
 		require("ibl").setup({

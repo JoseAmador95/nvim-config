@@ -82,6 +82,20 @@ test("catalog exposes stable descriptor ids, labels, hints, and dispatch", funct
 	equal("gd", definition.hint, "definition hint")
 	definition.run()
 	equal("lsp.definition", dispatched, "descriptor dispatched the wrong action")
+	assert(find_item(sections, "command.lazygit"), "retained LazyGit action is missing")
+	for _, id in ipairs({
+		"command.bookmark_add",
+		"command.neogen",
+		"command.plantuml_ascii",
+		"command.plantuml_preview",
+		"command.remote_start",
+		"command.xml_outline",
+		"command.yaml_outline",
+		"git.neogit",
+	}) do
+		assert(not find_item(sections, id), "removed menu action remains: " .. id)
+	end
+	assert(not find_section(sections, "bookmarks"), "removed bookmarks section remains")
 end)
 
 test("catalog filters visual, filetype, and CMake descriptors from context", function()
@@ -98,6 +112,13 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 
 	local cpp_sections = catalog.build(context.new({ filetype = "cpp" }), dispatch)
 	assert(find_section(cpp_sections, "cmake"), "CMake section missing for C++")
+
+	local plantuml_sections = catalog.build(context.new({ filetype = "plantuml" }), dispatch)
+	assert(find_item(plantuml_sections, "command.diagram_show"), "unified PlantUML viewer is missing")
+	local markdown_sections = catalog.build(context.new({ filetype = "markdown" }), dispatch)
+	assert(find_item(markdown_sections, "command.diagram_show"), "unified Markdown diagram viewer is missing")
+	assert(not find_section(catalog.build(context.new({ filetype = "yaml" }), dispatch), "file.yaml"))
+	assert(not find_section(catalog.build(context.new({ filetype = "xml" }), dispatch), "file.xml"))
 end)
 
 test("user text reaches Ex commands as structured argv without concatenation", function()
@@ -395,6 +416,67 @@ test("ensure_open is idempotent while open remains a toggle", function()
 
 	backend_module.default = original_default
 	package.loaded["config.menu"] = original_menu
+	package.loaded["config.pager"] = original_pager
+	assert(ok, err)
+end)
+
+test("Snacks palette flattens the shared catalog and confirms once", function()
+	local original_menu = package.loaded["config.menu"]
+	local original_actions = package.loaded["config.menu.actions"]
+	local original_snacks = package.loaded.snacks
+	local original_pager = package.loaded["config.pager"]
+	local captured
+	local dispatched = {}
+
+	local ok, err = xpcall(function()
+		package.loaded["config.menu.actions"] = {
+			run = function(id)
+				dispatched[#dispatched + 1] = id
+			end,
+		}
+		package.loaded.snacks = {
+			picker = {
+				pick = function(opts)
+					captured = opts
+				end,
+			},
+		}
+		package.loaded["config.pager"] = { active = false }
+		package.loaded["config.menu"] = nil
+
+		local menu = require("config.menu")
+		menu.open_palette()
+		assert(captured, "palette did not open")
+		equal("menu_actions", captured.source, "palette source")
+		equal("text", captured.format, "palette format")
+		local session_item
+		for _, item in ipairs(captured.items) do
+			if item.id == "session.search" then
+				session_item = item
+				break
+			end
+		end
+		assert(session_item, "session search is absent from the shared palette")
+		assert(session_item.text:find("Sessions", 1, true), "palette item lost its section")
+
+		local closes = 0
+		local picker = {
+			close = function()
+				closes = closes + 1
+			end,
+		}
+		captured.confirm(picker, session_item)
+		captured.confirm(picker, session_item)
+		vim.wait(500, function()
+			return #dispatched == 1
+		end, 5)
+		equal({ "session.search" }, dispatched, "palette confirmed an action more than once")
+		equal(1, closes, "palette closed more than once")
+	end, debug.traceback)
+
+	package.loaded["config.menu"] = original_menu
+	package.loaded["config.menu.actions"] = original_actions
+	package.loaded.snacks = original_snacks
 	package.loaded["config.pager"] = original_pager
 	assert(ok, err)
 end)

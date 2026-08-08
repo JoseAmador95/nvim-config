@@ -30,7 +30,7 @@ return {
 					return
 				end
 
-				return { timeout_ms = 2000, lsp_format = "fallback" }
+				return require("config.formatting").on_save(bufnr)
 			end,
 			formatters_by_ft = {
 				lua = { "stylua" },
@@ -41,14 +41,22 @@ return {
 				bash = { "shfmt" },
 				zsh = { "shfmt" },
 				toml = { "taplo" },
-				rust = { "rustfmt" }, -- ships with rustup, not Mason-managed
-				-- goimports handles import add/remove/sort; gofumpt then applies
-				-- strict formatting (matches the gofumpt=true gopls setting)
-				go = { "goimports", "gofumpt" },
+				rust = { "rustfmt" },
 				javascript = { "prettierd", "prettier", stop_after_first = true },
 				typescript = { "prettierd", "prettier", stop_after_first = true },
 				javascriptreact = { "prettierd", "prettier", stop_after_first = true },
 				typescriptreact = { "prettierd", "prettier", stop_after_first = true },
+				json = { "prettierd", "prettier", stop_after_first = true },
+				jsonc = { "prettierd", "prettier", stop_after_first = true },
+				yaml = { "prettierd", "prettier", stop_after_first = true },
+				markdown = { "prettierd", "prettier", stop_after_first = true },
+			},
+			formatters = {
+				rustfmt = {
+					command = function()
+						return require("config.rust_tools").rustfmt() or "rustfmt-not-available-outside-managed-paths"
+					end,
+				},
 			},
 		},
 		config = function(_, opts)
@@ -56,7 +64,7 @@ return {
 			conform.setup(opts)
 
 			vim.api.nvim_create_user_command("FormatFile", function()
-				conform.format({ async = true, lsp_format = "fallback" })
+				require("config.formatting").format({ async = true })
 			end, { desc = "Format current buffer" })
 
 			vim.api.nvim_create_user_command("FormatToggle", function(args)

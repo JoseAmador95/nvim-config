@@ -1,8 +1,3 @@
-local state = {
-	force_clear = false,
-	clear_on_exit = false,
-}
-
 local function is_file_buffer(buf)
 	if not vim.api.nvim_buf_is_valid(buf) then
 		return false
@@ -31,123 +26,40 @@ local function should_skip_session_save()
 	return count_file_windows() == 0
 end
 
-local function set_state(skip, force)
-	if force then
-		state.force_clear = true
-		state.clear_on_exit = true
-		return
-	end
-
-	if state.force_clear then
-		return
-	end
-
-	state.clear_on_exit = skip
-end
-
 return {
 	"rmagatti/auto-session",
 	lazy = false,
 	cond = function()
 		return not vim.g.vscode
 	end,
+	keys = {
+		{ "<leader>Ss", "<cmd>AutoSession save<cr>", desc = "Session save" },
+		{ "<leader>Sr", "<cmd>AutoSession restore<cr>", desc = "Session restore current project" },
+		{ "<leader>Sp", "<cmd>AutoSession search<cr>", desc = "Session search and restore" },
+		{ "<leader>Sd", "<cmd>AutoSession deletePicker<cr>", desc = "Session delete" },
+	},
 	opts = {
 		log_level = "error",
-		auto_restore = true,
+		auto_restore = false,
 		auto_save = true,
 		auto_create = true,
 		auto_restore_last_session = false,
 		show_auto_restore_notif = false,
 		bypass_save_filetypes = { "oil", "snacks_dashboard" },
-		auto_delete_empty_sessions = true,
-		-- Use snacks for the session picker (`:AutoSession search`). Auto-detection
-		-- would otherwise pick Telescope (kept only as a dependency); pin snacks to
-		-- match the rest of the config.
+		auto_delete_empty_sessions = false,
+		-- Use Snacks for the session picker (`:AutoSession search`) so session
+		-- discovery matches the rest of the editor UI.
 		session_lens = {
 			picker = "snacks",
 		},
 		pre_save_cmds = {
 			function()
-				if state.force_clear or should_skip_session_save() then
-					state.clear_on_exit = true
-					return false
-				end
-
-				return true
+				return not should_skip_session_save()
 			end,
 		},
 	},
 	config = function(_, opts)
 		vim.o.sessionoptions = "blank,buffers,curdir,folds,help,tabpages,winsize,winpos,terminal,localoptions"
 		require("auto-session").setup(opts)
-
-		local group = vim.api.nvim_create_augroup("auto_session_user", { clear = true })
-		local autosession = require("auto-session")
-
-		local function is_restoring()
-			if vim.g.SessionLoad then
-				return true
-			end
-			---@diagnostic disable-next-line: undefined-field
-			return autosession.restore_in_progress
-		end
-
-		local function update_state()
-			if is_restoring() then
-				return
-			end
-			set_state(should_skip_session_save(), false)
-		end
-
-		local function delete_active_session()
-			if vim.v.this_session and vim.v.this_session ~= "" then
-				pcall(autosession.delete_session_file, vim.v.this_session, vim.fn.fnamemodify(vim.v.this_session, ":t"))
-			end
-		end
-
-		vim.api.nvim_create_autocmd({
-			"BufEnter",
-			"BufDelete",
-			"BufUnload",
-			"BufWipeout",
-			"BufWinEnter",
-			"BufWinLeave",
-			"WinClosed",
-			"TabEnter",
-			"TabClosed",
-		}, {
-			group = group,
-			callback = function()
-				vim.schedule(update_state)
-			end,
-		})
-
-		vim.api.nvim_create_autocmd("QuitPre", {
-			group = group,
-			callback = function()
-				if is_restoring() then
-					return
-				end
-
-				if is_file_window(vim.api.nvim_get_current_win()) and count_file_windows() == 1 then
-					set_state(true, true)
-				end
-			end,
-		})
-
-		vim.api.nvim_create_autocmd("VimEnter", {
-			group = group,
-			callback = update_state,
-		})
-
-		vim.api.nvim_create_autocmd("VimLeavePre", {
-			group = group,
-			callback = function()
-				update_state()
-				if state.clear_on_exit then
-					delete_active_session()
-				end
-			end,
-		})
 	end,
 }

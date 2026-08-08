@@ -33,20 +33,15 @@ function M.specs()
 	-- (<leader>ff/fb/fh/u): those are editor-workflow bindings that make no sense
 	-- over piped content. The picker engine still loads (needed by <leader>ft,
 	-- added in M.setup).
-	local snacks = {}
-	for k, v in pairs(require("plugins.snacks")) do
-		snacks[k] = v
-	end
+	local snacks = vim.deepcopy(require("plugins.snacks"))
 	snacks.keys = nil
+	snacks.opts.dashboard.enabled = false
 
 	return {
 		require("plugins.core"), -- plenary (dormant) + nvim-web-devicons
 		require("plugins.colorscheme"), -- vscode.nvim theme (+ OSC11 bg detection)
-		snacks, -- picker engine (used by :SetFileType) + UI niceties, no keymaps
-		require("plugins.noice"), -- fancy command line / messages UI
-		require("plugins.blink"), -- completion (cmdline/buffer/path; loads on demand)
+		snacks, -- picker engine used by :SetFileType; no editor keymaps
 		require("plugins.render-markdown"), -- activates on ft=markdown
-		require("plugins.mermaid"), -- on-demand Mermaid diagrams via :DiagramShow
 		{
 			-- Slim treesitter: only already-installed M.parsers, with no implicit
 			-- network work and no textobjects/context/rainbow.
@@ -170,8 +165,7 @@ local function free_cursor_maps(buf)
 end
 
 -- True if the buffer is displayed in a floating window. nvimpager's paged
--- content lives in a normal window, so any float is plugin UI (snacks picker
--- input, noice popup, blink menu, ...).
+-- content lives in a normal window, so any float belongs to Snacks UI.
 local function in_float(buf)
 	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
 		if vim.api.nvim_win_get_config(win).relative ~= "" then

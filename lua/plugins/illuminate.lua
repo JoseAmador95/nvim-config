@@ -29,7 +29,6 @@ return {
 			"trouble",
 			"noice",
 			"notify",
-			"octo",
 			"snacks_picker_list",
 			"snacks_dashboard",
 		},

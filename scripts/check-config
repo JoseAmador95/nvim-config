@@ -174,11 +174,12 @@ run_pure_test ci_spec
 run_pure_test diagram_spec
 run_pure_test security_spec
 
-for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint_spec menu_spec tabs_spec toolchain_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec; do
+for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint_spec menu_spec tabs_spec notification_spec ux_spec toolchain_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec; do
 	run_pure_test "$pure_spec"
 done
 
 run_config_test startup_spec "$repo_root/tests/startup_spec.lua"
+run_config_test log_profile_spec "$repo_root/tests/log_profile_spec.lua"
 run_config_test menu_lifecycle_spec "$repo_root/tests/menu_lifecycle_spec.lua"
 run_config_test tooling_spec "$repo_root/tests/tooling_spec.lua"
 run_config_test tooling_ui_spec "$repo_root/tests/tooling_ui_spec.lua"
@@ -192,7 +193,7 @@ run_check "startup smoke" "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua
 	"+quitall"
 run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests
 run_check "ShellCheck" "$SHELLCHECK_BIN" \
-	scripts/check-config scripts/bootstrap-config scripts/install-ci-tools scripts/devpod-nvim
+	scripts/check-config scripts/bootstrap-config scripts/install-ci-tools
 if [ -n "${ACTIONLINT_BIN:-}" ]; then
 	run_check "actionlint" "$ACTIONLINT_BIN" -shellcheck="$SHELLCHECK_BIN"
 fi

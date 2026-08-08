@@ -28,17 +28,20 @@ for _, required in ipairs({
 	":MasonToolsInstallSync",
 	"tree-sitter",
 	"Tree-sitter parser compilation",
-	"CodeCompanion",
-	"Node.js 22+",
+	"Rust language intelligence (host/user only)",
+	"managed and Mason copies are intentionally ignored",
+	"CMake language intelligence",
+	"Git terminal UI",
+	"devcontainer shell",
 }) do
 	assert(source:find(required, 1, true), "health contract is missing: " .. required)
 end
 
-for _, manager in ipairs({ '"prebuilt"', '"npm"', '"go"', '"pypi"' }) do
+for _, manager in ipairs({ '"prebuilt"', '"npm"', '"pypi"' }) do
 	assert(source:find(manager, 1, true), "health manager inventory is missing: " .. manager)
 end
 
-for _, forbidden in ipairs({ "cargo install", "go install" }) do
+for _, forbidden in ipairs({ "CodeCompanion", "ACP", "gofumpt", "gopls", '"go"' }) do
 	assert(not source:find(forbidden, 1, true), "health contains removed or package-manager guidance: " .. forbidden)
 end
 

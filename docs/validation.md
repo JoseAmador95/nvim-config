@@ -14,14 +14,14 @@ PATH=/absolute/path/to/nvim-config-tools/bin:$PATH \
 `install-ci-tools` uses `curl` to fetch official precompiled StyLua, ShellCheck,
 actionlint, and tree-sitter assets for Darwin/Linux on arm64/x86_64. Metadata
 comes from `config.toolchain`; each archive is SHA-256 verified and atomically
-promoted. It never runs Cargo, Go, or npm. Before any network restore,
-`bootstrap-config` requires the exact pinned tree-sitter CLI and `cc` when
-parsers are enabled; `--skip-parsers` does not require either. Bootstrap may
-then use Git/network access to restore the editor, nvimpager, and stubbed
-VSCode-Neovim plugin profiles and waits for the configured editor and pager
-parsers. The final check disables installers, is offline, validates all four
-validator pins plus `cc`, and fails if an installed plugin does not match the
-lock.
+promoted. It never builds validators through a language package manager.
+Before any network restore, `bootstrap-config` requires the exact pinned
+tree-sitter CLI and `cc` when parsers are enabled; `--skip-parsers` does not
+require either. Bootstrap may then use Git/network access to restore the
+editor, nvimpager, and stubbed VSCode-Neovim plugin profiles and waits for the
+configured editor and pager parsers. The final check disables installers, is
+offline, validates all four validator pins plus `cc`, and fails if an installed
+plugin does not match the lock.
 
 The committed `lazy-lock.json` belongs to the full editor. The pager copies it
 byte-for-byte to a profile-local state file before Lazy starts; Lazy may prune
@@ -40,7 +40,7 @@ process has exited; live or unverifiable owners remain locked. Set
 `mason.auto_install = false` in local config to opt out. Manual retries are
 explicit:
 
-- `:NvimConfigToolsInstall [all|mmdflux|gofumpt|plantuml]` installs verified
+- `:NvimConfigToolsInstall [all|mmdflux|plantuml]` installs verified
   official precompiled releases; `!` installs the managed pin even when a host
   copy exists, without changing the host-first `PATH` precedence.
 - `:MasonToolsInstallSync` retries the exact Mason manifest.
@@ -51,17 +51,16 @@ share the primary Neovim managed-tool root.
 
 | Mason backend | Host dependency |
 | --- | --- |
-| Prebuilt | None to install; the prebuilt rust-analyzer still requires `cargo` at runtime |
+| Prebuilt | None |
 | npm | `node` and `npm` |
-| Go | `go` |
 | PyPI | Python with working `venv` support |
 
 Mason skips a pin whose required backend is unavailable; health reports the
-blocked packages. `mmdflux`, `gofumpt`, and PlantUML use the separate prebuilt
-release installer. ASM and PlantUML LSP support has been removed; PlantUML
-diagram rendering is unchanged. CodeCompanion resolves an explicit
-`codecompanion.acp_command` first, then a host `claude-agent-acp`, then pinned
-`npx` with Node.js 22+.
+blocked packages. `mmdflux` and PlantUML use the separate prebuilt release
+installer. Rust language intelligence and formatting accept only host/user
+`rust-analyzer` and `rustfmt`, never managed or Mason paths; missing tools leave
+Rust edit-only and are explained by health. ASM and PlantUML LSP support has
+been removed; PlantUML diagram rendering is unchanged.
 
 | Area | Automated evidence | Manual evidence still required |
 | --- | --- | --- |
@@ -69,12 +68,12 @@ diagram rendering is unchanged. CodeCompanion resolves an explicit
 | nvimpager | Allowlist, source-lock SHA parity, parser set, argv/stdin filetype behavior, mappings and absence of editor-only services | Rendering in the real `nvimpager` executable |
 | VSCode Neovim | Stubbed profile and action mappings; terminal-only commands/plugins stay absent | A live VS Code extension host |
 | Tree-sitter | Installed/missing parser lifecycle, completion retry, large-file guard and textobject surfaces | Language-specific highlighting judgement |
-| LSP | Server catalog, native neoconf disable/live-reload behavior, merge order, encoding conversion and clangd command construction | Connecting to every external language server |
-| DAP | Adapter resolution and VSCode adapter aliases | Real Python, Go and C/C++ debug sessions |
-| Lint/format | Filetype routing, open/save triggers and missing-tool behavior | Project-specific linter configuration |
+| LSP | Server catalog, native neoconf disable/live-reload behavior, merge order, single/multiple-result tab navigation and clangd command construction | Connecting to every external language server |
+| DAP | Adapter resolution and VSCode adapter aliases | Real Python and C/C++ debug sessions |
+| Lint/format | Save-only lint routing, formatter chains, no-LSP fallback and missing-tool behavior | Project-specific linter configuration |
 | Diagrams | Scanner, renderer generations, atomic cache writes, corruption and pruning | Kitty image display, browser opening and visual layout |
 | LogWatch | Append, partial lines, truncation, rotation, deletion/recreation and retention limits | Sustained observation of a high-volume production log |
-| Remote/devcontainer | Command/config contract and dependency health | A real SSH or DevPod connection |
+| Devcontainer shell | Command/config contract and workspace selection | A real `devcontainer exec` session |
 
 GitHub Actions runs the same bootstrap and check on `ubuntu-24.04` and
 `macos-15`. Hosted success is delivery evidence only after the branch has been

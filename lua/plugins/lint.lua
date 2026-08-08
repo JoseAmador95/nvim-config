@@ -2,7 +2,7 @@
 -- not own file writes or diagnostics, so they intentionally skip this plugin.
 return {
 	"mfussenegger/nvim-lint",
-	event = { "BufReadPost", "BufNewFile", "BufWritePost" },
+	event = "BufWritePost",
 	cond = function()
 		return not vim.g.vscode and not require("config.pager").active
 	end,
@@ -14,10 +14,13 @@ return {
 		local lint = require("lint")
 		lint.linters_by_ft.dockerfile = { "hadolint" }
 		lint.linters_by_ft.markdown = { "markdownlint-cli2" }
+		lint.linters_by_ft.sh = { "shellcheck" }
+		lint.linters_by_ft.bash = { "shellcheck" }
 
 		local executables = {
 			hadolint = "hadolint",
 			["markdownlint-cli2"] = "markdownlint-cli2",
+			shellcheck = "shellcheck",
 		}
 		local missing_notified = {}
 
@@ -72,19 +75,10 @@ return {
 			end
 		end
 
-		vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile", "BufWritePost" }, {
+		vim.api.nvim_create_autocmd("BufWritePost", {
 			group = vim.api.nvim_create_augroup("NvimLint", { clear = true }),
 			callback = function(args)
-				local buf = args.buf
-				if args.event == "BufWritePost" then
-					lint_buffer(buf)
-				else
-					-- Filetype detection is also a BufReadPost/BufNewFile observer and
-					-- may run after Lazy's loader. Defer the open pass until it settles.
-					vim.schedule(function()
-						lint_buffer(buf)
-					end)
-				end
+				lint_buffer(args.buf)
 			end,
 		})
 	end,

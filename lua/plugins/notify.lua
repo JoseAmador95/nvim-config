@@ -5,7 +5,8 @@ return {
 		return not vim.g.vscode
 	end,
 	config = function()
-		-- vim.notify is owned by the noice.lua wrapper, which delegates here.
+		-- vim.notify is owned by the noice.lua wrapper. Noice's public notify
+		-- route delegates here, keeping one owner and one toast backend.
 		require("notify").setup({
 			timeout = 3000,
 			-- The colorscheme runs with a transparent background (always in

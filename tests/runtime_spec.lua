@@ -72,12 +72,16 @@ test("diagram runtime modules load independently of the full config", function()
 	for _, module in ipairs({
 		"config.diagram_cache",
 		"config.diagram",
-		"config.mermaid_preview",
-		"config.plantuml_preview",
-		"config.plantuml_ascii",
 	}) do
 		local ok, result = pcall(require, module)
 		assert(ok and type(result) == "table", module .. " failed to load: " .. tostring(result))
+	end
+	for _, module in ipairs({
+		"config.mermaid_preview",
+		"config.plantuml_ascii",
+		"config.plantuml_preview",
+	}) do
+		assert(package.searchpath(module, package.path) == nil, "removed runtime module remains: " .. module)
 	end
 end)
 

@@ -9,9 +9,7 @@ local SPECIAL_FILETYPES = {
 	["help"] = true,
 	["qf"] = true,
 	["NvimTree"] = true,
-	["BookmarksTree"] = true,
 	["aerial"] = true,
-	["outline"] = true,
 }
 
 local function is_special_buffer(buf)

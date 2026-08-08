@@ -56,6 +56,15 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(close_map.rhs == "<cmd>CloseTab<cr>", "full editor close mapping bypasses CloseTab")
 				local close_all_map = vim.fn.maparg("<leader>Q", "n", false, true)
 				assert(close_all_map.rhs == "<cmd>CloseAll<cr>", "CloseAll mapping drifted")
+				for _, lhs in ipairs({ "[b", "]b", "<leader>bd", "gF" }) do
+					assert(
+						vim.fn.maparg(lhs, "n", false, true).lhs == nil,
+						lhs .. " duplicate buffer/file mapping remains"
+					)
+				end
+				local menu_map = vim.fn.maparg("<leader><leader>", "n", false, true)
+				assert(menu_map.rhs == "<cmd>MenuOpen<cr>", "action palette mapping drifted")
+				assert(not vim.lsp.inlay_hint.is_enabled({ bufnr = 0 }), "inlay hints must default off")
 				require("lazy").load({ plugins = { "bufferline.nvim" } })
 
 				local original_visual = vim.api.nvim_get_hl(0, { name = "Visual", link = false })

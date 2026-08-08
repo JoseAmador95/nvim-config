@@ -1,5 +1,4 @@
--- snacks.picker: modern fuzzy finder, primary picker for day-to-day flows.
--- Telescope stays installed only as a dependency of remote-nvim and bookmarks.
+-- snacks.picker: the single fuzzy finder for editor workflows.
 return {
 	"folke/snacks.nvim",
 	cond = function()
@@ -48,16 +47,15 @@ return {
 			enabled = true,
 			doc = { enabled = false },
 		},
-		-- Start screen shown only on `nvim` with no args in a directory without a
-		-- saved session (auto-session's auto_restore takes over in known projects).
-		-- Curated as an actionable launcher, not decoration: recent projects/files
-		-- plus a few high-value actions that reuse existing commands/keymaps.
+		-- Sole home screen for `nvim` without argv and for the reusable landing
+		-- tab created after the final work tab closes. Session restore is always
+		-- explicit, so the dashboard never disappears behind an automatic restore.
 		dashboard = {
 			enabled = true,
 			sections = {
 				{ section = "header" },
 				{ section = "keys", gap = 1, padding = 1 },
-				{ icon = " ", title = "Projects", section = "projects", padding = 1 },
+				{ icon = " ", title = "Projects", section = "projects", session = false, padding = 1 },
 				{ icon = " ", title = "Recent", section = "recent_files", padding = 1 },
 				{ section = "startup" },
 			},
@@ -80,6 +78,7 @@ return {
 						end,
 					},
 					{ icon = " ", key = "s", desc = "Restore session", action = ":AutoSession search" },
+					{ icon = " ", key = "p", desc = "Action palette", action = ":MenuOpen" },
 					{
 						icon = " ",
 						key = "c",
@@ -108,7 +107,7 @@ return {
 		picker = {
 			actions = {
 				-- Open the selection in a tab, reusing an existing one if the file
-				-- is already open. Mirrors the old Telescope smart_open().
+				-- is already open.
 				open_in_tab = function(picker, item)
 					picker:close()
 					if not item then
@@ -137,9 +136,8 @@ return {
 			sources = {
 				files = { hidden = true },
 				grep = { hidden = true },
-				-- `vim.ui.select` (used by e.g. remote-nvim's "Choose Neovim
-				-- version" prompt) runs through the "select" source, which wires
-				-- its own confirm action to resolve the on_choice callback. The
+				-- `vim.ui.select` runs through the "select" source, which wires its
+				-- own confirm action to resolve the on_choice callback. The
 				-- global confirm = "open_in_tab" shortcut above would clobber that
 				-- (config.get re-applies the shortcut over actions.confirm), leaving
 				-- the choice dropped. Setting confirm = false disables the shortcut

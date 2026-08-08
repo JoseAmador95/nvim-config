@@ -38,9 +38,7 @@ test("toolchain manifest is pinned and independent of Neovim", function()
 		shellcheck = "0.11.0",
 		actionlint = "1.7.12",
 		tree_sitter = "0.26.11",
-		claude_acp = "0.66.0",
 		mmdflux = "2.6.0",
-		gofumpt = "0.11.0",
 		plantuml = "1.2026.6",
 	}
 	assert(original_vim.deep_equal(toolchain.versions, expected_versions), "version manifest drifted")
@@ -70,7 +68,7 @@ end)
 
 test("managed releases are prebuilt and target-aware", function()
 	local toolchain = require("config.toolchain")
-	assert(vim.deep_equal(toolchain.managed_order, { "mmdflux", "gofumpt", "plantuml" }))
+	assert(vim.deep_equal(toolchain.managed_order, { "mmdflux", "plantuml" }))
 	for _, name in ipairs(toolchain.managed_order) do
 		local entry = assert(toolchain.managed_tools[name], name)
 		assert(entry.version == toolchain.versions[name])
@@ -89,6 +87,32 @@ end)
 
 test("Mason manifest is complete, exact, and stably ordered", function()
 	local toolchain = require("config.toolchain")
+	local expected_order = {
+		"clangd",
+		"docker-language-server",
+		"lemminx",
+		"lua-language-server",
+		"marksman",
+		"ruff",
+		"taplo",
+		"codelldb",
+		"hadolint",
+		"jq",
+		"shellcheck",
+		"shfmt",
+		"stylua",
+		"tree-sitter-cli",
+		"bash-language-server",
+		"json-lsp",
+		"pyright",
+		"vtsls",
+		"yaml-language-server",
+		"markdownlint-cli2",
+		"prettierd",
+		"cmake-language-server",
+		"clang-format",
+		"debugpy",
+	}
 	local expected = {
 		["clangd"] = "22.1.6",
 		["docker-language-server"] = "v0.20.1",
@@ -96,7 +120,6 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 		["lua-language-server"] = "3.18.2",
 		["marksman"] = "2026-02-08",
 		["ruff"] = "0.16.1",
-		["rust-analyzer"] = "2026-08-03",
 		["taplo"] = "0.10.0",
 		["codelldb"] = "v1.12.2",
 		["hadolint"] = "v2.15.1",
@@ -112,14 +135,12 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 		["yaml-language-server"] = "1.24.0",
 		["markdownlint-cli2"] = "0.23.2",
 		["prettierd"] = "0.29.0",
-		["gopls"] = "v0.23.0",
-		["delve"] = "v1.27.1",
-		["goimports"] = "v0.48.0",
 		["cmake-language-server"] = "0.1.11",
 		["clang-format"] = "22.1.8",
 		["debugpy"] = "1.8.21",
 	}
-	assert(#toolchain.mason_order == vim.tbl_count(expected), "Mason order count drifted")
+	assert(vim.deep_equal(toolchain.mason_order, expected_order), "Mason order drifted")
+	assert(#toolchain.mason_order == 24 and #toolchain.mason_order == vim.tbl_count(expected), "Mason count drifted")
 	local seen = {}
 	for _, name in ipairs(toolchain.mason_order) do
 		assert(not seen[name], "duplicate Mason entry: " .. name)
@@ -129,12 +150,11 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 		assert(entry.executables and #entry.executables > 0, name .. " lacks executable probes")
 		assert(toolchain.identity(name, entry) == name .. "@" .. expected[name])
 	end
-	assert(toolchain.mason_entry("gofumpt") == nil, "managed formatter leaked into Mason")
-	assert(vim.deep_equal(toolchain.mason_entry("gopls").requires_all, { "go" }))
+	for _, removed in ipairs({ "gofumpt", "gopls", "delve", "goimports", "rust-analyzer" }) do
+		assert(toolchain.mason_entry(removed) == nil, "removed tool leaked into Mason: " .. removed)
+	end
 	assert(vim.deep_equal(toolchain.mason_entry("pyright").requires_all, { "node", "npm" }))
 	assert(toolchain.mason_entry("debugpy").requires_python_venv == true)
-	assert(toolchain.mason_entry("rust-analyzer").requires_all == nil)
-	assert(vim.deep_equal(toolchain.mason_entry("rust-analyzer").runtime_requires_all, { "cargo" }))
 end)
 
 test("manual Mason sync receives every exact pin without startup automation", function()
@@ -176,14 +196,13 @@ test("manual Mason sync receives every exact pin without startup automation", fu
 	vim.env.NVIM_CONFIG_OFFLINE = original_offline
 end)
 
-test("LSP catalog enables only the declared native server set", function()
+test("LSP catalog separates the exact server set from external Rust eligibility", function()
 	local catalog = require("config.lsp_catalog")
 	local expected = {
 		"bashls",
 		"clangd",
 		"cmake",
 		"docker_language_server",
-		"gopls",
 		"jsonls",
 		"lemminx",
 		"lua_ls",
@@ -195,11 +214,62 @@ test("LSP catalog enables only the declared native server set", function()
 		"vtsls",
 		"yamlls",
 	}
-	assert(vim.deep_equal(catalog.enabled_servers(), expected), "native LSP server set drifted")
+	assert(vim.deep_equal(catalog.server_names(), expected), "native LSP server set drifted")
+	local without_rust = catalog.enabled_servers(function()
+		return nil
+	end)
+	assert(not vim.tbl_contains(without_rust, "rust_analyzer"), "missing external Rust server was enabled")
+	local with_rust = catalog.enabled_servers(function(name)
+		return name == "rust-analyzer" and "/host/bin/rust-analyzer" or nil
+	end)
+	assert(vim.deep_equal(with_rust, expected), "external rust-analyzer was not enabled")
 	local toolchain = require("config.toolchain")
 	for _, server in ipairs(catalog.servers) do
-		assert(toolchain.mason_entry(server.package), "LSP package is absent from Mason manifest: " .. server.package)
+		if server.package then
+			assert(
+				toolchain.mason_entry(server.package),
+				"LSP package is absent from Mason manifest: " .. server.package
+			)
+		else
+			assert(server.name == "rust_analyzer" and server.external == "rust-analyzer")
+		end
 	end
+end)
+
+test("Rust tools use external paths and the missing analyzer notice is one-shot", function()
+	local original_paths = package.loaded["config.tool_paths"]
+	local external = {}
+	package.loaded["config.tool_paths"] = {
+		external_executable = function(name)
+			return external[name]
+		end,
+	}
+	package.loaded["config.rust_tools"] = nil
+	local rust_tools = require("config.rust_tools")
+	local notifications = {}
+	rust_tools._notify = function(message, level)
+		notifications[#notifications + 1] = { message = message, level = level }
+	end
+
+	assert(rust_tools.rust_analyzer() == nil and rust_tools.rustfmt() == nil)
+	rust_tools.setup_missing_analyzer_notice(nil)
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "rust", modeline = false })
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "rust", modeline = false })
+	assert(#notifications == 1, "missing rust-analyzer notice was not one-shot")
+	assert(notifications[1].message:find("edit%-only"), "Rust notice omitted edit-only behavior")
+	assert(notifications[1].message:find(":checkhealth nvimconfig", 1, true), "Rust notice omitted health guidance")
+
+	external["rust-analyzer"] = "/host/bin/rust-analyzer"
+	external.rustfmt = "/user/bin/rustfmt"
+	assert(rust_tools.rust_analyzer() == "/host/bin/rust-analyzer")
+	assert(rust_tools.rustfmt() == "/user/bin/rustfmt")
+	rust_tools._reset_for_tests()
+	rust_tools.setup_missing_analyzer_notice(external["rust-analyzer"])
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "rust", modeline = false })
+	assert(#notifications == 1, "available external rust-analyzer still notified")
+
+	package.loaded["config.tool_paths"] = original_paths
+	package.loaded["config.rust_tools"] = nil
 end)
 
 test("clangd has one argv builder and rejects invalid databases before stop", function()

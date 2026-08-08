@@ -43,6 +43,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					assert(not has_plugin(plugin), plugin .. " loaded in VSCode")
 				end
 				assert(has_plugin("vscode-multi-cursor.nvim"), "VSCode multi-cursor integration did not load")
+				for _, lhs in ipairs({ "[b", "]b" }) do
+					assert(not vim.tbl_isempty(vim.fn.maparg(lhs, "n", false, true)), lhs .. " was removed from VSCode")
+				end
 				local close = vim.fn.maparg("<leader>q", "n", false, true)
 				assert(type(close.callback) == "function", "VSCode close mapping was replaced by CloseTab")
 				close.callback()

@@ -36,7 +36,7 @@ local lint = {
 }
 package.loaded.lint = lint
 
-local executable_state = { hadolint = 1, ["markdownlint-cli2"] = 1 }
+local executable_state = { hadolint = 1, ["markdownlint-cli2"] = 1, shellcheck = 1 }
 local original_executable = vim.fn.executable
 vim.fn.executable = function(name)
 	return executable_state[name] or 0
@@ -108,16 +108,15 @@ local function drain(expected)
 	)
 end
 
-test("first lazy-loaded BufReadPost runs lint exactly once", function()
+test("first lazy-loaded BufWritePost runs lint exactly once", function()
 	lint_calls = {}
 	local buf = named_buffer(vim.fn.tempname() .. ".md", "markdown")
-	vim.api.nvim_create_autocmd("BufReadPost", {
+	vim.api.nvim_create_autocmd("BufWritePost", {
 		group = vim.api.nvim_create_augroup("LintSpecLazyLoader", { clear = true }),
 		once = true,
 		callback = function(args)
 			spec.config()
-			-- Lazy publicly replays only groups created while the plugin loaded.
-			vim.api.nvim_exec_autocmds("BufReadPost", {
+			vim.api.nvim_exec_autocmds("BufWritePost", {
 				buffer = args.buf,
 				group = "NvimLint",
 				modeline = false,
@@ -125,19 +124,24 @@ test("first lazy-loaded BufReadPost runs lint exactly once", function()
 		end,
 	})
 
-	vim.api.nvim_exec_autocmds("BufReadPost", { buffer = buf, modeline = false })
+	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = buf, modeline = false })
 	drain(1)
-	equal(1, #lint_calls, "first lazy-loaded BufReadPost ran lint more than once")
+	equal(1, #lint_calls, "first lazy-loaded BufWritePost ran lint more than once")
 end)
 
-test("maps Dockerfile and markdown linters including compound markdown", function()
+test("maps only the declared saved-file linters", function()
 	lint_calls = {}
 	equal({ "hadolint" }, lint.linters_by_ft.dockerfile, "Dockerfile linter mapping is wrong")
 	equal({ "markdownlint-cli2" }, lint.linters_by_ft.markdown, "Markdown linter mapping is wrong")
+	equal({ "shellcheck" }, lint.linters_by_ft.sh, "sh linter mapping is wrong")
+	equal({ "shellcheck" }, lint.linters_by_ft.bash, "bash linter mapping is wrong")
+	equal(nil, lint.linters_by_ft.zsh, "zsh unexpectedly has a linter")
 
 	local markdown = named_buffer(vim.fn.tempname() .. ".md", "markdown.mdx")
 	vim.api.nvim_exec_autocmds("BufReadPost", { buffer = markdown, modeline = false })
-	drain(1)
+	flush_scheduled()
+	equal(0, #lint_calls, "compound Markdown linted on read")
+	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = markdown, modeline = false })
 	equal(markdown, lint_calls[1].buf, "compound Markdown lint ran in the wrong buffer")
 	equal({ "markdownlint-cli2" }, lint_calls[1].names, "compound Markdown did not resolve markdownlint-cli2")
 
@@ -151,29 +155,35 @@ test("maps Dockerfile and markdown linters including compound markdown", functio
 	drain(2)
 	equal(dockerfile, lint_calls[2].buf, "Dockerfile lint ran in the wrong buffer")
 	equal({ "hadolint" }, lint_calls[2].names, "Dockerfile did not resolve hadolint")
+
+	local shell = named_buffer(vim.fn.tempname() .. ".sh", "sh")
+	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = shell, modeline = false })
+	equal({ "shellcheck" }, lint_calls[3].names, "sh did not resolve ShellCheck")
 end)
 
-test("runs exactly once on open and once per save, never on InsertLeave", function()
+test("runs only once per save, never on read, create, or InsertLeave", function()
 	lint_calls = {}
 	local buf = named_buffer(vim.fn.tempname() .. ".md", "markdown")
 
 	vim.api.nvim_exec_autocmds("BufReadPost", { buffer = buf, modeline = false })
-	drain(1)
-	equal(1, #lint_calls, "open event ran lint more than once")
+	vim.api.nvim_exec_autocmds("BufNewFile", { buffer = buf, modeline = false })
+	vim.api.nvim_exec_autocmds("InsertLeave", { buffer = buf, modeline = false })
+	flush_scheduled()
+	equal(0, #lint_calls, "non-save event ran lint")
 
 	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = buf, modeline = false })
-	equal(2, #lint_calls, "first save did not run lint exactly once")
+	equal(1, #lint_calls, "first save did not run lint exactly once")
 	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = buf, modeline = false })
-	equal(3, #lint_calls, "second save did not run lint exactly once")
+	equal(2, #lint_calls, "second save did not run lint exactly once")
 
 	vim.api.nvim_exec_autocmds("InsertLeave", { buffer = buf, modeline = false })
-	equal(3, #lint_calls, "InsertLeave unexpectedly ran lint")
+	equal(2, #lint_calls, "InsertLeave unexpectedly ran lint")
 
 	local events = {}
 	for _, autocmd in ipairs(vim.api.nvim_get_autocmds({ group = "NvimLint" })) do
 		events[autocmd.event] = true
 	end
-	assert(not events.InsertLeave, "NvimLint registered an InsertLeave autocmd")
+	equal({ BufWritePost = true }, events, "NvimLint registered a non-save autocmd")
 end)
 
 test("skips unnamed and non-file buffers", function()
@@ -199,9 +209,8 @@ test("notifies once and skips a linter whose executable is missing", function()
 	local first = named_buffer(vim.fn.tempname() .. ".md", "markdown")
 	local second = named_buffer(vim.fn.tempname() .. ".md", "markdown.pandoc")
 
-	vim.api.nvim_exec_autocmds("BufReadPost", { buffer = first, modeline = false })
 	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = first, modeline = false })
-	vim.api.nvim_exec_autocmds("BufReadPost", { buffer = second, modeline = false })
+	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = second, modeline = false })
 
 	flush_scheduled()
 	equal({}, lint_calls, "missing markdownlint-cli2 was still invoked")

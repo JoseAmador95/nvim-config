@@ -202,6 +202,37 @@ test("blocking install API honors timeout and returns the Task result", function
 	equal(false, install_calls[1].opts.summary, "blocking install did not forward its summary option")
 end)
 
+test("editor parser manifest is exactly 19 languages and keeps Rust", function()
+	reset_runtime()
+	installed = {}
+	local specs = require("plugins.treesitter")
+	assert(specs[1].build == ":TSUpdate", "Tree-sitter build hook drifted")
+	specs[1].config()
+	local ok = runtime.install(nil, { wait = true, summary = false })
+	assert(ok, "configured parser manifest could not be inspected")
+	equal({
+		"bash",
+		"c",
+		"cmake",
+		"cpp",
+		"javascript",
+		"json",
+		"lua",
+		"markdown",
+		"markdown_inline",
+		"python",
+		"query",
+		"rust",
+		"toml",
+		"tsx",
+		"typescript",
+		"vim",
+		"vimdoc",
+		"xml",
+		"yaml",
+	}, install_calls[1].parsers, "editor parser manifest drifted")
+end)
+
 test("editor and pager plugin specs never install parsers implicitly", function()
 	reset_runtime()
 	installed = {}
@@ -249,5 +280,5 @@ if #failures > 0 then
 	vim.cmd("cquit")
 end
 
-print(string.format("treesitter_spec: %d tests passed", 8))
+print(string.format("treesitter_spec: %d tests passed", 9))
 vim.cmd("quitall!")

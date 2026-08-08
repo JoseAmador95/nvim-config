@@ -39,6 +39,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				)
 				assert(dap.adapters.lldb == dap.adapters.codelldb, "lldb was not aliased to codelldb")
 				assert(dap.adapters.cppdbg == dap.adapters.codelldb, "cppdbg was not aliased to codelldb")
+				assert(dap.configurations.rust == nil, "Rust DAP configuration remains")
+				assert(dap.configurations.go == nil, "Go DAP configuration remains")
+				assert(
+					not vim.tbl_contains(require("plugins.dap").dependencies, "leoluz/nvim-dap-go"),
+					"nvim-dap-go dependency remains"
+				)
 
 				assert(vim.g.conform_format_on_save == false, "global autoformat must default to off")
 				local original_notify = vim.notify
@@ -74,6 +80,67 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				vim.g.conform_format_on_save = false
 				vim.b.conform_format_on_save = nil
 				assert(format_ok, format_err)
+
+				local formatting_spec = require("plugins.formatting")[1]
+				local formatters = formatting_spec.opts.formatters_by_ft
+				assert(formatters.go == nil, "Go formatter remains configured")
+				assert(vim.deep_equal(formatters.python, { "ruff_format" }), "Python is not ruff-format only")
+				for _, ft in ipairs({
+					"javascript",
+					"typescript",
+					"javascriptreact",
+					"typescriptreact",
+					"json",
+					"jsonc",
+					"yaml",
+					"markdown",
+				}) do
+					assert(
+						vim.deep_equal(formatters[ft], { "prettierd", "prettier", stop_after_first = true }),
+						ft .. " formatter chain drifted"
+					)
+				end
+
+				local actual_conform = package.loaded.conform
+				local formatter_available = true
+				local format_calls = {}
+				package.loaded.conform = {
+					list_formatters = function()
+						return formatter_available and { { name = "test", available = true } } or {}
+					end,
+					format = function(options)
+						format_calls[#format_calls + 1] = vim.deepcopy(options)
+						return true
+					end,
+				}
+				package.loaded["config.formatting"] = nil
+				local formatting = require("config.formatting")
+				local missing_notifications = {}
+				formatting._notify = function(message, level)
+					missing_notifications[#missing_notifications + 1] = { message = message, level = level }
+				end
+				vim.g.conform_format_on_save = true
+				local save_options = assert(formatting_spec.opts.format_on_save(0))
+				assert(save_options.lsp_format == "never", "format-on-save permits LSP fallback")
+				formatting.format({ async = true })
+				vim.cmd("FormatFile")
+				require("config.menu.actions").run("format.buffer")
+				require("config.menu.actions").run("lsp.format")
+				assert(#format_calls == 4, "format entry points did not share the external formatter helper")
+				for _, options in ipairs(format_calls) do
+					assert(options.lsp_format == "never", "format entry point permits LSP fallback")
+				end
+				formatter_available = false
+				assert(formatting.format({ async = true }) == false, "missing formatter reported success")
+				assert(#format_calls == 4, "missing formatter fell through to formatting")
+				assert(#missing_notifications == 1, "missing formatter notification was not emitted once")
+				assert(
+					missing_notifications[1].message:find("LSP formatting is disabled", 1, true),
+					"missing formatter notification omitted the no-LSP contract"
+				)
+				vim.g.conform_format_on_save = false
+				package.loaded.conform = actual_conform
+				package.loaded["config.formatting"] = nil
 
 				local smart_splits = require("plugins.smart-splits")
 				assert(

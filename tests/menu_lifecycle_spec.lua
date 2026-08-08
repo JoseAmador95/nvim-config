@@ -50,18 +50,27 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 				local bridge_ok, bridge_error = xpcall(function()
 					bridge.handle_close(unopened_target)
-					bridge.handle_click(unopened_target, nil, "r")
 					bridge.handle_click(unopened_target, nil, "m")
 				end, debug.traceback)
 				tabs.request_close = original_request
 				assert(bridge_ok, bridge_error)
 				assert(
-					vim.deep_equal(forwarded, { unopened_target, unopened_target, unopened_target }),
+					vim.deep_equal(forwarded, { unopened_target, unopened_target }),
 					"installed bufferline changed or bypassed a configured stable-handle close callback"
 				)
 				assert(vim.api.nvim_tabpage_is_valid(unopened_target), "callback probe unexpectedly closed its tab")
 				close_through_bufferline(unopened_target)
 				assert(package.loaded["menu.state"] == nil, "ordinary tab close activated lazy menu.nvim")
+
+				vim.cmd("tabnew")
+				local context_target = vim.api.nvim_get_current_tabpage()
+				bridge.handle_click(context_target, nil, "r")
+				assert(vim.api.nvim_tabpage_is_valid(context_target), "right click closed its tab")
+				local context_state = require("menu.state")
+				local context_buf = assert(context_state.bufids[1], "right click did not open the context menu")
+				assert(#vim.fn.win_findbuf(context_buf) > 0, "right-click context menu is not displayed")
+				assert(require("config.menu").dismiss(), "right-click context menu did not dismiss")
+				close_through_bufferline(context_target, "m")
 
 				vim.cmd("tabnew")
 				local target = vim.api.nvim_get_current_tabpage()
@@ -107,7 +116,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				local preserved_buf = assert(state.bufids[1], "preservation menu did not create a buffer")
 				local background_tab = vim.api.nvim_list_tabpages()[1]
 				assert(background_tab ~= preserved_tab, "preservation fixture has no background tab")
-				close_through_bufferline(background_tab, "r")
+				close_through_bufferline(background_tab, "m")
 				assert(vim.api.nvim_tabpage_is_valid(preserved_tab), "non-current close removed the current tab")
 				assert(vim.api.nvim_buf_is_valid(preserved_buf), "non-current close deleted the displayed menu")
 				assert(#vim.fn.win_findbuf(preserved_buf) > 0, "non-current close hid the displayed menu")

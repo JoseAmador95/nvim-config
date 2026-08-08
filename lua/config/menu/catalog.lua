@@ -79,7 +79,6 @@ function M.definitions(dispatch)
 			item("lsp.outgoing_calls", "Outgoing Calls"),
 			item("lsp.rename", "Rename"),
 			item("lsp.code_action", "Code Actions"),
-			item("command.neogen", "Generate Docs"),
 			item("command.toggle_inlay_hints", "Toggle Inlay Hints"),
 			item("command.toggle_inline_diagnostics", "Toggle Inline Diagnostics"),
 			item("lsp.format", "Format"),
@@ -95,7 +94,7 @@ function M.definitions(dispatch)
 			item("gitsigns.toggle_current_line_blame", "Toggle Line Blame"),
 			item("gitsigns.next_hunk", "Next Hunk", "]h"),
 			item("gitsigns.prev_hunk", "Prev Hunk", "[h"),
-			item("git.neogit", "Neogit Status", "<leader>gg"),
+			item("command.lazygit", "LazyGit", "<leader>gl"),
 			item("command.diffview_open", "Diffview Open"),
 			item("command.diffview_file_history", "Diffview File History"),
 		}),
@@ -142,9 +141,11 @@ function M.definitions(dispatch)
 			item("command.format_toggle_buffer", "Toggle Autoformat (buffer)"),
 			item("command.conform_info", "Conform Info"),
 		}),
-		section("bookmarks", "Bookmarks", {
-			item("command.bookmark_add", "Add Bookmark", "<leader>ba"),
-			item("command.bookmark_tree", "Bookmarks Tree", "<leader>bm"),
+		section("sessions", "Sessions", {
+			item("session.save", "Save Current Project", "<leader>Ss"),
+			item("session.restore", "Restore Current Project", "<leader>Sr"),
+			item("session.search", "Search and Restore", "<leader>Sp"),
+			item("session.delete", "Delete Session", "<leader>Sd"),
 		}),
 		section("log_highlights", "Log Highlights", {
 			item("log.highlight_exact", "Add Highlight (exact)"),
@@ -152,25 +153,18 @@ function M.definitions(dispatch)
 			item("command.log_highlight_clear", "Clear All Highlights"),
 		}),
 		section("devcontainer", "Devcontainer", {
-			item("command.remote_start", "Dev in container (remote-nvim)"),
 			item("command.devcontainer_shell", "Shell"),
 			item("command.devcontainer_workspace", "Set Workspace"),
 		}),
 		section("file.plantuml", "File (plantuml)", {
-			item("command.plantuml_ascii", "PlantUML ASCII"),
-			item("command.plantuml_preview", "PlantUML Preview"),
+			item("command.diagram_show", "Show Diagram", "<leader>md"),
 		}, is_filetype("plantuml")),
 		section("file.json", "File (json)", {
 			item("command.json_tree", "JSON Tree"),
 			item("json.jqx_query", "JQX Query"),
 		}, is_filetype("json")),
-		section("file.yaml", "File (yaml)", {
-			item("command.yaml_outline", "YAML Outline"),
-		}, is_filetype("yaml")),
-		section("file.xml", "File (xml)", {
-			item("command.xml_outline", "XML Outline"),
-		}, is_filetype("xml")),
 		section("file.markdown", "File (markdown)", {
+			item("command.diagram_show", "Show Diagram", "<leader>md"),
 			item("command.markdown_preview", "Markdown Preview Toggle"),
 			item("markdown.render_toggle", "Render Markdown Toggle"),
 		}, is_filetype("markdown")),

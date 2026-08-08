@@ -37,7 +37,7 @@ end
 assert(installer:find("config.toolchain", 1, true), "validator metadata is not derived from config.toolchain")
 assert(installer:find("expected_sha", 1, true), "release SHA-256 is not verified")
 assert(installer:find("mv -f", 1, true), "validators are not atomically promoted")
-for _, forbidden in ipairs({ "cargo install", "go install", "npm install" }) do
+for _, forbidden in ipairs({ "cargo install", "npm install" }) do
 	assert(not installer:find(forbidden, 1, true), "validator installer invokes a package manager: " .. forbidden)
 end
 

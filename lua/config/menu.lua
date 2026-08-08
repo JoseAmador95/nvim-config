@@ -16,6 +16,23 @@ local function descriptors(menu_context)
 	return catalog.build(menu_context, actions.run)
 end
 
+local function palette_items(sections)
+	local items = {}
+	for _, section in ipairs(sections) do
+		for _, descriptor in ipairs(section.items) do
+			local hint = descriptor.hint and ("  " .. descriptor.hint) or ""
+			items[#items + 1] = {
+				id = descriptor.id,
+				text = section.label .. "  " .. descriptor.label .. hint,
+				section = section.label,
+				label = descriptor.label,
+				run = descriptor.run,
+			}
+		end
+	end
+	return items
+end
+
 ---The menu belongs only to full terminal Neovim, never VS Code or nvimpager.
 ---@return boolean
 function M.enabled()
@@ -32,6 +49,39 @@ function M.open()
 		return
 	end
 	M.ensure_open()
+end
+
+---Open the shared catalog as a searchable Snacks action palette.
+function M.open_palette()
+	if not M.enabled() then
+		return
+	end
+
+	local ok, snacks = pcall(require, "snacks")
+	if not ok or not snacks.picker then
+		vim.notify("Snacks picker not available", vim.log.levels.ERROR, { title = "Menu" })
+		return
+	end
+
+	local confirmed = false
+	snacks.picker.pick({
+		source = "menu_actions",
+		title = "Actions",
+		items = palette_items(descriptors(current_context())),
+		format = "text",
+		preview = false,
+		layout = { preset = "select" },
+		confirm = function(picker, item)
+			if confirmed then
+				return
+			end
+			confirmed = true
+			picker:close()
+			if item and type(item.run) == "function" then
+				vim.schedule(item.run)
+			end
+		end,
+	})
 end
 
 function M.ensure_open()
@@ -59,7 +109,8 @@ function M.recover_stale()
 	return backend:recover_stale()
 end
 
-function M.open_context()
+---@param options? { move_cursor?: boolean }
+function M.open_context(options)
 	if not M.enabled() then
 		return
 	end
@@ -68,8 +119,9 @@ function M.open_context()
 		return
 	end
 
+	options = options or {}
 	local menu_context = current_context()
-	if not menu_context.visual then
+	if not menu_context.visual and options.move_cursor ~= false then
 		pcall(vim.cmd, "normal! \\<RightMouse>")
 	end
 	backend:show(descriptors(menu_context), { mouse = true, border = true })

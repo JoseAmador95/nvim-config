@@ -7,8 +7,10 @@ local function offline()
 end
 
 local function host_context()
+	local rust_tools = require("config.rust_tools")
 	return {
 		cmake_language_server_path = vim.fn.exepath("cmake-language-server"),
+		rust_analyzer_path = rust_tools.rust_analyzer(),
 	}
 end
 
@@ -87,7 +89,11 @@ return {
 			local catalog = require("config.lsp_catalog")
 			require("config.lsp_navigation").setup()
 			require("config.lsp_servers").setup(context)
-			vim.lsp.enable(catalog.enabled_servers())
+			vim.lsp.enable(catalog.enabled_servers(function(executable)
+				if executable == "rust-analyzer" then
+					return context.rust_analyzer_path
+				end
+			end))
 		end,
 	},
 

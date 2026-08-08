@@ -6,7 +6,9 @@ return {
 		return not vim.g.vscode
 	end,
 	opts = {
-		pattern = { "*.log", "*.txt" },
+		extension = "log",
+		filename = {},
+		pattern = {},
 		keyword = {
 			error = { "ERROR", "FATAL", "CRITICAL" },
 			warning = { "WARN", "WARNING" },

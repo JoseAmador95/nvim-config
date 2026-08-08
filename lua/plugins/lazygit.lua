@@ -46,6 +46,7 @@ local function toggle_lazygit()
 		vim.notify("lazygit not found in PATH", vim.log.levels.ERROR, { title = "lazygit" })
 		return
 	end
+	require("lazy").load({ plugins = { "toggleterm.nvim" } })
 	if not lazygit_term then
 		local Terminal = require("toggleterm.terminal").Terminal
 		lazygit_term = Terminal:new({
@@ -78,4 +79,7 @@ return {
 	keys = {
 		{ "<leader>gl", toggle_lazygit, desc = "Open lazygit" },
 	},
+	init = function()
+		vim.api.nvim_create_user_command("LazyGit", toggle_lazygit, { desc = "Open lazygit" })
+	end,
 }

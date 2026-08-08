@@ -19,26 +19,6 @@ local function ensure_filetype(allowed)
 	return false
 end
 
-local function lsp_has_method(method)
-	local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
-	return clients and #clients > 0
-end
-
-local function open_outline()
-	if not lsp_has_method("textDocument/documentSymbol") then
-		notify("LSP document symbols not available", vim.log.levels.WARN)
-		return
-	end
-
-	local ok, snacks = pcall(require, "snacks")
-	if ok then
-		snacks.picker.lsp_symbols()
-		return
-	end
-
-	vim.lsp.buf.document_symbol()
-end
-
 local function sanitize_suffix(ft)
 	local safe = ft:gsub("[^%w%-_]", "-")
 	if safe == "" then
@@ -127,10 +107,10 @@ if not pager.active then
 			notify("Menu config not available", vim.log.levels.WARN)
 			return
 		end
-		menu.open()
-	end, { desc = "Open menu" })
+		menu.open_palette()
+	end, { desc = "Open action palette" })
 
-	vim.keymap.set("n", "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open menu" })
+	vim.keymap.set("n", "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open action palette" })
 end
 
 vim.api.nvim_create_user_command("LogHlAdd", function(opts)
@@ -154,18 +134,6 @@ end, {
 	end,
 	desc = "Follow current log file live (read-only, toggles without argument)",
 })
-
-vim.api.nvim_create_user_command("PlantumlAscii", function()
-	require("config.plantuml_ascii").render()
-end, { desc = "Render PlantUML ASCII preview" })
-
-vim.api.nvim_create_user_command("PlantumlPreview", function()
-	require("config.plantuml_preview").preview()
-end, { desc = "Preview PlantUML diagram in browser" })
-
-vim.api.nvim_create_user_command("MermaidPreview", function()
-	require("config.mermaid_preview").preview()
-end, { desc = "Preview mermaid diagram (SVG) in browser" })
 
 -- Markdown render toggle (<leader>mr -> :MarkdownRender; skipped in VS Code). The
 -- diagram viewer keymap (<leader>md -> :DiagramShow) lives in config.diagram;
@@ -202,20 +170,6 @@ if not vim.g.vscode then
 		end
 	end
 end
-
-vim.api.nvim_create_user_command("YamlOutline", function()
-	if not ensure_filetype({ "yaml" }) then
-		return
-	end
-	open_outline()
-end, { desc = "YAML document outline" })
-
-vim.api.nvim_create_user_command("XmlOutline", function()
-	if not ensure_filetype({ "xml" }) then
-		return
-	end
-	open_outline()
-end, { desc = "XML document outline" })
 
 vim.api.nvim_create_user_command("FoldOpenAll", function()
 	local ok, ufo = pcall(require, "ufo")

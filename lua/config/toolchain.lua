@@ -9,9 +9,7 @@ M.versions = {
 	shellcheck = "0.11.0",
 	actionlint = "1.7.12",
 	tree_sitter = "0.26.11",
-	claude_acp = "0.66.0",
 	mmdflux = "2.6.0",
-	gofumpt = "0.11.0",
 	plantuml = "1.2026.6",
 }
 
@@ -128,7 +126,7 @@ M.validation_tools = {
 	}),
 }
 
-M.managed_order = { "mmdflux", "gofumpt", "plantuml" }
+M.managed_order = { "mmdflux", "plantuml" }
 M.managed_tools = {
 	mmdflux = release("kevinswiber/mmdflux", "mmdflux-v2.6.0", "mmdflux", {
 		["darwin-arm64"] = {
@@ -148,28 +146,6 @@ M.managed_tools = {
 			kind = "tar.gz",
 			member = "mmdflux",
 			sha256 = "533267ed07d70160a0f1fcd1bfc816bf1c39503c05688272902396d81527205b",
-		},
-	}),
-	gofumpt = release("mvdan/gofumpt", "v0.11.0", "gofumpt", {
-		["darwin-arm64"] = {
-			archive = "gofumpt_v0.11.0_darwin_arm64",
-			kind = "file",
-			sha256 = "18936628f195369a80a129c73ee33d23e39086286dab538781ba826effc7e10b",
-		},
-		["darwin-x86_64"] = {
-			archive = "gofumpt_v0.11.0_darwin_amd64",
-			kind = "file",
-			sha256 = "b93b3d2c326196af9fb1ce34a5436a18e7b9a73a795bf42e5b6a542eea88d322",
-		},
-		["linux-arm64"] = {
-			archive = "gofumpt_v0.11.0_linux_arm64",
-			kind = "file",
-			sha256 = "9272c2d1738acc1acae33793419e74c69653e70fe56bec4ad9044b12b54715e5",
-		},
-		["linux-x86_64"] = {
-			archive = "gofumpt_v0.11.0_linux_amd64",
-			kind = "file",
-			sha256 = "9f247ec294f5082375c7b062f3ddf48c8212a8711f65a6d75f5129f7fda0d7da",
 		},
 	}),
 	plantuml = release("plantuml/plantuml", "v1.2026.6", "plantuml", {
@@ -218,7 +194,6 @@ M.mason_order = {
 	"lua-language-server",
 	"marksman",
 	"ruff",
-	"rust-analyzer",
 	"taplo",
 	"codelldb",
 	"hadolint",
@@ -234,9 +209,6 @@ M.mason_order = {
 	"yaml-language-server",
 	"markdownlint-cli2",
 	"prettierd",
-	"gopls",
-	"delve",
-	"goimports",
 	"cmake-language-server",
 	"clang-format",
 	"debugpy",
@@ -261,9 +233,6 @@ M.mason_tools = {
 	["lua-language-server"] = mason("3.18.2", { "lua-language-server" }, "prebuilt"),
 	marksman = mason("2026-02-08", { "marksman" }, "prebuilt"),
 	ruff = mason("0.16.1", { "ruff" }, "prebuilt"),
-	["rust-analyzer"] = mason("2026-08-03", { "rust-analyzer" }, "prebuilt", {
-		runtime_requires_all = { "cargo" },
-	}),
 	taplo = mason("0.10.0", { "taplo" }, "prebuilt"),
 	codelldb = mason("v1.12.2", { "codelldb" }, "prebuilt"),
 	hadolint = mason("v2.15.1", { "hadolint" }, "prebuilt"),
@@ -292,9 +261,6 @@ M.mason_tools = {
 		requires_all = { "node", "npm" },
 		satisfies_any = { "prettierd", "prettier" },
 	}),
-	gopls = mason("v0.23.0", { "gopls" }, "go", { requires_all = { "go" } }),
-	delve = mason("v1.27.1", { "dlv" }, "go", { requires_all = { "go" } }),
-	goimports = mason("v0.48.0", { "goimports" }, "go", { requires_all = { "go" } }),
 	["cmake-language-server"] = mason("0.1.11", { "cmake-language-server" }, "pypi", {
 		requires_any = { "python3", "python" },
 		requires_python_venv = true,

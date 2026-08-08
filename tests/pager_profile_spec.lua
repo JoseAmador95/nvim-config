@@ -20,8 +20,11 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"CloseTab",
 					"ClangdSetCompileCommands",
 					"DevcontainerShell",
+					"MermaidPreview",
 					"NvimConfigToolsInstall",
 					"Mason",
+					"PlantumlAscii",
+					"PlantumlPreview",
 				}) do
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into the pager profile")
 				end
@@ -41,11 +44,20 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					end
 					return false
 				end
-				for _, plugin in ipairs({ "mason.nvim", "nvim-lspconfig", "nvim-lint", "remote-nvim.nvim" }) do
+				for _, plugin in ipairs({
+					"blink.cmp",
+					"mason.nvim",
+					"mermaid-nvim",
+					"noice.nvim",
+					"nvim-lspconfig",
+					"nvim-lint",
+					"remote-nvim.nvim",
+				}) do
 					assert(not has_plugin(plugin), plugin .. " is present in the pager runtime")
 				end
 				assert(has_plugin("render-markdown.nvim"), "render-markdown is missing from the pager")
 				assert(has_plugin("nvim-treesitter"), "Tree-sitter is missing from the pager")
+				assert(Snacks.config.dashboard.enabled == false, "editor dashboard leaked into the pager")
 
 				local installed = {}
 				for _, parser in ipairs(require("nvim-treesitter").get_installed("parsers")) do
@@ -59,6 +71,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(vim.tbl_isempty(menu_map), "menu mapping leaked into the pager")
 				local close_map = vim.fn.maparg("<leader>q", "n", false, true)
 				assert(close_map.rhs == ":q<CR>", "pager close mapping was replaced by tab ownership")
+				for _, lhs in ipairs({ "[b", "]b" }) do
+					assert(
+						not vim.tbl_isempty(vim.fn.maparg(lhs, "n", false, true)),
+						lhs .. " was removed from the pager"
+					)
+				end
 				local diagram_map = vim.fn.maparg("<leader>md", "n", false, true)
 				assert(not vim.tbl_isempty(diagram_map), "global pager diagram mapping is missing")
 			end, debug.traceback)

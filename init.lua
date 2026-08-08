@@ -162,11 +162,6 @@ vim.keymap.set("n", "H", "^", {
 	desc = "Beginning of indentation",
 })
 
--- Buffer navigation (]c/[c are taken by treesitter; <S-h>/<S-l> by H=^)
-vim.keymap.set("n", "]b", ":bnext<CR>", { silent = true, desc = "Next buffer" })
-vim.keymap.set("n", "[b", ":bprevious<CR>", { silent = true, desc = "Prev buffer" })
-vim.keymap.set("n", "<leader>bd", ":bdelete<CR>", { silent = true, desc = "Delete buffer" })
-
 -- Open file under cursor in new tab
 local function open_file_under_cursor_in_tab()
 	local file = vim.fn.expand("<cfile>")
@@ -187,8 +182,6 @@ local function open_file_under_cursor_in_tab()
 end
 
 vim.keymap.set("n", "gf", open_file_under_cursor_in_tab, { desc = "Open file under cursor in new tab" })
-
-vim.keymap.set("n", "gF", open_file_under_cursor_in_tab, { desc = "Open file under cursor in new tab (same as gf)" })
 
 -- Neovim 0.11+ ships gr-prefixed LSP maps (grr/grn/gri/gra/grt). This config
 -- defines its own equivalents (gr, gi, <leader>rn, <leader>ca in lsp.lua);
@@ -220,6 +213,15 @@ require("config.diagnostics")
 local pager = require("config.pager")
 local is_vscode = vim.g.vscode == 1 or vim.g.vscode == true
 local is_editor = not is_vscode and not pager.active
+
+-- Tabs are the navigation unit in the full terminal editor. Keep Neovim's
+-- native buffer-cycle maps in VSCode and nvimpager, where this tab workflow
+-- does not own navigation.
+if is_editor then
+	for _, lhs in ipairs({ "[b", "]b" }) do
+		pcall(vim.keymap.del, "n", lhs)
+	end
+end
 
 -- Register profile-owned commands and FileType observers before Lazy and
 -- filetype detection see the first argv buffer. VSCode deliberately keeps only

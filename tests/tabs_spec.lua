@@ -26,17 +26,30 @@ local function test(name, callback)
 	end
 end
 
-local menu_opens = 0
+local dashboard_opens = 0
 local menu_dismisses = 0
+local menu_context_options = {}
 package.loaded["config.pager"] = { active = false }
 package.loaded["config.menu"] = {
 	dismiss = function()
 		menu_dismisses = menu_dismisses + 1
 		return true
 	end,
-	ensure_open = function()
-		menu_opens = menu_opens + 1
+	open_context = function(options)
+		menu_context_options[#menu_context_options + 1] = options
+		return true
 	end,
+}
+package.loaded.snacks = {
+	dashboard = {
+		open = function(opts)
+			dashboard_opens = dashboard_opens + 1
+			vim.bo[opts.buf].buftype = "nofile"
+			vim.bo[opts.buf].filetype = "snacks_dashboard"
+			vim.bo[opts.buf].modified = false
+			vim.api.nvim_exec_autocmds("User", { pattern = "SnacksDashboardOpened" })
+		end,
+	},
 }
 
 local tabs = require("config.tabs")
@@ -74,8 +87,9 @@ local function reset_editor()
 	pcall(vim.cmd, "silent! only!")
 	vim.cmd("enew!")
 	tabs.unmark_home(vim.api.nvim_get_current_tabpage())
-	menu_opens = 0
+	dashboard_opens = 0
 	menu_dismisses = 0
+	menu_context_options = {}
 	notifications = {}
 end
 
@@ -105,7 +119,7 @@ test("home requires an explicit marker and exactly one pristine normal window", 
 	assert(not tabs.is_home(home), "modified scratch buffer remained home")
 end)
 
-test("closing the last work tab preserves its modified buffer and opens home", function()
+test("closing the last work tab preserves its modified buffer and opens dashboard home", function()
 	reset_editor()
 	local target = vim.api.nvim_get_current_tabpage()
 	local user_buf = vim.api.nvim_get_current_buf()
@@ -121,7 +135,7 @@ test("closing the last work tab preserves its modified buffer and opens home", f
 	equal(1, #remaining, "last work close did not leave exactly one tab")
 	assert(tabs.is_home(remaining[1]), "remaining tab is not a pristine marked home")
 	equal(1, menu_dismisses, "current tab menu was not dismissed before close")
-	equal(1, menu_opens, "main menu did not open exactly once")
+	equal(1, dashboard_opens, "dashboard did not open exactly once")
 end)
 
 test("closing a tab with multiple splits never deletes its user buffers", function()
@@ -173,7 +187,7 @@ test("closing a non-current penultimate work tab focuses the existing home", fun
 	equal({ home }, vim.api.nvim_list_tabpages(), "penultimate close left extra tabs")
 	equal(home, vim.api.nvim_get_current_tabpage(), "home was not focused")
 	equal(0, menu_dismisses, "closing a non-current tab dismissed the current tab menu")
-	equal(1, menu_opens, "home menu did not open")
+	equal(1, dashboard_opens, "home dashboard did not open")
 end)
 
 test("queued close coalesces double clicks and retains a stable non-current handle", function()
@@ -251,17 +265,22 @@ test("bufferline exposes native safe close callbacks and dynamic selected highli
 		requested[#requested + 1] = tabpage
 	end
 	local callback_ok, callback_error = xpcall(function()
-		for index, option in ipairs({ "close_command", "right_mouse_command", "middle_mouse_command" }) do
+		for index, option in ipairs({ "close_command", "middle_mouse_command" }) do
 			assert(type(captured.options[option]) == "function", option .. " is not a public function callback")
 			captured.options[option](987650 + index)
 		end
+		assert(type(captured.options.right_mouse_command) == "function", "right mouse is not a public callback")
+		captured.options.right_mouse_command(987653)
 	end, debug.traceback)
 	tabs.request_close = original_request
 	assert(callback_ok, callback_error)
-	equal({ 987651, 987652, 987653 }, requested, "a close callback changed or dropped its stable tab handle")
+	equal({ 987651, 987652 }, requested, "a close callback changed or dropped its stable tab handle")
+	equal(1, #menu_context_options, "right mouse did not open the context menu")
+	equal(false, menu_context_options[1].move_cursor, "tabline context menu replayed RightMouse")
 
 	vim.api.nvim_set_hl(0, "Visual", { bg = 0x112233 })
 	vim.api.nvim_set_hl(0, "PmenuSel", { bg = 0x445566 })
+	vim.api.nvim_set_hl(0, "DiagnosticInfo", { fg = 0xabcdef })
 	local defaults = {
 		highlights = {
 			tab_selected = {},
@@ -284,7 +303,9 @@ test("bufferline exposes native safe close callbacks and dynamic selected highli
 	end
 	equal(true, first.tab_selected.bold, "active label is not bold")
 	equal(false, first.tab_selected.italic, "active label is italic")
-	equal({ highlight = "DiagnosticInfo", attribute = "fg" }, first.indicator_selected.fg, "indicator source")
+	equal(0xabcdef, first.indicator_selected.fg, "indicator source")
+	equal(0xabcdef, first.separator_selected.fg, "selected separator source")
+	equal(0xabcdef, first.close_button_selected.fg, "selected close source")
 
 	vim.api.nvim_set_hl(0, "Visual", {})
 	local fallback = captured.highlights(defaults)
@@ -319,6 +340,11 @@ test("setup owns CloseTab only in the full terminal editor", function()
 	tabs.request_close = original_request
 	assert(command_ok, command_error)
 	equal(current, requested, "CloseTab did not forward the current stable tab handle")
+
+	reset_editor()
+	local home = vim.api.nvim_get_current_tabpage()
+	package.loaded.snacks.dashboard.open({ buf = 0, win = 0 })
+	assert(tabs.is_home(home), "startup dashboard event did not mark the reusable home tab")
 end)
 
 vim.notify = original_notify

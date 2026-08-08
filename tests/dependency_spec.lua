@@ -24,30 +24,23 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				require("lazy").load({
 					plugins = {
 						"SchemaStore.nvim",
-						"codecompanion.nvim",
 						"grug-far.nvim",
 						"mason-lspconfig.nvim",
 						"neoconf.nvim",
-						"neogit",
 						"neotest",
 						"nvim-lint",
+						"nvim-surround",
 						"nvim-treesitter-context",
 						"nvim-treesitter-textobjects",
 						"nvim-web-devicons",
-						"obsidian.nvim",
-						"octo.nvim",
 						"rainbow-delimiters.nvim",
 						"smart-splits.nvim",
-						"zk-nvim",
 					},
 				})
 
 				local schemastore = require_table("schemastore")
 				assert(#schemastore.json.schemas() > 0, "SchemaStore JSON catalog is empty")
 				assert(not vim.tbl_isempty(schemastore.yaml.schemas()), "SchemaStore YAML catalog is empty")
-
-				local codecompanion = require_table("codecompanion")
-				assert(type(codecompanion.setup) == "function", "CodeCompanion setup API is missing")
 
 				local grug = require_table("grug-far")
 				assert(type(grug.open) == "function", "grug-far open API is missing")
@@ -62,8 +55,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(type(mason_lsp.setup) == "function", "mason-lspconfig setup API is missing")
 				assert(type(require_table("neoconf").get) == "function", "neoconf public get API is missing")
 
-				local neogit = require_table("neogit")
-				assert(type(neogit.open) == "function", "Neogit open API is missing")
 				local neotest = require_table("neotest")
 				assert(type(neotest.run.run) == "function", "Neotest run API is missing")
 				assert(type(neotest.summary.toggle) == "function", "Neotest summary API is missing")
@@ -77,8 +68,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				local icon = devicons.get_icon("photo.heic", "heic", { default = false })
 				assert(icon ~= nil, "updated devicons HEIC entry is unavailable")
 
-				assert(type(require_table("obsidian").setup) == "function", "Obsidian setup API is missing")
-				assert(type(require_table("octo").setup) == "function", "Octo setup API is missing")
 				assert(type(require_table("rainbow-delimiters").strategy) == "table")
 
 				local splits = require_table("smart-splits")
@@ -112,14 +101,64 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				vim.g.smart_splits_multiplexer_integration = saved.override
 				split_config.multiplexer_integration = nil
 
-				assert(type(require_table("zk").setup) == "function", "zk setup API is missing")
-
 				local lint = require_table("lint")
 				assert(vim.deep_equal(lint.linters_by_ft.dockerfile, { "hadolint" }), "Docker lint mapping drifted")
 				assert(
 					vim.deep_equal(lint.linters_by_ft.markdown, { "markdownlint-cli2" }),
 					"Markdown lint mapping drifted"
 				)
+				assert(type(require_table("nvim-surround").setup) == "function", "nvim-surround setup API is missing")
+				assert(require("plugins.surround").version == "^4.0.0", "nvim-surround major constraint drifted")
+
+				local plugins = {}
+				for _, plugin in ipairs(require("lazy").plugins()) do
+					plugins[plugin.name] = plugin
+				end
+				for _, name in ipairs({
+					"bookmarks.nvim",
+					"codecompanion.nvim",
+					"dressing.nvim",
+					"git-conflict.nvim",
+					"mermaid-nvim",
+					"neogen",
+					"neogit",
+					"obsidian.nvim",
+					"octo.nvim",
+					"outline.nvim",
+					"overseer.nvim",
+					"rainbow_csv.nvim",
+					"remote-nvim.nvim",
+					"sqlite.lua",
+					"telescope-smart-history.nvim",
+					"telescope.nvim",
+					"zk-nvim",
+				}) do
+					assert(plugins[name] == nil, "removed plugin remains in the full profile: " .. name)
+				end
+				for _, name in ipairs({ "diffview.nvim", "gitsigns.nvim", "toggleterm.nvim" }) do
+					assert(plugins[name] ~= nil, "retained Git workflow is missing: " .. name)
+				end
+				assert(vim.fn.exists(":LazyGit") == 2, "LazyGit command is missing")
+				assert(vim.fn.exists(":DevcontainerShell") == 2, "focused devcontainer shell is missing")
+				assert(vim.fn.exists(":DevcontainerWorkspace") == 2, "devcontainer workspace selector is missing")
+				for _, name in ipairs({
+					"BookmarksMark",
+					"CodeCompanion",
+					"MermaidPreview",
+					"Neogen",
+					"Neogit",
+					"Obsidian",
+					"Octo",
+					"Outline",
+					"OverseerRun",
+					"PlantumlAscii",
+					"PlantumlPreview",
+					"RemoteStart",
+					"Telescope",
+					"ZkNew",
+				}) do
+					assert(vim.fn.exists(":" .. name) == 0, "removed command remains: " .. name)
+				end
 			end, debug.traceback)
 
 			vim.notify = original_notify

@@ -93,6 +93,17 @@ local function check_tool(name, feature, install, required, configured)
 	return false
 end
 
+local function check_external_tool(name, feature, install, configured)
+	local path = tool_paths.external_executable(name)
+	if path then
+		local origin = path_origin(path, configured or local_path_set())
+		health.ok(("%s available for %s (%s): %s"):format(name, feature, origin, path))
+		return true
+	end
+	health.warn(("%s is missing (%s). %s"):format(name, feature, install))
+	return false
+end
+
 local function has_exact_line(output, expected)
 	for line in output:gmatch("[^\r\n]+") do
 		if line == expected then
@@ -316,9 +327,8 @@ local function missing_requirements(entry)
 end
 
 local function check_mason_inventory()
-	local managers = { prebuilt = {}, npm = {}, go = {}, pypi = {} }
+	local managers = { prebuilt = {}, npm = {}, pypi = {} }
 	local blocked = {}
-	local runtime_limited = {}
 	for _, name in ipairs(toolchain.mason_order) do
 		local entry = toolchain.mason_tools[name]
 		managers[entry.manager][#managers[entry.manager] + 1] = toolchain.identity(name, entry)
@@ -326,63 +336,14 @@ local function check_mason_inventory()
 		if #missing > 0 then
 			blocked[#blocked + 1] = name .. " (" .. table.concat(missing, "+") .. ")"
 		end
-		local runtime_missing = {}
-		for _, executable in ipairs(entry.runtime_requires_all or {}) do
-			if not tool_paths.external_executable(executable) then
-				runtime_missing[#runtime_missing + 1] = executable
-			end
-		end
-		if #runtime_missing > 0 then
-			runtime_limited[#runtime_limited + 1] = name .. " (" .. table.concat(runtime_missing, "+") .. ")"
-		end
 	end
-	for _, manager in ipairs({ "prebuilt", "npm", "go", "pypi" }) do
+	for _, manager in ipairs({ "prebuilt", "npm", "pypi" }) do
 		health.info(("Mason %-8s %s"):format(manager .. ":", table.concat(managers[manager], ", ")))
 	end
 	if #blocked == 0 then
 		health.ok("All declared Mason installer prerequisites are available")
 	else
 		health.warn("One-shot Mason skips tools blocked by host prerequisites: " .. table.concat(blocked, ", "))
-	end
-	if #runtime_limited > 0 then
-		health.warn(
-			"Prebuilt tools can be installed but are not usable without runtime prerequisites: "
-				.. table.concat(runtime_limited, ", ")
-		)
-	end
-end
-
-local function check_acp(configured)
-	local config = require("config.local_config").get("codecompanion", {}) or {}
-	if type(config.acp_command) == "table" and #config.acp_command > 0 then
-		check_tool(
-			config.acp_command[1],
-			"CodeCompanion ACP override",
-			"Fix codecompanion.acp_command.",
-			false,
-			configured
-		)
-		return
-	end
-	local host = tool_paths.external_executable("claude-agent-acp")
-	if host then
-		health.ok("CodeCompanion uses the host claude-agent-acp: " .. host)
-		return
-	end
-	local npx = tool_paths.external_executable("npx")
-	local node = tool_paths.external_executable("node")
-	if not npx or not node then
-		health.warn("CodeCompanion fallback needs host Node.js 22+ with npx, or codecompanion.acp_command")
-		return
-	end
-	local result = vim.system({ node, "--version" }, { text = true }):wait(5000)
-	local major = tonumber(((result.stdout or "") .. (result.stderr or "")):match("v?(%d+)%."))
-	if result.code == 0 and major and major >= 22 then
-		health.ok(("CodeCompanion can use npx with Node %d for ACP %s"):format(major, toolchain.versions.claude_acp))
-	else
-		health.warn(
-			"CodeCompanion npx fallback requires Node.js 22+; configure codecompanion.acp_command to override it"
-		)
 	end
 end
 
@@ -480,14 +441,32 @@ function M.check()
 	state_summary("Mason", toolchain.mason_order, toolchain.mason_tools)
 	check_managed_release_eligibility()
 	check_mason_receipts()
-	health.info("Retry managed releases with :NvimConfigToolsInstall[!] [all|mmdflux|gofumpt|plantuml]")
+	health.info("Retry managed releases with :NvimConfigToolsInstall[!] [all|mmdflux|plantuml]")
 	health.info("Retry exact Mason pins with :MasonToolsInstallSync")
 	check_mason_inventory()
 
 	health.start("Optional feature dependencies")
 	check_tool("mmdflux", "Mermaid ASCII/SVG rendering", "Run :NvimConfigToolsInstall mmdflux.", false, configured)
 	check_tool("plantuml", "PlantUML ASCII/SVG rendering", "Run :NvimConfigToolsInstall plantuml.", false, configured)
-	check_tool("gofumpt", "Go formatting", "Run :NvimConfigToolsInstall gofumpt.", false, configured)
+	check_external_tool(
+		"rust-analyzer",
+		"Rust language intelligence (host/user only)",
+		"Install it with rustup or the host package manager; managed and Mason copies are intentionally ignored.",
+		configured
+	)
+	check_external_tool(
+		"rustfmt",
+		"Rust formatting (host/user only)",
+		"Install it with rustup or the host package manager; managed and Mason copies are intentionally ignored.",
+		configured
+	)
+	check_tool(
+		"cmake-language-server",
+		"CMake language intelligence",
+		"Retry the exact Mason manifest with :MasonToolsInstallSync.",
+		false,
+		configured
+	)
 	check_tool(
 		"rsvg-convert",
 		"SVG diagram rasterization",
@@ -496,8 +475,8 @@ function M.check()
 		configured
 	)
 	check_tool("nvimpager", "pager profile", "Install nvimpager with the host package manager.", false, configured)
-	check_tool("devpod", "remote devcontainers", "Install devpod with the host package manager.", false, configured)
-	check_acp(configured)
+	check_tool("lazygit", "Git terminal UI", "Install lazygit with the host package manager.", false, configured)
+	check_tool("devcontainer", "devcontainer shell", "Install the host devcontainer CLI.", false, configured)
 	check_pager_profile()
 
 	health.start("Reproducible validation")

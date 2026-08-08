@@ -19,15 +19,7 @@
 --       transparent = false,
 --       italic_comments = true,
 --     },
---     obsidian = {               -- list of vaults
---       { name = "personal", path = "~/Obsidian" },
---     },
---     notes = { dir = "~/Notes" }, -- directory for :Note create
 --     clangd = { path = "clangd" },
---     codecompanion = {
---       oauth_token = "sk-ant-oat...", -- token from `claude setup-token`
---       acp_command = { "/path/to/claude-agent-acp" },
---     },
 --     mason = { auto_install = true },
 --     log_watch = { max_lines = 100000, max_bytes = 67108864 },
 --     diagram_cache = { max_age_seconds = 2592000, max_bytes = 268435456 },
@@ -52,38 +44,10 @@ local SCHEMA = {
 			italic_comments = { type = "boolean", default = true },
 		},
 	},
-	obsidian = {
-		type = "list",
-		default = {},
-		item = {
-			type = "table",
-			fields = {
-				name = { type = "string", required = true },
-				path = { type = "string", required = true },
-			},
-		},
-	},
-	notes = {
-		type = "table",
-		fields = {
-			dir = { type = "string", default = "~/Notes" },
-		},
-	},
 	clangd = {
 		type = "table",
 		fields = {
 			path = { type = "string", default = "clangd" },
-		},
-	},
-	codecompanion = {
-		type = "table",
-		fields = {
-			oauth_token = { type = "string", sensitive = true },
-			acp_command = {
-				type = "list",
-				default = {},
-				item = { type = "string" },
-			},
 		},
 	},
 	mason = {
@@ -127,16 +91,18 @@ local SCHEMA = {
 local cache = nil
 local sources = {}
 local last_errors = {}
-local legacy_oauth_warning_sent = false
+local blocked_env_warnings = {}
+local BLOCKED_ENV_KEYS = {
+	CLAUDE_CODE_OAUTH_TOKEN = true,
+}
 
-local function warn_legacy_oauth_token()
-	if legacy_oauth_warning_sent then
+local function warn_blocked_env_key(key)
+	if blocked_env_warnings[key] then
 		return
 	end
-	legacy_oauth_warning_sent = true
+	blocked_env_warnings[key] = true
 	vim.notify(
-		"env.CLAUDE_CODE_OAUTH_TOKEN is deprecated; move it to codecompanion.oauth_token. "
-			.. "The legacy value is no longer exported to Neovim's environment.",
+		("env.%s is ignored and will not be exported by this config"):format(key),
 		vim.log.levels.WARN,
 		{ title = TITLE }
 	)
@@ -224,7 +190,7 @@ local function deep_merge(base, override)
 	if type(base) ~= "table" or type(override) ~= "table" then
 		return override
 	end
-	-- Lists replace wholesale; we don't merge vault lists element-by-element.
+	-- Lists replace wholesale instead of merging elements by position.
 	if is_array(base) or is_array(override) then
 		return override
 	end
@@ -386,24 +352,6 @@ function M.get(key, default)
 	return v
 end
 
--- Keep the Claude OAuth credential out of Neovim's process environment. The
--- legacy env entry is read only as a migration fallback and is handed directly
--- to CodeCompanion's ACP child process by lua/plugins/codecompanion.lua.
-function M.codecompanion_oauth_token()
-	local cfg = M.read()
-	local token = cfg.codecompanion and cfg.codecompanion.oauth_token
-	if token and token ~= "" then
-		return token
-	end
-
-	local legacy = cfg.env and cfg.env.CLAUDE_CODE_OAUTH_TOKEN
-	if legacy ~= nil then
-		warn_legacy_oauth_token()
-		return legacy ~= "" and legacy or nil
-	end
-	return nil
-end
-
 function M.reload()
 	cache = nil
 	return M.read()
@@ -414,8 +362,8 @@ end
 function M.apply_env()
 	local cfg = M.read()
 	for key, value in pairs(cfg.env or {}) do
-		if key == "CLAUDE_CODE_OAUTH_TOKEN" then
-			warn_legacy_oauth_token()
+		if BLOCKED_ENV_KEYS[key] then
+			warn_blocked_env_key(key)
 		else
 			vim.env[key] = value
 		end
@@ -492,24 +440,8 @@ return {
     transparent = false,
     italic_comments = true,
   },
-
-  -- Obsidian vaults. Paths are expanded (~ and env vars).
-  obsidian = {
-    -- { name = "personal", path = "~/Obsidian" },
-  },
-
-  -- Directory for quick markdown notes created by :Note create (expanded).
-  notes = { dir = "~/Notes" },
-
   -- Override the clangd binary on this host.
   clangd = { path = "clangd" },
-
-  -- Claude subscription token used only by CodeCompanion's ACP child process.
-  -- Generate it with `claude setup-token`.
-  codecompanion = {
-    -- oauth_token = "sk-ant-oat...",
-    -- acp_command = { "/path/to/claude-agent-acp" },
-  },
 
   -- Attempt each exact Mason/managed tool pin once on interactive startup.
   mason = { auto_install = true },

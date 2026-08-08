@@ -34,10 +34,9 @@ return {
 			backend = "nui",
 		},
 		notify = {
-			-- We own `vim.notify` in `config` below (to also record into the
-			-- native `:messages`), so noice must not manage it — otherwise it
-			-- warns that `vim.notify` was overwritten. nvim-notify still renders
-			-- the toast (called directly from our wrapper).
+			-- The config owns `vim.notify` so it can also record an exact native
+			-- `:messages` entry. Notifications still enter Noice through its public
+			-- API and use this view (backed by nvim-notify) for their toast.
 			enabled = false,
 		},
 		lsp = {
@@ -69,10 +68,10 @@ return {
 			{ filter = { event = "msg_show", find = "%d+ lines" }, opts = { skip = true } },
 			{ filter = { event = "msg_show", find = "search hit" }, opts = { skip = true } },
 			{ filter = { event = "msg_show", find = "Already at" }, opts = { skip = true } },
-			-- `vim.notify` is mirrored into the native `:messages` history by the
-			-- wrapper in `config` below, tagged with a leading `[notify]`. Skip
-			-- that tagged echo here so noice does not show a duplicate toast.
-			{ filter = { event = "msg_show", find = "^%[notify%]" }, opts = { skip = true } },
+			-- `vim.notify` is mirrored into native `:messages` with this dedicated
+			-- echo kind. The notification itself is routed separately through the
+			-- public Noice API, so the echo must never create a second toast.
+			{ filter = { event = "msg_show", kind = "nvim_config_notify" }, opts = { skip = true } },
 		},
 	},
 	-- `<leader>fn` opens the native `:messages` (the single source now: echo +
@@ -91,26 +90,43 @@ return {
 	config = function(_, opts)
 		require("noice").setup(opts)
 
-		-- Own `vim.notify` so notifications are ALSO recorded in the native
-		-- `:messages` history (noice by itself routes them only to transient
-		-- toasts). noice's own notify handling is disabled above
-		-- (`notify.enabled = false`), so this override is expected and does not
-		-- trigger noice's "vim.notify overwritten" warning. The toast is still
-		-- rendered directly via nvim-notify; the `[notify]` tag is filtered by
-		-- the route above so noice doesn't echo a duplicate.
+		-- Own `vim.notify`: mirror the unmodified text into native history once,
+		-- then create exactly one Noice notification. Noice's notify source is
+		-- disabled above, so it will not replace this function. Its public API
+		-- preserves replace handles while the configured `notify` view delegates
+		-- the toast to nvim-notify.
 		vim.notify = function(msg, level, notify_opts)
-			local text = type(msg) == "table" and table.concat(msg, "\n") or tostring(msg)
-			local hl = "Normal"
-			if level == vim.log.levels.ERROR then
-				hl = "ErrorMsg"
-			elseif level == vim.log.levels.WARN then
-				hl = "WarningMsg"
+			local function dispatch()
+				if msg ~= nil then
+					local text
+					if type(msg) == "table" then
+						local lines = {}
+						for _, value in ipairs(msg) do
+							lines[#lines + 1] = tostring(value)
+						end
+						text = table.concat(lines, "\n")
+					else
+						text = type(msg) == "string" and msg or tostring(msg)
+					end
+					local hl = "Normal"
+					if level == vim.log.levels.ERROR then
+						hl = "ErrorMsg"
+					elseif level == vim.log.levels.WARN then
+						hl = "WarningMsg"
+					end
+					pcall(vim.api.nvim_echo, { { text, hl } }, true, {
+						kind = "nvim_config_notify",
+						err = level == vim.log.levels.ERROR,
+					})
+				end
+				return require("noice").notify(msg, level, notify_opts)
 			end
-			pcall(vim.api.nvim_echo, { { "[notify] " .. text, hl } }, true, {})
-			local ok, nvim_notify = pcall(require, "notify")
-			if ok then
-				return nvim_notify(msg, level, notify_opts)
+
+			if vim.in_fast_event() then
+				vim.schedule(dispatch)
+				return
 			end
+			return dispatch()
 		end
 	end,
 }
