@@ -88,10 +88,12 @@ files incrementally, preserves partial lines, survives rotation, and refuses
 to overwrite unsaved buffer changes.
 
 The tab line uses the active colorscheme's `Visual` background (falling back to
-`PmenuSel`) and bold text for the selected tab. Close a tab with `<leader>q`,
-`:CloseTab`, middle click, or the single global tab-line close button. Closing
-the final work tab preserves user buffers, creates a pristine home tab, and
-opens the main menu; `<leader>Q` remains the explicit close-all flow.
+`PmenuSel`) and bold text for the selected tab. Unmodified tabs have a native
+per-tab X, while modified tabs show the modified marker in its place. The X,
+right or middle click, `<leader>q`, and `:CloseTab` all route safely through
+`config.tabs`. Closing the final work tab preserves user buffers, creates a
+pristine home tab, and opens the main menu; `<leader>Q` remains the explicit
+close-all flow.
 
 Enable the lightweight pager profile with:
 

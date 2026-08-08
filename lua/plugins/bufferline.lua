@@ -8,19 +8,20 @@ return {
 	dependencies = { "nvim-tree/nvim-web-devicons" },
 	config = function()
 		local tabs = require("config.tabs")
+		local function request_close(tabpage)
+			return tabs.request_close(tabpage)
+		end
+
 		require("bufferline").setup({
 			options = {
 				mode = "tabs",
 				diagnostics = "nvim_lsp",
 				show_buffer_icons = true,
-				show_buffer_close_icons = false,
+				show_buffer_close_icons = true,
 				show_close_icon = false,
-				middle_mouse_command = function(tabpage)
-					tabs.request_close(tabpage)
-				end,
-				custom_areas = {
-					right = tabs.close_area,
-				},
+				close_command = request_close,
+				right_mouse_command = request_close,
+				middle_mouse_command = request_close,
 				separator_style = "thin",
 				hover = { enabled = true },
 				numbers = "none",

@@ -18,11 +18,49 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			local ok, err = xpcall(function()
 				assert(left_mouse_mapping().lhs == nil, "fixture started with a global LeftMouse mapping")
 				assert(package.loaded["menu.state"] == nil, "menu.nvim state loaded before first use")
+				assert(_G.NvimConfigCloseTab == nil, "obsolete global tabline close callback is present")
+				require("lazy").load({ plugins = { "bufferline.nvim" } })
+				local bridge = assert(_G.___bufferline_private, "installed bufferline click bridge is missing")
+				assert(type(bridge.handle_close) == "function", "installed bufferline close bridge is missing")
+				assert(type(bridge.handle_click) == "function", "installed bufferline mouse bridge is missing")
+
+				local function close_through_bufferline(tabpage, button)
+					if button then
+						bridge.handle_click(tabpage, nil, button)
+					else
+						bridge.handle_close(tabpage)
+					end
+					assert(
+						vim.wait(500, function()
+							return not vim.api.nvim_tabpage_is_valid(tabpage)
+						end, 5),
+						"bufferline did not close the requested stable tab handle"
+					)
+				end
 
 				vim.cmd("tabnew")
 				vim.cmd("tabnew")
 				local unopened_target = vim.api.nvim_get_current_tabpage()
-				assert(require("config.tabs").close(unopened_target), "ordinary current tab did not close")
+				local tabs = require("config.tabs")
+				local forwarded = {}
+				local original_request = tabs.request_close
+				tabs.request_close = function(tabpage)
+					forwarded[#forwarded + 1] = tabpage
+					return true
+				end
+				local bridge_ok, bridge_error = xpcall(function()
+					bridge.handle_close(unopened_target)
+					bridge.handle_click(unopened_target, nil, "r")
+					bridge.handle_click(unopened_target, nil, "m")
+				end, debug.traceback)
+				tabs.request_close = original_request
+				assert(bridge_ok, bridge_error)
+				assert(
+					vim.deep_equal(forwarded, { unopened_target, unopened_target, unopened_target }),
+					"installed bufferline changed or bypassed a configured stable-handle close callback"
+				)
+				assert(vim.api.nvim_tabpage_is_valid(unopened_target), "callback probe unexpectedly closed its tab")
+				close_through_bufferline(unopened_target)
 				assert(package.loaded["menu.state"] == nil, "ordinary tab close activated lazy menu.nvim")
 
 				vim.cmd("tabnew")
@@ -34,7 +72,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(#vim.fn.win_findbuf(menu_buf) > 0, "mouse context menu is not displayed")
 				local stale_callback = assert(left_mouse_mapping().callback, "menu.nvim did not install LeftMouse")
 
-				assert(require("config.tabs").close(target), "current tab did not close")
+				close_through_bufferline(target, "m")
 				assert(not vim.api.nvim_tabpage_is_valid(target), "target tab remains valid")
 				assert(not vim.api.nvim_buf_is_valid(menu_buf), "dismiss left the menu buffer valid")
 				assert(#state.bufids == 0, "dismiss left stale menu buffer ids")
@@ -69,7 +107,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				local preserved_buf = assert(state.bufids[1], "preservation menu did not create a buffer")
 				local background_tab = vim.api.nvim_list_tabpages()[1]
 				assert(background_tab ~= preserved_tab, "preservation fixture has no background tab")
-				vim.cmd("tabclose 1")
+				close_through_bufferline(background_tab, "r")
 				assert(vim.api.nvim_tabpage_is_valid(preserved_tab), "non-current close removed the current tab")
 				assert(vim.api.nvim_buf_is_valid(preserved_buf), "non-current close deleted the displayed menu")
 				assert(#vim.fn.win_findbuf(preserved_buf) > 0, "non-current close hid the displayed menu")

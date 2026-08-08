@@ -236,26 +236,9 @@ function M.request_close(tabpage)
 	return true
 end
 
----@return table[]
-function M.close_area()
-	return {
-		{
-			text = "%@v:lua.NvimConfigCloseTab@ × %X",
-			link = "BufferLineCloseButton",
-		},
-	}
-end
-
 function M.setup()
 	if not enabled() then
 		return
-	end
-
-	_G.NvimConfigCloseTab = function(_, clicks, button)
-		if button ~= "l" or clicks ~= 1 then
-			return
-		end
-		M.request_close(vim.api.nvim_get_current_tabpage())
 	end
 
 	vim.api.nvim_create_user_command("CloseTab", function()

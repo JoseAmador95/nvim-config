@@ -223,7 +223,7 @@ test("editor reuses only a valid marked home tab", function()
 	equal(2, #vim.api.nvim_list_tabpages(), "invalid multi-split home was reused")
 end)
 
-test("bufferline exposes one global close area, stable middle click, and dynamic selected highlights", function()
+test("bufferline exposes native safe close callbacks and dynamic selected highlights", function()
 	reset_editor()
 	local captured
 	local original_bufferline = package.loaded.bufferline
@@ -240,21 +240,25 @@ test("bufferline exposes one global close area, stable middle click, and dynamic
 
 	assert(captured, "bufferline setup was not called")
 	equal("tabs", captured.options.mode, "bufferline mode")
-	equal(false, captured.options.show_buffer_close_icons, "per-tab close icons remain enabled")
-	equal(false, captured.options.show_close_icon, "legacy global close icon remains enabled")
-	local area = captured.options.custom_areas.right()
-	equal(1, #area, "close area contains more than one control")
-	assert(area[1].text:find("%@v:lua.NvimConfigCloseTab@", 1, true), "public click callback is missing")
-	assert(area[1].text:find("%X", 1, true), "click region is not terminated")
+	equal(true, captured.options.show_buffer_close_icons, "native per-tab close icons are disabled")
+	equal(false, captured.options.show_close_icon, "global bufferline close icon remains enabled")
+	equal(nil, captured.options.custom_areas, "custom global close area remains configured")
+	equal(nil, tabs.close_area, "obsolete tabs.close_area API remains exported")
 
-	local requested
+	local requested = {}
 	local original_request = tabs.request_close
 	tabs.request_close = function(tabpage)
-		requested = tabpage
+		requested[#requested + 1] = tabpage
 	end
-	captured.options.middle_mouse_command(987654)
+	local callback_ok, callback_error = xpcall(function()
+		for index, option in ipairs({ "close_command", "right_mouse_command", "middle_mouse_command" }) do
+			assert(type(captured.options[option]) == "function", option .. " is not a public function callback")
+			captured.options[option](987650 + index)
+		end
+	end, debug.traceback)
 	tabs.request_close = original_request
-	equal(987654, requested, "middle click did not forward the stable tab handle")
+	assert(callback_ok, callback_error)
+	equal({ 987651, 987652, 987653 }, requested, "a close callback changed or dropped its stable tab handle")
 
 	vim.api.nvim_set_hl(0, "Visual", { bg = 0x112233 })
 	vim.api.nvim_set_hl(0, "PmenuSel", { bg = 0x445566 })
@@ -262,13 +266,20 @@ test("bufferline exposes one global close area, stable middle click, and dynamic
 		highlights = {
 			tab_selected = {},
 			buffer_selected = {},
+			close_button_selected = {},
 			separator_selected = {},
 			indicator_selected = {},
 			background = {},
 		},
 	}
 	local first = captured.highlights(defaults)
-	for _, name in ipairs({ "tab_selected", "buffer_selected", "separator_selected", "indicator_selected" }) do
+	for _, name in ipairs({
+		"tab_selected",
+		"buffer_selected",
+		"close_button_selected",
+		"separator_selected",
+		"indicator_selected",
+	}) do
 		equal(0x112233, first[name].bg, name .. " did not use Visual background")
 	end
 	equal(true, first.tab_selected.bold, "active label is not bold")
@@ -291,23 +302,23 @@ end)
 
 test("setup owns CloseTab only in the full terminal editor", function()
 	reset_editor()
+	assert(_G.NvimConfigCloseTab == nil, "obsolete global tabline callback exists before setup")
 	tabs.setup()
 	equal(2, vim.fn.exists(":CloseTab"), "CloseTab command is missing")
 	local mapping = vim.fn.maparg("<leader>q", "n", false, true)
 	equal("<cmd>CloseTab<cr>", mapping.rhs, "editor close mapping bypasses CloseTab")
-	assert(type(_G.NvimConfigCloseTab) == "function", "global tabline callback is missing")
+	assert(_G.NvimConfigCloseTab == nil, "setup recreated the obsolete global tabline callback")
 
-	local requested = 0
+	local requested
 	local original_request = tabs.request_close
-	tabs.request_close = function()
-		requested = requested + 1
+	tabs.request_close = function(tabpage)
+		requested = tabpage
 	end
-	_G.NvimConfigCloseTab(0, 1, "r", "")
-	_G.NvimConfigCloseTab(0, 2, "l", "")
-	equal(0, requested, "right click or the second double-click event closed a tab")
-	_G.NvimConfigCloseTab(0, 1, "l", "")
-	equal(1, requested, "single left click did not close the current tab")
+	local current = vim.api.nvim_get_current_tabpage()
+	local command_ok, command_error = pcall(vim.cmd, "CloseTab")
 	tabs.request_close = original_request
+	assert(command_ok, command_error)
+	equal(current, requested, "CloseTab did not forward the current stable tab handle")
 end)
 
 vim.notify = original_notify
