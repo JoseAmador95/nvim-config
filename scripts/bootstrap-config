@@ -72,6 +72,33 @@ if ! command -v "$NVIM_BIN" >/dev/null 2>&1; then
 	exit 1
 fi
 
+toolchain_version() {
+	version_key=$1
+	NVIM_CONFIG_VERSION_KEY=$version_key "$NVIM_BIN" --headless -u NONE -i NONE \
+		--cmd "set runtimepath^=$repo_root" \
+		-c 'lua local value = require("config.toolchain").versions[vim.env.NVIM_CONFIG_VERSION_KEY]; assert(value); io.write(value)' \
+		-c 'quitall!'
+}
+
+# Parser compilation needs both the exact CLI used by the lock contract and a
+# host C compiler. Fail before any plugin restore or parser network activity.
+if [ "$install_parsers" -eq 1 ]; then
+	if ! command -v tree-sitter >/dev/null 2>&1; then
+		printf '%s\n' 'Required parser tool not found: tree-sitter' >&2
+		exit 1
+	fi
+	tree_sitter_version=$(toolchain_version tree_sitter)
+	tree_sitter_actual=$(tree-sitter --version 2>&1)
+	if [ "$tree_sitter_actual" != "tree-sitter $tree_sitter_version" ]; then
+		printf 'tree-sitter version mismatch: expected %s, got: %s\n' "$tree_sitter_version" "$tree_sitter_actual" >&2
+		exit 1
+	fi
+	if ! command -v cc >/dev/null 2>&1; then
+		printf '%s\n' 'Required parser compiler not found: cc' >&2
+		exit 1
+	fi
+fi
+
 printf 'Restoring plugins from %s/lazy-lock.json\n' "$repo_root"
 "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" "+Lazy! restore" \
 	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \

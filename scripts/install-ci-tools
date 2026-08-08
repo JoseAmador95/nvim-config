@@ -10,90 +10,132 @@ case $bin_dir in
 		exit 2
 		;;
 esac
-mkdir -p "$bin_dir"
+if [ "$bin_dir" = "/" ]; then
+	printf '%s\n' 'Refusing to install validation tools into /' >&2
+	exit 2
+fi
 
 NVIM_BIN=${NVIM_BIN:-nvim}
-version() {
-	version_key=$1
-	NVIM_CONFIG_VERSION_KEY=$version_key "$NVIM_BIN" --headless -u NONE -i NONE \
-		--cmd "set runtimepath^=$repo_root" \
-		-c 'lua local value = require("config.toolchain").versions[vim.env.NVIM_CONFIG_VERSION_KEY]; assert(value); io.write(value)' \
-		-c 'quitall!'
+for command_name in "$NVIM_BIN" curl tar unzip gzip awk; do
+	if ! command -v "$command_name" >/dev/null 2>&1; then
+		printf 'Required command not found: %s\n' "$command_name" >&2
+		exit 1
+	fi
+done
+if command -v sha256sum >/dev/null 2>&1; then
+	sha_command=sha256sum
+elif command -v shasum >/dev/null 2>&1; then
+	sha_command=shasum
+else
+	printf '%s\n' 'Required checksum command not found: sha256sum or shasum' >&2
+	exit 1
+fi
+
+mkdir -p "$bin_dir"
+install_tmp=$(mktemp -d "${TMPDIR:-/tmp}/nvim-ci-tools.XXXXXX")
+promote_tmp=
+cleanup() {
+	if [ -n "${promote_tmp:-}" ]; then
+		rm -f -- "$promote_tmp"
+	fi
+	rm -rf -- "$install_tmp"
+}
+trap cleanup 0 HUP INT TERM
+
+manifest_file="$install_tmp/manifest.tsv"
+NVIM_CONFIG_MANIFEST_FILE="$manifest_file" "$NVIM_BIN" --headless -u NONE -i NONE \
+	--cmd "set runtimepath^=$repo_root" \
+	-c 'lua local t = require("config.toolchain"); local u = vim.uv.os_uname(); local f = assert(io.open(vim.env.NVIM_CONFIG_MANIFEST_FILE, "wb")); for _, name in ipairs(t.validation_order) do local e = assert(t.validation_tools[name]); local a, target = t.asset_for(e, u.sysname, u.machine); assert(a, ("unsupported validator target %s for %s"):format(tostring(target), name)); local fields = { name, e.version, e.executable, a.archive, a.kind, a.member or "-", a.sha256, t.release_url(e, a) }; f:write(table.concat(fields, "\t"), "\n") end; assert(f:close())' \
+	-c 'quitall!'
+
+matches_pin() {
+	tool_name=$1
+	tool_version=$2
+	tool_path=$3
+	[ -x "$tool_path" ] || return 1
+	case $tool_name in
+		stylua)
+			[ "$("$tool_path" --version 2>/dev/null)" = "stylua $tool_version" ]
+			;;
+		shellcheck)
+			"$tool_path" --version 2>/dev/null | grep -F -x -- "version: $tool_version" >/dev/null 2>&1
+			;;
+		actionlint)
+			"$tool_path" -version 2>/dev/null | grep -F -x -- "$tool_version" >/dev/null 2>&1
+			;;
+		tree_sitter)
+			[ "$("$tool_path" --version 2>/dev/null)" = "tree-sitter $tool_version" ]
+			;;
+		*) return 1 ;;
+	esac
 }
 
-stylua_version=$(version stylua)
-shellcheck_version=$(version shellcheck)
-actionlint_version=$(version actionlint)
+checksum() {
+	archive_path=$1
+	if [ "$sha_command" = sha256sum ]; then
+		sha256sum "$archive_path" | awk '{ print $1 }'
+	else
+		shasum -a 256 "$archive_path" | awk '{ print $1 }'
+	fi
+}
 
-if ! "$bin_dir/stylua" --version 2>/dev/null | grep -F -x -- "stylua $stylua_version" >/dev/null 2>&1; then
-	command -v cargo >/dev/null 2>&1 || {
-		printf '%s\n' 'cargo is required to install StyLua' >&2
+tab=$(printf '\t')
+while IFS="$tab" read -r tool_name tool_version executable archive kind member expected_sha url; do
+	target="$bin_dir/$executable"
+	if matches_pin "$tool_name" "$tool_version" "$target"; then
+		printf 'Already installed: %s@%s\n' "$tool_name" "$tool_version"
+		continue
+	fi
+
+	tool_tmp="$install_tmp/$tool_name"
+	mkdir -p "$tool_tmp/extract"
+	archive_path="$tool_tmp/$archive"
+	printf 'Downloading %s@%s from its official release\n' "$tool_name" "$tool_version"
+	curl --fail --location --retry 3 --retry-all-errors --output "$archive_path" "$url"
+	actual_sha=$(checksum "$archive_path")
+	if [ "$actual_sha" != "$expected_sha" ]; then
+		printf '%s checksum mismatch: expected %s, got %s\n' "$tool_name" "$expected_sha" "$actual_sha" >&2
 		exit 1
-	}
-	cargo install stylua --version "$stylua_version" --locked --root "$(dirname -- "$bin_dir")"
-fi
+	fi
 
-if ! "$bin_dir/actionlint" -version 2>/dev/null | grep -F -x -- "v$actionlint_version" >/dev/null 2>&1; then
-	command -v go >/dev/null 2>&1 || {
-		printf '%s\n' 'Go is required to install actionlint' >&2
-		exit 1
-	}
-	GOBIN="$bin_dir" go install "github.com/rhysd/actionlint/cmd/actionlint@v$actionlint_version"
-fi
-
-if ! "$bin_dir/shellcheck" --version 2>/dev/null | grep -F -x -- "version: $shellcheck_version" >/dev/null 2>&1; then
-	command -v curl >/dev/null 2>&1 || {
-		printf '%s\n' 'curl is required to install ShellCheck' >&2
-		exit 1
-	}
-	install_tmp=$(mktemp -d "${TMPDIR:-/tmp}/nvim-shellcheck.XXXXXX")
-	cleanup() {
-		rm -rf -- "$install_tmp"
-	}
-	trap cleanup 0 HUP INT TERM
-
-	case $(uname -s):$(uname -m) in
-		Linux:x86_64)
-			platform=linux.x86_64
-			archive_ext=tar.xz
-			archive_sha=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+	case $kind in
+		zip)
+			unzip -qq "$archive_path" "$member" -d "$tool_tmp/extract"
+			candidate="$tool_tmp/extract/$member"
 			;;
-		Linux:aarch64 | Linux:arm64)
-			platform=linux.aarch64
-			archive_ext=tar.xz
-			archive_sha=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
+		tar.gz | tar.xz)
+			tar -xf "$archive_path" -C "$tool_tmp/extract" "$member"
+			candidate="$tool_tmp/extract/$member"
 			;;
-		Darwin:x86_64)
-			platform=darwin.x86_64
-			archive_ext=tar.gz
-			archive_sha=c2c15e08df0e8fbc374c335b230a7ee958c313fa5714817a59aa59f1aa594f51
+		gzip)
+			candidate="$tool_tmp/extract/$executable"
+			gzip -dc "$archive_path" >"$candidate"
 			;;
-		Darwin:arm64 | Darwin:aarch64)
-			platform=darwin.aarch64
-			archive_ext=tar.gz
-			archive_sha=339b930feb1ea764467013cc1f72d09cd6b869ebf1013296ba9055ab2ffbd26f
+		file)
+			candidate=$archive_path
 			;;
 		*)
-			printf 'Unsupported ShellCheck platform: %s %s\n' "$(uname -s)" "$(uname -m)" >&2
+			printf 'Unsupported archive kind for %s: %s\n' "$tool_name" "$kind" >&2
 			exit 1
 			;;
 	esac
-
-	archive="shellcheck-v$shellcheck_version.$platform.$archive_ext"
-	url="https://github.com/koalaman/shellcheck/releases/download/v$shellcheck_version/$archive"
-	curl --fail --location --retry 3 --output "$install_tmp/$archive" "$url"
-	if command -v sha256sum >/dev/null 2>&1; then
-		actual_sha=$(sha256sum "$install_tmp/$archive" | awk '{ print $1 }')
-	else
-		actual_sha=$(shasum -a 256 "$install_tmp/$archive" | awk '{ print $1 }')
-	fi
-	if [ "$actual_sha" != "$archive_sha" ]; then
-		printf 'ShellCheck archive checksum mismatch: expected %s, got %s\n' "$archive_sha" "$actual_sha" >&2
+	if [ ! -f "$candidate" ]; then
+		printf 'Release asset for %s did not contain %s\n' "$tool_name" "$member" >&2
 		exit 1
 	fi
-	tar -xf "$install_tmp/$archive" -C "$install_tmp"
-	cp "$install_tmp/shellcheck-v$shellcheck_version/shellcheck" "$bin_dir/shellcheck"
-	chmod +x "$bin_dir/shellcheck"
-fi
 
-printf 'Installed validation tools in %s\n' "$bin_dir"
+	# Prepare inside the destination directory, then rename over the stable path.
+	# The previous executable remains usable until this final same-filesystem step.
+	promote_tmp=$(mktemp "$bin_dir/.$executable.tmp.XXXXXX")
+	cp "$candidate" "$promote_tmp"
+	chmod 0755 "$promote_tmp"
+	if ! matches_pin "$tool_name" "$tool_version" "$promote_tmp"; then
+		printf 'Downloaded %s does not report the exact pin %s\n' "$tool_name" "$tool_version" >&2
+		exit 1
+	fi
+	mv -f "$promote_tmp" "$target"
+	promote_tmp=
+	printf 'Installed: %s@%s\n' "$tool_name" "$tool_version"
+done <"$manifest_file"
+
+printf 'Installed exact validation tools in %s\n' "$bin_dir"

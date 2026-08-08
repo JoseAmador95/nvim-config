@@ -51,6 +51,56 @@ vim.api.nvim_create_autocmd("VimEnter", {
 	callback = function()
 		vim.schedule(function()
 			local ok, err = xpcall(function()
+				assert(vim.fn.exists(":CloseTab") == 2, "full editor CloseTab command is missing")
+				local close_map = vim.fn.maparg("<leader>q", "n", false, true)
+				assert(close_map.rhs == "<cmd>CloseTab<cr>", "full editor close mapping bypasses CloseTab")
+				local close_all_map = vim.fn.maparg("<leader>Q", "n", false, true)
+				assert(close_all_map.rhs == "<cmd>CloseAll<cr>", "CloseAll mapping drifted")
+				require("lazy").load({ plugins = { "bufferline.nvim" } })
+
+				local original_visual = vim.api.nvim_get_hl(0, { name = "Visual", link = false })
+				local original_pmenu = vim.api.nvim_get_hl(0, { name = "PmenuSel", link = false })
+				local selected_groups = {
+					"BufferLineTabSelected",
+					"BufferLineBufferSelected",
+					"BufferLineSeparatorSelected",
+					"BufferLineIndicatorSelected",
+				}
+				vim.api.nvim_set_hl(0, "Visual", { bg = 0x123456 })
+				for _, group in ipairs(selected_groups) do
+					vim.cmd("highlight clear " .. group)
+				end
+				vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "tabs_spec_visual" })
+				for _, group in ipairs(selected_groups) do
+					assert(
+						vim.api.nvim_get_hl(0, { name = group, link = false }).bg == 0x123456,
+						group .. " did not repaint from Visual on ColorScheme"
+					)
+				end
+				for _, group in ipairs({ "BufferLineTabSelected", "BufferLineBufferSelected" }) do
+					local selected_label = vim.api.nvim_get_hl(0, { name = group, link = false })
+					assert(selected_label.bold and not selected_label.italic, group .. " emphasis drifted")
+				end
+				assert(
+					vim.api.nvim_get_hl(0, { name = "BufferLineIndicatorSelected", link = false }).fg
+						== vim.api.nvim_get_hl(0, { name = "DiagnosticInfo", link = false }).fg,
+					"selected tab indicator does not use DiagnosticInfo"
+				)
+
+				vim.api.nvim_set_hl(0, "Visual", {})
+				vim.api.nvim_set_hl(0, "PmenuSel", { bg = 0x654321 })
+				for _, group in ipairs(selected_groups) do
+					vim.cmd("highlight clear " .. group)
+				end
+				vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "tabs_spec_fallback" })
+				assert(
+					vim.api.nvim_get_hl(0, { name = "BufferLineTabSelected", link = false }).bg == 0x654321,
+					"selected tab did not repaint from the PmenuSel fallback"
+				)
+				vim.api.nvim_set_hl(0, "Visual", original_visual)
+				vim.api.nvim_set_hl(0, "PmenuSel", original_pmenu)
+				vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "tabs_spec_restore" })
+
 				assert(#vim.fn.argv() == 3, "startup fixture did not create a three-file argument list")
 				assert_markdown_argument("first existing argv buffer")
 				assert(package.loaded.gitsigns, "BufReadPre plugin did not load for the first argv buffer")

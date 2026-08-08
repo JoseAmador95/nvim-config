@@ -1,15 +1,39 @@
--- AI assistant using the Claude subscription (no API key).
---
--- CodeCompanion talks to Claude through the `claude_code` ACP adapter, which
--- authenticates with an OAuth token from `claude setup-token`. Store the token
--- in ~/.nvim-local.lua as codecompanion.oauth_token (see config.local_config).
--- The credential is passed only to the ACP child process and is never exported
--- to Neovim's process environment.
---
--- External dep: Node with `npx`. The Zed ACP adapter
--- (@agentclientprotocol/claude-agent-acp) is fetched and cached automatically
--- by npx on first use, so there is no manual `npm install -g` step.
+-- Claude subscription support through an ACP child process. Credentials are
+-- resolved from local config and passed only to that child, never vim.env.
+
 local acp_package = "@agentclientprotocol/claude-agent-acp@" .. require("config.toolchain").versions.claude_acp
+
+local function copy_argv(argv)
+	local copy = {}
+	for index, value in ipairs(argv or {}) do
+		copy[index] = value
+	end
+	return copy
+end
+
+local function resolve_acp_command()
+	local config = require("config.local_config").get("codecompanion", {}) or {}
+	if type(config.acp_command) == "table" and #config.acp_command > 0 then
+		return copy_argv(config.acp_command)
+	end
+
+	local executable = require("config.tool_paths").external_executable("claude-agent-acp")
+	if executable then
+		return { executable }
+	end
+	return { "npx", "--yes", acp_package }
+end
+
+local function yolo_command(command)
+	local argv = copy_argv(command)
+	for _, argument in ipairs(argv) do
+		if argument == "--yolo" then
+			return argv
+		end
+	end
+	argv[#argv + 1] = "--yolo"
+	return argv
+end
 
 return {
 	{
@@ -38,25 +62,18 @@ return {
 				acp = {
 					claude_code = function()
 						local token = require("config.local_config").codecompanion_oauth_token()
+						local command = resolve_acp_command()
 						return require("codecompanion.adapters").extend("claude_code", {
-							-- Run the ACP adapter through npx so it auto-installs and
-							-- caches this reviewed version on first use.
 							commands = {
-								default = { "npx", "--yes", acp_package },
-								yolo = {
-									"npx",
-									"--yes",
-									acp_package,
-									"--yolo",
-								},
+								default = command,
+								yolo = yolo_command(command),
 							},
 							env = {
 								CLAUDE_CODE_OAUTH_TOKEN = token,
 							},
 							handlers = {
-								-- Upstream's handler copies the token into vim.env. The ACP
-								-- process already receives adapter.env, so authentication only
-								-- needs to confirm that the child credential was resolved.
+								-- Upstream's handler exports the token into vim.env. The child
+								-- already receives adapter.env, so only validate that value.
 								auth = function(self)
 									local child_token = self.env_replaced and self.env_replaced.CLAUDE_CODE_OAUTH_TOKEN
 									return child_token ~= nil and child_token ~= ""
@@ -80,9 +97,12 @@ return {
 					{ title = "codecompanion" }
 				)
 			end
-			if vim.fn.executable("npx") ~= 1 then
+			local command = resolve_acp_command()
+			if not command[1] or vim.fn.executable(command[1]) ~= 1 then
 				vim.notify(
-					"CodeCompanion: `npx` (Node.js) not found in PATH; the Claude ACP adapter cannot start.",
+					("CodeCompanion: ACP command `%s` is not executable; configure codecompanion.acp_command."):format(
+						tostring(command[1] or "")
+					),
 					vim.log.levels.WARN,
 					{ title = "codecompanion" }
 				)

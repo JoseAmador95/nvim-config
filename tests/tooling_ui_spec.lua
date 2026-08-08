@@ -20,7 +20,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end, { request = "launch" })
 				assert(python_adapter, "Python adapter callback did not return an adapter")
 
-				local mason_bin = vim.fn.stdpath("data") .. "/mason/bin/"
+				local mason_bin = require("config.tool_paths").mason_bin() .. "/"
 				local expected_debugpy = vim.fn.exepath("debugpy-adapter")
 				if expected_debugpy == "" then
 					expected_debugpy = mason_bin .. "debugpy-adapter"

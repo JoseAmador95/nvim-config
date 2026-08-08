@@ -58,7 +58,9 @@ local function render_spec(state)
 		return nil
 	end
 	if vim.fn.executable("plantuml") ~= 1 then
-		notify("plantuml not found in PATH", vim.log.levels.ERROR)
+		local command = ":NvimConfigToolsInstall plantuml"
+		local hint = require("config.pager").active and ("open full Neovim and run " .. command) or command
+		notify("plantuml not found in PATH (" .. hint .. ")", vim.log.levels.ERROR)
 		return nil
 	end
 	local input = table.concat(vim.api.nvim_buf_get_lines(state.source_buf, 0, -1, false), "\n")

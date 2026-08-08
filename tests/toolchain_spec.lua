@@ -24,96 +24,182 @@ local function temp_dir()
 	return path
 end
 
-test("toolchain manifest is pinned and side-effect free", function()
-	local toolchain = require("config.toolchain")
-	assert(toolchain.versions.neovim == "0.12.4")
-	assert(toolchain.versions.stylua == "2.5.2")
-	assert(toolchain.versions.shellcheck == "0.11.0")
-	assert(toolchain.versions.actionlint == "1.7.12")
-	assert(toolchain.versions.claude_acp == "0.66.0")
-	assert(toolchain.versions.mmdflux == "2.6.0")
-	assert(toolchain.versions.plantuml_lsp == "v0.5.3")
-	assert(
-		vim.deep_equal(toolchain.installers.mmdflux, {
-			"cargo",
-			"install",
-			"mmdflux",
-			"--version",
-			"2.6.0",
-			"--locked",
-		}),
-		"mmdflux installer is not exact"
-	)
-	assert(
-		vim.deep_equal(toolchain.installers["plantuml-lsp"], {
-			"go",
-			"install",
-			"github.com/ptdewey/plantuml-lsp@v0.5.3",
-		}),
-		"plantuml-lsp installer is not exact"
-	)
+test("toolchain manifest is pinned and independent of Neovim", function()
+	local original_vim = _G.vim
+	local chunk = assert(loadfile(repo .. "/lua/config/toolchain.lua"))
+	_G.vim = nil
+	local ok, toolchain = pcall(chunk)
+	_G.vim = original_vim
+	assert(ok, toolchain)
+
+	local expected_versions = {
+		neovim = "0.12.4",
+		stylua = "2.5.2",
+		shellcheck = "0.11.0",
+		actionlint = "1.7.12",
+		tree_sitter = "0.26.11",
+		claude_acp = "0.66.0",
+		mmdflux = "2.6.0",
+		gofumpt = "0.11.0",
+		plantuml = "1.2026.6",
+	}
+	assert(original_vim.deep_equal(toolchain.versions, expected_versions), "version manifest drifted")
+	assert(toolchain.target_key("Darwin", "aarch64") == "darwin-arm64")
+	assert(toolchain.target_key("macOS", "amd64") == "darwin-x86_64")
+	assert(toolchain.target_key("Linux", "x64") == "linux-x86_64")
+	assert(toolchain.target_key("Plan9", "x64") == nil)
 end)
 
-test("tool installer launches pinned commands asynchronously", function()
-	package.loaded["config.tool_installer"] = nil
-	local original_system = vim.system
-	local original_notify = vim.notify
-	local commands = {}
-	vim.notify = function() end
-	vim.system = function(command, options, callback)
-		commands[#commands + 1] = { command = vim.deepcopy(command), options = options }
-		callback({ code = 0, stdout = "", stderr = "" })
-		return {
-			wait = function()
-				error("installer unexpectedly waited for an async process")
-			end,
-		}
+test("validation assets cover every supported target with exact metadata", function()
+	local toolchain = require("config.toolchain")
+	local targets = { "darwin-arm64", "darwin-x86_64", "linux-arm64", "linux-x86_64" }
+	for _, name in ipairs(toolchain.validation_order) do
+		local entry = assert(toolchain.validation_tools[name], name)
+		assert(entry.version == toolchain.versions[name], name .. " version is not canonical")
+		for _, target in ipairs(targets) do
+			local asset = assert(entry.assets[target], name .. " lacks " .. target)
+			assert(asset.archive and asset.archive ~= "", name .. " asset name is empty")
+			assert(asset.sha256:match("^[0-9a-f]+$") and #asset.sha256 == 64, name .. " SHA is invalid")
+			local url = toolchain.release_url(entry, asset)
+			assert(url:sub(-#asset.archive) == asset.archive, name .. " URL does not end in its asset")
+		end
+	end
+	assert(toolchain.validation_tools.tree_sitter.assets["darwin-arm64"].kind == "gzip")
+	assert(toolchain.validation_tools.shellcheck.assets["linux-x86_64"].kind == "tar.xz")
+end)
+
+test("managed releases are prebuilt and target-aware", function()
+	local toolchain = require("config.toolchain")
+	assert(vim.deep_equal(toolchain.managed_order, { "mmdflux", "gofumpt", "plantuml" }))
+	for _, name in ipairs(toolchain.managed_order) do
+		local entry = assert(toolchain.managed_tools[name], name)
+		assert(entry.version == toolchain.versions[name])
+		assert(entry.repository and entry.tag and entry.executable)
+		for _, asset in pairs(entry.assets) do
+			assert(asset.archive and asset.sha256 and #asset.sha256 == 64)
+		end
+	end
+	assert(toolchain.managed_tools.mmdflux.assets["linux-arm64"] == nil, "unsupported binary was invented")
+	local jar = assert(toolchain.managed_tools.plantuml.assets["darwin-x86_64"])
+	assert(jar.kind == "jar")
+	assert(vim.deep_equal(jar.requires_all, { "java" }))
+	assert(vim.deep_equal(jar.wrapper, { "java", "-jar", "{artifact}" }))
+	assert(toolchain.installers == nil, "package-manager installers remain in the manifest")
+end)
+
+test("Mason manifest is complete, exact, and stably ordered", function()
+	local toolchain = require("config.toolchain")
+	local expected = {
+		["clangd"] = "22.1.6",
+		["docker-language-server"] = "v0.20.1",
+		["lemminx"] = "0.29.3",
+		["lua-language-server"] = "3.18.2",
+		["marksman"] = "2026-02-08",
+		["ruff"] = "0.16.1",
+		["rust-analyzer"] = "2026-08-03",
+		["taplo"] = "0.10.0",
+		["codelldb"] = "v1.12.2",
+		["hadolint"] = "v2.15.1",
+		["jq"] = "jq-1.7",
+		["shellcheck"] = "v0.11.0",
+		["shfmt"] = "v3.13.1",
+		["stylua"] = "v2.5.2",
+		["tree-sitter-cli"] = "v0.26.11",
+		["bash-language-server"] = "5.6.0",
+		["json-lsp"] = "4.10.0",
+		["pyright"] = "1.1.411",
+		["vtsls"] = "0.3.0",
+		["yaml-language-server"] = "1.24.0",
+		["markdownlint-cli2"] = "0.23.2",
+		["prettierd"] = "0.29.0",
+		["gopls"] = "v0.23.0",
+		["delve"] = "v1.27.1",
+		["goimports"] = "v0.48.0",
+		["cmake-language-server"] = "0.1.11",
+		["clang-format"] = "22.1.8",
+		["debugpy"] = "1.8.21",
+	}
+	assert(#toolchain.mason_order == vim.tbl_count(expected), "Mason order count drifted")
+	local seen = {}
+	for _, name in ipairs(toolchain.mason_order) do
+		assert(not seen[name], "duplicate Mason entry: " .. name)
+		seen[name] = true
+		local entry = assert(toolchain.mason_entry(name), name)
+		assert(entry.version == expected[name], name .. " pin drifted")
+		assert(entry.executables and #entry.executables > 0, name .. " lacks executable probes")
+		assert(toolchain.identity(name, entry) == name .. "@" .. expected[name])
+	end
+	assert(toolchain.mason_entry("gofumpt") == nil, "managed formatter leaked into Mason")
+	assert(vim.deep_equal(toolchain.mason_entry("gopls").requires_all, { "go" }))
+	assert(vim.deep_equal(toolchain.mason_entry("pyright").requires_all, { "node", "npm" }))
+	assert(toolchain.mason_entry("debugpy").requires_python_venv == true)
+	assert(toolchain.mason_entry("rust-analyzer").requires_all == nil)
+	assert(vim.deep_equal(toolchain.mason_entry("rust-analyzer").runtime_requires_all, { "cargo" }))
+end)
+
+test("manual Mason sync receives every exact pin without startup automation", function()
+	local original_offline = vim.env.NVIM_CONFIG_OFFLINE
+	local original_installer = package.loaded["mason-tool-installer"]
+	local captured
+	vim.env.NVIM_CONFIG_OFFLINE = nil
+	package.loaded["plugins.lsp"] = nil
+	package.loaded["mason-tool-installer"] = {
+		setup = function(options)
+			captured = options
+		end,
+	}
+	local specs = require("plugins.lsp")
+	local installer_spec
+	for _, spec in ipairs(specs) do
+		if spec[1] == "WhoIsSethDaniel/mason-tool-installer.nvim" then
+			installer_spec = spec
+		end
+	end
+	assert(installer_spec and vim.tbl_contains(installer_spec.cmd, "MasonToolsInstallSync"))
+	installer_spec.config()
+	local toolchain = require("config.toolchain")
+	assert(#captured.ensure_installed == #toolchain.mason_order)
+	for index, item in ipairs(captured.ensure_installed) do
+		local name = toolchain.mason_order[index]
+		assert(item[1] == name)
+		assert(item.version == toolchain.mason_entry(name).version)
+		assert(type(item.condition) == "function")
+	end
+	assert(captured.run_on_start == false)
+	assert(captured.auto_update == false)
+	for _, enabled in pairs(captured.integrations) do
+		assert(enabled == false)
 	end
 
-	local completed
-	require("config.tool_installer").install("all", function(ok)
-		completed = ok
-	end)
-	assert(
-		vim.wait(1000, function()
-			return completed ~= nil
-		end),
-		"async install callbacks did not finish"
-	)
-	vim.system = original_system
-	vim.notify = original_notify
-
-	assert(completed == true, "aggregate install callback did not complete successfully")
-	assert(#commands == 2, string.format("installer launched %d commands instead of 2", #commands))
-	assert(commands[1].options.text == true, "installer did not request text output")
-	local manifest = require("config.toolchain")
-	assert(vim.deep_equal(commands[1].command, manifest.installers.mmdflux), "mmdflux argv drifted")
-	assert(vim.deep_equal(commands[2].command, manifest.installers["plantuml-lsp"]), "plantuml-lsp argv drifted")
+	package.loaded["mason-tool-installer"] = original_installer
+	package.loaded["plugins.lsp"] = nil
+	vim.env.NVIM_CONFIG_OFFLINE = original_offline
 end)
 
-test("LSP catalog derives Mason and enabled sets from host probes", function()
+test("LSP catalog enables only the declared native server set", function()
 	local catalog = require("config.lsp_catalog")
-	local host = {
-		has_cmake_language_server = true,
-		has_rust_analyzer = true,
-		has_plantuml_lsp = false,
+	local expected = {
+		"bashls",
+		"clangd",
+		"cmake",
+		"docker_language_server",
+		"gopls",
+		"jsonls",
+		"lemminx",
+		"lua_ls",
+		"marksman",
+		"pyright",
+		"ruff",
+		"rust_analyzer",
+		"taplo",
+		"vtsls",
+		"yamlls",
 	}
-	local ensure = catalog.ensure_installed(host)
-	local enabled = catalog.enabled_servers(host)
-	assert(not vim.tbl_contains(ensure, "cmake"), "host cmake-language-server was not preferred")
-	assert(not vim.tbl_contains(ensure, "rust_analyzer"), "rustup rust-analyzer was not preferred")
-	assert(vim.tbl_contains(ensure, "docker_language_server"), "Docker LSP is absent from Mason catalog")
-	assert(vim.tbl_contains(enabled, "docker_language_server"), "Docker LSP is not explicitly enabled")
-	assert(not vim.tbl_contains(enabled, "plantuml_lsp"), "missing PlantUML LSP was enabled")
-
-	host.has_cmake_language_server = false
-	host.has_rust_analyzer = false
-	host.has_plantuml_lsp = true
-	ensure = catalog.ensure_installed(host)
-	enabled = catalog.enabled_servers(host)
-	assert(vim.tbl_contains(ensure, "cmake"), "Mason cmake fallback is absent")
-	assert(vim.tbl_contains(ensure, "rust_analyzer"), "Mason rust-analyzer fallback is absent")
-	assert(vim.tbl_contains(enabled, "plantuml_lsp"), "available PlantUML LSP was not enabled")
+	assert(vim.deep_equal(catalog.enabled_servers(), expected), "native LSP server set drifted")
+	local toolchain = require("config.toolchain")
+	for _, server in ipairs(catalog.servers) do
+		assert(toolchain.mason_entry(server.package), "LSP package is absent from Mason manifest: " .. server.package)
+	end
 end)
 
 test("clangd has one argv builder and rejects invalid databases before stop", function()

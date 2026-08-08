@@ -31,7 +31,13 @@ function M.open()
 		backend:close()
 		return
 	end
+	M.ensure_open()
+end
 
+function M.ensure_open()
+	if not M.enabled() or backend:is_open() then
+		return
+	end
 	backend:show(descriptors(current_context()), { border = true })
 end
 

@@ -18,6 +18,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(vim.g.nvim_config_initialized == true, "init.lua did not complete in the VSCode profile")
 				for _, command in ipairs({
 					"MenuOpen",
+					"CloseTab",
 					"DiagramShow",
 					"ClangdSetCompileCommands",
 					"DevcontainerShell",
@@ -42,6 +43,14 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					assert(not has_plugin(plugin), plugin .. " loaded in VSCode")
 				end
 				assert(has_plugin("vscode-multi-cursor.nvim"), "VSCode multi-cursor integration did not load")
+				local close = vim.fn.maparg("<leader>q", "n", false, true)
+				assert(type(close.callback) == "function", "VSCode close mapping was replaced by CloseTab")
+				close.callback()
+				local close_call = vscode_stub.calls[#vscode_stub.calls]
+				assert(
+					close_call and close_call.action == "workbench.action.closeActiveEditor",
+					"VSCode close action drifted"
+				)
 
 				local definition = vim.fn.maparg("gd", "n", false, true)
 				assert(not vim.tbl_isempty(definition), "VSCode definition mapping is missing")

@@ -91,6 +91,7 @@ test("legacy OAuth config is isolated from vim.env and warns once", function()
 	local original_override = vim.env.NVIM_CONFIG_FILE
 	local original_oauth = vim.env.CLAUDE_CODE_OAUTH_TOKEN
 	local original_public = vim.env.SECURITY_SPEC_PUBLIC
+	local original_path = vim.env.PATH
 	local original_notify = vim.notify
 	local notifications = {}
 	vim.env.NVIM_CONFIG_FILE = config_path
@@ -114,6 +115,7 @@ test("legacy OAuth config is isolated from vim.env and warns once", function()
 	vim.env.NVIM_CONFIG_FILE = original_override
 	vim.env.CLAUDE_CODE_OAUTH_TOKEN = original_oauth
 	vim.env.SECURITY_SPEC_PUBLIC = original_public
+	vim.env.PATH = original_path
 	vim.fn.delete(root, "rf")
 end)
 
@@ -122,7 +124,10 @@ test("CodeCompanion keeps OAuth credentials in the ACP child adapter", function(
 	local config_path = root .. "/host.lua"
 	local token = "security-spec-child-only-token"
 	assert(vim.fn.writefile({
-		"return { codecompanion = { oauth_token = '" .. token .. "' } }",
+		"return { codecompanion = {",
+		"  oauth_token = '" .. token .. "',",
+		"  acp_command = { '/custom/bin/claude-agent-acp', '--stdio' },",
+		"} }",
 	}, config_path) == 0, "could not write temporary CodeCompanion config")
 
 	local original_override = vim.env.NVIM_CONFIG_FILE
@@ -144,13 +149,13 @@ test("CodeCompanion keeps OAuth credentials in the ACP child adapter", function(
 	assert(spec.opts.strategies == nil, "deprecated CodeCompanion strategies config remains")
 	assert(
 		vim.deep_equal(adapter.commands.default, {
-			"npx",
-			"--yes",
-			"@agentclientprotocol/claude-agent-acp@0.66.0",
+			"/custom/bin/claude-agent-acp",
+			"--stdio",
 		}),
-		"default ACP command is not pinned exactly"
+		"explicit ACP command did not take priority"
 	)
 	assert(adapter.commands.yolo[#adapter.commands.yolo] == "--yolo", "ACP yolo command lost its mode flag")
+	assert(#adapter.commands.yolo == 3, "ACP yolo command was appended more than once")
 	assert(adapter.env.CLAUDE_CODE_OAUTH_TOKEN == token, "OAuth token was not attached to adapter.env")
 	assert(vim.env.CLAUDE_CODE_OAUTH_TOKEN == nil, "building the ACP adapter mutated vim.env")
 
@@ -163,6 +168,64 @@ test("CodeCompanion keeps OAuth credentials in the ACP child adapter", function(
 	vim.env.NVIM_CONFIG_FILE = original_override
 	vim.env.CLAUDE_CODE_OAUTH_TOKEN = original_oauth
 	vim.fn.delete(root, "rf")
+end)
+
+test("CodeCompanion resolves a host ACP before its exact npx fallback", function()
+	local original_local_config = package.loaded["config.local_config"]
+	local original_tool_paths = package.loaded["config.tool_paths"]
+	local original_adapters = package.loaded["codecompanion.adapters"]
+	package.loaded["codecompanion.adapters"] = {
+		extend = function(_, overrides)
+			return overrides
+		end,
+	}
+	package.loaded["config.local_config"] = {
+		get = function()
+			return { acp_command = {} }
+		end,
+		codecompanion_oauth_token = function()
+			return "child-token"
+		end,
+	}
+
+	package.loaded["config.tool_paths"] = {
+		external_executable = function(name)
+			assert(name == "claude-agent-acp")
+			return "/host/bin/claude-agent-acp"
+		end,
+	}
+	package.loaded["plugins.codecompanion"] = nil
+	local adapter = require("plugins.codecompanion")[1].opts.adapters.acp.claude_code()
+	assert(vim.deep_equal(adapter.commands.default, { "/host/bin/claude-agent-acp" }))
+
+	package.loaded["config.tool_paths"].external_executable = function()
+		return nil
+	end
+	package.loaded["plugins.codecompanion"] = nil
+	adapter = require("plugins.codecompanion")[1].opts.adapters.acp.claude_code()
+	assert(vim.deep_equal(adapter.commands.default, {
+		"npx",
+		"--yes",
+		"@agentclientprotocol/claude-agent-acp@0.66.0",
+	}))
+
+	package.loaded["config.local_config"].get = function()
+		return { acp_command = { "/custom/acp", "--yolo" } }
+	end
+	package.loaded["plugins.codecompanion"] = nil
+	adapter = require("plugins.codecompanion")[1].opts.adapters.acp.claude_code()
+	local yolo_count = 0
+	for _, argument in ipairs(adapter.commands.yolo) do
+		if argument == "--yolo" then
+			yolo_count = yolo_count + 1
+		end
+	end
+	assert(yolo_count == 1, "ACP mode flag was duplicated")
+
+	package.loaded["config.local_config"] = original_local_config
+	package.loaded["config.tool_paths"] = original_tool_paths
+	package.loaded["codecompanion.adapters"] = original_adapters
+	package.loaded["plugins.codecompanion"] = nil
 end)
 
 test("lazy bootstrap reports clone failure without network access", function()

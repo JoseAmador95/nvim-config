@@ -42,25 +42,6 @@ if not chmod_ok then
 end
 vim.opt.undodir = undodir .. "//"
 
-local function prepend_path(path)
-	if not path or path == "" then
-		return
-	end
-	local current = vim.env.PATH or ""
-	if not string.find(current, path, 1, true) then
-		vim.env.PATH = path .. ":" .. current
-	end
-end
-
-local mason_root = vim.fn.stdpath("data") .. "/mason"
-prepend_path(mason_root .. "/bin")
-prepend_path(mason_root .. "/build")
-
--- cargo-installed CLIs (e.g. mmdflux, the mermaid ASCII backend) live in
--- ~/.cargo/bin, which isn't on the default PATH; add it so nvim and plugins
--- can find them.
-prepend_path(vim.fn.expand("~/.cargo/bin"))
-
 -- Apply per-host $PATH and environment overrides from ~/.nvim-local.lua early,
 -- before plugins and mason rely on them.
 require("config.local_config").apply_env()

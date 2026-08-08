@@ -78,7 +78,9 @@ local function render_spec(state)
 		return nil
 	end
 	if vim.fn.executable("mmdflux") ~= 1 then
-		notify("mmdflux not found in PATH (cargo install mmdflux)", vim.log.levels.ERROR)
+		local command = ":NvimConfigToolsInstall mmdflux"
+		local hint = require("config.pager").active and ("open full Neovim and run " .. command) or command
+		notify("mmdflux not found in PATH (" .. hint .. ")", vim.log.levels.ERROR)
 		return nil
 	end
 	local source = mermaid_src(state.buf, state.anchor_win)

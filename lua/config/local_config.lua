@@ -26,7 +26,9 @@
 --     clangd = { path = "clangd" },
 --     codecompanion = {
 --       oauth_token = "sk-ant-oat...", -- token from `claude setup-token`
+--       acp_command = { "/path/to/claude-agent-acp" },
 --     },
+--     mason = { auto_install = true },
 --     log_watch = { max_lines = 100000, max_bytes = 67108864 },
 --     diagram_cache = { max_age_seconds = 2592000, max_bytes = 268435456 },
 --     path = { "~/bin" },          -- dirs prepended to $PATH
@@ -77,6 +79,17 @@ local SCHEMA = {
 		type = "table",
 		fields = {
 			oauth_token = { type = "string", sensitive = true },
+			acp_command = {
+				type = "list",
+				default = {},
+				item = { type = "string" },
+			},
+		},
+	},
+	mason = {
+		type = "table",
+		fields = {
+			auto_install = { type = "boolean", default = true },
 		},
 	},
 	log_watch = {
@@ -396,25 +409,10 @@ function M.reload()
 	return M.read()
 end
 
--- Prepend a directory to $PATH (idempotent), mirroring init.lua's prepend_path.
-local function prepend_path(dir)
-	dir = vim.fn.expand(dir)
-	if dir == "" then
-		return
-	end
-	local current = vim.env.PATH or ""
-	if not string.find(current, dir, 1, true) then
-		vim.env.PATH = dir .. ":" .. current
-	end
-end
-
 -- Apply $PATH and environment overrides. Call early in init.lua so they are in
 -- place before plugins/mason rely on them.
 function M.apply_env()
 	local cfg = M.read()
-	for _, dir in ipairs(cfg.path or {}) do
-		prepend_path(dir)
-	end
 	for key, value in pairs(cfg.env or {}) do
 		if key == "CLAUDE_CODE_OAUTH_TOKEN" then
 			warn_legacy_oauth_token()
@@ -422,6 +420,7 @@ function M.apply_env()
 			vim.env[key] = value
 		end
 	end
+	require("config.tool_paths").apply(cfg.path)
 end
 
 -- Introspection for :NvimConfigDump and :checkhealth.
@@ -509,7 +508,11 @@ return {
   -- Generate it with `claude setup-token`.
   codecompanion = {
     -- oauth_token = "sk-ant-oat...",
+    -- acp_command = { "/path/to/claude-agent-acp" },
   },
+
+  -- Attempt each exact Mason/managed tool pin once on interactive startup.
+  mason = { auto_install = true },
 
   -- Safety bounds for incremental log following and rendered-diagram cache.
   log_watch = { max_lines = 100000, max_bytes = 64 * 1024 * 1024 },

@@ -43,20 +43,23 @@ vim.keymap.set("t", "jj", "<C-\\><C-n>", {
 	desc = "Exit terminal mode",
 })
 
--- Saving makes no sense over a read-only pager buffer.
-if not require("config.pager").active then
+local pager = require("config.pager")
+
+-- Saving and tab ownership make no sense over a read-only pager buffer.
+if not pager.active then
 	vim.keymap.set("n", "<leader>w", "<cmd>write<CR>", {
 		noremap = true,
 		silent = true,
 		desc = "Save",
 	})
+	require("config.tabs").setup()
+else
+	vim.keymap.set("n", "<leader>q", ":q<CR>", {
+		noremap = true,
+		silent = true,
+		desc = "Quit",
+	})
 end
-
-vim.keymap.set("n", "<leader>q", ":q<CR>", {
-	noremap = true,
-	silent = true,
-	desc = "Quit",
-})
 
 vim.keymap.set("n", "<leader>Q", "<cmd>CloseAll<cr>", {
 	noremap = true,

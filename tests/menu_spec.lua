@@ -147,7 +147,7 @@ end)
 
 test("backend adapter contains private menu.nvim state behind one seam", function()
 	local backend = require("config.menu.backend")
-	local state = { bufids = {}, config = { stale = true } }
+	local state = { bufids = {}, bufs = {}, config = { stale = true }, nested_menu = "stale" }
 	local closed = 0
 	local opened
 	local menu_available = false
@@ -208,10 +208,28 @@ test("backend adapter contains private menu.nvim state behind one seam", functio
 	equal("key", opened.items[1].items[1].rtxt, "hint rendering")
 	equal({ border = true }, opened.options, "menu options")
 
-	state.bufids = { 11 }
+	local menu_buf = vim.api.nvim_create_buf(false, true)
+	local menu_win = vim.api.nvim_open_win(menu_buf, false, {
+		relative = "editor",
+		width = 1,
+		height = 1,
+		row = 0,
+		col = 0,
+		style = "minimal",
+	})
+	state.bufids = { menu_buf }
+	state.bufs[menu_buf] = { stale = true }
 	assert(adapter:is_open(), "populated backend state is closed")
 	assert(adapter:close(), "backend did not close")
 	equal(1, closed, "private close seam was not invoked")
+
+	vim.api.nvim_win_close(menu_win, true)
+	assert(not adapter:is_open(), "hidden stale menu buffer was treated as displayed")
+	assert(adapter:show({}, { border = true }), "adapter did not recover from stale menu state")
+	assert(not vim.api.nvim_buf_is_valid(menu_buf), "stale hidden menu buffer was leaked")
+	equal({}, state.bufids, "stale buffer ids were retained")
+	equal({}, state.bufs, "stale buffer metadata was retained")
+	equal("", state.nested_menu, "stale nested-menu state was retained")
 
 	for _, path in ipairs({
 		repo .. "/lua/config/menu.lua",
@@ -223,6 +241,52 @@ test("backend adapter contains private menu.nvim state behind one seam", functio
 		assert(not source:find('"menu.state"', 1, true), "private state escaped backend: " .. path)
 		assert(not source:find('"menu.utils"', 1, true), "private utils escaped backend: " .. path)
 	end
+end)
+
+test("ensure_open is idempotent while open remains a toggle", function()
+	local backend_module = require("config.menu.backend")
+	local original_default = backend_module.default
+	local original_menu = package.loaded["config.menu"]
+	local original_pager = package.loaded["config.pager"]
+	local open = false
+	local shows = 0
+	local closes = 0
+	local adapter = {
+		is_open = function()
+			return open
+		end,
+		show = function()
+			shows = shows + 1
+			open = true
+			return true
+		end,
+		close = function()
+			closes = closes + 1
+			open = false
+			return true
+		end,
+	}
+
+	local ok, err = xpcall(function()
+		backend_module.default = function()
+			return adapter
+		end
+		package.loaded["config.menu"] = nil
+		package.loaded["config.pager"] = { active = false }
+		local menu = require("config.menu")
+
+		menu.ensure_open()
+		menu.ensure_open()
+		equal(1, shows, "ensure_open toggled or reopened an existing menu")
+		equal(0, closes, "ensure_open closed an existing menu")
+		menu.open()
+		equal(1, closes, "open stopped behaving as a toggle")
+	end, debug.traceback)
+
+	backend_module.default = original_default
+	package.loaded["config.menu"] = original_menu
+	package.loaded["config.pager"] = original_pager
+	assert(ok, err)
 end)
 
 test("menu plugin is limited to the full terminal editor", function()

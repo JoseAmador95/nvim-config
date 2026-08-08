@@ -11,24 +11,21 @@ vim.api.nvim_create_autocmd("VimEnter", {
 	callback = function()
 		vim.schedule(function()
 			local ok, err = xpcall(function()
+				local mason_options = require("mason.settings").current
+				assert(
+					mason_options.install_root_dir == require("config.tool_paths").mason_root(),
+					"Mason is not rooted in the primary editor data directory"
+				)
+				assert(mason_options.PATH == "append", "Mason still prepends itself ahead of host tools")
 				local mason_settings = require("mason-lspconfig.settings").current
 				assert(mason_settings.automatic_enable == false, "Mason automatic LSP enablement is not disabled")
-				if vim.env.NVIM_CONFIG_OFFLINE == "1" then
-					assert(
-						vim.tbl_isempty(mason_settings.ensure_installed),
-						"offline mode still schedules Mason installs"
-					)
-				end
+				assert(vim.tbl_isempty(mason_settings.ensure_installed), "mason-lspconfig still schedules installs")
 				assert(vim.lsp.is_enabled("docker_language_server"), "Docker LSP is not explicitly enabled")
 				assert(not vim.lsp.is_enabled("stylua"), "Stylua was unexpectedly enabled as an LSP")
 				assert(vim.lsp.config["*"].before_init == nil, "wildcard before_init hook is still configured")
 				assert(type(vim.lsp.config.pyright.root_dir) == "function", "native LSP startup gate is missing")
 				assert(vim.fn.exists(":NvimConfigToolsInstall") == 2, "pinned tool installer command is missing")
-				assert(vim.fn.exists(":PlantumlLspInstall") == 2, "PlantUML install compatibility command is missing")
-				assert(
-					vim.fn.exists("#PlantumlLspMissing#FileType") == 0,
-					"PlantUML FileType auto-install hook still exists"
-				)
+				assert(vim.fn.exists(":MasonToolsInstallSync") == 2, "manual Mason sync command is missing")
 
 				local neoconf = require("neoconf")
 				local original_get = neoconf.get

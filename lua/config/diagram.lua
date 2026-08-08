@@ -14,11 +14,7 @@ end
 
 local LANGS = { mermaid = "mermaid", plantuml = "plantuml", puml = "plantuml", uml = "plantuml" }
 
-local INSTALL = {
-	mmdflux = "cargo install mmdflux",
-	["rsvg-convert"] = "brew install librsvg",
-	plantuml = "brew install plantuml",
-}
+local INSTALL = { ["rsvg-convert"] = "brew install librsvg" }
 
 local DEPS = {
 	mermaid = { svg = { "mmdflux", "rsvg-convert" }, ascii = { "mmdflux" } },
@@ -38,7 +34,12 @@ end
 local function install_hint(list)
 	local hints = {}
 	for _, executable in ipairs(list) do
-		hints[#hints + 1] = INSTALL[executable] or ("install " .. executable)
+		if executable == "mmdflux" or executable == "plantuml" then
+			local command = ":NvimConfigToolsInstall " .. executable
+			hints[#hints + 1] = require("config.pager").active and ("open full Neovim and run " .. command) or command
+		else
+			hints[#hints + 1] = INSTALL[executable] or ("install " .. executable)
+		end
 	end
 	return table.concat(hints, "; ")
 end

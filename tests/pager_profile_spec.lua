@@ -17,6 +17,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				for _, command in ipairs({
 					"MenuOpen",
+					"CloseTab",
 					"ClangdSetCompileCommands",
 					"DevcontainerShell",
 					"NvimConfigToolsInstall",
@@ -56,6 +57,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				local menu_map = vim.fn.maparg("<leader><leader>", "n", false, true)
 				assert(vim.tbl_isempty(menu_map), "menu mapping leaked into the pager")
+				local close_map = vim.fn.maparg("<leader>q", "n", false, true)
+				assert(close_map.rhs == ":q<CR>", "pager close mapping was replaced by tab ownership")
 				local diagram_map = vim.fn.maparg("<leader>md", "n", false, true)
 				assert(not vim.tbl_isempty(diagram_map), "global pager diagram mapping is missing")
 			end, debug.traceback)

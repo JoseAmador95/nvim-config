@@ -59,6 +59,15 @@ function M.open_file_in_tab(filepath, opts)
 		end
 	end
 
+	local home = require("config.tabs").find_home()
+	if home then
+		vim.api.nvim_set_current_tabpage(home)
+		vim.api.nvim_cmd({ cmd = "edit", args = { filepath } }, {})
+		require("config.tabs").unmark_home(home)
+		set_cursor_position(0, 0, lnum, col)
+		return
+	end
+
 	vim.cmd("tabedit " .. vim.fn.fnameescape(filepath))
 	set_cursor_position(0, 0, lnum, col)
 end

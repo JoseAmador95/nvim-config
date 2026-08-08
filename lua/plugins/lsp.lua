@@ -1,30 +1,18 @@
--- Native Neovim 0.12 LSP setup. Mason decides what to install, while the
--- catalog and server modules decide what to configure and explicitly enable.
+-- Native Neovim 0.12 LSP setup. Installation is deliberately separate:
+-- mason-lspconfig only supplies mappings/commands, mason-tool-installer owns
+-- explicit manual sync, and config.tool_bootstrap owns the one-shot lifecycle.
 
 local function offline()
 	return vim.env.NVIM_CONFIG_OFFLINE == "1"
 end
 
 local function host_context()
-	local cmake_path = vim.fn.exepath("cmake-language-server")
 	return {
-		has_cmake_language_server = cmake_path ~= "",
-		cmake_language_server_path = cmake_path,
-		has_rust_analyzer = vim.fn.executable("rust-analyzer") == 1,
-		has_plantuml_lsp = require("config.plantuml_lsp").available(),
+		cmake_language_server_path = vim.fn.exepath("cmake-language-server"),
 	}
 end
 
-local function setup_mason_lsp(options)
-	if not offline() then
-		require("mason-lspconfig").setup(options)
-		return
-	end
-
-	-- mason-lspconfig.setup() unconditionally refreshes the Mason registry. In
-	-- offline validation, replace that one refresh with a successful no-op while
-	-- still letting setup register its commands and other public APIs.
-	options.ensure_installed = {}
+local function setup_mason_lsp()
 	local registry = require("mason-registry")
 	local original_refresh = registry.refresh
 	registry.refresh = function(callback)
@@ -32,11 +20,31 @@ local function setup_mason_lsp(options)
 			callback(true, {})
 		end)
 	end
-	local ok, error_message = pcall(require("mason-lspconfig").setup, options)
+	local ok, error_message = pcall(require("mason-lspconfig").setup, {
+		ensure_installed = {},
+		automatic_enable = false,
+	})
 	registry.refresh = original_refresh
 	if not ok then
 		error(error_message)
 	end
+end
+
+local function manual_mason_tools()
+	if offline() then
+		return {}
+	end
+	local toolchain = require("config.toolchain")
+	local tools = {}
+	for _, name in ipairs(toolchain.mason_order) do
+		local entry = assert(toolchain.mason_entry(name), "missing Mason manifest entry: " .. name)
+		tools[#tools + 1] = {
+			name,
+			version = entry.version,
+			condition = require("config.tool_bootstrap").mason_condition(entry),
+		}
+	end
+	return tools
 end
 
 return {
@@ -45,17 +53,17 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
+		event = "VeryLazy",
 		cmd = { "Mason", "MasonInstall", "MasonUninstall", "MasonUninstallAll", "MasonUpdate", "MasonLog" },
-		build = function()
-			if not offline() then
-				vim.cmd("MasonUpdate")
-			end
-		end,
 		init = function()
-			require("config.tool_installer").setup()
+			require("config.tool_bootstrap").setup()
 		end,
 		config = function()
-			require("mason").setup()
+			require("mason").setup({
+				install_root_dir = require("config.tool_paths").mason_root(),
+				PATH = "append",
+			})
+			require("config.tool_bootstrap").mason_ready()
 		end,
 	},
 
@@ -66,26 +74,20 @@ return {
 		end,
 		event = { "BufReadPre", "BufNewFile" },
 		dependencies = {
+			"mason-org/mason.nvim",
 			"saghen/blink.cmp",
 			"b0o/SchemaStore.nvim",
 			"folke/neoconf.nvim",
 			"neovim/nvim-lspconfig",
 		},
-		init = function()
-			require("config.plantuml_lsp").setup_install_command()
-		end,
 		config = function()
-			local catalog = require("config.lsp_catalog")
-			local context = host_context()
-			local mason_lsp_options = {
-				ensure_installed = catalog.ensure_installed(context),
-				automatic_enable = false,
-			}
-			setup_mason_lsp(mason_lsp_options)
+			setup_mason_lsp()
 
+			local context = host_context()
+			local catalog = require("config.lsp_catalog")
 			require("config.lsp_navigation").setup()
 			require("config.lsp_servers").setup(context)
-			vim.lsp.enable(catalog.enabled_servers(context))
+			vim.lsp.enable(catalog.enabled_servers())
 		end,
 	},
 
@@ -94,13 +96,18 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		event = "VeryLazy",
+		cmd = { "MasonToolsInstall", "MasonToolsInstallSync" },
 		dependencies = { "mason-org/mason.nvim" },
 		config = function()
-			local ensure_tools = offline() and {} or vim.deepcopy(require("config.lsp_catalog").mason_tools)
 			require("mason-tool-installer").setup({
-				ensure_installed = ensure_tools,
-				run_on_start = not offline(),
+				ensure_installed = manual_mason_tools(),
+				auto_update = false,
+				run_on_start = false,
+				integrations = {
+					["mason-lspconfig"] = false,
+					["mason-null-ls"] = false,
+					["mason-nvim-dap"] = false,
+				},
 			})
 		end,
 	},

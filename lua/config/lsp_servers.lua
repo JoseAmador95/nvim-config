@@ -94,14 +94,6 @@ function M.setup(context)
 			},
 		},
 	})
-	register("plantuml_lsp", require("config.plantuml_lsp").config(client_capabilities))
-	register("asm_lsp", {
-		capabilities = client_capabilities,
-		cmd = { "asm-lsp" },
-		filetypes = { "asm", "vmasm" },
-		root_markers = { ".asm-lsp.toml", ".git" },
-		single_file_support = true,
-	})
 	register("docker_language_server", { capabilities = client_capabilities })
 end
 

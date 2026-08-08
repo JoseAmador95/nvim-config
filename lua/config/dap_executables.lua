@@ -1,7 +1,7 @@
 local M = {}
 
 function M.mason_bin_dir()
-	return vim.fs.joinpath(vim.fn.stdpath("data"), "mason", "bin")
+	return require("config.tool_paths").mason_bin()
 end
 
 -- Prefer a real executable from PATH (including Mason's bin directory, which

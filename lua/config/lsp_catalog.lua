@@ -1,91 +1,41 @@
--- Single catalog for Mason installation and native vim.lsp enablement. This
--- module is intentionally free of Neovim runtime calls; callers provide the
--- small set of host-tool probes that affect installation/enablement.
+-- Pure mapping between native Neovim server names and Mason package names.
+-- Exact package versions and prerequisites live only in config.toolchain.
 
 local M = {}
 
 M.servers = {
-	{ name = "asm_lsp", mason = true },
-	{ name = "bashls", mason = true },
-	{ name = "clangd", mason = true },
-	{
-		name = "cmake",
-		mason = function(context)
-			return not context.has_cmake_language_server
-		end,
-	},
-	{ name = "docker_language_server", mason = true },
-	{ name = "gopls", mason = true },
-	{ name = "jsonls", mason = true },
-	{ name = "lemminx", mason = true },
-	{ name = "lua_ls", mason = true },
-	{ name = "marksman", mason = true },
-	{ name = "pyright", mason = true },
-	{ name = "ruff", mason = true },
-	{
-		name = "rust_analyzer",
-		mason = function(context)
-			return not context.has_rust_analyzer
-		end,
-	},
-	{ name = "taplo", mason = true },
-	{ name = "vtsls", mason = true },
-	{ name = "yamlls", mason = true },
-	{
-		name = "plantuml_lsp",
-		mason = false,
-		enabled = function(context)
-			return context.has_plantuml_lsp
-		end,
-	},
+	{ name = "bashls", package = "bash-language-server" },
+	{ name = "clangd", package = "clangd" },
+	{ name = "cmake", package = "cmake-language-server" },
+	{ name = "docker_language_server", package = "docker-language-server" },
+	{ name = "gopls", package = "gopls" },
+	{ name = "jsonls", package = "json-lsp" },
+	{ name = "lemminx", package = "lemminx" },
+	{ name = "lua_ls", package = "lua-language-server" },
+	{ name = "marksman", package = "marksman" },
+	{ name = "pyright", package = "pyright" },
+	{ name = "ruff", package = "ruff" },
+	{ name = "rust_analyzer", package = "rust-analyzer" },
+	{ name = "taplo", package = "taplo" },
+	{ name = "vtsls", package = "vtsls" },
+	{ name = "yamlls", package = "yaml-language-server" },
 }
 
-M.mason_tools = {
-	"codelldb",
-	"clang-format",
-	"debugpy",
-	"delve",
-	"gofumpt",
-	"goimports",
-	"hadolint",
-	"jq",
-	"markdownlint-cli2",
-	"prettierd",
-	"shellcheck",
-	"shfmt",
-	"stylua",
-}
-
-local function selected(value, context, default)
-	if value == nil then
-		return default
-	end
-	if type(value) == "function" then
-		return value(context)
-	end
-	return value
-end
-
-function M.ensure_installed(context)
-	context = context or {}
+function M.enabled_servers()
 	local names = {}
 	for _, server in ipairs(M.servers) do
-		if selected(server.mason, context, false) then
-			names[#names + 1] = server.name
-		end
+		names[#names + 1] = server.name
 	end
 	return names
 end
 
-function M.enabled_servers(context)
-	context = context or {}
-	local names = {}
+function M.mason_package(server_name)
 	for _, server in ipairs(M.servers) do
-		if selected(server.enabled, context, true) then
-			names[#names + 1] = server.name
+		if server.name == server_name then
+			return server.package
 		end
 	end
-	return names
+	return nil
 end
 
 return M

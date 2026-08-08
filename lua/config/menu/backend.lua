@@ -55,11 +55,37 @@ function Adapter:_menu()
 	return menu
 end
 
+local function displayed(buf)
+	return type(buf) == "number" and vim.api.nvim_buf_is_valid(buf) and #vim.fn.win_findbuf(buf) > 0
+end
+
+local function clear_stale_state(state)
+	if type(state) ~= "table" or type(state.bufids) ~= "table" then
+		return
+	end
+	for _, buf in ipairs(state.bufids) do
+		if type(buf) == "number" and vim.api.nvim_buf_is_valid(buf) and not displayed(buf) then
+			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		end
+	end
+	state.bufids = {}
+	state.bufs = {}
+	state.nested_menu = ""
+end
+
 ---Whether a menu.nvim buffer is currently displayed.
 ---@return boolean
 function Adapter:is_open()
 	local state = self:_optional("menu.state")
-	return state ~= nil and type(state.bufids) == "table" and #state.bufids > 0
+	if state == nil or type(state.bufids) ~= "table" then
+		return false
+	end
+	for _, buf in ipairs(state.bufids) do
+		if displayed(buf) then
+			return true
+		end
+	end
+	return false
 end
 
 ---Close all menu.nvim buffers through its private compatibility seam.
@@ -85,6 +111,9 @@ function Adapter:show(sections, options)
 
 	local state = self:_optional("menu.state")
 	if state then
+		if not self:is_open() then
+			clear_stale_state(state)
+		end
 		state.config = nil
 	end
 	menu.open(M.render(sections), options)

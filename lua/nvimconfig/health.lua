@@ -4,20 +4,87 @@ local M = {}
 local health = vim.health
 local uv = vim.uv
 local toolchain = require("config.toolchain")
+local tool_paths = require("config.tool_paths")
 
 local function version_string()
 	local version = vim.version()
 	return ("%d.%d.%d"):format(version.major, version.minor, version.patch)
 end
 
-local function check_tool(name, feature, install, required)
+local function normalized(path)
+	return vim.fs.normalize(vim.fn.expand(path))
+end
+
+local function split_path(value)
+	return vim.split(value or "", ":", { plain = true, trimempty = true })
+end
+
+local function local_path_set()
+	local configured = require("config.local_config").get("path", {}) or {}
+	local result = {}
+	for _, path in ipairs(configured) do
+		result[normalized(path)] = true
+	end
+	return result
+end
+
+local function path_origin(path, configured)
+	path = normalized(path)
+	local function within(root)
+		root = root:gsub("/+$", "")
+		return path == root or path:sub(1, #root + 1) == root .. "/"
+	end
+	for root in pairs(configured) do
+		if within(root) then
+			return "local_config", 1
+		end
+	end
+	if within(normalized("~/.local/bin")) then
+		return "user-local", 2
+	end
+	if tool_paths.is_managed_path(path) then
+		return "managed", 4
+	end
+	if tool_paths.is_mason_path(path) then
+		return "mason", 5
+	end
+	return "host", 3
+end
+
+local function check_path_order()
+	local configured = local_path_set()
+	local previous_rank = 0
+	local ordered = true
+	health.info(
+		"PATH precedence contract: local_config.path > ~/.local/bin > inherited host PATH > managed tools > Mason"
+	)
+	for index, path in ipairs(split_path(vim.env.PATH)) do
+		local origin, rank = path_origin(path, configured)
+		health.info(("PATH[%02d] %-12s %s"):format(index, origin, normalized(path)))
+		if rank < previous_rank then
+			ordered = false
+		end
+		previous_rank = math.max(previous_rank, rank)
+	end
+	if ordered then
+		health.ok("PATH segments follow the configured precedence")
+	else
+		health.warn(
+			"PATH contains an origin after a lower-precedence segment; restart after reviewing local_config.path"
+		)
+	end
+	return configured
+end
+
+local function check_tool(name, feature, install, required, configured)
 	local path = vim.fn.exepath(name)
 	if path ~= "" then
-		health.ok(("%s available for %s: %s"):format(name, feature, path))
+		local origin = path_origin(path, configured or local_path_set())
+		health.ok(("%s available for %s (%s): %s"):format(name, feature, origin, path))
 		return true
 	end
 
-	local message = ("%s is missing (%s). Install: %s"):format(name, feature, install)
+	local message = ("%s is missing (%s). %s"):format(name, feature, install)
 	if required then
 		health.error(message)
 	else
@@ -35,11 +102,11 @@ local function has_exact_line(output, expected)
 	return false
 end
 
-local function check_validation_tool(name, args, expected_line)
+local function check_validation_tool(name, args, expected_line, configured)
 	local path = vim.fn.exepath(name)
-	local install = "scripts/install-ci-tools /absolute/path/to/bin"
+	local install = "Run: scripts/install-ci-tools /absolute/path/to/bin"
 	if path == "" then
-		health.warn(("%s is missing; reproducible validation will fail. Install: %s"):format(name, install))
+		health.warn(("%s is missing; reproducible validation will fail. %s"):format(name, install))
 		return
 	end
 
@@ -47,16 +114,11 @@ local function check_validation_tool(name, args, expected_line)
 	vim.list_extend(command, args)
 	local result = vim.system(command, { text = true }):wait(5000)
 	local output = (result.stdout or "") .. (result.stderr or "")
+	local origin = path_origin(path, configured)
 	if result.code == 0 and has_exact_line(output, expected_line) then
-		health.ok(("%s matches the validation pin at %s: %s"):format(name, path, expected_line))
+		health.ok(("%s matches the validation pin (%s): %s"):format(name, origin, expected_line))
 	else
-		health.warn(
-			("%s does not match the required validation version %q. Reinstall with: %s"):format(
-				path,
-				expected_line,
-				install
-			)
-		)
+		health.warn(("%s does not match required version %q. %s"):format(path, expected_line, install))
 	end
 end
 
@@ -112,7 +174,219 @@ local function check_profile()
 	end
 end
 
-local function check_validation_contract()
+local function joined_pins(order, entries)
+	local pins = {}
+	for _, name in ipairs(order) do
+		pins[#pins + 1] = toolchain.identity(name, entries[name])
+	end
+	return table.concat(pins, ", ")
+end
+
+local function state_summary(label, order, entries)
+	local tool_state = require("config.tool_state")
+	local grouped = {}
+	for _, name in ipairs(order) do
+		local entry = entries[name]
+		local record, reason = tool_state.inspect(name, entry.version)
+		local status = record and record.status or reason
+		local identity = toolchain.identity(name, entry)
+		if record and type(record.detail) == "string" and record.detail ~= "" then
+			local detail = record.detail:gsub("[%c]", " "):sub(1, 160)
+			identity = identity .. " (" .. detail .. ")"
+		end
+		grouped[status] = grouped[status] or {}
+		grouped[status][#grouped[status] + 1] = identity
+	end
+	local parts = {}
+	for _, status in ipairs({
+		"succeeded",
+		"failed",
+		"installing",
+		"claimed",
+		"locked",
+		"corrupt",
+		"unreadable",
+		"absent",
+	}) do
+		if grouped[status] then
+			parts[#parts + 1] = status .. "=[" .. table.concat(grouped[status], ", ") .. "]"
+		end
+	end
+	health.info(label .. " one-shot state: " .. table.concat(parts, "; "))
+	if grouped.failed then
+		health.warn(
+			label
+				.. " automatic failures will not retry; inspect the reason above, then use the documented manual command"
+		)
+	end
+	if grouped.corrupt or grouped.unreadable then
+		health.warn(
+			label .. " has unsafe one-shot records; use a manual command only after inspecting " .. tool_state.root()
+		)
+	end
+end
+
+local function mason_receipt_status(name, expected)
+	local receipt = vim.fs.joinpath(tool_paths.mason_root(), "packages", name, "mason-receipt.json")
+	if vim.fn.filereadable(receipt) ~= 1 then
+		return "missing"
+	end
+	local ok, lines = pcall(vim.fn.readfile, receipt)
+	if not ok then
+		return "corrupt"
+	end
+	local decoded_ok, value = pcall(vim.json.decode, table.concat(lines, "\n"))
+	local source_id = decoded_ok and type(value) == "table" and type(value.source) == "table" and value.source.id
+	if type(source_id) ~= "string" then
+		return "corrupt"
+	end
+	local actual = source_id:match("@([^@]+)$")
+	if not actual or actual == "" then
+		return "corrupt"
+	end
+	return actual == expected and "exact" or "wrong", actual
+end
+
+local function check_mason_receipts()
+	local grouped = { exact = {}, wrong = {}, missing = {}, corrupt = {} }
+	for _, name in ipairs(toolchain.mason_order) do
+		local entry = toolchain.mason_tools[name]
+		local status, actual = mason_receipt_status(name, entry.version)
+		local label = toolchain.identity(name, entry)
+		if status == "wrong" then
+			label = label .. " (installed " .. actual .. ")"
+		end
+		grouped[status][#grouped[status] + 1] = label
+	end
+	for _, status in ipairs({ "exact", "wrong", "missing", "corrupt" }) do
+		if #grouped[status] > 0 then
+			local message = "Mason receipts " .. status .. ": " .. table.concat(grouped[status], ", ")
+			if status == "wrong" or status == "corrupt" then
+				health.warn(message)
+			else
+				health.info(message)
+			end
+		end
+	end
+end
+
+local function check_managed_release_eligibility()
+	local release = require("config.release_installer")
+	local results = {}
+	for _, name in ipairs(toolchain.managed_order) do
+		local entry = toolchain.managed_tools[name]
+		local plan, reason = release.plan(name, { force = true })
+		results[#results + 1] = toolchain.identity(name, entry) .. "=" .. (plan and plan.target or reason)
+	end
+	health.info("Managed release platform/prerequisites: " .. table.concat(results, ", "))
+end
+
+local python_venv = {}
+local function missing_requirements(entry)
+	local missing = {}
+	for _, executable in ipairs(entry.requires_all or {}) do
+		if not tool_paths.external_executable(executable) then
+			missing[#missing + 1] = executable
+		end
+	end
+
+	local selected
+	if entry.requires_any then
+		for _, executable in ipairs(entry.requires_any) do
+			selected = tool_paths.external_executable(executable)
+			if selected then
+				break
+			end
+		end
+		if not selected then
+			missing[#missing + 1] = table.concat(entry.requires_any, "|")
+		end
+	end
+
+	if entry.requires_python_venv and selected then
+		if python_venv[selected] == nil then
+			local result = vim.system({ selected, "-c", "import venv" }, { text = true }):wait(5000)
+			python_venv[selected] = result.code == 0
+		end
+		if not python_venv[selected] then
+			missing[#missing + 1] = "python-venv"
+		end
+	end
+	return missing
+end
+
+local function check_mason_inventory()
+	local managers = { prebuilt = {}, npm = {}, go = {}, pypi = {} }
+	local blocked = {}
+	local runtime_limited = {}
+	for _, name in ipairs(toolchain.mason_order) do
+		local entry = toolchain.mason_tools[name]
+		managers[entry.manager][#managers[entry.manager] + 1] = toolchain.identity(name, entry)
+		local missing = missing_requirements(entry)
+		if #missing > 0 then
+			blocked[#blocked + 1] = name .. " (" .. table.concat(missing, "+") .. ")"
+		end
+		local runtime_missing = {}
+		for _, executable in ipairs(entry.runtime_requires_all or {}) do
+			if not tool_paths.external_executable(executable) then
+				runtime_missing[#runtime_missing + 1] = executable
+			end
+		end
+		if #runtime_missing > 0 then
+			runtime_limited[#runtime_limited + 1] = name .. " (" .. table.concat(runtime_missing, "+") .. ")"
+		end
+	end
+	for _, manager in ipairs({ "prebuilt", "npm", "go", "pypi" }) do
+		health.info(("Mason %-8s %s"):format(manager .. ":", table.concat(managers[manager], ", ")))
+	end
+	if #blocked == 0 then
+		health.ok("All declared Mason installer prerequisites are available")
+	else
+		health.warn("One-shot Mason skips tools blocked by host prerequisites: " .. table.concat(blocked, ", "))
+	end
+	if #runtime_limited > 0 then
+		health.warn(
+			"Prebuilt tools can be installed but are not usable without runtime prerequisites: "
+				.. table.concat(runtime_limited, ", ")
+		)
+	end
+end
+
+local function check_acp(configured)
+	local config = require("config.local_config").get("codecompanion", {}) or {}
+	if type(config.acp_command) == "table" and #config.acp_command > 0 then
+		check_tool(
+			config.acp_command[1],
+			"CodeCompanion ACP override",
+			"Fix codecompanion.acp_command.",
+			false,
+			configured
+		)
+		return
+	end
+	local host = tool_paths.external_executable("claude-agent-acp")
+	if host then
+		health.ok("CodeCompanion uses the host claude-agent-acp: " .. host)
+		return
+	end
+	local npx = tool_paths.external_executable("npx")
+	local node = tool_paths.external_executable("node")
+	if not npx or not node then
+		health.warn("CodeCompanion fallback needs host Node.js 22+ with npx, or codecompanion.acp_command")
+		return
+	end
+	local result = vim.system({ node, "--version" }, { text = true }):wait(5000)
+	local major = tonumber(((result.stdout or "") .. (result.stderr or "")):match("v?(%d+)%."))
+	if result.code == 0 and major and major >= 22 then
+		health.ok(("CodeCompanion can use npx with Node %d for ACP %s"):format(major, toolchain.versions.claude_acp))
+	else
+		health.warn(
+			"CodeCompanion npx fallback requires Node.js 22+; configure codecompanion.acp_command to override it"
+		)
+	end
+end
+
+local function check_validation_contract(configured)
 	local root = config_root()
 	local lockfile = vim.fs.joinpath(root, "lazy-lock.json")
 	if vim.fn.filereadable(lockfile) == 1 then
@@ -129,16 +403,11 @@ local function check_validation_contract()
 			health.error("validation entrypoint is missing or not executable: " .. path)
 		end
 	end
-	check_validation_tool("stylua", { "--version" }, "stylua " .. toolchain.versions.stylua)
-	check_validation_tool("shellcheck", { "--version" }, "version: " .. toolchain.versions.shellcheck)
-	check_validation_tool("actionlint", { "-version" }, "v" .. toolchain.versions.actionlint)
-	health.info(
-		("Feature installer pins: Claude ACP %s, mmdflux %s, plantuml-lsp %s"):format(
-			toolchain.versions.claude_acp,
-			toolchain.versions.mmdflux,
-			toolchain.versions.plantuml_lsp
-		)
-	)
+	check_validation_tool("stylua", { "--version" }, "stylua " .. toolchain.versions.stylua, configured)
+	check_validation_tool("shellcheck", { "--version" }, "version: " .. toolchain.versions.shellcheck, configured)
+	check_validation_tool("actionlint", { "-version" }, toolchain.versions.actionlint, configured)
+	check_validation_tool("tree-sitter", { "--version" }, "tree-sitter " .. toolchain.versions.tree_sitter, configured)
+	check_tool("cc", "Tree-sitter parser compilation", "Install a host C compiler.", true, configured)
 end
 
 local function check_undo()
@@ -163,7 +432,7 @@ local function check_undo()
 	local legacy = vim.fs.joinpath(config_root(), ".undodir")
 	if uv.fs_stat(legacy) then
 		health.warn(
-			("Legacy undo directory still exists at %s. It is no longer active; review it and remove it manually when no longer needed."):format(
+			("Legacy undo directory still exists at %s. It is no longer active; review and remove it manually when no longer needed."):format(
 				legacy
 			)
 		)
@@ -188,39 +457,58 @@ function M.check()
 	else
 		health.error("Neovim " .. version_string() .. " is unsupported; install Neovim 0.12 or newer")
 	end
-	check_tool("git", "lazy.nvim bootstrap and Git workflows", "Git from https://git-scm.com", true)
+	local configured = check_path_order()
+	check_tool(
+		"git",
+		"lazy.nvim bootstrap and Git workflows",
+		"Install Git from https://git-scm.com.",
+		true,
+		configured
+	)
 	check_profile()
 
+	health.start("Pinned tool bootstrap")
+	health.info("Managed release pins: " .. joined_pins(toolchain.managed_order, toolchain.managed_tools))
+	health.info("Mason exact pins: " .. joined_pins(toolchain.mason_order, toolchain.mason_tools))
+	local auto_install = require("config.local_config").get("mason", {}).auto_install ~= false
+	if auto_install then
+		health.ok("Automatic exact-pin bootstrap is enabled; every name@version is attempted at most once")
+	else
+		health.info("Automatic exact-pin bootstrap is disabled by mason.auto_install=false")
+	end
+	state_summary("Managed", toolchain.managed_order, toolchain.managed_tools)
+	state_summary("Mason", toolchain.mason_order, toolchain.mason_tools)
+	check_managed_release_eligibility()
+	check_mason_receipts()
+	health.info("Retry managed releases with :NvimConfigToolsInstall[!] [all|mmdflux|gofumpt|plantuml]")
+	health.info("Retry exact Mason pins with :MasonToolsInstallSync")
+	check_mason_inventory()
+
 	health.start("Optional feature dependencies")
+	check_tool("mmdflux", "Mermaid ASCII/SVG rendering", "Run :NvimConfigToolsInstall mmdflux.", false, configured)
+	check_tool("plantuml", "PlantUML ASCII/SVG rendering", "Run :NvimConfigToolsInstall plantuml.", false, configured)
+	check_tool("gofumpt", "Go formatting", "Run :NvimConfigToolsInstall gofumpt.", false, configured)
 	check_tool(
-		"mmdflux",
-		"Mermaid ASCII/SVG rendering",
-		"cargo install mmdflux --version " .. toolchain.versions.mmdflux .. " --locked",
-		false
+		"rsvg-convert",
+		"SVG diagram rasterization",
+		"Install librsvg with the host package manager.",
+		false,
+		configured
 	)
-	check_tool("plantuml", "PlantUML ASCII/SVG rendering", "brew install plantuml", false)
-	check_tool("rsvg-convert", "SVG diagram rasterization", "brew install librsvg", false)
-	check_tool(
-		"plantuml-lsp",
-		"PlantUML language support",
-		"go install github.com/ptdewey/plantuml-lsp@" .. toolchain.versions.plantuml_lsp,
-		false
-	)
-	check_tool("hadolint", "Dockerfile linting", ":MasonInstall hadolint", false)
-	check_tool("markdownlint-cli2", "Markdown linting", ":MasonInstall markdownlint-cli2", false)
-	check_tool("debugpy-adapter", "Python debugging", ":MasonInstall debugpy", false)
-	check_tool("codelldb", "C/C++ debugging", ":MasonInstall codelldb", false)
-	check_tool("npx", "CodeCompanion Claude ACP", "install Node.js/npm", false)
-	check_tool("jq", "JSON tree view", ":MasonInstall jq", false)
-	check_tool("nvimpager", "pager profile", "brew install nvimpager", false)
-	check_tool("devpod", "remote devcontainers", "brew install loft-sh/tap/devpod", false)
+	check_tool("nvimpager", "pager profile", "Install nvimpager with the host package manager.", false, configured)
+	check_tool("devpod", "remote devcontainers", "Install devpod with the host package manager.", false, configured)
+	check_acp(configured)
 	check_pager_profile()
 
 	health.start("Reproducible validation")
-	check_validation_contract()
+	check_validation_contract(configured)
 
 	health.start("Persistent undo")
 	check_undo()
 end
+
+-- Small test seam for origin classification; no filesystem or state mutation.
+M._path_origin = path_origin
+M._mason_receipt_status = mason_receipt_status
 
 return M

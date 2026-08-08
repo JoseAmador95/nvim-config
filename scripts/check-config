@@ -90,6 +90,14 @@ if [ -d .github/workflows ]; then
 		exit 1
 	fi
 fi
+if ! TREE_SITTER_BIN=$(find_tool tree-sitter); then
+	printf 'Required parser tool not found: tree-sitter %s\n' "$(toolchain_version tree_sitter)" >&2
+	exit 1
+fi
+if ! command -v cc >/dev/null 2>&1; then
+	printf '%s\n' 'Required parser compiler not found: cc' >&2
+	exit 1
+fi
 
 stylua_version=$(toolchain_version stylua)
 shellcheck_version=$(toolchain_version shellcheck)
@@ -97,8 +105,10 @@ require_version StyLua "$stylua_version" "stylua $stylua_version" "$STYLUA_BIN" 
 require_version ShellCheck "$shellcheck_version" "version: $shellcheck_version" "$SHELLCHECK_BIN" --version
 if [ -n "${ACTIONLINT_BIN:-}" ]; then
 	actionlint_version=$(toolchain_version actionlint)
-	require_version actionlint "$actionlint_version" "v$actionlint_version" "$ACTIONLINT_BIN" -version
+	require_version actionlint "$actionlint_version" "$actionlint_version" "$ACTIONLINT_BIN" -version
 fi
+tree_sitter_version=$(toolchain_version tree_sitter)
+require_version tree-sitter "$tree_sitter_version" "tree-sitter $tree_sitter_version" "$TREE_SITTER_BIN" --version
 
 check_timeout=${NVIM_CONFIG_CHECK_TIMEOUT:-90}
 run_check() {
@@ -164,7 +174,7 @@ run_pure_test ci_spec
 run_pure_test diagram_spec
 run_pure_test security_spec
 
-for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint_spec menu_spec toolchain_spec; do
+for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint_spec menu_spec tabs_spec toolchain_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec; do
 	run_pure_test "$pure_spec"
 done
 

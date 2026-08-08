@@ -49,7 +49,7 @@ jobs:
           path: |
             ${{ env.NVIM_CONFIG_XDG_ROOT }}/data
             ${{ runner.temp }}/nvim-config-tools
-          key: nvim-${{ runner.os }}-0.12.4-${{ hashFiles('lazy-lock.json', 'lua/plugins/treesitter.lua', 'lua/config/toolchain.lua') }}
+          key: nvim-${{ runner.os }}-${{ runner.arch }}-0.12.4-${{ hashFiles('lazy-lock.json', 'lua/plugins/treesitter.lua', 'lua/config/toolchain.lua') }}
 
       - name: Install pinned validation tools
         run: |
