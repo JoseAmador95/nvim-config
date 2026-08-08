@@ -41,6 +41,24 @@ function M.ensure_open()
 	backend:show(descriptors(current_context()), { border = true })
 end
 
+---Dismiss any displayed menu or recover stale menu.nvim state.
+---@return boolean
+function M.dismiss()
+	if not M.enabled() then
+		return false
+	end
+	return backend:close()
+end
+
+---Recover only stale state from an already-loaded menu.nvim instance.
+---@return boolean
+function M.recover_stale()
+	if not M.enabled() then
+		return false
+	end
+	return backend:recover_stale()
+end
+
 function M.open_context()
 	if not M.enabled() then
 		return
@@ -63,6 +81,15 @@ function M.setup()
 	end
 
 	vim.keymap.set({ "n", "v" }, "<RightMouse>", M.open_context, { desc = "Open menu" })
+
+	local group = vim.api.nvim_create_augroup("NvimConfigMenu", { clear = true })
+	vim.api.nvim_create_autocmd("TabClosed", {
+		group = group,
+		desc = "Recover menu state after an external tab close",
+		callback = function()
+			M.recover_stale()
+		end,
+	})
 end
 
 return M

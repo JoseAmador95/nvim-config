@@ -27,8 +27,13 @@ local function test(name, callback)
 end
 
 local menu_opens = 0
+local menu_dismisses = 0
 package.loaded["config.pager"] = { active = false }
 package.loaded["config.menu"] = {
+	dismiss = function()
+		menu_dismisses = menu_dismisses + 1
+		return true
+	end,
 	ensure_open = function()
 		menu_opens = menu_opens + 1
 	end,
@@ -70,6 +75,7 @@ local function reset_editor()
 	vim.cmd("enew!")
 	tabs.unmark_home(vim.api.nvim_get_current_tabpage())
 	menu_opens = 0
+	menu_dismisses = 0
 	notifications = {}
 end
 
@@ -114,6 +120,7 @@ test("closing the last work tab preserves its modified buffer and opens home", f
 	local remaining = vim.api.nvim_list_tabpages()
 	equal(1, #remaining, "last work close did not leave exactly one tab")
 	assert(tabs.is_home(remaining[1]), "remaining tab is not a pristine marked home")
+	equal(1, menu_dismisses, "current tab menu was not dismissed before close")
 	equal(1, menu_opens, "main menu did not open exactly once")
 end)
 
@@ -165,6 +172,7 @@ test("closing a non-current penultimate work tab focuses the existing home", fun
 	drain()
 	equal({ home }, vim.api.nvim_list_tabpages(), "penultimate close left extra tabs")
 	equal(home, vim.api.nvim_get_current_tabpage(), "home was not focused")
+	equal(0, menu_dismisses, "closing a non-current tab dismissed the current tab menu")
 	equal(1, menu_opens, "home menu did not open")
 end)
 

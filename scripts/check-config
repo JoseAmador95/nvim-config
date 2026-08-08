@@ -179,6 +179,7 @@ for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint
 done
 
 run_config_test startup_spec "$repo_root/tests/startup_spec.lua"
+run_config_test menu_lifecycle_spec "$repo_root/tests/menu_lifecycle_spec.lua"
 run_config_test tooling_spec "$repo_root/tests/tooling_spec.lua"
 run_config_test tooling_ui_spec "$repo_root/tests/tooling_ui_spec.lua"
 run_config_test dependency_spec "$repo_root/tests/dependency_spec.lua"

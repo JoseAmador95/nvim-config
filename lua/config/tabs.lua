@@ -169,6 +169,10 @@ function M.close(tabpage)
 		return true
 	end
 
+	if tabpage == vim.api.nvim_get_current_tabpage() then
+		require("config.menu").dismiss()
+	end
+
 	local original = vim.api.nvim_get_current_tabpage()
 	local landing
 	local landing_buf

@@ -185,6 +185,9 @@ test("backend adapter contains private menu.nvim state behind one seam", functio
 			end
 			error("unexpected module: " .. module)
 		end,
+		loaded = function(module)
+			return modules[module]
+		end,
 		notify = function() end,
 	})
 
@@ -243,6 +246,108 @@ test("backend adapter contains private menu.nvim state behind one seam", functio
 	end
 end)
 
+test("backend close recovers hidden mouse menus without deleting unrelated mappings", function()
+	local backend = require("config.menu.backend")
+	local state = { bufids = {}, bufs = {}, config = nil, nested_menu = "" }
+	local unsafe_closes = 0
+	local plugin_callback
+	local menu = {
+		open = function(_, options)
+			state.config = options
+			plugin_callback = function() end
+			vim.keymap.set("n", "<LeftMouse>", plugin_callback)
+		end,
+	}
+	local modules = {
+		menu = menu,
+		["menu.state"] = state,
+		["menu.utils"] = {
+			delete_old_menus = function()
+				unsafe_closes = unsafe_closes + 1
+			end,
+		},
+	}
+	local adapter = backend.new({
+		require = function(module)
+			if modules[module] then
+				return modules[module]
+			end
+			error("unexpected module: " .. module)
+		end,
+		loaded = function(module)
+			return modules[module]
+		end,
+		notify = function() end,
+	})
+
+	assert(adapter:show({}, { mouse = true }), "mouse menu fixture did not open")
+	equal(plugin_callback, vim.fn.maparg("<LeftMouse>", "n", false, true).callback, "mouse mapping ownership")
+	local stale_buf = vim.api.nvim_create_buf(false, true)
+	local displayed_buf = vim.api.nvim_create_buf(false, true)
+	local displayed_win = vim.api.nvim_open_win(displayed_buf, false, {
+		relative = "editor",
+		width = 1,
+		height = 1,
+		row = 0,
+		col = 0,
+		style = "minimal",
+	})
+	state.bufids = { displayed_buf }
+	state.bufs[displayed_buf] = { stale = true }
+	assert(not adapter:recover_stale(), "recovery closed a fully displayed mouse menu")
+	assert(vim.api.nvim_buf_is_valid(displayed_buf), "displayed menu buffer was deleted")
+	equal(plugin_callback, vim.fn.maparg("<LeftMouse>", "n", false, true).callback, "displayed mouse mapping")
+
+	state.bufids = { stale_buf, displayed_buf }
+	state.bufs[stale_buf] = { stale = true }
+	state.nested_menu = "stale"
+
+	assert(adapter:recover_stale(), "hidden mouse menu did not recover")
+	equal(0, unsafe_closes, "hidden menu invoked menu.nvim's unsafe close helper")
+	assert(not vim.api.nvim_buf_is_valid(stale_buf), "hidden stale menu buffer remains valid")
+	assert(not vim.api.nvim_buf_is_valid(displayed_buf), "mixed stale menu buffer remains valid")
+	assert(not vim.api.nvim_win_is_valid(displayed_win), "mixed stale menu window remains valid")
+	equal({}, state.bufids, "hidden close retained buffer ids")
+	equal({}, state.bufs, "hidden close retained buffer metadata")
+	assert(state.config == nil, "hidden close retained menu config")
+	equal("", state.nested_menu, "hidden close retained nested-menu state")
+	assert(vim.fn.maparg("<LeftMouse>", "n", false, true).lhs == nil, "owned mouse mapping was not removed")
+	assert(adapter:close(), "repeated hidden close was not idempotent")
+	equal(0, unsafe_closes, "idempotent close invoked the unsafe helper")
+
+	assert(adapter:show({}, { mouse = true }), "second mouse menu fixture did not open")
+	local unrelated_callback = function() end
+	vim.keymap.set("n", "<LeftMouse>", unrelated_callback)
+	local second_stale_buf = vim.api.nvim_create_buf(false, true)
+	state.bufids = { second_stale_buf }
+	state.bufs[second_stale_buf] = { stale = true }
+	assert(adapter:close(), "second hidden menu did not close")
+	equal(
+		unrelated_callback,
+		vim.fn.maparg("<LeftMouse>", "n", false, true).callback,
+		"hidden recovery deleted an unrelated replacement mapping"
+	)
+	vim.keymap.del("n", "<LeftMouse>")
+end)
+
+test("stale recovery and dismiss do not load menu.nvim", function()
+	local requires = 0
+	local adapter = require("config.menu.backend").new({
+		require = function()
+			requires = requires + 1
+			error("menu.nvim must not load")
+		end,
+		loaded = function()
+			return nil
+		end,
+		notify = function() end,
+	})
+
+	assert(not adapter:recover_stale(), "absent menu state was reported as recovered")
+	assert(not adapter:close(), "absent menu state was reported as closed")
+	equal(0, requires, "stale recovery or dismiss attempted to require menu.nvim")
+end)
+
 test("ensure_open is idempotent while open remains a toggle", function()
 	local backend_module = require("config.menu.backend")
 	local original_default = backend_module.default
@@ -261,7 +366,9 @@ test("ensure_open is idempotent while open remains a toggle", function()
 			return true
 		end,
 		close = function()
-			closes = closes + 1
+			if open then
+				closes = closes + 1
+			end
 			open = false
 			return true
 		end,
@@ -281,6 +388,9 @@ test("ensure_open is idempotent while open remains a toggle", function()
 		equal(0, closes, "ensure_open closed an existing menu")
 		menu.open()
 		equal(1, closes, "open stopped behaving as a toggle")
+		menu.dismiss()
+		menu.dismiss()
+		equal(1, closes, "dismiss was not idempotent")
 	end, debug.traceback)
 
 	backend_module.default = original_default

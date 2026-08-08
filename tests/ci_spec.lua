@@ -51,5 +51,6 @@ local gate = read_file(repo .. "/scripts/check-config")
 assert(gate:find("TREE_SITTER_BIN", 1, true), "canonical gate does not validate tree-sitter")
 assert(gate:find("command -v cc", 1, true), "canonical gate does not require cc")
 assert(gate:find("tool_paths_spec", 1, true), "canonical gate omits tool_paths_spec")
+assert(gate:find("menu_lifecycle_spec", 1, true), "canonical gate omits the real menu lifecycle regression")
 
 print("ci_spec: workflow, prebuilt validators, parser preflight, and offline gate match the manifest")

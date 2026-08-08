@@ -37,6 +37,10 @@ function Adapter:_optional(module)
 	return nil
 end
 
+function Adapter:_loaded(module)
+	return self.loaded(module)
+end
+
 function Adapter:_menu()
 	local menu = self:_optional("menu")
 	if menu then
@@ -64,13 +68,55 @@ local function clear_stale_state(state)
 		return
 	end
 	for _, buf in ipairs(state.bufids) do
-		if type(buf) == "number" and vim.api.nvim_buf_is_valid(buf) and not displayed(buf) then
+		if type(buf) == "number" and vim.api.nvim_buf_is_valid(buf) then
 			pcall(vim.api.nvim_buf_delete, buf, { force = true })
 		end
 	end
 	state.bufids = {}
 	state.bufs = {}
+	state.config = nil
 	state.nested_menu = ""
+end
+
+local function all_displayed(state)
+	if type(state) ~= "table" or type(state.bufids) ~= "table" or #state.bufids == 0 then
+		return false
+	end
+	for _, buf in ipairs(state.bufids) do
+		if not displayed(buf) then
+			return false
+		end
+	end
+	return true
+end
+
+local function left_mouse_mapping()
+	local mapping = vim.fn.maparg("<LeftMouse>", "n", false, true)
+	if type(mapping) ~= "table" or type(mapping.callback) ~= "function" then
+		return nil
+	end
+	return mapping.callback
+end
+
+function Adapter:_remember_mouse_mapping()
+	self.mouse_mapping = left_mouse_mapping()
+end
+
+function Adapter:_clear_owned_mouse_mapping()
+	local owned = self.mouse_mapping
+	self.mouse_mapping = nil
+	if owned and left_mouse_mapping() == owned then
+		pcall(vim.keymap.del, "n", "<LeftMouse>")
+	end
+end
+
+function Adapter:_recover_state(state)
+	if not state or all_displayed(state) then
+		return false
+	end
+	clear_stale_state(state)
+	self:_clear_owned_mouse_mapping()
+	return true
 end
 
 ---Whether a menu.nvim buffer is currently displayed.
@@ -91,12 +137,30 @@ end
 ---Close all menu.nvim buffers through its private compatibility seam.
 ---@return boolean
 function Adapter:close()
+	local state = self:_loaded("menu.state")
+	if not state then
+		return false
+	end
+	if self:_recover_state(state) then
+		return true
+	end
+
 	local utils = self:_optional("menu.utils")
 	if not utils or type(utils.delete_old_menus) ~= "function" then
 		return false
 	end
-	utils.delete_old_menus()
+	local ok, error_message = pcall(utils.delete_old_menus)
+	self:_clear_owned_mouse_mapping()
+	if not ok then
+		error(error_message, 0)
+	end
 	return true
+end
+
+---Clear only already-loaded stale menu state without activating menu.nvim.
+---@return boolean
+function Adapter:recover_stale()
+	return self:_recover_state(self:_loaded("menu.state"))
 end
 
 ---Open rendered descriptors after resetting menu.nvim's cached config.
@@ -113,19 +177,26 @@ function Adapter:show(sections, options)
 	if state then
 		if not self:is_open() then
 			clear_stale_state(state)
+			self:_clear_owned_mouse_mapping()
 		end
 		state.config = nil
 	end
 	menu.open(M.render(sections), options)
+	if options.mouse then
+		self:_remember_mouse_mapping()
+	end
 	return true
 end
 
----@param options? { require?: fun(module: string): any, notify?: fun(message: string, level?: integer) }
+---@param options? { require?: fun(module: string): any, loaded?: fun(module: string): any, notify?: fun(message: string, level?: integer) }
 ---@return table
 function M.new(options)
 	options = options or {}
 	return setmetatable({
 		require = options.require or require,
+		loaded = options.loaded or function(module)
+			return package.loaded[module]
+		end,
 		notify = options.notify or default_notify,
 	}, Adapter)
 end
