@@ -75,6 +75,110 @@ class DevPodLauncherTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.DevPodError, "outside"):
             MODULE.discover_config(self.root, "../devcontainer.json")
 
+    def test_targetarch_overlay_is_private_and_preserves_project(self):
+        config = self.root / ".devcontainer/devcontainer.json"
+        config.parent.mkdir()
+        config.write_text(
+            json.dumps(
+                {
+                    "build": {
+                        "context": ".",
+                        "dockerfile": "Dockerfile",
+                        "args": {"KEEP": "yes"},
+                    },
+                    "remoteUser": "dev",
+                }
+            ),
+            encoding="utf-8",
+        )
+        dockerfile = config.parent / "Dockerfile"
+        dockerfile.write_text(
+            "FROM alpine AS base-arm64\nARG TARGETARCH\nFROM base-$TARGETARCH AS final\n",
+            encoding="utf-8",
+        )
+        before = config.read_bytes()
+        state = MODULE.ensure_dir(self.root / "state")
+        with mock.patch.object(MODULE.platform, "machine", return_value="arm64"):
+            effective, identity = MODULE.compatibility_config(
+                state, self.root.resolve(), ".devcontainer/devcontainer.json"
+            )
+        overlay = (self.root / effective).resolve(strict=True)
+        value = json.loads(overlay.read_text(encoding="utf-8"))
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(value["build"]["args"], {"KEEP": "yes", "TARGETARCH": "arm64"})
+        self.assertEqual((overlay.parent / value["build"]["context"]).resolve(), config.parent.resolve())
+        private_dockerfile = overlay.parent / value["build"]["dockerfile"]
+        self.assertNotEqual(private_dockerfile.resolve(), dockerfile.resolve())
+        self.assertIn("ARG TARGETARCH\nFROM alpine", private_dockerfile.read_text(encoding="utf-8"))
+        self.assertEqual(
+            dockerfile.read_text(encoding="utf-8"),
+            "FROM alpine AS base-arm64\nARG TARGETARCH\nFROM base-$TARGETARCH AS final\n",
+        )
+        self.assertIn("TARGETARCH=arm64", identity)
+        self.assertEqual(stat.S_IMODE(overlay.stat().st_mode), 0o600)
+
+    def test_explicit_targetarch_and_global_arg_need_no_overlay(self):
+        config = self.root / ".devcontainer/devcontainer.json"
+        config.parent.mkdir()
+        config.write_text(
+            json.dumps({"build": {"dockerfile": "Dockerfile", "args": {"TARGETARCH": "custom"}}}),
+            encoding="utf-8",
+        )
+        (config.parent / "Dockerfile").write_text(
+            "ARG TARGETARCH\nFROM base-$TARGETARCH\n", encoding="utf-8"
+        )
+        path, identity = MODULE.compatibility_config(
+            MODULE.ensure_dir(self.root / "state"),
+            self.root.resolve(),
+            ".devcontainer/devcontainer.json",
+        )
+        self.assertEqual(path, ".devcontainer/devcontainer.json")
+        self.assertEqual(identity, path)
+
+    def test_jsonc_config_preserves_devpod_native_handling(self):
+        config = self.root / ".devcontainer/devcontainer.json"
+        config.parent.mkdir()
+        config.write_text(
+            '// DevPod accepts JSON with comments.\n{"image": "ubuntu:24.04",}\n',
+            encoding="utf-8",
+        )
+        path, identity = MODULE.compatibility_config(
+            MODULE.ensure_dir(self.root / "state"),
+            self.root.resolve(),
+            ".devcontainer/devcontainer.json",
+        )
+        self.assertEqual(path, ".devcontainer/devcontainer.json")
+        self.assertEqual(identity, path)
+
+    def test_missing_empty_credential_store_uses_private_docker_config(self):
+        docker = self.root / "docker"
+        docker.mkdir()
+        (docker / "config.json").write_text(
+            json.dumps({"auths": {}, "credsStore": "desktop"}), encoding="utf-8"
+        )
+        state = MODULE.ensure_dir(self.root / "state")
+        with mock.patch.dict(os.environ, {"DOCKER_CONFIG": str(docker)}), mock.patch.object(
+            MODULE.shutil, "which", return_value=None
+        ):
+            MODULE.configure_registry_environment(state)
+            private = pathlib.Path(os.environ["DOCKER_CONFIG"])
+            self.assertEqual(json.loads((private / "config.json").read_text(encoding="utf-8")), {"auths": {}})
+            self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
+
+    def test_missing_credential_store_does_not_discard_auths(self):
+        docker = self.root / "docker"
+        docker.mkdir()
+        (docker / "config.json").write_text(
+            json.dumps(
+                {"auths": {"registry.example": {"auth": "secret"}}, "credsStore": "desktop"}
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"DOCKER_CONFIG": str(docker)}), mock.patch.object(
+            MODULE.shutil, "which", return_value=None
+        ), self.assertRaisesRegex(MODULE.DevPodError, "contains registry credentials"):
+            MODULE.configure_registry_environment(MODULE.ensure_dir(self.root / "state"))
+
     def test_git_fingerprint_reports_lifecycle_mutation(self):
         before = MODULE.project_fingerprint(self.root)
         (self.root / "tracked.txt").write_text("changed\n", encoding="utf-8")
@@ -190,6 +294,57 @@ class DevPodLauncherTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(MODULE.DevPodError, "local built-in Docker provider"):
                 MODULE.ensure_context_provider(pathlib.Path("/tmp/devpod"), "podman")
+
+    def test_container_workspace_uses_the_exact_project_bind_mount(self):
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        ps = subprocess.CompletedProcess([], 0, b"abcdef012345\n", b"")
+        inspect = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                [
+                    {
+                        "Type": "bind",
+                        "Source": str(self.root.resolve()),
+                        "Destination": "/workspace/project",
+                    }
+                ]
+            ).encode(),
+            b"",
+        )
+        with mock.patch.object(
+            MODULE,
+            "json_command",
+            return_value=[{"id": "fixture", "uid": "fixture-123"}],
+        ), mock.patch.object(MODULE, "run", side_effect=[ps, inspect]), mock.patch.object(
+            MODULE, "container_command", return_value=completed
+        ):
+            destination = MODULE.container_workspace(
+                pathlib.Path("/tmp/devpod"),
+                "podman",
+                "fixture",
+                pathlib.Path("/tmp/podman"),
+                self.root.resolve(),
+            )
+        self.assertEqual(destination, "/workspace/project")
+
+    def test_container_workspace_rejects_an_unmapped_project(self):
+        ps = subprocess.CompletedProcess([], 0, b"abcdef012345\n", b"")
+        inspect = subprocess.CompletedProcess([], 0, b"[]", b"")
+        with mock.patch.object(
+            MODULE,
+            "json_command",
+            return_value=[{"id": "fixture", "uid": "fixture-123"}],
+        ), mock.patch.object(MODULE, "run", side_effect=[ps, inspect]), self.assertRaisesRegex(
+            MODULE.DevPodError, "no unique bind mount"
+        ):
+            MODULE.container_workspace(
+                pathlib.Path("/tmp/devpod"),
+                "podman",
+                "fixture",
+                pathlib.Path("/tmp/podman"),
+                self.root.resolve(),
+            )
 
     def test_live_editor_requires_the_single_editor_pane(self):
         completed = subprocess.CompletedProcess([], 0, b"editor\t1\n", b"")

@@ -25,6 +25,16 @@ Al entrar en el workflow, el contexto dedicado fija
 `SSH_AGENT_FORWARDING=false` y `GIT_SSH_SIGNATURE_FORWARDING=false`; crear el
 contexto no cambia permanentemente el contexto default que ya tenía el usuario.
 
+DevPod 0.6.15 no aplica por sí solo el build arg automático `TARGETARCH` al
+inspeccionar un Dockerfile con una etapa como `FROM base-$TARGETARCH`. Si el
+proyecto no declara ese arg en `build.args` y en el preámbulo del Dockerfile, el
+launcher genera un overlay privado y determinista bajo su estado, copia allí el
+Dockerfile, completa ambos valores y pasa la arquitectura efectiva (`arm64` o
+`amd64`) sin escribir en el repo. Un `credsStore` de
+Docker cuyo helper ya no existe se sustituye por una config privada vacía sólo
+si no contiene auths ni helpers por registro; credenciales existentes hacen que
+el flujo falle cerrado.
+
 ## Uso
 
 Desde el palette global de tmux (`Alt-Space`), elige `editor: DevPod`. También

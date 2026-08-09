@@ -20,6 +20,7 @@ import platform
 import plistlib
 import re
 import signal
+import shlex
 import shutil
 import socket
 import socketserver
@@ -40,6 +41,7 @@ NVIM_VERSION = "0.12.4"
 CONTEXT = "nvim-devpod"
 MAX_JSON = 64 * 1024
 MAX_RPC_OUTPUT = 1024 * 1024
+MAX_DOCKERFILE = 10 * 1024 * 1024
 STALE_SECONDS = 30 * 24 * 60 * 60
 PROVIDERS = {"docker", "podman"}
 GIT_ENV = {
@@ -108,26 +110,30 @@ def ensure_dir(path: pathlib.Path) -> pathlib.Path:
 
 def prepare_state() -> pathlib.Path:
     root = ensure_dir(state_root())
-    for name in ("bin", "downloads", "selections", "snapshots", "workspaces"):
+    for name in ("bin", "docker-config", "downloads", "overlays", "selections", "snapshots", "workspaces"):
         ensure_dir(root / name)
     prune(root)
     return root
 
 
 def atomic_json(path: pathlib.Path, value: dict) -> None:
-    ensure_dir(path.parent)
     payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
     if len(payload) > MAX_JSON:
         fail("private state record exceeds 64 KiB")
+    atomic_bytes(path, payload, 0o600)
+
+
+def atomic_bytes(path: pathlib.Path, payload: bytes, mode: int) -> None:
+    ensure_dir(path.parent)
     temp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
         with os.fdopen(fd, "wb", closefd=True) as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, path)
-        path.chmod(0o600)
+        path.chmod(mode)
     finally:
         try:
             temp.unlink()
@@ -148,7 +154,7 @@ def read_json(path: pathlib.Path) -> dict | None:
 
 def prune(root: pathlib.Path) -> None:
     cutoff = time.time() - STALE_SECONDS
-    for directory in (root / "workspaces", root / "snapshots"):
+    for directory in (root / "workspaces", root / "snapshots", root / "overlays"):
         if not directory.is_dir():
             continue
         for item in directory.iterdir():
@@ -269,6 +275,141 @@ def discover_config(root: pathlib.Path, requested: str | None) -> str:
     return unique[0].relative_to(root).as_posix()
 
 
+def configure_registry_environment(root: pathlib.Path) -> None:
+    """Avoid a stale, empty Docker Desktop credential store.
+
+    DevPod's registry client consults Docker's config even when the selected
+    local engine is Podman. An uninstalled credsStore helper prevents public
+    and already-local images from being inspected. It is safe to substitute
+    an empty private config only when the original config contains no auths or
+    per-registry helpers; otherwise fail rather than silently discard access.
+    """
+    configured = os.environ.get("DOCKER_CONFIG")
+    docker_dir = pathlib.Path(configured).expanduser() if configured else pathlib.Path.home() / ".docker"
+    config_path = docker_dir / "config.json"
+    if not config_path.exists():
+        return
+    value = read_json(config_path)
+    if value is None:
+        return
+    store = value.get("credsStore")
+    if not isinstance(store, str) or not store:
+        return
+    if shutil.which(f"docker-credential-{store}"):
+        return
+    auths = value.get("auths", {})
+    helpers = value.get("credHelpers", {})
+    if not isinstance(auths, dict) or auths or not isinstance(helpers, dict) or helpers:
+        fail(
+            f"Docker config requires missing docker-credential-{store} and contains registry credentials; "
+            "repair that helper before starting DevPod"
+        )
+    private = ensure_dir(root / "docker-config")
+    atomic_json(private / "config.json", {"auths": {}})
+    os.environ["DOCKER_CONFIG"] = str(private)
+
+
+def target_architecture() -> str:
+    architecture = platform.machine().lower()
+    if architecture in {"aarch64", "arm64"}:
+        return "arm64"
+    if architecture in {"amd64", "x86_64"}:
+        return "amd64"
+    fail(f"DevPod TARGETARCH compatibility is unavailable for host architecture {architecture!r}")
+
+
+def compatibility_config(root: pathlib.Path, repo: pathlib.Path, config: str) -> tuple[str, str]:
+    """Return DevPod's config path and a workspace-identity config key.
+
+    DevPod 0.6.15 resolves Dockerfile stage variables using devcontainer
+    build args before asking the local engine for the base image. Docker's
+    automatic TARGETARCH is otherwise absent at that point, so a final stage
+    such as `FROM base-$TARGETARCH` is misread as the remote image `base-`.
+    Materialize a private config overlay with the same effective TARGETARCH;
+    never write compatibility state into the project.
+    """
+    original = (repo / config).resolve(strict=True)
+    try:
+        payload = original.read_bytes()
+        text = payload.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        fail(f"cannot inspect devcontainer.json for DevPod compatibility: {error}")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        # DevPod accepts JSON-with-comments. Preserve that existing behavior;
+        # the private TARGETARCH workaround is deliberately limited to JSON
+        # that the stdlib parser can reproduce without changing semantics.
+        return config, config
+    if not isinstance(value, dict):
+        fail("devcontainer.json must contain a JSON object")
+    build = value.get("build")
+    if not isinstance(build, dict):
+        return config, config
+    dockerfile_value = build.get("dockerfile")
+    if not isinstance(dockerfile_value, str) or not dockerfile_value:
+        return config, config
+    config_dir = original.parent
+    dockerfile = (config_dir / dockerfile_value).resolve(strict=True)
+    if not contained(repo, dockerfile) or not dockerfile.is_file():
+        fail("devcontainer Dockerfile is outside the registered project")
+    try:
+        dockerfile_payload = dockerfile.read_bytes()
+        if len(dockerfile_payload) > MAX_DOCKERFILE:
+            fail("devcontainer Dockerfile exceeds 10 MiB")
+        dockerfile_text = dockerfile_payload.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        fail(f"cannot inspect devcontainer Dockerfile: {error}")
+    target_reference = re.compile(
+        r"^\s*FROM\s+\S*\$(?:\{TARGETARCH\}|TARGETARCH)\S*", re.IGNORECASE | re.MULTILINE
+    )
+    arguments = build.get("args", {})
+    if not isinstance(arguments, dict):
+        fail("devcontainer build.args must be an object")
+    if not target_reference.search(dockerfile_text):
+        return config, config
+
+    first_from = re.search(r"^\s*FROM\s+", dockerfile_text, re.IGNORECASE | re.MULTILINE)
+    if first_from is None:
+        fail("devcontainer Dockerfile has no FROM instruction")
+    preamble = dockerfile_text[: first_from.start()]
+    global_arg = re.search(r"^\s*ARG\s+TARGETARCH(?:\s*=.*)?$", preamble, re.IGNORECASE | re.MULTILINE)
+    if arguments.get("TARGETARCH") and global_arg:
+        return config, config
+
+    architecture = str(arguments.get("TARGETARCH") or target_architecture())
+    context_value = build.get("context", ".")
+    if not isinstance(context_value, str) or not context_value:
+        fail("devcontainer build.context must be a non-empty string")
+    context = (config_dir / context_value).resolve(strict=True)
+    if not contained(repo, context) or not context.is_dir():
+        fail("devcontainer build context is outside the registered project")
+
+    repo_key = hashlib.sha256(os.fsencode(str(repo))).hexdigest()
+    digest = hashlib.sha256(
+        payload + b"\0" + dockerfile_payload + b"\0TARGETARCH=" + architecture.encode()
+    ).hexdigest()
+    overlay_dir = ensure_dir(root / "overlays" / f"{repo_key}-{digest}").resolve(strict=True)
+    overlay = overlay_dir / "devcontainer.json"
+    effective = json.loads(json.dumps(value))
+    effective_build = effective["build"]
+    effective_args = dict(arguments)
+    effective_args.setdefault("TARGETARCH", architecture)
+    effective_build["args"] = effective_args
+    effective_build["context"] = os.path.relpath(context, overlay_dir)
+    effective_build["dockerfile"] = "Dockerfile"
+    if global_arg:
+        effective_dockerfile = dockerfile_text
+    else:
+        effective_dockerfile = dockerfile_text[: first_from.start()] + "ARG TARGETARCH\n" + dockerfile_text[first_from.start() :]
+    atomic_bytes(overlay_dir / "Dockerfile", effective_dockerfile.encode("utf-8"), 0o600)
+    atomic_json(overlay, effective)
+    os.utime(overlay_dir, None)
+    devpod_path = pathlib.Path(os.path.relpath(overlay, repo)).as_posix()
+    identity = f"{config}\0TARGETARCH={architecture}\0{digest}"
+    return devpod_path, identity
+
+
 def slug(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return (cleaned or "project")[:20]
@@ -376,7 +517,7 @@ def json_command(argv) -> object:
         fail(f"DevPod returned invalid JSON: {error}")
 
 
-def ensure_context_provider(binary: pathlib.Path, provider: str) -> None:
+def ensure_context_provider(binary: pathlib.Path, provider: str) -> pathlib.Path:
     contexts = json_command([binary, "context", "list", "--output", "json"])
     if isinstance(contexts, list):
         names = {item.get("name") for item in contexts if isinstance(item, dict)}
@@ -464,6 +605,57 @@ def ensure_context_provider(binary: pathlib.Path, provider: str) -> None:
     resolved_engine = shutil.which(engine) if engine else None
     if not resolved_engine or not pathlib.Path(resolved_engine).is_file() or not os.access(resolved_engine, os.X_OK):
         fail(f"provider {provider!r} does not resolve an executable local container engine")
+    return pathlib.Path(resolved_engine).resolve(strict=True)
+
+
+def container_workspace(binary, provider, workspace, engine: pathlib.Path, repo: pathlib.Path) -> str:
+    records = json_command(devpod_args(binary, provider, "list", "--output", "json"))
+    if not isinstance(records, list):
+        fail("DevPod returned an invalid workspace list")
+    record = next(
+        (item for item in records if isinstance(item, dict) and item.get("id") == workspace),
+        None,
+    )
+    uid = record.get("uid") if isinstance(record, dict) else None
+    if not isinstance(uid, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", uid):
+        fail("DevPod workspace has no valid container label UID")
+    listed = run([engine, "ps", "-aq", "--filter", f"label=dev.containers.id={uid}"])
+    containers = [line for line in listed.stdout.decode("utf-8", "strict").splitlines() if line]
+    if len(containers) != 1 or not re.fullmatch(r"[0-9a-fA-F]+", containers[0]):
+        fail("local provider did not return exactly one DevPod container")
+    inspected = run([engine, "inspect", "--format", "{{json .Mounts}}", containers[0]])
+    try:
+        mounts = json.loads(inspected.stdout.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        fail(f"local provider returned invalid mount metadata: {error}")
+    destinations = []
+    if isinstance(mounts, list):
+        for mount in mounts:
+            if not isinstance(mount, dict) or str(mount.get("Type", "")).lower() != "bind":
+                continue
+            source = mount.get("Source")
+            destination = mount.get("Destination")
+            if not isinstance(source, str) or not isinstance(destination, str):
+                continue
+            try:
+                source_path = pathlib.Path(source).resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if source_path == repo and destination.startswith("/") and "\n" not in destination:
+                destinations.append(destination)
+    if len(destinations) != 1:
+        fail("DevPod container has no unique bind mount for the registered project")
+    destination = destinations[0]
+    exists = container_command(
+        binary,
+        provider,
+        workspace,
+        f"test -d {shlex.quote(destination)}",
+        check=False,
+    )
+    if exists.returncode != 0:
+        fail("registered DevPod workspace path is not a directory")
+    return destination
 
 
 def manifest_digest(root: pathlib.Path) -> tuple[str, list[dict]]:
@@ -837,7 +1029,8 @@ def cmd_up(args):
     if provider not in PROVIDERS:
         fail("provider must be docker or podman")
     config = discover_config(repo, args.config or saved.get("devcontainer_path"))
-    repo_key, workspace = identities(repo, provider, config)
+    devpod_config, config_identity = compatibility_config(private, repo, config)
+    repo_key, workspace = identities(repo, provider, config_identity)
     atomic_json(
         private / "selections" / f"{repo_key}.json",
         {"version": VERSION, "repo_root": str(repo), "provider": provider, "devcontainer_path": config, "workspace": workspace},
@@ -846,8 +1039,9 @@ def cmd_up(args):
     if not allow_network and sys.stdin.isatty():
         answer = input("Allow a verified network download if this workspace needs its first bootstrap? [y/N] ")
         allow_network = answer.strip().lower() in {"y", "yes"}
+    configure_registry_environment(private)
     devpod = devpod_binary(private, allow_network)
-    ensure_context_provider(devpod, provider)
+    engine = ensure_context_provider(devpod, provider)
     snapshot = config_snapshot(private, args.experimental_dirty_config)
     before = project_fingerprint(repo)
     up = devpod_args(
@@ -858,7 +1052,7 @@ def cmd_up(args):
         "--id",
         workspace,
         "--devcontainer-path",
-        config,
+        devpod_config,
         "--ide",
         "none",
         "--open-ide=false",
@@ -872,7 +1066,7 @@ def cmd_up(args):
     after = project_fingerprint(repo)
     mutated = before != after
     require_cc(devpod, provider, workspace)
-    container_root = container_command(devpod, provider, workspace, "pwd").stdout.decode().strip()
+    container_root = container_workspace(devpod, provider, workspace, engine, repo)
     if not container_root.startswith("/") or "\n" in container_root:
         fail("DevPod returned an invalid container workspace path")
     provision_config(devpod, provider, workspace, snapshot, workspace)
