@@ -19,7 +19,7 @@
 --       transparent = false,
 --       italic_comments = true,
 --     },
---     clangd = { path = "clangd" },
+--     clangd = { path = "clangd", profile = "full" },
 --     mason = { auto_install = true },
 --     log_watch = { max_lines = 100000, max_bytes = 67108864 },
 --     diagram_cache = { max_age_seconds = 2592000, max_bytes = 268435456 },
@@ -48,6 +48,7 @@ local SCHEMA = {
 		type = "table",
 		fields = {
 			path = { type = "string", default = "clangd" },
+			profile = { type = "enum", values = { "full", "light" }, default = "full" },
 		},
 	},
 	mason = {
@@ -441,7 +442,7 @@ return {
     italic_comments = true,
   },
   -- Override the clangd binary on this host.
-  clangd = { path = "clangd" },
+	clangd = { path = "clangd", profile = "full" }, -- full | light
 
   -- Attempt each exact Mason/managed tool pin once on interactive startup.
   mason = { auto_install = true },

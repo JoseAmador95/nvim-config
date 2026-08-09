@@ -36,6 +36,8 @@ function M.specs()
 	local snacks = vim.deepcopy(require("plugins.snacks"))
 	snacks.keys = nil
 	snacks.opts.dashboard.enabled = false
+	snacks.opts.terminal.enabled = false
+	snacks.opts.scratch.enabled = false
 
 	return {
 		require("plugins.core"), -- plenary (dormant) + nvim-web-devicons

@@ -1,11 +1,8 @@
--- lazygit in a floating terminal (via toggleterm), opened with <leader>gl.
--- Adds a lazy-loading key to the existing toggleterm spec.
+-- lazygit in the shared Snacks terminal factory, opened with <leader>gl.
 --
 -- When a file is edited from within lazygit (pressing `e`), LazyGit's official
 -- `nvim-remote` preset opens it in the parent Neovim instance. The LazyGit
 -- terminal remains available in its original tab.
-local lazygit_term
-
 -- Generate the lazygit config that selects its parent-Neovim edit preset.
 -- Rewritten on every launch so config changes always take effect.
 --
@@ -18,7 +15,10 @@ local function ensure_config()
 		"os:",
 		"  editPreset: nvim-remote",
 	}
-	vim.fn.writefile(lines, path)
+	local ok, err = require("config.fs").write_binary_atomic(path, table.concat(lines, "\n") .. "\n")
+	if not ok then
+		error("could not write lazygit config: " .. tostring(err))
+	end
 	return path
 end
 
@@ -46,33 +46,25 @@ local function toggle_lazygit()
 		vim.notify("lazygit not found in PATH", vim.log.levels.ERROR, { title = "lazygit" })
 		return
 	end
-	require("lazy").load({ plugins = { "toggleterm.nvim" } })
-	if not lazygit_term then
-		local Terminal = require("toggleterm.terminal").Terminal
-		lazygit_term = Terminal:new({
-			cmd = "lazygit",
-			direction = "float",
-			hidden = true,
-			close_on_exit = true,
-			env = { LG_CONFIG_FILE = config_files() },
-			-- Enter terminal (insert) mode so keystrokes reach lazygit instead of
-			-- moving the Neovim cursor. The global terminal-mode mappings `jj`
-			-- (exit terminal) and `<leader>t` (= <space>t, toggle terminal) would
-			-- otherwise steal lazygit's `j` (navigate) and `<space>` (stage); send
-			-- those through immediately with nowait buffer-local maps.
-			on_open = function(term)
-				vim.cmd("startinsert!")
-				local opts = { buffer = term.bufnr, nowait = true }
-				vim.keymap.set("t", "j", "j", opts)
-				vim.keymap.set("t", "<space>", "<space>", opts)
-			end,
-		})
+	local root = require("config.repo").current_root(0) or vim.uv.cwd()
+	local record, err = require("config.terminal").toggle({
+		runtime = "host",
+		root = root,
+		id = "lazygit",
+		argv = { "lazygit" },
+		cwd = root,
+		env = { LG_CONFIG_FILE = config_files() },
+		layout = "float",
+		title = "LazyGit",
+		passthrough = { "j", "<space>" },
+	})
+	if not record then
+		vim.notify(err, vim.log.levels.ERROR, { title = "lazygit" })
 	end
-	lazygit_term:toggle()
 end
 
 return {
-	"akinsho/toggleterm.nvim",
+	"folke/snacks.nvim",
 	cond = function()
 		return not vim.g.vscode
 	end,

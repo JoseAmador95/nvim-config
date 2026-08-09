@@ -3,8 +3,6 @@ local M = {}
 
 local LAUNCHER = vim.fn.expand("~/.config/tuicr/tuicr-round")
 local cached_rounds = {}
-local review_terminal
-local review_command
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Review" })
@@ -43,71 +41,72 @@ local function decode_start(result, root)
 	return value.round
 end
 
-local function terminal_options(command)
-	return {
-		cmd = command,
-		direction = "float",
-		hidden = true,
-		close_on_exit = true,
-		float_opts = {
-			width = function()
-				return math.max(1, math.floor(vim.o.columns * 0.95))
-			end,
-			height = function()
-				return math.max(1, math.floor(vim.o.lines * 0.95))
-			end,
-		},
-		on_open = function(term)
-			vim.cmd("startinsert!")
-			local options = { buffer = term.bufnr, nowait = true }
-			vim.keymap.set("t", "j", "j", options)
-			vim.keymap.set("t", "<space>", "<space>", options)
-			vim.keymap.set({ "n", "t" }, "<C-t>", function()
-				term:close()
-			end, { buffer = term.bufnr, nowait = true, silent = true, desc = "Hide review terminal" })
-		end,
-	}
-end
-
-local function shell_command(arguments)
-	local escaped = {}
-	for _, argument in ipairs(arguments) do
-		escaped[#escaped + 1] = vim.fn.shellescape(argument)
+local function decode_status(result, root)
+	local stdout = result and vim.trim(result.stdout or "") or ""
+	local stderr = result and vim.trim(result.stderr or "") or ""
+	local payload = stdout ~= "" and stdout or stderr
+	local ok, value = pcall(vim.json.decode, payload)
+	if not ok or type(value) ~= "table" or vim.islist(value) then
+		return nil, payload ~= "" and payload or "tuicr-round did not return one JSON object"
 	end
-	return table.concat(escaped, " ")
+	if result.code == 0 and value.ok == true and value.command == "status" then
+		if value.repo_root ~= root then
+			return nil, "tuicr-round returned a different repository root"
+		end
+		if not is_uuid(value.round) then
+			return nil, "tuicr-round returned an invalid round id"
+		end
+		return { value.round }
+	end
+	local error_value = type(value.error) == "table" and value.error or {}
+	local details = type(error_value.details) == "table" and error_value.details or {}
+	if
+		result.code == 0
+		or error_value.code ~= "ambiguous_round"
+		or type(details.rounds) ~= "table"
+		or not vim.islist(details.rounds)
+	then
+		return nil, error_value.message or "tuicr-round returned an unsuccessful status result"
+	end
+	local seen = {}
+	local rounds = {}
+	for _, round in ipairs(details.rounds) do
+		if not is_uuid(round) or seen[round] then
+			return nil, "tuicr-round returned an invalid ambiguous round list"
+		end
+		seen[round] = true
+		rounds[#rounds + 1] = round
+	end
+	if #rounds < 2 then
+		return nil, "tuicr-round returned an invalid ambiguous round list"
+	end
+	return rounds
 end
 
 local function open_terminal(root, round, dependencies)
 	local selector = round and { "--round", round } or { "--repo", root }
-	local arguments = { LAUNCHER, "open" }
-	vim.list_extend(arguments, selector)
-	local command = shell_command(arguments)
+	local argv = { LAUNCHER, "open" }
+	vim.list_extend(argv, selector)
+	local options = {
+		runtime = "host",
+		root = root,
+		id = "tuicr-review",
+		argv = argv,
+		cwd = root,
+		env = {},
+		layout = "float",
+		title = "tuicr review",
+		passthrough = { "j", "<space>" },
+		hide_keys = { "<C-t>" },
+	}
 	local deps = dependencies or {}
 	if deps.open_terminal then
-		return deps.open_terminal(command, terminal_options(command))
+		return deps.open_terminal(argv, options)
 	end
-
-	require("lazy").load({ plugins = { "toggleterm.nvim" } })
-	local ok, terminal_module = pcall(require, "toggleterm.terminal")
-	if not ok then
-		notify("toggleterm.nvim is required for review rounds", vim.log.levels.ERROR)
-		return
+	local record, err = require("config.terminal").open(options)
+	if not record then
+		notify("Could not open review terminal: " .. tostring(err), vim.log.levels.ERROR)
 	end
-
-	if review_terminal and review_terminal:is_open() and review_command == command then
-		review_terminal:focus()
-		return
-	end
-	if review_terminal and review_command ~= command then
-		review_terminal:shutdown()
-		review_terminal = nil
-	end
-	if not review_terminal then
-		review_terminal = terminal_module.Terminal:new(terminal_options(command))
-	end
-	review_command = command
-	review_terminal.cmd = command
-	review_terminal:open()
 end
 
 function M.start(root, dependencies)
@@ -134,7 +133,54 @@ function M.start(root, dependencies)
 end
 
 function M.open(root, dependencies)
-	open_terminal(root, cached_rounds[root], dependencies)
+	local deps = dependencies or {}
+	local report = deps.notify or notify
+	local requested_round = deps.round
+	if requested_round ~= nil then
+		if not is_uuid(requested_round) then
+			report("Could not open review round: invalid round id", vim.log.levels.ERROR)
+			return
+		end
+	end
+	if requested_round == nil and cached_rounds[root] then
+		open_terminal(root, cached_rounds[root], deps)
+		return
+	end
+
+	local system = deps.system or vim.system
+	local schedule = deps.schedule or vim.schedule
+	local select = deps.select or vim.ui.select
+	local selector = requested_round and { "--round", requested_round } or { "--repo", root }
+	local command = { LAUNCHER, "status" }
+	vim.list_extend(command, selector)
+	local function completed(result)
+		schedule(function()
+			local rounds, err = decode_status(result, root)
+			if not rounds then
+				report("Could not find review round: " .. err, vim.log.levels.ERROR)
+				return
+			end
+			if #rounds == 1 then
+				if requested_round and rounds[1] ~= requested_round then
+					report("Could not open review round: status returned a different round id", vim.log.levels.ERROR)
+					return
+				end
+				cached_rounds[root] = rounds[1]
+				open_terminal(root, rounds[1], deps)
+				return
+			end
+			select(rounds, { prompt = "Select tuicr review round" }, function(round)
+				if not round then
+					return
+				end
+				M.open(root, vim.tbl_extend("force", deps, { round = round }))
+			end)
+		end)
+	end
+	local ok, err = pcall(system, command, { text = true }, completed)
+	if not ok then
+		report("Could not find review round: " .. tostring(err), vim.log.levels.ERROR)
+	end
 end
 
 function M.setup()
@@ -147,18 +193,27 @@ function M.setup()
 		M.start(root)
 	end, { nargs = 0, desc = "Start and open an isolated tuicr review round" })
 
-	vim.api.nvim_create_user_command("TuicrReview", function()
+	vim.api.nvim_create_user_command("TuicrReview", function(command)
 		local root, err = require("config.repo").current_root(0)
 		if not root then
 			notify(err, vim.log.levels.ERROR)
 			return
 		end
-		M.open(root)
-	end, { nargs = 0, desc = "Open the exact cached tuicr review round" })
+		M.open(root, { round = command.args ~= "" and command.args or nil })
+	end, { nargs = "?", desc = "Open an exact tuicr review round" })
 end
 
 M._decode_start = decode_start
-M._terminal_options = terminal_options
+M._decode_status = decode_status
+M._terminal_spec = function(root, round)
+	local captured
+	open_terminal(root, round, {
+		open_terminal = function(_, options)
+			captured = options
+		end,
+	})
+	return captured
+end
 M._launcher = LAUNCHER
 
 return M

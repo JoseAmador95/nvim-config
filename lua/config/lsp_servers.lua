@@ -28,10 +28,12 @@ function M.setup(context)
 	register("clangd", {
 		capabilities = client_capabilities,
 		cmd = require("config.clangd").command(),
+		on_new_config = require("config.clangd").on_new_config,
 	})
 	register("pyright", {
 		capabilities = client_capabilities,
 		settings = { pyright = { disableOrganizeImports = true } },
+		before_init = require("config.python").before_init,
 	})
 	register("ruff", { capabilities = client_capabilities })
 	register("cmake", {

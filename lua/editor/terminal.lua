@@ -53,6 +53,8 @@ if not pager.active then
 		desc = "Save",
 	})
 	require("config.tabs").setup()
+	require("config.just").setup()
+	require("config.scratch").setup()
 else
 	vim.keymap.set("n", "<leader>q", ":q<CR>", {
 		noremap = true,

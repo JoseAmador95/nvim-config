@@ -100,7 +100,9 @@ function M.definitions(dispatch)
 		}),
 		section("tests", "Tests", {
 			item("test.nearest", "Run Nearest"),
-			item("test.file", "Run File"),
+			item("test.file", "Run File", nil, function(context)
+				return not cmake_filetypes[context.filetype]
+			end),
 			item("test.last", "Run Last"),
 			item("test.stop", "Stop"),
 			item("test.output_panel", "Toggle Output Panel"),
@@ -147,6 +149,10 @@ function M.definitions(dispatch)
 			item("session.search", "Search and Restore", "<leader>Sp"),
 			item("session.delete", "Delete Session", "<leader>Sd"),
 		}),
+		section("just", "Just", {
+			item("command.just_run", "Run Recipe"),
+			item("command.just_import_last", "Import Last Locations"),
+		}),
 		section("log_highlights", "Log Highlights", {
 			item("log.highlight_exact", "Add Highlight (exact)"),
 			item("log.highlight_regex", "Add Highlight (regex)"),
@@ -170,7 +176,8 @@ function M.definitions(dispatch)
 		}, is_filetype("markdown")),
 		section("view", "View / Utils", {
 			item("view.oil", "File Explorer (oil)"),
-			item("view.toggleterm", "ToggleTerm"),
+			item("view.terminal", "Terminal", "<leader>t"),
+			item("command.scratch", "Project Scratch", "<leader>."),
 			item("picker.diagnostics", "Diagnostics"),
 			item("command.fold_open", "Fold Open All"),
 			item("command.fold_close", "Fold Close All"),

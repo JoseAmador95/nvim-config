@@ -59,7 +59,8 @@ order. External tools are optional unless their feature is used:
 | Inline diagram images | A terminal with the Kitty graphics protocol, such as Ghostty |
 | Pager profile | `nvimpager` plus the config symlink below |
 | Git terminal UI | Host `lazygit` |
-| Devcontainer shell | `devcontainer` CLI and ToggleTerm; see [the focused workflow](docs/devcontainer-shell.md) |
+| Devcontainer shell | Host `devcontainer` CLI and the shared Snacks terminal; see [the focused workflow](docs/devcontainer-shell.md) |
+| Just recipes | Host `just`; it is never installed automatically |
 
 `mmdflux` and PlantUML are installed from pinned official precompiled releases
 with `:NvimConfigToolsInstall [all|mmdflux|plantuml]`;
@@ -103,10 +104,12 @@ are intentionally absent from VSCode and `nvimpager`:
 
 - `:ReviewRoundStart` resolves the current canonical Git root, starts
   `~/.config/tuicr/tuicr-round` asynchronously, caches the returned
-  round UUID for that root, and opens that exact round in a reusable 95% floating
-  ToggleTerm. `:TuicrReview` reopens the cached UUID; without one it asks the
-  launcher to select by repository and lets ambiguity fail closed. The launcher,
-  not Neovim, owns the private tmux session that prevents duplicate TUIs across
+  round UUID for that root, and opens that exact round in a reusable 95% Snacks
+  terminal. `:TuicrReview` reopens the cached UUID; after an editor restart it
+  queries the launcher and, when several rounds match, requires an explicit
+  selection before opening one. `:TuicrReview {uuid}` validates that the exact
+  round belongs to the current repository before opening it. The launcher, not
+  Neovim, owns the private tmux session that prevents duplicate TUIs across
   surfaces. Inside the review float, `<C-t>` hides the terminal without stopping
   tuicr; `:TuicrReview` shows the same live round again. `<leader>t` is
   intentionally unavailable there because `Space` is passed immediately to
@@ -158,6 +161,41 @@ only an opaque request UUID through a constant remote expression and validates
 the request and path again inside Neovim before routing through the shared tab
 opener. Zero or multiple matches are errors: it never starts plain Neovim and
 never falls back to another editor.
+
+## Development workflows
+
+`<leader>t` opens a host shell in a lower split. Shells, Python REPLs, LazyGit,
+tuicr, Just and the temporary devcontainer shell share one Snacks terminal
+lifecycle keyed by runtime, repository and purpose. Hiding a terminal preserves
+its process; a failed process keeps its output. LazyGit and tuicr use 95% floats,
+while shells, REPLs and recipe output use the lower split. `gf` on a contained
+`file:line[:column]` location opens or reuses the corresponding editor tab.
+
+Python environment discovery remains in `:VenvSelect`, but selection never
+changes global `PATH`, `VIRTUAL_ENV` or terminal activation. The selected
+interpreter for each root is shared by Pyright, Neotest, DAP and the REPL.
+`<leader>rr` runs the nearest test, `<leader>rd` debugs it, `<leader>rp` toggles
+the project REPL and `<leader>rs` opens or focuses that REPL before sending the
+current line or visual selection.
+Pytest is preferred when installed in that interpreter, with unittest as the
+fallback; a live REPL asks before changing interpreter.
+
+Coverage is import-only: `:CoverageLoad [path]` reads an existing
+`coverage.json` or LCOV report, `:CoverageSummary` displays it and
+`:CoverageClear` removes it. These commands never run tests or generate a
+report. CMake Tools keeps its selected build directory as clangd's
+`--compile-commands-dir` for the same root without copying or linking
+`compile_commands.json`; `:ClangdSetCompileCommands` remains the manual
+override and `:ClangdSwitchSourceHeader` opens the paired source/header. CTest
+is the project-wide C/C++ test action in the CMake menu; Neotest-GTest remains
+for a focused associated test.
+
+`:JustRun [recipe]` reads recipes from `just --dump --dump-format json` only
+after the justfile content is trusted, prompts for structured parameters and
+executes literal argv in the lower terminal. `:JustImportLast` conservatively
+imports contained `file:line[:column]` output into quickfix and Trouble. The
+project/branch `:Scratch` (`<leader>.`) is private under `stdpath("state")`,
+saved atomically and prunes only inactive files older than 30 days when opened.
 
 Enable the lightweight pager profile with:
 

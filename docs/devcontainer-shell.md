@@ -8,7 +8,7 @@ otra copia de Neovim ni administra sesiones remotas.
 
 - `devcontainer` disponible en el `PATH` del host.
 - El runtime y el contenedor requeridos por el proyecto ya configurados.
-- `toggleterm.nvim`, incluido por esta configuración.
+- El terminal compartido de Snacks, incluido por esta configuración.
 
 ## Uso
 
@@ -32,5 +32,5 @@ Para seleccionar explícitamente otro workspace:
 Ejecutar `:DevcontainerWorkspace` sin argumento elimina el override. También se
 puede definir `NVIM_DEVCONTAINER_WORKSPACE` antes de arrancar Neovim.
 
-Si el CLI no está disponible o ToggleTerm no puede cargarse, el comando muestra
+Si el CLI no está disponible o el terminal de Snacks no puede cargarse, el comando muestra
 un error accionable y no modifica el workspace.

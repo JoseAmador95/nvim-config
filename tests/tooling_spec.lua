@@ -188,10 +188,13 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					modeline = false,
 				})
 				vim.api.nvim_buf_call(keymap_buf, function()
-					for _, lhs in ipairs({ "gd", "gD", "gi", "gr", "<leader>.", "<C-k>", "<leader>rn", "<leader>ca" }) do
+					for _, lhs in ipairs({ "gd", "gD", "gi", "gr", "K", "<C-k>", "<leader>rn", "<leader>ca" }) do
 						local mapping = vim.fn.maparg(lhs, "n", false, true)
 						assert(mapping and mapping.buffer == 1, "custom LSP mapping is missing: " .. lhs)
 					end
+					local scratch = vim.fn.maparg("<leader>.", "n", false, true)
+					assert(scratch and scratch.buffer == 0, "LSP mapping shadowed the global project scratch")
+					assert(scratch.desc == "Project scratch", "<leader>. no longer routes to project scratch")
 				end)
 				vim.api.nvim_buf_delete(keymap_buf, { force = true })
 				local menu_route_count = 0

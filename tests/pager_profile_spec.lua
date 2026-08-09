@@ -19,13 +19,20 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"MenuOpen",
 					"CloseTab",
 					"ClangdSetCompileCommands",
+					"ClangdSwitchSourceHeader",
+					"CoverageLoad",
+					"CoverageSummary",
+					"CoverageClear",
 					"DevcontainerShell",
+					"JustRun",
+					"JustImportLast",
 					"MermaidPreview",
 					"NvimConfigToolsInstall",
 					"Mason",
 					"PlantumlAscii",
 					"PlantumlPreview",
 					"ReviewRoundStart",
+					"Scratch",
 					"TuicrReview",
 					"AgentContext",
 					"AgentResultsImport",
@@ -57,13 +64,19 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"noice.nvim",
 					"nvim-lspconfig",
 					"nvim-lint",
+					"nvim-coverage",
+					"nvim-navic",
 					"remote-nvim.nvim",
+					"venv-selector.nvim",
 				}) do
 					assert(not has_plugin(plugin), plugin .. " is present in the pager runtime")
 				end
 				assert(has_plugin("render-markdown.nvim"), "render-markdown is missing from the pager")
 				assert(has_plugin("nvim-treesitter"), "Tree-sitter is missing from the pager")
 				assert(Snacks.config.dashboard.enabled == false, "editor dashboard leaked into the pager")
+				assert(Snacks.config.notifier.enabled == false, "notifier leaked into the pager")
+				assert(Snacks.config.terminal.enabled == false, "terminal service leaked into the pager")
+				assert(Snacks.config.scratch.enabled == false, "scratch service leaked into the pager")
 
 				local installed = {}
 				for _, parser in ipairs(require("nvim-treesitter").get_installed("parsers")) do

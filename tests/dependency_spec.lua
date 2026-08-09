@@ -21,6 +21,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			vim.notify = function() end
 
 			local ok, err = xpcall(function()
+				for _, module in ipairs({ "coverage", "nvim-navic", "venv-selector" }) do
+					assert(package.loaded[module] == nil, "Phase 2 plugin loaded eagerly: " .. module)
+				end
 				require("lazy").load({
 					plugins = {
 						"SchemaStore.nvim",
@@ -126,21 +129,39 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"octo.nvim",
 					"outline.nvim",
 					"overseer.nvim",
+					"nvim-notify",
 					"rainbow_csv.nvim",
 					"remote-nvim.nvim",
 					"sqlite.lua",
 					"telescope-smart-history.nvim",
 					"telescope.nvim",
+					"toggleterm.nvim",
 					"zk-nvim",
 				}) do
 					assert(plugins[name] == nil, "removed plugin remains in the full profile: " .. name)
 				end
-				for _, name in ipairs({ "diffview.nvim", "gitsigns.nvim", "toggleterm.nvim" }) do
+				for _, name in ipairs({ "diffview.nvim", "gitsigns.nvim", "snacks.nvim" }) do
 					assert(plugins[name] ~= nil, "retained Git workflow is missing: " .. name)
 				end
+				for _, name in ipairs({ "nvim-coverage", "nvim-navic", "venv-selector.nvim" }) do
+					assert(plugins[name] ~= nil, "Phase 2 dependency is missing: " .. name)
+				end
+				assert(package.loaded["nvim-navic"] == nil, "nvim-navic loaded before LspAttach")
+				assert(package.loaded.coverage == nil, "nvim-coverage loaded without a coverage command")
 				assert(vim.fn.exists(":LazyGit") == 2, "LazyGit command is missing")
 				assert(vim.fn.exists(":DevcontainerShell") == 2, "focused devcontainer shell is missing")
 				assert(vim.fn.exists(":DevcontainerWorkspace") == 2, "devcontainer workspace selector is missing")
+				for _, name in ipairs({
+					"ClangdSwitchSourceHeader",
+					"CoverageClear",
+					"CoverageLoad",
+					"CoverageSummary",
+					"JustImportLast",
+					"JustRun",
+					"Scratch",
+				}) do
+					assert(vim.fn.exists(":" .. name) == 2, "Phase 2 command is missing: " .. name)
+				end
 				for _, name in ipairs({
 					"BookmarksMark",
 					"CodeCompanion",

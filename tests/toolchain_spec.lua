@@ -282,14 +282,17 @@ test("clangd has one argv builder and rejects invalid databases before stop", fu
 	}
 	package.loaded["config.clangd"] = nil
 	local clangd = require("config.clangd")
-	local command = clangd.command("/tmp/build")
+	local command = clangd.command()
 	assert(command[1] == "/host/bin/clangd-custom", "local clangd path was ignored")
-	assert(command[2] == "--compile-commands-dir=/tmp/build", "compile database flag is misplaced")
 	assert(vim.tbl_contains(command, "--clang-tidy"), "dynamic clangd argv lost --clang-tidy")
 
 	local root = temp_dir()
 	assert(vim.fn.writefile({ "[]" }, root .. "/compile_commands.json") == 0)
-	assert(clangd.validate_compile_commands(root) == vim.fs.normalize(root), "valid database was rejected")
+	root = vim.uv.fs_realpath(root) or vim.fs.normalize(root)
+	assert(clangd.validate_compile_commands(root) == root, "valid database was rejected")
+	clangd._roots[root] = { manual = root }
+	command = clangd.command(root)
+	assert(command[2] == "--compile-commands-dir=" .. root, "root-scoped compile database flag is misplaced")
 	assert(vim.fn.writefile({ "{" }, root .. "/compile_commands.json") == 0)
 	local valid, message = clangd.validate_compile_commands(root)
 	assert(valid == nil and message:find("invalid", 1, true), "malformed database was accepted")

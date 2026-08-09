@@ -8,6 +8,13 @@ return {
 	lazy = false,
 	keys = {
 		{
+			"<leader>t",
+			function()
+				require("config.terminal").toggle_shell()
+			end,
+			desc = "Toggle terminal",
+		},
+		{
 			"<leader>ff",
 			function()
 				Snacks.picker.files()
@@ -38,6 +45,15 @@ return {
 	},
 	---@type snacks.Config
 	opts = {
+		terminal = { enabled = true },
+		notifier = {
+			enabled = not require("config.pager").active,
+			timeout = 3000,
+		},
+		scratch = {
+			enabled = true,
+			root = vim.fs.joinpath(vim.fn.stdpath("state"), "nvim-config", "scratch"),
+		},
 		image = {
 			-- Enable the image machinery (Kitty graphics protocol; Ghostty). The
 			-- diagram viewer (config.diagram) drives image rendering itself via the

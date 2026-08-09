@@ -108,6 +108,18 @@ local function bootstrap_lazy()
 			)
 		)
 	end
+	local branch_code, _, branch_detail = run_git({
+		"git",
+		"-C",
+		staging,
+		"symbolic-ref",
+		"refs/remotes/origin/HEAD",
+		"refs/remotes/origin/" .. locked_lazy.branch,
+	})
+	if branch_code ~= 0 then
+		remove_bootstrap(staging)
+		error("Could not record lazy.nvim's locked branch: " .. branch_detail)
+	end
 
 	local renamed, rename_err = uv.fs_rename(staging, lazypath)
 	if not renamed then
@@ -217,14 +229,94 @@ vim.opt.rtp:prepend(lazypath)
 local pager = require("config.pager")
 local lockfile = lazy_lock.resolve(repo_root, pager.active)
 
+-- Give every native spec the branch already recorded in the immutable lock.
+-- Fresh restores check out exact commits (detached HEAD); without this public
+-- spec field Lazy may try to infer a default branch from origin/HEAD while the
+-- remote is still incomplete and abort before the lock can be reproduced.
+local lock_entries, lock_entries_err = lazy_lock.entries(repo_root)
+if not lock_entries then
+	error("Cannot read native plugin branches: " .. tostring(lock_entries_err))
+end
+
+local function spec_name(spec)
+	if type(spec) == "table" and type(spec.name) == "string" then
+		return spec.name
+	end
+	local source = type(spec) == "table" and spec[1] or spec
+	if type(source) ~= "string" then
+		return nil
+	end
+	local name = source:match("([^/]+)$") or source
+	return name:gsub("%.git$", "")
+end
+
+local function pin_spec(spec)
+	if type(spec) == "string" then
+		local entry = lock_entries[spec_name(spec)]
+		return entry and { spec, branch = entry.branch } or spec
+	end
+	if type(spec) ~= "table" then
+		return spec
+	end
+	if #spec > 1 or vim.islist(spec) then
+		for index, child in ipairs(spec) do
+			spec[index] = pin_spec(child)
+		end
+		return spec
+	end
+	local entry = lock_entries[spec_name(spec)]
+	if entry and spec.branch == nil then
+		spec.branch = entry.branch
+	end
+	if type(spec.dependencies) == "table" then
+		for index, dependency in ipairs(spec.dependencies) do
+			spec.dependencies[index] = pin_spec(dependency)
+		end
+	end
+	if type(spec.specs) == "table" then
+		spec.specs = pin_spec(spec.specs)
+	end
+	return spec
+end
+
+local function native_editor_specs()
+	local directory = vim.fs.joinpath(repo_root, "lua", "plugins")
+	local files = {}
+	for name, kind in vim.fs.dir(directory) do
+		if kind == "file" and name:sub(-4) == ".lua" then
+			files[#files + 1] = name
+		end
+	end
+	table.sort(files)
+	local result = {}
+	for _, name in ipairs(files) do
+		local path = vim.fs.joinpath(directory, name)
+		local chunk, load_err = loadfile(path)
+		if not chunk then
+			error(("Could not load native plugin spec %s: %s"):format(path, tostring(load_err)))
+		end
+		local ok, value = pcall(chunk)
+		if not ok or type(value) ~= "table" then
+			error(("Invalid native plugin spec %s: %s"):format(path, tostring(value)))
+		end
+		result[#result + 1] = pin_spec(value)
+	end
+	return result
+end
+
 -- In pager mode (nvimpager) load only the minimal allowlist; skip the full
 -- `{ import = "plugins" }` set and any external ~/.nvim-local.lua plugin dirs.
 local specs
 if pager.active then
-	specs = pager.specs()
+	specs = pin_spec(pager.specs())
 else
 	-- Native specs from lua/plugins, plus any external dirs from ~/.nvim-local.lua.
-	specs = { { import = "plugins" } }
+	specs = {
+		{
+			name = "nvim_config_plugins",
+			import = native_editor_specs,
+		},
+	}
 	for _, dir in ipairs(require("config.local_config").get("plugins_dir", {})) do
 		dir = fn.expand(dir)
 		if fn.isdirectory(dir) == 1 then

@@ -1,6 +1,5 @@
 local M = {}
 local uv = vim.uv
-local devcontainer_shell_term
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "Devcontainer" })
@@ -44,31 +43,31 @@ function M.setup()
 			return
 		end
 
-		local ok, terminal_mod = pcall(require, "toggleterm.terminal")
-		if not ok then
-			notify("toggleterm.nvim is required for :DevcontainerShell", vim.log.levels.ERROR)
-			return
-		end
-
 		local workspace = find_workspace(uv.cwd())
 		local shell_bootstrap =
 			[[if [ -n "$SHELL" ] && [ -x "$SHELL" ]; then exec "$SHELL" -l; elif command -v bash >/dev/null 2>&1; then exec bash -l; elif command -v zsh >/dev/null 2>&1; then exec zsh -l; else exec sh; fi]]
-		local cmd = "devcontainer exec --workspace-folder "
-			.. vim.fn.shellescape(workspace)
-			.. " -- sh -lc "
-			.. vim.fn.shellescape(shell_bootstrap)
-
-		if not devcontainer_shell_term then
-			devcontainer_shell_term = terminal_mod.Terminal:new({
-				cmd = cmd,
-				direction = "horizontal",
-				close_on_exit = false,
-				hidden = true,
-			})
+		local record, err = require("config.terminal").toggle({
+			runtime = "devcontainer",
+			root = workspace,
+			id = "shell",
+			argv = {
+				"devcontainer",
+				"exec",
+				"--workspace-folder",
+				workspace,
+				"--",
+				"sh",
+				"-lc",
+				shell_bootstrap,
+			},
+			cwd = workspace,
+			env = {},
+			layout = "bottom",
+			title = "Devcontainer shell",
+		})
+		if not record then
+			notify("Could not open shell: " .. tostring(err), vim.log.levels.ERROR)
 		end
-
-		devcontainer_shell_term.cmd = cmd
-		devcontainer_shell_term:toggle()
 	end, {
 		nargs = 0,
 		desc = "Open interactive shell inside devcontainer",

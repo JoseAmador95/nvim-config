@@ -339,6 +339,7 @@ if ! cmp -s "$lock_snapshot" "$repo_root/lazy-lock.json"; then
 	exit 1
 fi
 if ! cmp -s "$lock_snapshot" "$lock_working"; then
+	diff -u "$lock_snapshot" "$lock_working" >&2 || true
 	printf '%s\n' 'Plugin bootstrap did not reproduce lazy-lock.json exactly' >&2
 	exit 1
 fi

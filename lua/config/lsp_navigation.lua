@@ -158,7 +158,7 @@ function M.setup()
 				end),
 				{ buffer = event.buf, silent = true, desc = "References" }
 			)
-			vim.keymap.set("n", "<leader>.", function()
+			vim.keymap.set("n", "K", function()
 				vim.lsp.buf.hover(hover_opts)
 			end, { buffer = event.buf, silent = true, desc = "Hover symbol documentation" })
 			vim.keymap.set("n", "<C-k>", vim.lsp.buf.signature_help, {

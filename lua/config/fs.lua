@@ -87,6 +87,12 @@ function M.write_binary_atomic(path, data)
 		end
 		offset = offset + written
 	end
+	local synced, sync_err = uv.fs_fsync(fd)
+	if not synced then
+		pcall(uv.fs_close, fd)
+		cleanup(temp)
+		return nil, "cannot sync temporary file: " .. tostring(sync_err)
+	end
 
 	local closed, close_err = uv.fs_close(fd)
 	if not closed then

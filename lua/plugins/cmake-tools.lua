@@ -37,5 +37,10 @@ return {
 				},
 			}
 		end,
+		config = function(_, opts)
+			local cmake = require("cmake-tools")
+			cmake.setup(opts)
+			require("config.cmake").setup(cmake)
+		end,
 	},
 }

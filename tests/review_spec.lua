@@ -51,8 +51,8 @@ test("ReviewRoundStart uses exact asynchronous non-TTY argv and opens returned U
 	})
 	assert(vim.deep_equal(captured.command, { review._launcher, "start", "--repo", root }))
 	assert(captured.options.text == true and captured.options.pty == nil, "start unexpectedly requested a PTY")
-	assert(opened.command:find("open", 1, true) and opened.command:find("--round", 1, true))
-	assert(opened.command:find(round, 1, true), "returned round UUID was not selected")
+	assert(vim.deep_equal(opened.command, { review._launcher, "open", "--round", round }))
+	assert(opened.options.argv == opened.command, "terminal spec did not preserve argv identity")
 end)
 
 test("malformed, multiple, and nonzero launcher results fail visibly", function()
@@ -85,52 +85,129 @@ test("malformed, multiple, and nonzero launcher results fail visibly", function(
 	end
 end)
 
-test("TuicrReview falls back to fail-closed repo selector without cache", function()
+test("TuicrReview discovers one exact round without opening an ambiguous terminal", function()
+	local uncached_root = "/tmp/uncached review"
+	local captured
 	local opened
-	review.open("/tmp/uncached review", {
+	review.open(uncached_root, {
+		system = function(command, options, callback)
+			captured = { command = command, options = options }
+			callback({
+				code = 0,
+				stdout = vim.json.encode({
+					ok = true,
+					command = "status",
+					round = round,
+					repo_root = uncached_root,
+				}) .. "\n",
+				stderr = "",
+			})
+			return {}
+		end,
+		schedule = function(callback)
+			callback()
+		end,
 		open_terminal = function(command)
 			opened = command
 		end,
 	})
-	assert(opened:find("--repo", 1, true))
-	assert(opened:find("/tmp/uncached review", 1, true))
-	assert(not opened:find("--round", 1, true))
+	assert(vim.deep_equal(captured.command, { review._launcher, "status", "--repo", uncached_root }))
+	assert(captured.options.text == true)
+	assert(vim.deep_equal(opened, { review._launcher, "open", "--round", round }))
 end)
 
-test("ToggleTerm contract is a reusable 95 percent TUI-safe float", function()
-	local options = review._terminal_options("command")
-	assert(options.direction == "float" and options.hidden and options.close_on_exit)
-	assert(options.float_opts.width() == math.floor(vim.o.columns * 0.95))
-	assert(options.float_opts.height() == math.floor(vim.o.lines * 0.95))
-	local buf = vim.api.nvim_create_buf(false, true)
-	local close_count = 0
-	options.on_open({
-		bufnr = buf,
-		close = function()
-			close_count = close_count + 1
+test("TuicrReview requires an explicit choice when repository rounds are ambiguous", function()
+	local uncached_root = "/tmp/ambiguous review"
+	local other_round = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	local selected
+	local opened
+	local commands = {}
+	review.open(uncached_root, {
+		system = function(command, _, callback)
+			commands[#commands + 1] = command
+			if #commands == 1 then
+				callback({
+					code = 2,
+					stdout = vim.json.encode({
+						ok = false,
+						error = {
+							code = "ambiguous_round",
+							message = "More than one round matches; specify --round",
+							details = { rounds = { round, other_round } },
+						},
+					}) .. "\n",
+					stderr = "",
+				})
+			else
+				callback({
+					code = 0,
+					stdout = vim.json.encode({
+						ok = true,
+						command = "status",
+						round = other_round,
+						repo_root = uncached_root,
+					}) .. "\n",
+					stderr = "",
+				})
+			end
+			return {}
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+		select = function(items, options, callback)
+			selected = { items = items, options = options }
+			callback(other_round)
+		end,
+		open_terminal = function(command)
+			opened = command
 		end,
 	})
-	local maps = vim.api.nvim_buf_get_keymap(buf, "t")
-	local found = {}
-	for _, map in ipairs(maps) do
-		found[map.lhs] = map
-	end
-	assert(found.j and found.j.rhs == "j" and found.j.nowait == 1)
-	local space = found["<Space>"] or found[" "]
-	assert(space and (space.rhs == "<Space>" or space.rhs == " ") and space.nowait == 1)
-	local hide = found["<C-T>"] or found["<C-t>"]
-	assert(hide and type(hide.callback) == "function" and hide.nowait == 1)
-	assert(hide.desc == "Hide review terminal")
-	hide.callback()
-	assert(close_count == 1, "Ctrl-t did not hide the review terminal")
-	local normal_hide
-	for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
-		if map.lhs == "<C-T>" or map.lhs == "<C-t>" then
-			normal_hide = map
-		end
-	end
-	assert(normal_hide and type(normal_hide.callback) == "function")
-	vim.api.nvim_buf_delete(buf, { force = true })
+	assert(vim.deep_equal(selected.items, { round, other_round }))
+	assert(selected.options.prompt == "Select tuicr review round")
+	assert(vim.deep_equal(commands[1], { review._launcher, "status", "--repo", uncached_root }))
+	assert(vim.deep_equal(commands[2], { review._launcher, "status", "--round", other_round }))
+	assert(vim.deep_equal(opened, { review._launcher, "open", "--round", other_round }))
+end)
+
+test("TuicrReview accepts a validated explicit UUID", function()
+	local explicit_root = "/tmp/explicit review"
+	local captured
+	local opened
+	review.open(explicit_root, {
+		round = round,
+		system = function(command, _, callback)
+			captured = command
+			callback({
+				code = 0,
+				stdout = vim.json.encode({
+					ok = true,
+					command = "status",
+					round = round,
+					repo_root = explicit_root,
+				}) .. "\n",
+				stderr = "",
+			})
+			return {}
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+		open_terminal = function(command)
+			opened = command
+		end,
+	})
+	assert(vim.deep_equal(captured, { review._launcher, "status", "--round", round }))
+	assert(vim.deep_equal(opened, { review._launcher, "open", "--round", round }))
+end)
+
+test("review uses the shared 95 percent TUI terminal contract", function()
+	local options = review._terminal_spec(root, round)
+	assert(options.runtime == "host" and options.root == root and options.id == "tuicr-review")
+	assert(options.layout == "float" and options.title == "tuicr review")
+	assert(vim.deep_equal(options.argv, { review._launcher, "open", "--round", round }))
+	assert(vim.deep_equal(options.passthrough, { "j", "<space>" }))
+	assert(vim.deep_equal(options.hide_keys, { "<C-t>" }))
 end)
 
 if #failures > 0 then

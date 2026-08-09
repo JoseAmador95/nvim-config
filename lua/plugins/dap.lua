@@ -75,6 +75,7 @@ return {
 		-- first install completes, so the adapter works later without a reload.
 		local debugpy_path, has_debugpy = executables.resolve("debugpy-adapter")
 		require("dap-python").setup(debugpy_path)
+		require("config.python").setup_dap(dap)
 		if not has_debugpy then
 			vim.notify(
 				"debugpy-adapter not found. Retry the exact tool manifest with :MasonToolsInstallSync",

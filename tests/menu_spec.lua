@@ -112,6 +112,10 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 
 	local cpp_sections = catalog.build(context.new({ filetype = "cpp" }), dispatch)
 	assert(find_section(cpp_sections, "cmake"), "CMake section missing for C++")
+	local ctest = assert(find_item(cpp_sections, "command.cmake_test"), "CTest project action missing for C++")
+	assert(ctest.label == "Run Tests (CTest)", "CTest is not the primary project-wide C/C++ action")
+	assert(find_item(cpp_sections, "test.nearest"), "focused Neotest-GTest action missing for C++")
+	assert(not find_item(cpp_sections, "test.file"), "project-wide Neotest-GTest action displaced CTest")
 
 	local plantuml_sections = catalog.build(context.new({ filetype = "plantuml" }), dispatch)
 	assert(find_item(plantuml_sections, "command.diagram_show"), "unified PlantUML viewer is missing")

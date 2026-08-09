@@ -64,6 +64,13 @@ function M.plugin(repo_root, name)
 end
 
 ---@param repo_root string
+---@return table<string, { branch: string, commit: string }>? entries
+---@return string? error
+function M.entries(repo_root)
+	return read_lock(M.source(repo_root))
+end
+
+---@param repo_root string
 ---@param pager_active boolean
 ---@param options? { state_root?: string }
 ---@return string lockfile

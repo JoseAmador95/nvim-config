@@ -6,7 +6,6 @@ return {
 	end,
 	dependencies = {
 		"MunifTanjim/nui.nvim",
-		"rcarriga/nvim-notify",
 	},
 	opts = {
 		cmdline = {
@@ -35,8 +34,7 @@ return {
 		},
 		notify = {
 			-- The config owns `vim.notify` so it can also record an exact native
-			-- `:messages` entry. Notifications still enter Noice through its public
-			-- API and use this view (backed by nvim-notify) for their toast.
+			-- `:messages` entry before sending one toast to Snacks Notifier.
 			enabled = false,
 		},
 		lsp = {
@@ -69,8 +67,8 @@ return {
 			{ filter = { event = "msg_show", find = "search hit" }, opts = { skip = true } },
 			{ filter = { event = "msg_show", find = "Already at" }, opts = { skip = true } },
 			-- `vim.notify` is mirrored into native `:messages` with this dedicated
-			-- echo kind. The notification itself is routed separately through the
-			-- public Noice API, so the echo must never create a second toast.
+			-- echo kind. The toast is sent directly to Snacks, so Noice must never
+			-- turn the echo into a second notification.
 			{ filter = { event = "msg_show", kind = "nvim_config_notify" }, opts = { skip = true } },
 		},
 	},
@@ -82,7 +80,7 @@ return {
 		{
 			"<leader>fN",
 			function()
-				require("noice").cmd("dismiss")
+				require("snacks").notifier.hide()
 			end,
 			desc = "Dismiss notifications",
 		},
@@ -90,15 +88,13 @@ return {
 	config = function(_, opts)
 		require("noice").setup(opts)
 
-		-- Own `vim.notify`: mirror the unmodified text into native history once,
-		-- then create exactly one Noice notification. Noice's notify source is
-		-- disabled above, so it will not replace this function. Its public API
-		-- preserves replace handles while the configured `notify` view delegates
-		-- the toast to nvim-notify.
+		-- Own `vim.notify`: mirror the text into native history once, then create
+		-- exactly one Snacks toast. Noice's notify source is disabled above, so it
+		-- cannot wrap this function or feed the toast back into itself.
 		vim.notify = function(msg, level, notify_opts)
 			local function dispatch()
+				local text
 				if msg ~= nil then
-					local text
 					if type(msg) == "table" then
 						local lines = {}
 						for _, value in ipairs(msg) do
@@ -119,7 +115,7 @@ return {
 						err = level == vim.log.levels.ERROR,
 					})
 				end
-				return require("noice").notify(msg, level, notify_opts)
+				return require("snacks").notifier.notify(text or "", level, notify_opts)
 			end
 
 			if vim.in_fast_event() then

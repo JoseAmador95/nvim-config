@@ -38,6 +38,33 @@ for _, section in ipairs(snacks_opts.dashboard.sections) do
 end
 assert(projects and projects.session == false, "dashboard projects still restore sessions implicitly")
 assert(snacks_opts.scroll == nil, "smooth scrolling was enabled")
+assert(snacks_opts.terminal.enabled == true, "Snacks terminal is disabled")
+assert(snacks_opts.notifier.enabled == true, "Snacks notifier is disabled in the editor")
+assert(snacks_opts.scratch.enabled == true, "Snacks scratch is disabled")
+
+local context_spec
+for _, entry in ipairs(require("plugins.treesitter")) do
+	if entry[1] == "nvim-treesitter/nvim-treesitter-context" then
+		context_spec = entry
+	end
+end
+assert(context_spec and context_spec.opts.max_lines == 3, "Treesitter Context is not limited to three lines")
+local navic_spec = require("plugins.navic")
+assert(navic_spec.commit == "f5eba192f39b453675d115351808bd51276d9de5", "nvim-navic pin drifted")
+local original_navic = package.loaded["nvim-navic"]
+package.loaded["nvim-navic"] = {
+	is_available = function()
+		return true
+	end,
+	get_data = function()
+		return { { icon = "C", name = "Outer" }, { icon = "F", name = "inner" } }
+	end,
+}
+local statusline = require("config.statusline")
+assert(statusline.navic() == "Finner", "statusline shows more than the innermost symbol")
+package.loaded["nvim-navic"] = original_navic
+statusline.update_root(0)
+assert(vim.b.nvim_config_root == vim.uv.fs_realpath(repo), "statusline did not cache the filesystem project root")
 
 vim.o.background = "dark"
 vim.api.nvim_set_hl(0, "Normal", { bg = 0x101010, fg = 0xf0f0f0 })

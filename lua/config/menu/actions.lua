@@ -100,11 +100,14 @@ local commands = {
 	format_toggle_buffer = { "FormatToggle", true },
 	diagram_show = { "DiagramShow" },
 	json_tree = { "JsonTree" },
+	just_import_last = { "JustImportLast" },
+	just_run = { "JustRun" },
 	lazygit = { "LazyGit" },
 	log_highlight_clear = { "LogHlClear" },
 	markdown_preview = { "MarkdownPreviewToggle" },
 	mason = { "Mason" },
 	reload_config = { "ReloadConfig" },
+	scratch = { "Scratch" },
 	toggle_inlay_hints = { "ToggleInlayHints" },
 	toggle_inline_diagnostics = { "ToggleInlineDiagnostics" },
 }
@@ -336,11 +339,8 @@ local handlers = {
 		vim.wo.wrap = not vim.wo.wrap
 		notify("Wrap: " .. (vim.wo.wrap and "on" or "off"))
 	end,
-	["view.toggleterm"] = function()
-		local ok = pcall(command, "ToggleTerm")
-		if not ok then
-			notify("ToggleTerm not available", vim.log.levels.WARN)
-		end
+	["view.terminal"] = function()
+		require("config.terminal").toggle_shell()
 	end,
 }
 

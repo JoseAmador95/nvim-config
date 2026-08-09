@@ -10,6 +10,7 @@ return {
 	config = function()
 		local palette = require("config.palette")
 		local lualine = require("lualine")
+		local statusline = require("config.statusline")
 
 		local function theme()
 			local colors = palette.current()
@@ -64,8 +65,16 @@ return {
 					lualine_b = { "branch" },
 					lualine_c = {
 						{ "filename", path = 1 }, -- relative path
+						statusline.navic,
 					},
-					lualine_x = { "diagnostics", "filetype" },
+					lualine_x = {
+						statusline.devpod,
+						statusline.python,
+						statusline.cmake,
+						statusline.clangd,
+						"diagnostics",
+						"filetype",
+					},
 					lualine_y = {},
 					lualine_z = { "location" },
 				},
@@ -83,12 +92,12 @@ return {
 
 				extensions = {
 					"quickfix",
-					"toggleterm",
 				},
 			})
 		end
 
 		setup()
+		statusline.setup_refresh()
 		vim.api.nvim_create_autocmd("ColorScheme", {
 			group = vim.api.nvim_create_augroup("NvimConfigLualineTheme", { clear = true }),
 			callback = function()

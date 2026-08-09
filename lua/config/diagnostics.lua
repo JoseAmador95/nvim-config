@@ -1,8 +1,6 @@
 vim.diagnostic.config({
-	virtual_text = {
-		prefix = "●",
-		spacing = 2,
-	},
+	virtual_text = false,
+	virtual_lines = { current_line = true },
 	severity_sort = true,
 	float = {
 		border = "rounded",

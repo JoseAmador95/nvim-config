@@ -52,9 +52,36 @@ vim.api.nvim_create_autocmd("VimEnter", {
 		vim.schedule(function()
 			local ok, err = xpcall(function()
 				assert(vim.fn.exists(":CloseTab") == 2, "full editor CloseTab command is missing")
-				for _, command in ipairs({ "ReviewRoundStart", "TuicrReview", "AgentContext", "AgentResultsImport" }) do
+				for _, command in ipairs({
+					"ReviewRoundStart",
+					"TuicrReview",
+					"AgentContext",
+					"AgentResultsImport",
+					"ClangdSwitchSourceHeader",
+					"CoverageLoad",
+					"CoverageSummary",
+					"CoverageClear",
+					"JustRun",
+					"JustImportLast",
+					"Scratch",
+				}) do
 					assert(vim.fn.exists(":" .. command) == 2, "full editor " .. command .. " command is missing")
 				end
+				assert(not vim.tbl_isempty(vim.fn.maparg("<leader>t", "n", false, true)), "terminal toggle is missing")
+				assert(
+					not vim.tbl_isempty(vim.fn.maparg("<leader>rr", "n", false, true)),
+					"nearest-test mapping is missing"
+				)
+				assert(
+					not vim.tbl_isempty(vim.fn.maparg("<leader>rd", "n", false, true)),
+					"debug-test mapping is missing"
+				)
+				local diagnostics = vim.diagnostic.config()
+				assert(diagnostics.virtual_text == false, "diagnostic virtual text is enabled")
+				assert(
+					type(diagnostics.virtual_lines) == "table" and diagnostics.virtual_lines.current_line == true,
+					"current-line diagnostic virtual lines are not enabled"
+				)
 				local close_map = vim.fn.maparg("<leader>q", "n", false, true)
 				assert(close_map.rhs == "<cmd>CloseTab<cr>", "full editor close mapping bypasses CloseTab")
 				local close_all_map = vim.fn.maparg("<leader>Q", "n", false, true)

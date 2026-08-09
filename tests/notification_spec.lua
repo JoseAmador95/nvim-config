@@ -6,6 +6,7 @@ vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
 local original_noice = package.loaded.noice
+local original_snacks = package.loaded.snacks
 local original_notify = vim.notify
 local original_echo = vim.api.nvim_echo
 local original_fast_event = vim.in_fast_event
@@ -19,14 +20,19 @@ local noice = {
 	setup = function(opts)
 		setup_opts = opts
 	end,
-	notify = function(message, level, opts)
-		notify_calls[#notify_calls + 1] = { message = message, level = level, opts = opts }
-		return { id = #notify_calls }
-	end,
+}
+local snacks = {
+	notifier = {
+		notify = function(message, level, opts)
+			notify_calls[#notify_calls + 1] = { message = message, level = level, opts = opts }
+			return { id = #notify_calls }
+		end,
+	},
 }
 
 local ok, err = xpcall(function()
 	package.loaded.noice = noice
+	package.loaded.snacks = snacks
 	vim.api.nvim_echo = function(chunks, history, opts)
 		echo_calls[#echo_calls + 1] = { chunks = chunks, history = history, opts = opts }
 	end
@@ -61,7 +67,7 @@ local ok, err = xpcall(function()
 	assert(#echo_calls == 2 and #notify_calls == 2, "table notification was duplicated")
 	assert(echo_calls[2].chunks[1][1] == "first line\n42\nthird line", "table history lost multiline text")
 	assert(echo_calls[2].opts.err == true, "error notification lost nvim_echo error semantics")
-	assert(notify_calls[2].message == table_message, "Noice did not receive the original table message")
+	assert(notify_calls[2].message == "first line\n42\nthird line", "Snacks did not receive normalized text")
 
 	local replace_opts = { replace = first }
 	local second = vim.notify("replacement", vim.log.levels.INFO, replace_opts)
@@ -84,6 +90,7 @@ local ok, err = xpcall(function()
 end, debug.traceback)
 
 package.loaded.noice = original_noice
+package.loaded.snacks = original_snacks
 vim.notify = original_notify
 vim.api.nvim_echo = original_echo
 vim.in_fast_event = original_fast_event
