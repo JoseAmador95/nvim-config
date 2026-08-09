@@ -22,8 +22,10 @@ el ID del workspace incluye repositorio, provider y config. Si hay más de un
 Al entrar en el workflow, el contexto dedicado fija
 `SSH_INJECT_GIT_CREDENTIALS=false`, `SSH_INJECT_DOCKER_CREDENTIALS=false` y
 `GPG_AGENT_FORWARDING=false`, `SSH_ADD_PRIVATE_KEYS=false`,
-`SSH_AGENT_FORWARDING=false` y `GIT_SSH_SIGNATURE_FORWARDING=false`; crear el
+`SSH_AGENT_FORWARDING=true` y `GIT_SSH_SIGNATURE_FORWARDING=false`; crear el
 contexto no cambia permanentemente el contexto default que ya tenía el usuario.
+Sólo se forwardea el agente que ya está cargado en `SSH_AUTH_SOCK`: no se copian
+ni se buscan llaves privadas en `~/.ssh`.
 
 DevPod 0.6.15 no aplica por sí solo el build arg automático `TARGETARCH` al
 inspeccionar un Dockerfile con una etapa como `FROM base-$TARGETARCH`. Si el
@@ -34,6 +36,12 @@ Dockerfile, completa ambos valores y pasa la arquitectura efectiva (`arm64` o
 Docker cuyo helper ya no existe se sustituye por una config privada vacía sólo
 si no contiene auths ni helpers por registro; credenciales existentes hacen que
 el flujo falle cerrado.
+
+Si existe una configuración Git global, el mismo overlay monta su archivo real
+en `/tmp/nvim-devpod-host.gitconfig` como bind read-only y Neovim exporta
+`GIT_CONFIG_GLOBAL` a sus terminales y procesos. El montaje no incluye `~/.ssh`
+ni credential helpers de DevPod. Su ruta forma parte de la identidad del
+workspace para no reutilizar un contenedor creado sin ese contrato.
 
 ## Uso
 
@@ -52,6 +60,12 @@ launcher pregunta si posee un TTY; en automatización falla cerrado y pide
 `--allow-network`. `:HostEditor` regresa explícitamente a Neovim del host. Salir
 normalmente del editor del container deja el pane detenido por
 `remain-on-exit`; no relanza nada.
+
+El launcher escribe etapas y un heartbeat periódico en stderr mientras
+`devpod up` está construyendo o reutilizando el workspace; la salida JSON de
+automatización permanece limpia en stdout. La terminal general (`<leader>t`)
+pasa `<Tab>` y `<S-Tab>` literalmente al shell, incluida la terminal dentro del
+container.
 
 La CLI pública es:
 
@@ -86,9 +100,11 @@ su SHA-256 y lo instala en el estado privado del workspace. `cc` es obligatorio.
 No instala npm, Go, Cargo, compiladores ni package managers. El bootstrap de
 plugins usa el lock existente y los instaladores exactos de esta configuración.
 
-Cada conexión desactiva agent/GPG forwarding y los credential services de
-DevPod. Los sockets Unix y registros del host son privados (directorios `0700`,
-archivos `0600`). DevPod 0.6.15 deshabilita el forwarding directo hacia un
+Las conexiones de control desactivan agent/GPG forwarding y los credential
+services de DevPod. Sólo la conexión que posee el Neovim interactivo habilita el
+SSH agent del host; GPG, inyección de llaves y servicios de credenciales siguen
+deshabilitados. Los sockets Unix y registros del host son privados (directorios
+`0700`, archivos `0600`). DevPod 0.6.15 deshabilita el forwarding directo hacia un
 socket Unix remoto, por lo que el bridge host→editor termina en un puerto TCP
 aleatorio ligado únicamente a `127.0.0.1` dentro del container; nunca se
 publica fuera de él. El bridge inverso conserva Unix→Unix. `:TuicrReview`

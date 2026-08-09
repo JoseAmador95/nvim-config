@@ -6,6 +6,7 @@ import os
 import pathlib
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -99,7 +100,7 @@ class DevPodLauncherTest(unittest.TestCase):
         before = config.read_bytes()
         state = MODULE.ensure_dir(self.root / "state")
         with mock.patch.object(MODULE.platform, "machine", return_value="arm64"):
-            effective, identity = MODULE.compatibility_config(
+            effective, identity, gitconfig_target = MODULE.compatibility_config(
                 state, self.root.resolve(), ".devcontainer/devcontainer.json"
             )
         overlay = (self.root / effective).resolve(strict=True)
@@ -114,7 +115,8 @@ class DevPodLauncherTest(unittest.TestCase):
             dockerfile.read_text(encoding="utf-8"),
             "FROM alpine AS base-arm64\nARG TARGETARCH\nFROM base-$TARGETARCH AS final\n",
         )
-        self.assertIn("TARGETARCH=arm64", identity)
+        self.assertIn("OVERLAY=", identity)
+        self.assertIsNone(gitconfig_target)
         self.assertEqual(stat.S_IMODE(overlay.stat().st_mode), 0o600)
 
     def test_explicit_targetarch_and_global_arg_need_no_overlay(self):
@@ -127,13 +129,14 @@ class DevPodLauncherTest(unittest.TestCase):
         (config.parent / "Dockerfile").write_text(
             "ARG TARGETARCH\nFROM base-$TARGETARCH\n", encoding="utf-8"
         )
-        path, identity = MODULE.compatibility_config(
+        path, identity, gitconfig_target = MODULE.compatibility_config(
             MODULE.ensure_dir(self.root / "state"),
             self.root.resolve(),
             ".devcontainer/devcontainer.json",
         )
         self.assertEqual(path, ".devcontainer/devcontainer.json")
         self.assertEqual(identity, path)
+        self.assertIsNone(gitconfig_target)
 
     def test_jsonc_config_preserves_devpod_native_handling(self):
         config = self.root / ".devcontainer/devcontainer.json"
@@ -142,13 +145,44 @@ class DevPodLauncherTest(unittest.TestCase):
             '// DevPod accepts JSON with comments.\n{"image": "ubuntu:24.04",}\n',
             encoding="utf-8",
         )
-        path, identity = MODULE.compatibility_config(
+        path, identity, gitconfig_target = MODULE.compatibility_config(
             MODULE.ensure_dir(self.root / "state"),
             self.root.resolve(),
             ".devcontainer/devcontainer.json",
         )
         self.assertEqual(path, ".devcontainer/devcontainer.json")
         self.assertEqual(identity, path)
+        self.assertIsNone(gitconfig_target)
+
+    def test_jsonc_overlay_mounts_host_gitconfig_read_only(self):
+        config = self.root / ".devcontainer/devcontainer.json"
+        config.parent.mkdir()
+        original = '// comment\n{"image": "ubuntu:24.04",}\n'
+        config.write_text(original, encoding="utf-8")
+        gitconfig = self.root / "host.gitconfig"
+        gitconfig.write_text("[user]\n\tname = Fixture\n", encoding="utf-8")
+        effective, identity, target = MODULE.compatibility_config(
+            MODULE.ensure_dir(self.root / "state"),
+            self.root.resolve(),
+            ".devcontainer/devcontainer.json",
+            gitconfig,
+        )
+        overlay = (self.root / effective).resolve(strict=True)
+        value = json.loads(overlay.read_text(encoding="utf-8"))
+        self.assertEqual(config.read_text(encoding="utf-8"), original)
+        self.assertEqual(target, MODULE.GITCONFIG_TARGET)
+        self.assertIn("OVERLAY=", identity)
+        self.assertEqual(
+            value["mounts"],
+            [
+                {
+                    "type": "bind",
+                    "source": str(gitconfig.resolve()),
+                    "target": MODULE.GITCONFIG_TARGET,
+                    "other": ["readonly"],
+                }
+            ],
+        )
 
     def test_missing_empty_credential_store_uses_private_docker_config(self):
         docker = self.root / "docker"
@@ -259,6 +293,10 @@ class DevPodLauncherTest(unittest.TestCase):
         calls = [[str(value) for value in call.args[0]] for call in runner.call_args_list]
         self.assertIn(["/tmp/devpod", "context", "create", "nvim-devpod"], calls)
         self.assertIn(["/tmp/devpod", "context", "use", "default"], calls)
+        options = next(call for call in calls if "set-options" in call)
+        self.assertIn("SSH_AGENT_FORWARDING=true", options)
+        self.assertIn("SSH_ADD_PRIVATE_KEYS=false", options)
+        self.assertIn("GPG_AGENT_FORWARDING=false", options)
 
     def test_existing_context_is_selected_only_during_management(self):
         completed = subprocess.CompletedProcess([], 0, b"", b"")
@@ -345,6 +383,85 @@ class DevPodLauncherTest(unittest.TestCase):
                 pathlib.Path("/tmp/podman"),
                 self.root.resolve(),
             )
+
+    def test_container_workspace_requires_read_only_gitconfig_mount(self):
+        gitconfig = self.root / "host.gitconfig"
+        gitconfig.write_text("[user]\n\tname = Fixture\n", encoding="utf-8")
+        ps = subprocess.CompletedProcess([], 0, b"abcdef012345\n", b"")
+        mounts = [
+            {
+                "Type": "bind",
+                "Source": str(self.root.resolve()),
+                "Destination": "/workspace/project",
+                "RW": True,
+            },
+            {
+                "Type": "bind",
+                "Source": str(gitconfig.resolve()),
+                "Destination": MODULE.GITCONFIG_TARGET,
+                "RW": False,
+            },
+        ]
+        inspect = subprocess.CompletedProcess([], 0, json.dumps(mounts).encode(), b"")
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.object(
+            MODULE,
+            "json_command",
+            return_value=[{"id": "fixture", "uid": "fixture-123"}],
+        ), mock.patch.object(MODULE, "run", side_effect=[ps, inspect]), mock.patch.object(
+            MODULE, "container_command", return_value=completed
+        ):
+            destination = MODULE.container_workspace(
+                pathlib.Path("/tmp/devpod"),
+                "podman",
+                "fixture",
+                pathlib.Path("/tmp/podman"),
+                self.root.resolve(),
+                gitconfig.resolve(),
+            )
+        self.assertEqual(destination, "/workspace/project")
+        mounts[1]["RW"] = True
+        inspect = subprocess.CompletedProcess([], 0, json.dumps(mounts).encode(), b"")
+        with mock.patch.object(
+            MODULE,
+            "json_command",
+            return_value=[{"id": "fixture", "uid": "fixture-123"}],
+        ), mock.patch.object(MODULE, "run", side_effect=[ps, inspect]), self.assertRaisesRegex(
+            MODULE.DevPodError, "not read-only"
+        ):
+            MODULE.container_workspace(
+                pathlib.Path("/tmp/devpod"),
+                "podman",
+                "fixture",
+                pathlib.Path("/tmp/podman"),
+                self.root.resolve(),
+                gitconfig.resolve(),
+            )
+
+    def test_long_command_reports_progress_without_polluting_stdout(self):
+        with mock.patch.object(MODULE, "progress") as reporter:
+            result = MODULE.run_traced(
+                [sys.executable, "-c", "import time; time.sleep(0.04)"],
+                label="fixture preparation",
+                timeout=1,
+                interval=0.01,
+            )
+        self.assertEqual(result.returncode, 0)
+        messages = [call.args[0] for call in reporter.call_args_list]
+        self.assertEqual(messages[0], "fixture preparation")
+        self.assertTrue(any("still running" in message for message in messages[1:]))
+
+    def test_ssh_agent_detection_and_forwarding_flags_are_explicit(self):
+        path = self.root / "agent.sock"
+        with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": str(path)}), mock.patch.object(
+            MODULE.pathlib.Path,
+            "stat",
+            return_value=mock.Mock(st_mode=stat.S_IFSOCK),
+        ):
+            self.assertTrue(MODULE.ssh_agent_available())
+        self.assertIn("--agent-forwarding=true", MODULE.ssh_flags(True))
+        self.assertIn("--agent-forwarding=false", MODULE.ssh_flags(False))
+        self.assertIn("--gpg-agent-forwarding=false", MODULE.ssh_flags(True))
 
     def test_live_editor_requires_the_single_editor_pane(self):
         completed = subprocess.CompletedProcess([], 0, b"editor\t1\n", b"")

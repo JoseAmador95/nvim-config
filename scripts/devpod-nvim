@@ -42,8 +42,10 @@ CONTEXT = "nvim-devpod"
 MAX_JSON = 64 * 1024
 MAX_RPC_OUTPUT = 1024 * 1024
 MAX_DOCKERFILE = 10 * 1024 * 1024
+MAX_GITCONFIG = 1024 * 1024
 STALE_SECONDS = 30 * 24 * 60 * 60
 PROVIDERS = {"docker", "podman"}
+GITCONFIG_TARGET = "/tmp/nvim-devpod-host.gitconfig"
 GIT_ENV = {
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CEILING_DIRECTORIES",
@@ -89,6 +91,10 @@ class NoActiveEditor(DevPodError):
 
 def fail(message: str) -> "None":
     raise DevPodError(message)
+
+
+def progress(message: str) -> None:
+    print(f"devpod-nvim: {message}", file=sys.stderr, flush=True)
 
 
 def state_root() -> pathlib.Path:
@@ -197,6 +203,31 @@ def run(argv, *, cwd=None, input_bytes=None, env=None, timeout=None, check=True)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
         fail(f"{pathlib.Path(str(argv[0])).name} exited {result.returncode}: {detail or 'no diagnostic'}")
+    return result
+
+
+def run_traced(argv, *, label: str, timeout: float, interval: float = 10.0):
+    """Run a quiet long-lived command with bounded progress on stderr."""
+    command = [str(item) for item in argv]
+    progress(label)
+    started = time.monotonic()
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    while True:
+        elapsed = time.monotonic() - started
+        remaining = timeout - elapsed
+        if remaining <= 0:
+            process.kill()
+            stdout, stderr = process.communicate()
+            fail(f"{pathlib.Path(command[0]).name} timed out after {timeout} seconds")
+        try:
+            stdout, stderr = process.communicate(timeout=min(interval, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            progress(f"{label} still running ({int(time.monotonic() - started)}s)")
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if result.returncode != 0:
+        detail = (stderr or stdout).decode("utf-8", "replace").strip()
+        fail(f"{pathlib.Path(command[0]).name} exited {result.returncode}: {detail or 'no diagnostic'}")
     return result
 
 
@@ -318,96 +349,270 @@ def target_architecture() -> str:
     fail(f"DevPod TARGETARCH compatibility is unavailable for host architecture {architecture!r}")
 
 
-def compatibility_config(root: pathlib.Path, repo: pathlib.Path, config: str) -> tuple[str, str]:
-    """Return DevPod's config path and a workspace-identity config key.
+def decode_devcontainer(payload: bytes) -> dict:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeError as error:
+        fail(f"cannot decode devcontainer.json: {error}")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        chars = list(text)
+        index = 0
+        in_string = False
+        escaped = False
+        while index < len(chars):
+            char = chars[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                index += 1
+                continue
+            if char == '"':
+                in_string = True
+                index += 1
+                continue
+            if char == "/" and index + 1 < len(chars) and chars[index + 1] == "/":
+                chars[index] = chars[index + 1] = " "
+                index += 2
+                while index < len(chars) and chars[index] not in "\r\n":
+                    chars[index] = " "
+                    index += 1
+                continue
+            if char == "/" and index + 1 < len(chars) and chars[index + 1] == "*":
+                chars[index] = chars[index + 1] = " "
+                index += 2
+                while index + 1 < len(chars) and not (chars[index] == "*" and chars[index + 1] == "/"):
+                    if chars[index] not in "\r\n":
+                        chars[index] = " "
+                    index += 1
+                if index + 1 >= len(chars):
+                    fail("devcontainer.json has an unterminated block comment")
+                chars[index] = chars[index + 1] = " "
+                index += 2
+                continue
+            index += 1
+        in_string = False
+        escaped = False
+        for index, char in enumerate(chars):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == ",":
+                lookahead = index + 1
+                while lookahead < len(chars) and chars[lookahead].isspace():
+                    lookahead += 1
+                if lookahead < len(chars) and chars[lookahead] in "]}":
+                    chars[index] = " "
+        try:
+            value = json.loads("".join(chars))
+        except json.JSONDecodeError as error:
+            fail(f"cannot inspect devcontainer.json for a private overlay: {error}")
+    if not isinstance(value, dict):
+        fail("devcontainer.json must contain a JSON object")
+    return value
+
+
+def host_gitconfig() -> pathlib.Path | None:
+    configured = os.environ.get("GIT_CONFIG_GLOBAL")
+    candidates = []
+    if configured:
+        candidates.append(pathlib.Path(configured).expanduser())
+    else:
+        candidates.append(pathlib.Path.home() / ".gitconfig")
+        xdg = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config"))
+        candidates.append(xdg / "git/config")
+    for candidate in candidates:
+        if not candidate.exists():
+            if configured:
+                fail(f"GIT_CONFIG_GLOBAL does not exist: {candidate}")
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            info = resolved.stat()
+        except OSError as error:
+            fail(f"cannot inspect host Git config: {error}")
+        if not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.R_OK):
+            fail(f"host Git config is not a readable regular file: {resolved}")
+        if info.st_size > MAX_GITCONFIG:
+            fail("host Git config exceeds 1 MiB")
+        if any(character in str(resolved) for character in (",", "\n", "\r", "\0")):
+            fail("host Git config path is unsafe for a container bind mount")
+        return resolved
+    return None
+
+
+def ssh_agent_available() -> bool:
+    value = os.environ.get("SSH_AUTH_SOCK")
+    if not value or any(character in value for character in ("\n", "\r", "\0")):
+        return False
+    try:
+        return stat.S_ISSOCK(pathlib.Path(value).stat().st_mode)
+    except OSError:
+        return False
+
+
+def compatibility_config(
+    root: pathlib.Path,
+    repo: pathlib.Path,
+    config: str,
+    gitconfig: pathlib.Path | None = None,
+) -> tuple[str, str, str | None]:
+    """Return DevPod's config path, workspace identity key, and Git config target.
 
     DevPod 0.6.15 resolves Dockerfile stage variables using devcontainer
     build args before asking the local engine for the base image. Docker's
     automatic TARGETARCH is otherwise absent at that point, so a final stage
     such as `FROM base-$TARGETARCH` is misread as the remote image `base-`.
-    Materialize a private config overlay with the same effective TARGETARCH;
-    never write compatibility state into the project.
+    Materialize a private config overlay with the same effective TARGETARCH and
+    the optional read-only host Git config mount; never write it into the repo.
     """
     original = (repo / config).resolve(strict=True)
     try:
         payload = original.read_bytes()
-        text = payload.decode("utf-8")
-    except (OSError, UnicodeError) as error:
+    except OSError as error:
         fail(f"cannot inspect devcontainer.json for DevPod compatibility: {error}")
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
-        # DevPod accepts JSON-with-comments. Preserve that existing behavior;
-        # the private TARGETARCH workaround is deliberately limited to JSON
-        # that the stdlib parser can reproduce without changing semantics.
-        return config, config
-    if not isinstance(value, dict):
-        fail("devcontainer.json must contain a JSON object")
-    build = value.get("build")
-    if not isinstance(build, dict):
-        return config, config
-    dockerfile_value = build.get("dockerfile")
-    if not isinstance(dockerfile_value, str) or not dockerfile_value:
-        return config, config
+    value = decode_devcontainer(payload)
+    effective = json.loads(json.dumps(value))
     config_dir = original.parent
-    dockerfile = (config_dir / dockerfile_value).resolve(strict=True)
-    if not contained(repo, dockerfile) or not dockerfile.is_file():
-        fail("devcontainer Dockerfile is outside the registered project")
-    try:
-        dockerfile_payload = dockerfile.read_bytes()
-        if len(dockerfile_payload) > MAX_DOCKERFILE:
-            fail("devcontainer Dockerfile exceeds 10 MiB")
-        dockerfile_text = dockerfile_payload.decode("utf-8")
-    except (OSError, UnicodeError) as error:
-        fail(f"cannot inspect devcontainer Dockerfile: {error}")
-    target_reference = re.compile(
-        r"^\s*FROM\s+\S*\$(?:\{TARGETARCH\}|TARGETARCH)\S*", re.IGNORECASE | re.MULTILINE
-    )
-    arguments = build.get("args", {})
-    if not isinstance(arguments, dict):
-        fail("devcontainer build.args must be an object")
-    if not target_reference.search(dockerfile_text):
-        return config, config
+    dockerfile_payload = b""
+    dockerfile_text = ""
+    dockerfile = None
+    context = None
+    targetarch = None
+    global_arg = None
 
-    first_from = re.search(r"^\s*FROM\s+", dockerfile_text, re.IGNORECASE | re.MULTILINE)
-    if first_from is None:
-        fail("devcontainer Dockerfile has no FROM instruction")
-    preamble = dockerfile_text[: first_from.start()]
-    global_arg = re.search(r"^\s*ARG\s+TARGETARCH(?:\s*=.*)?$", preamble, re.IGNORECASE | re.MULTILINE)
-    if arguments.get("TARGETARCH") and global_arg:
-        return config, config
+    build = value.get("build")
+    if build is not None and not isinstance(build, dict):
+        fail("devcontainer build must be an object")
+    if isinstance(build, dict):
+        context_value = build.get("context", ".")
+        if not isinstance(context_value, str) or not context_value:
+            fail("devcontainer build.context must be a non-empty string")
+        context = (config_dir / context_value).resolve(strict=True)
+        if not contained(repo, context) or not context.is_dir():
+            fail("devcontainer build context is outside the registered project")
+        dockerfile_value = build.get("dockerfile") or build.get("dockerFile")
+        if dockerfile_value is not None:
+            if not isinstance(dockerfile_value, str) or not dockerfile_value:
+                fail("devcontainer build.dockerfile must be a non-empty string")
+            dockerfile = (config_dir / dockerfile_value).resolve(strict=True)
+            if not contained(repo, dockerfile) or not dockerfile.is_file():
+                fail("devcontainer Dockerfile is outside the registered project")
+            try:
+                dockerfile_payload = dockerfile.read_bytes()
+                if len(dockerfile_payload) > MAX_DOCKERFILE:
+                    fail("devcontainer Dockerfile exceeds 10 MiB")
+                dockerfile_text = dockerfile_payload.decode("utf-8")
+            except (OSError, UnicodeError) as error:
+                fail(f"cannot inspect devcontainer Dockerfile: {error}")
+            target_reference = re.compile(
+                r"^\s*FROM\s+\S*\$(?:\{TARGETARCH\}|TARGETARCH)\S*",
+                re.IGNORECASE | re.MULTILINE,
+            )
+            if target_reference.search(dockerfile_text):
+                arguments = build.get("args", {})
+                if not isinstance(arguments, dict):
+                    fail("devcontainer build.args must be an object")
+                first_from = re.search(r"^\s*FROM\s+", dockerfile_text, re.IGNORECASE | re.MULTILINE)
+                if first_from is None:
+                    fail("devcontainer Dockerfile has no FROM instruction")
+                preamble = dockerfile_text[: first_from.start()]
+                global_arg = re.search(
+                    r"^\s*ARG\s+TARGETARCH(?:\s*=.*)?$",
+                    preamble,
+                    re.IGNORECASE | re.MULTILINE,
+                )
+                if not (arguments.get("TARGETARCH") and global_arg):
+                    targetarch = str(arguments.get("TARGETARCH") or target_architecture())
+                    effective_args = dict(arguments)
+                    effective_args.setdefault("TARGETARCH", targetarch)
+                    effective["build"]["args"] = effective_args
 
-    architecture = str(arguments.get("TARGETARCH") or target_architecture())
-    context_value = build.get("context", ".")
-    if not isinstance(context_value, str) or not context_value:
-        fail("devcontainer build.context must be a non-empty string")
-    context = (config_dir / context_value).resolve(strict=True)
-    if not contained(repo, context) or not context.is_dir():
-        fail("devcontainer build context is outside the registered project")
+    gitconfig_target = None
+    if gitconfig is not None:
+        gitconfig = gitconfig.resolve(strict=True)
+        mounts = effective.get("mounts", [])
+        if mounts is None:
+            mounts = []
+        if not isinstance(mounts, list):
+            fail("devcontainer mounts must be an array")
+        for mount in mounts:
+            if isinstance(mount, dict) and mount.get("target") == GITCONFIG_TARGET:
+                fail(f"devcontainer already owns reserved mount target {GITCONFIG_TARGET}")
+            if isinstance(mount, str) and GITCONFIG_TARGET in mount:
+                fail(f"devcontainer already owns reserved mount target {GITCONFIG_TARGET}")
+        effective["mounts"] = list(mounts) + [
+            {
+                "type": "bind",
+                "source": str(gitconfig),
+                "target": GITCONFIG_TARGET,
+                "other": ["readonly"],
+            }
+        ]
+        gitconfig_target = GITCONFIG_TARGET
+
+    if targetarch is None and gitconfig_target is None:
+        return config, config, None
 
     repo_key = hashlib.sha256(os.fsencode(str(repo))).hexdigest()
+    effective_signal = json.dumps(
+        effective,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     digest = hashlib.sha256(
-        payload + b"\0" + dockerfile_payload + b"\0TARGETARCH=" + architecture.encode()
+        payload
+        + b"\0"
+        + dockerfile_payload
+        + b"\0EFFECTIVE="
+        + effective_signal
     ).hexdigest()
     overlay_dir = ensure_dir(root / "overlays" / f"{repo_key}-{digest}").resolve(strict=True)
     overlay = overlay_dir / "devcontainer.json"
-    effective = json.loads(json.dumps(value))
-    effective_build = effective["build"]
-    effective_args = dict(arguments)
-    effective_args.setdefault("TARGETARCH", architecture)
-    effective_build["args"] = effective_args
-    effective_build["context"] = os.path.relpath(context, overlay_dir)
-    effective_build["dockerfile"] = "Dockerfile"
-    if global_arg:
-        effective_dockerfile = dockerfile_text
-    else:
-        effective_dockerfile = dockerfile_text[: first_from.start()] + "ARG TARGETARCH\n" + dockerfile_text[first_from.start() :]
-    atomic_bytes(overlay_dir / "Dockerfile", effective_dockerfile.encode("utf-8"), 0o600)
+    if isinstance(build, dict):
+        effective_build = effective["build"]
+        effective_build["context"] = os.path.relpath(context, overlay_dir)
+        if dockerfile is not None:
+            effective_build.pop("dockerFile", None)
+            effective_build["dockerfile"] = "Dockerfile"
+            effective_dockerfile = dockerfile_text
+            if targetarch is not None and global_arg is None:
+                first_from = re.search(r"^\s*FROM\s+", dockerfile_text, re.IGNORECASE | re.MULTILINE)
+                effective_dockerfile = (
+                    dockerfile_text[: first_from.start()]
+                    + "ARG TARGETARCH\n"
+                    + dockerfile_text[first_from.start() :]
+                )
+            atomic_bytes(overlay_dir / "Dockerfile", effective_dockerfile.encode("utf-8"), 0o600)
+    compose = effective.get("dockerComposeFile")
+    if compose is not None:
+        values = [compose] if isinstance(compose, str) else compose
+        if not isinstance(values, list) or any(not isinstance(item, str) or not item for item in values):
+            fail("devcontainer dockerComposeFile must be a string or string array")
+        rebased = []
+        for item in values:
+            path = (config_dir / item).resolve(strict=True)
+            if not contained(repo, path) or not path.is_file():
+                fail("devcontainer compose file is outside the registered project")
+            rebased.append(os.path.relpath(path, overlay_dir))
+        effective["dockerComposeFile"] = rebased[0] if isinstance(compose, str) else rebased
     atomic_json(overlay, effective)
     os.utime(overlay_dir, None)
     devpod_path = pathlib.Path(os.path.relpath(overlay, repo)).as_posix()
-    identity = f"{config}\0TARGETARCH={architecture}\0{digest}"
-    return devpod_path, identity
+    identity = f"{config}\0OVERLAY={digest}"
+    return devpod_path, identity, gitconfig_target
 
 
 def slug(value: str) -> str:
@@ -558,7 +763,7 @@ def ensure_context_provider(binary: pathlib.Path, provider: str) -> pathlib.Path
                 "-o",
                 "SSH_ADD_PRIVATE_KEYS=false",
                 "-o",
-                "SSH_AGENT_FORWARDING=false",
+                "SSH_AGENT_FORWARDING=true",
                 "-o",
                 "GIT_SSH_SIGNATURE_FORWARDING=false",
             ]
@@ -608,7 +813,14 @@ def ensure_context_provider(binary: pathlib.Path, provider: str) -> pathlib.Path
     return pathlib.Path(resolved_engine).resolve(strict=True)
 
 
-def container_workspace(binary, provider, workspace, engine: pathlib.Path, repo: pathlib.Path) -> str:
+def container_workspace(
+    binary,
+    provider,
+    workspace,
+    engine: pathlib.Path,
+    repo: pathlib.Path,
+    gitconfig: pathlib.Path | None = None,
+) -> str:
     records = json_command(devpod_args(binary, provider, "list", "--output", "json"))
     if not isinstance(records, list):
         fail("DevPod returned an invalid workspace list")
@@ -629,6 +841,7 @@ def container_workspace(binary, provider, workspace, engine: pathlib.Path, repo:
     except (UnicodeError, json.JSONDecodeError) as error:
         fail(f"local provider returned invalid mount metadata: {error}")
     destinations = []
+    gitconfig_mounts = []
     if isinstance(mounts, list):
         for mount in mounts:
             if not isinstance(mount, dict) or str(mount.get("Type", "")).lower() != "bind":
@@ -643,8 +856,15 @@ def container_workspace(binary, provider, workspace, engine: pathlib.Path, repo:
                 continue
             if source_path == repo and destination.startswith("/") and "\n" not in destination:
                 destinations.append(destination)
+            if gitconfig is not None and source_path == gitconfig:
+                if destination == GITCONFIG_TARGET and mount.get("RW") is False:
+                    gitconfig_mounts.append(destination)
+                else:
+                    fail("host Git config bind mount is not read-only at the reserved target")
     if len(destinations) != 1:
         fail("DevPod container has no unique bind mount for the registered project")
+    if gitconfig is not None and gitconfig_mounts != [GITCONFIG_TARGET]:
+        fail("DevPod container has no unique read-only host Git config mount")
     destination = destinations[0]
     exists = container_command(
         binary,
@@ -785,15 +1005,21 @@ def tar_directory(path: pathlib.Path) -> bytes:
     return payload.getvalue()
 
 
+def ssh_flags(agent_forwarding=False) -> list[str]:
+    return [
+        "ssh",
+        f"--agent-forwarding={'true' if agent_forwarding else 'false'}",
+        "--gpg-agent-forwarding=false",
+        "--start-services=false",
+    ]
+
+
 def ssh(binary, provider, workspace, *flags, input_bytes=None, check=True):
     argv = devpod_args(
         binary,
         provider,
         "--silent",
-        "ssh",
-        "--agent-forwarding=false",
-        "--gpg-agent-forwarding=false",
-        "--start-services=false",
+        *ssh_flags(False),
         *flags,
         workspace,
     )
@@ -1023,13 +1249,17 @@ def cmd_up(args):
     private = prepare_state()
     repo = repo_root(args.repo or os.getcwd())
     require_editor_pane(args.prepare_only)
+    progress(f"resolving DevPod configuration for {repo.name}")
     existing_key = hashlib.sha256(os.fsencode(str(repo))).hexdigest()
     saved = selection(private, existing_key) or {}
     provider = args.provider or saved.get("provider") or ("podman" if shutil.which("podman") else "docker")
     if provider not in PROVIDERS:
         fail("provider must be docker or podman")
     config = discover_config(repo, args.config or saved.get("devcontainer_path"))
-    devpod_config, config_identity = compatibility_config(private, repo, config)
+    gitconfig = host_gitconfig()
+    devpod_config, config_identity, gitconfig_target = compatibility_config(
+        private, repo, config, gitconfig
+    )
     repo_key, workspace = identities(repo, provider, config_identity)
     atomic_json(
         private / "selections" / f"{repo_key}.json",
@@ -1039,6 +1269,7 @@ def cmd_up(args):
     if not allow_network and sys.stdin.isatty():
         answer = input("Allow a verified network download if this workspace needs its first bootstrap? [y/N] ")
         allow_network = answer.strip().lower() in {"y", "yes"}
+    progress(f"validating DevPod {DEVPOD_VERSION} and local {provider} provider")
     configure_registry_environment(private)
     devpod = devpod_binary(private, allow_network)
     engine = ensure_context_provider(devpod, provider)
@@ -1062,15 +1293,23 @@ def cmd_up(args):
     )
     if args.recreate:
         up.append("--recreate")
-    run(up, timeout=600)
+    run_traced(
+        up,
+        label=f"starting or reusing workspace {workspace}",
+        timeout=600,
+    )
     after = project_fingerprint(repo)
     mutated = before != after
+    progress("verifying compiler, project mount and read-only Git configuration")
     require_cc(devpod, provider, workspace)
-    container_root = container_workspace(devpod, provider, workspace, engine, repo)
+    container_root = container_workspace(devpod, provider, workspace, engine, repo, gitconfig)
     if not container_root.startswith("/") or "\n" in container_root:
         fail("DevPod returned an invalid container workspace path")
+    progress("provisioning the verified read-only Neovim configuration")
     provision_config(devpod, provider, workspace, snapshot, workspace)
+    progress(f"verifying Neovim {NVIM_VERSION}")
     nvim = provision_nvim(devpod, provider, workspace, private, workspace, allow_network)
+    progress("checking the pinned plugin bootstrap")
     bootstrap_plugins(devpod, provider, workspace, workspace, nvim, snapshot["digest"], allow_network)
     result = {
         "ok": True,
@@ -1084,12 +1323,15 @@ def cmd_up(args):
         "project_mutated": mutated,
         "git_before": before,
         "git_after": after,
+        "gitconfig_target": gitconfig_target,
+        "ssh_agent_forwarding": ssh_agent_available(),
     }
     if mutated:
         print("devpod-nvim: project lifecycle hooks changed the Git worktree; no rollback was attempted", file=sys.stderr)
     if args.prepare_only:
         print(json.dumps(result, sort_keys=True))
         return
+    progress("starting Neovim with the authenticated host bridge")
     launch_editor(private, devpod, result, nvim)
 
 
@@ -1131,6 +1373,9 @@ def launch_editor(private, devpod, prepared, nvim):
         "tmux_pane": os.environ.get("TMUX_PANE"),
         "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
+    if prepared.get("gitconfig_target"):
+        record["gitconfig_target"] = prepared["gitconfig_target"]
+    record["ssh_agent_forwarding"] = prepared.get("ssh_agent_forwarding") is True
     atomic_json(record_path, record)
     project = pathlib.Path(prepared["repo_root"]).name
     title = f"DevPod · {provider} · {project}"
@@ -1152,12 +1397,7 @@ def launch_editor(private, devpod, prepared, nvim):
         f'XDG_CACHE_HOME="{base}/xdg/cache" {nvim} -u "{base}/config/init.lua" '
         f'--listen "{container_nvim_address}"'
     )
-    secure_ssh = [
-        "ssh",
-        "--agent-forwarding=false",
-        "--gpg-agent-forwarding=false",
-        "--start-services=false",
-    ]
+    secure_ssh = ssh_flags(False)
     forward_argv = devpod_args(
         devpod,
         provider,
@@ -1174,10 +1414,9 @@ def launch_editor(private, devpod, prepared, nvim):
         f"{container_controller}:{controller_socket}",
         workspace,
     )
-    editor_argv = devpod_args(
-        devpod,
-        provider,
-        *secure_ssh,
+    editor_ssh = ssh_flags(prepared.get("ssh_agent_forwarding") is True)
+    editor_options = [
+        *editor_ssh,
         "--workdir",
         prepared["container_root"],
         "--set-env",
@@ -1194,10 +1433,13 @@ def launch_editor(private, devpod, prepared, nvim):
         f"NVIM_DEVPOD_HOST_ROOT={prepared['repo_root']}",
         "--set-env",
         f"NVIM_DEVPOD_CONTAINER_ROOT={prepared['container_root']}",
-        "--command",
-        command,
-        workspace,
-    )
+    ]
+    if prepared.get("gitconfig_target"):
+        editor_options.extend(
+            ["--set-env", f"GIT_CONFIG_GLOBAL={prepared['gitconfig_target']}"]
+        )
+    editor_options.extend(["--command", command, workspace])
+    editor_argv = devpod_args(devpod, provider, *editor_options)
     forward_process = None
     reverse_process = None
     code = None

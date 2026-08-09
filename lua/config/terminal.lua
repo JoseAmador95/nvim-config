@@ -409,6 +409,7 @@ function M.shell_spec(root)
 		env = {},
 		layout = "bottom",
 		title = "Shell",
+		passthrough = { "<Tab>", "<S-Tab>" },
 	}
 end
 

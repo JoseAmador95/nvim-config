@@ -136,6 +136,10 @@ test("an empty environment map opens the default shell", function()
 	local shell = terminal.shell_spec(repo)
 	local normalized = assert(terminal._normalize(shell))
 	assert(next(normalized.env) == nil and not vim.islist(normalized.env), "empty env did not remain a map")
+	assert(
+		vim.deep_equal(normalized.passthrough, { "<Tab>", "<S-Tab>" }),
+		"shell completion keys are not passed through"
+	)
 	local record = assert(terminal.open(shell))
 	assert(record and #opened == 1, "default shell did not open")
 	assert(next(opened[1].opts.env) == nil and not vim.islist(opened[1].opts.env), "Snacks received an empty list")
