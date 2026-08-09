@@ -52,6 +52,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 		vim.schedule(function()
 			local ok, err = xpcall(function()
 				assert(vim.fn.exists(":CloseTab") == 2, "full editor CloseTab command is missing")
+				for _, command in ipairs({ "ReviewRoundStart", "TuicrReview", "AgentContext", "AgentResultsImport" }) do
+					assert(vim.fn.exists(":" .. command) == 2, "full editor " .. command .. " command is missing")
+				end
 				local close_map = vim.fn.maparg("<leader>q", "n", false, true)
 				assert(close_map.rhs == "<cmd>CloseTab<cr>", "full editor close mapping bypasses CloseTab")
 				local close_all_map = vim.fn.maparg("<leader>Q", "n", false, true)

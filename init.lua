@@ -227,6 +227,10 @@ end
 -- filetype detection see the first argv buffer. VSCode deliberately keeps only
 -- its action bridge; the pager gets viewer/diagram commands but no IDE tools.
 if is_editor then
+	require("config.review").setup()
+	require("config.agent_context").setup()
+	require("config.agent_results").setup()
+	require("config.editor_rpc").setup_deferred()
 	require("config.devcontainer_shell").setup()
 	require("config.indent")
 	require("config.lsp_helpers")

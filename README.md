@@ -96,6 +96,69 @@ right click opens the hierarchical menu. Closing the final work tab preserves
 user buffers, creates a pristine home tab, and opens the Snacks dashboard;
 `<leader>Q` remains the explicit close-all flow.
 
+## Review rounds and agent interchange
+
+The full terminal-editor profile exposes four explicit review commands. They
+are intentionally absent from VSCode and `nvimpager`:
+
+- `:ReviewRoundStart` resolves the current canonical Git root, starts
+  `~/.config/tuicr/tuicr-round` asynchronously, caches the returned
+  round UUID for that root, and opens that exact round in a reusable 95% floating
+  ToggleTerm. `:TuicrReview` reopens the cached UUID; without one it asks the
+  launcher to select by repository and lets ambiguity fail closed. The launcher,
+  not Neovim, owns the private tmux session that prevents duplicate TUIs across
+  surfaces. Inside the review float, `<C-t>` hides the terminal without stopping
+  tuicr; `:TuicrReview` shows the same live round again. `<leader>t` is
+  intentionally unavailable there because `Space` is passed immediately to
+  tuicr's commit selector. A normal tuicr `q` closes the private tmux server and
+  returns to Neovim, while a failed process keeps its pane and output for
+  diagnosis.
+- `:[range]AgentContext` copies version-1 UTF-8 JSON through OSC52's `+`
+  register even on a local host. It includes the canonical root, relative file,
+  one-based range, selected text, current-buffer diagnostics, and an optional
+  `symbol` navigation hint taken from the current word under the cursor. That
+  hint is deliberately lexical, not an LSP semantic-symbol claim.
+- `:[range]AgentContext!` additionally includes separate staged and unstaged
+  diffs plus the untracked path list. This can disclose all uncommitted work in
+  the repository to the clipboard recipient. Both forms refuse payloads larger
+  than 1 MiB; the non-bang form never reads or emits diffs.
+- `:AgentResultsImport {json}` accepts only the version-1 contract in
+  `~/.config/tuicr/schemas/agent-results.schema.json`. The importer
+  enforces the 1 MiB and 2,000-item limits, exact canonical root, strict keys,
+  bounded strings, contained existing files, positions, and protocol severity.
+  Accepted findings replace the quickfix list and open Trouble's `qflist` mode.
+  The importer cannot carry executable actions, callbacks, or shell commands.
+
+Each interactive full editor also registers, just after its UI enters, a private
+Unix RPC socket and an owner-only JSON record under the review state root. This
+keeps socket and Git discovery off the startup critical path; headless validators
+are not editor targets. The root is
+`$NVIM_REVIEW_STATE_HOME`, otherwise `$XDG_STATE_HOME/nvim-review`, otherwise
+`~/.local/state/nvim-review`; its `editors`, `requests`, and `sockets`
+directories are mode 0700 and JSON files are mode 0600. Registry roots update
+only on `BufEnter` and `DirChanged`, and the editor removes its record and socket
+on exit.
+
+External tools may request an already-open file with:
+
+```sh
+~/.config/nvim/scripts/nvim-review-open \
+  --cwd /absolute/repository \
+  --file relative/or/absolute/file \
+  --line 12 \
+  --column 4
+```
+
+The helper prunes dead editor records and stale requests, retries a bounded
+registration/socket window while preserving live records across transient probe
+failures, then requires exactly one reachable editor registered for the target
+repository. Its remote calls are headless and independent of whether the caller
+has a TTY. It sends
+only an opaque request UUID through a constant remote expression and validates
+the request and path again inside Neovim before routing through the shared tab
+opener. Zero or multiple matches are errors: it never starts plain Neovim and
+never falls back to another editor.
+
 Enable the lightweight pager profile with:
 
 ```sh

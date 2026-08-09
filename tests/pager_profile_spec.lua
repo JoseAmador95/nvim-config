@@ -25,9 +25,15 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"Mason",
 					"PlantumlAscii",
 					"PlantumlPreview",
+					"ReviewRoundStart",
+					"TuicrReview",
+					"AgentContext",
+					"AgentResultsImport",
 				}) do
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into the pager profile")
 				end
+				assert(package.loaded["config.editor_rpc"] == nil, "editor RPC module loaded in the pager")
+				assert(_G.NvimReviewOpenRequest == nil, "editor RPC function leaked into the pager")
 				assert(
 					vim.fn.exists(":NvimConfigParsersInstall") == 2,
 					"explicit parser installer is missing from the pager"

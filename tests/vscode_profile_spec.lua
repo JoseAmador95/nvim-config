@@ -25,9 +25,15 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"NvimConfigToolsInstall",
 					"LogWatchCurrentFile",
 					"Mason",
+					"ReviewRoundStart",
+					"TuicrReview",
+					"AgentContext",
+					"AgentResultsImport",
 				}) do
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into VSCode")
 				end
+				assert(package.loaded["config.editor_rpc"] == nil, "editor RPC module loaded in VSCode")
+				assert(_G.NvimReviewOpenRequest == nil, "editor RPC function leaked into VSCode")
 
 				require("lazy").load({ plugins = { "vscode-multi-cursor.nvim" } })
 				local runtime_paths = vim.api.nvim_list_runtime_paths()
