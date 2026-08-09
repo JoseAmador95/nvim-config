@@ -194,6 +194,20 @@ function M.setup()
 	end, { nargs = 0, desc = "Start and open an isolated tuicr review round" })
 
 	vim.api.nvim_create_user_command("TuicrReview", function(command)
+		if require("config.devpod").in_workspace() then
+			if command.args ~= "" then
+				notify(
+					"Container review delegates to the host popup and does not accept a round argument",
+					vim.log.levels.ERROR
+				)
+				return
+			end
+			local ok, host_err = require("config.devpod").request_host("tuicr")
+			if not ok then
+				notify(host_err, vim.log.levels.ERROR)
+			end
+			return
+		end
 		local root, err = require("config.repo").current_root(0)
 		if not root then
 			notify(err, vim.log.levels.ERROR)

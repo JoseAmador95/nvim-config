@@ -149,8 +149,10 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(package.loaded["nvim-navic"] == nil, "nvim-navic loaded before LspAttach")
 				assert(package.loaded.coverage == nil, "nvim-coverage loaded without a coverage command")
 				assert(vim.fn.exists(":LazyGit") == 2, "LazyGit command is missing")
-				assert(vim.fn.exists(":DevcontainerShell") == 2, "focused devcontainer shell is missing")
-				assert(vim.fn.exists(":DevcontainerWorkspace") == 2, "devcontainer workspace selector is missing")
+				for _, name in ipairs({ "DevPodUp", "DevPodRecreate", "DevPodStatus", "HostEditor" }) do
+					assert(vim.fn.exists(":" .. name) == 2, "DevPod command is missing: " .. name)
+				end
+				assert(vim.fn.exists(":DevcontainerShell") == 0, "retired devcontainer shell remains")
 				for _, name in ipairs({
 					"ClangdSwitchSourceHeader",
 					"CoverageClear",

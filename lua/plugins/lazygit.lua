@@ -42,6 +42,13 @@ local function config_files()
 end
 
 local function toggle_lazygit()
+	if require("config.devpod").in_workspace() then
+		local ok, err = require("config.devpod").request_host("lazygit")
+		if not ok then
+			vim.notify(err, vim.log.levels.ERROR, { title = "lazygit" })
+		end
+		return
+	end
 	if vim.fn.executable("lazygit") ~= 1 then
 		vim.notify("lazygit not found in PATH", vim.log.levels.ERROR, { title = "lazygit" })
 		return

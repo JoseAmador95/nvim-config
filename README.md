@@ -59,7 +59,7 @@ order. External tools are optional unless their feature is used:
 | Inline diagram images | A terminal with the Kitty graphics protocol, such as Ghostty |
 | Pager profile | `nvimpager` plus the config symlink below |
 | Git terminal UI | Host `lazygit` |
-| Devcontainer shell | Host `devcontainer` CLI and the shared Snacks terminal; see [the focused workflow](docs/devcontainer-shell.md) |
+| Container editor | DevPod `0.6.15`, local Podman/Docker provider and host `cc`; see [the focused workflow](docs/devpod-neovim.md) |
 | Just recipes | Host `just`; it is never installed automatically |
 
 `mmdflux` and PlantUML are installed from pinned official precompiled releases
@@ -165,7 +165,7 @@ never falls back to another editor.
 ## Development workflows
 
 `<leader>t` opens a host shell in a lower split. Shells, Python REPLs, LazyGit,
-tuicr, Just and the temporary devcontainer shell share one Snacks terminal
+tuicr and Just share one Snacks terminal
 lifecycle keyed by runtime, repository and purpose. Hiding a terminal preserves
 its process; a failed process keeps its output. LazyGit and tuicr use 95% floats,
 while shells, REPLs and recipe output use the lower split. `gf` on a contained
@@ -196,6 +196,15 @@ executes literal argv in the lower terminal. `:JustImportLast` conservatively
 imports contained `file:line[:column]` output into quickfix and Trouble. The
 project/branch `:Scratch` (`<leader>.`) is private under `stdpath("state")`,
 saved atomically and prunes only inactive files older than 30 days when opened.
+
+`Alt-Space` in tmux exposes stable `editor: DevPod` and `editor: host` actions.
+The former replaces only the dev session's `editor` pane, using a private
+host-first bridge pinned to DevPod `0.6.15`; agent/Git/LazyGit/tuicr stay on the
+host. `:DevPodUp[!]`, `:DevPodRecreate[!]`, `:DevPodStatus` and `:HostEditor`
+provide the editor surfaces. A commit-backed read-only config snapshot and an
+exact Neovim `0.12.4` runtime are provisioned outside the project. See
+[Neovim inside DevPod](docs/devpod-neovim.md) for provider setup, network
+confirmation, path mapping, structured `exec --` and the security boundary.
 
 Enable the lightweight pager profile with:
 

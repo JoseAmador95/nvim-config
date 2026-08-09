@@ -227,11 +227,17 @@ end
 -- filetype detection see the first argv buffer. VSCode deliberately keeps only
 -- its action bridge; the pager gets viewer/diagram commands but no IDE tools.
 if is_editor then
+	local devpod = require("config.devpod")
+	devpod.setup()
 	require("config.review").setup()
 	require("config.agent_context").setup()
 	require("config.agent_results").setup()
-	require("config.editor_rpc").setup_deferred()
-	require("config.devcontainer_shell").setup()
+	-- A container editor is reached through the launcher's registered path
+	-- mapping. Registering it as a host editor would publish container-only
+	-- paths to nvim-review-open.
+	if not devpod.in_workspace() then
+		require("config.editor_rpc").setup_deferred()
+	end
 	require("config.indent")
 	require("config.lsp_helpers")
 	require("config.lsp_commands")

@@ -73,7 +73,7 @@ been removed; PlantUML diagram rendering is unchanged.
 | Lint/format | Save-only lint routing, formatter chains, no-LSP fallback and missing-tool behavior | Project-specific linter configuration |
 | Diagrams | Scanner, renderer generations, atomic cache writes, corruption and pruning | Kitty image display, browser opening and visual layout |
 | LogWatch | Append, partial lines, truncation, rotation, deletion/recreation and retention limits | Sustained observation of a high-volume production log |
-| Devcontainer shell | Command/config contract and workspace selection | A real `devcontainer exec` session |
+| DevPod editor | Launcher/RPC schemas, argv transport, path containment, private state, provider/config identity and Git mutation fingerprints | A real Podman workspace, image lifecycle hooks and bidirectional SSH forwarding |
 
 GitHub Actions runs the same bootstrap and check on `ubuntu-24.04` and
 `macos-15`. Hosted success is delivery evidence only after the branch has been

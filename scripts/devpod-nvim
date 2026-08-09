@@ -1,0 +1,1199 @@
+#!/usr/bin/env python3
+"""Run the exact Neovim config inside a local DevPod workspace.
+
+The host owns workspace selection, verified runtime/config snapshots and both
+ends of the editor bridge.  Projects are only passed to DevPod; this helper
+never writes a project file or rolls back lifecycle-hook changes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime as dt
+import hashlib
+import io
+import json
+import os
+import pathlib
+import platform
+import plistlib
+import re
+import signal
+import shutil
+import socket
+import socketserver
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+import urllib.request
+import urllib.error
+
+
+VERSION = 1
+DEVPOD_VERSION = "0.6.15"
+NVIM_VERSION = "0.12.4"
+CONTEXT = "nvim-devpod"
+MAX_JSON = 64 * 1024
+MAX_RPC_OUTPUT = 1024 * 1024
+STALE_SECONDS = 30 * 24 * 60 * 60
+PROVIDERS = {"docker", "podman"}
+GIT_ENV = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_WORK_TREE",
+}
+NVIM_RELEASES = {
+    "aarch64": (
+        "nvim-linux-arm64.tar.gz",
+        "ceb7e88c6b681f0515d135dcdfad54f5eb4373b25ce6172197cd9a69c758063f",
+    ),
+    "arm64": (
+        "nvim-linux-arm64.tar.gz",
+        "ceb7e88c6b681f0515d135dcdfad54f5eb4373b25ce6172197cd9a69c758063f",
+    ),
+    "x86_64": (
+        "nvim-linux-x86_64.tar.gz",
+        "012bf3fcac5ade43914df3f174668bf64d05e049a4f032a388c027b1ebd78628",
+    ),
+    "amd64": (
+        "nvim-linux-x86_64.tar.gz",
+        "012bf3fcac5ade43914df3f174668bf64d05e049a4f032a388c027b1ebd78628",
+    ),
+}
+DEVPOD_DARWIN_ARM64 = (
+    "DevPod_macos_aarch64.dmg",
+    "63fea2f91762be167a53267722b1f37b95214bb1824957e2eeaf38d41f6a16af",
+)
+
+
+class DevPodError(Exception):
+    pass
+
+
+class NoActiveEditor(DevPodError):
+    pass
+
+
+def fail(message: str) -> "None":
+    raise DevPodError(message)
+
+
+def state_root() -> pathlib.Path:
+    configured = os.environ.get("NVIM_DEVPOD_STATE_HOME")
+    if configured:
+        return pathlib.Path(configured).expanduser().absolute()
+    base = pathlib.Path(os.environ.get("XDG_STATE_HOME", pathlib.Path.home() / ".local/state"))
+    return (base / "nvim-devpod").expanduser().absolute()
+
+
+def ensure_dir(path: pathlib.Path) -> pathlib.Path:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    mode = path.lstat().st_mode
+    if path.is_symlink() or not stat.S_ISDIR(mode):
+        fail(f"private state path is not a real directory: {path}")
+    path.chmod(0o700)
+    return path
+
+
+def prepare_state() -> pathlib.Path:
+    root = ensure_dir(state_root())
+    for name in ("bin", "downloads", "selections", "snapshots", "workspaces"):
+        ensure_dir(root / name)
+    prune(root)
+    return root
+
+
+def atomic_json(path: pathlib.Path, value: dict) -> None:
+    ensure_dir(path.parent)
+    payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if len(payload) > MAX_JSON:
+        fail("private state record exceeds 64 KiB")
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=True) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        path.chmod(0o600)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def read_json(path: pathlib.Path) -> dict | None:
+    try:
+        mode = path.lstat().st_mode
+        if path.is_symlink() or not stat.S_ISREG(mode) or path.stat().st_size > MAX_JSON:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def prune(root: pathlib.Path) -> None:
+    cutoff = time.time() - STALE_SECONDS
+    for directory in (root / "workspaces", root / "snapshots"):
+        if not directory.is_dir():
+            continue
+        for item in directory.iterdir():
+            try:
+                old = item.stat().st_mtime < cutoff
+            except OSError:
+                old = False
+            if not old:
+                continue
+            if directory.name == "workspaces":
+                record = read_json(item) if item.is_file() else None
+                if record and record.get("status") == "running" and pid_alive(record.get("pid")):
+                    continue
+            if item.is_file() and not item.is_symlink():
+                item.unlink()
+            elif item.is_dir() and not item.is_symlink():
+                for child in item.rglob("*"):
+                    if child.is_dir() and not child.is_symlink():
+                        child.chmod(0o700)
+                    elif child.is_file() and not child.is_symlink():
+                        child.chmod(0o600)
+                item.chmod(0o700)
+                shutil.rmtree(item)
+
+
+def run(argv, *, cwd=None, input_bytes=None, env=None, timeout=None, check=True):
+    try:
+        result = subprocess.run(
+            [str(item) for item in argv],
+            cwd=cwd,
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        fail(f"{pathlib.Path(str(argv[0])).name} timed out after {timeout} seconds")
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
+        fail(f"{pathlib.Path(str(argv[0])).name} exited {result.returncode}: {detail or 'no diagnostic'}")
+    return result
+
+
+def git_env() -> dict:
+    environment = os.environ.copy()
+    for name in GIT_ENV:
+        environment.pop(name, None)
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    return environment
+
+
+def git(root: pathlib.Path, *arguments: str, check=True):
+    return run(["git", "-C", root, *arguments], env=git_env(), check=check)
+
+
+def repo_root(start: str | os.PathLike) -> pathlib.Path:
+    candidate = pathlib.Path(start).expanduser().resolve(strict=True)
+    if not candidate.is_dir():
+        candidate = candidate.parent
+    result = git(candidate, "rev-parse", "--show-toplevel")
+    text = result.stdout.decode("utf-8", "strict").strip()
+    if not text or "\0" in text or "\n" in text:
+        fail("Git returned an invalid repository root")
+    root = pathlib.Path(text).resolve(strict=True)
+    if not root.is_dir():
+        fail("Git repository root is not a directory")
+    return root
+
+
+def contained(root: pathlib.Path, path: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def relative_file(root: pathlib.Path, value: str, *, must_exist=True) -> tuple[str, pathlib.Path]:
+    raw = pathlib.Path(value).expanduser()
+    if not raw.is_absolute() and ".." in raw.parts:
+        fail(f"path is outside the registered project: {value}")
+    try:
+        target = (raw if raw.is_absolute() else root / raw).resolve(strict=must_exist)
+    except (OSError, RuntimeError) as error:
+        fail(f"path does not exist: {value}: {error}")
+    if not contained(root, target) or target == root:
+        fail(f"path is outside the registered project: {value}")
+    if must_exist and not target.is_file():
+        fail(f"path is not a regular file: {value}")
+    return target.relative_to(root).as_posix(), target
+
+
+def discover_config(root: pathlib.Path, requested: str | None) -> str:
+    root = root.resolve(strict=True)
+    if requested:
+        relative, path = relative_file(root, requested)
+        if path.name != "devcontainer.json":
+            fail("DevPod config must name a devcontainer.json file")
+        return relative
+    candidates = []
+    default = root / ".devcontainer/devcontainer.json"
+    if default.is_file():
+        candidates.append(default)
+    container_dir = root / ".devcontainer"
+    if container_dir.is_dir():
+        candidates.extend(
+            path for path in sorted(container_dir.glob("*/devcontainer.json")) if path.is_file()
+        )
+    unique = list(dict.fromkeys(path.resolve() for path in candidates))
+    if not unique:
+        fail("no devcontainer.json found; pass --config with a contained path")
+    if len(unique) != 1:
+        choices = ", ".join(path.relative_to(root).as_posix() for path in unique)
+        fail(f"more than one devcontainer.json exists; pass --config ({choices})")
+    return unique[0].relative_to(root).as_posix()
+
+
+def slug(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return (cleaned or "project")[:20]
+
+
+def identities(root: pathlib.Path, provider: str, config: str) -> tuple[str, str]:
+    repo_key = hashlib.sha256(os.fsencode(str(root))).hexdigest()
+    digest = hashlib.sha256(
+        os.fsencode(str(root)) + b"\0" + provider.encode() + b"\0" + config.encode()
+    ).hexdigest()
+    return repo_key, f"nvim-{slug(root.name)}-{digest[:12]}"
+
+
+def executable_version(path: pathlib.Path, expected: str) -> bool:
+    result = run([path, "version"], check=False)
+    text = (result.stdout + result.stderr).decode("utf-8", "replace")
+    return result.returncode == 0 and re.search(rf"\bv?{re.escape(expected)}\b", text) is not None
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download(url: str, target: pathlib.Path, expected: str, allow_network: bool) -> pathlib.Path:
+    if target.is_file() and not target.is_symlink() and sha256_file(target) == expected:
+        return target
+    if not allow_network:
+        fail(f"verified download is absent: {target.name}; rerun with --allow-network")
+    temp = target.with_name(f".{target.name}.{os.getpid()}.download")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response, temp.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if sha256_file(temp) != expected:
+            fail(f"SHA-256 mismatch for {target.name}")
+        os.replace(temp, target)
+        target.chmod(0o600)
+    except (OSError, urllib.error.URLError) as error:
+        fail(f"verified download failed for {target.name}: {error}")
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+    return target
+
+
+def devpod_binary(root: pathlib.Path, allow_network: bool) -> pathlib.Path:
+    override = os.environ.get("NVIM_DEVPOD_BIN")
+    found = pathlib.Path(override or shutil.which("devpod") or "")
+    if found and found.is_file() and executable_version(found, DEVPOD_VERSION):
+        return found.resolve()
+    if platform.system() != "Darwin" or platform.machine().lower() not in {"arm64", "aarch64"}:
+        fail(f"DevPod {DEVPOD_VERSION} is required; no verified fallback exists for this host")
+    asset, checksum = DEVPOD_DARWIN_ARM64
+    dmg = download(
+        f"https://github.com/loft-sh/devpod/releases/download/v{DEVPOD_VERSION}/{asset}",
+        root / "downloads" / asset,
+        checksum,
+        allow_network,
+    )
+    destination = root / "bin" / "devpod"
+    attach = run(["hdiutil", "attach", "-readonly", "-nobrowse", "-plist", dmg])
+    value = plistlib.loads(attach.stdout)
+    mounts = [
+        entity.get("mount-point")
+        for entity in value.get("system-entities", [])
+        if entity.get("mount-point")
+    ]
+    if len(mounts) != 1:
+        fail("could not identify the verified DevPod disk image mount")
+    mount = pathlib.Path(mounts[0])
+    try:
+        binary = mount / "DevPod.app/Contents/MacOS/devpod"
+        if not binary.is_file():
+            fail("verified DevPod image does not contain its CLI")
+        temp = destination.with_suffix(".tmp")
+        shutil.copyfile(binary, temp)
+        temp.chmod(0o700)
+        os.replace(temp, destination)
+    finally:
+        run(["hdiutil", "detach", mount], check=False)
+    if not executable_version(destination, DEVPOD_VERSION):
+        fail("verified DevPod fallback did not report the pinned version")
+    return destination
+
+
+def devpod_args(binary: pathlib.Path, provider: str, *args: str) -> list[str]:
+    return [str(binary), "--context", CONTEXT, "--provider", provider, *args]
+
+
+def json_command(argv) -> object:
+    result = run(argv)
+    try:
+        return json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        fail(f"DevPod returned invalid JSON: {error}")
+
+
+def ensure_context_provider(binary: pathlib.Path, provider: str) -> None:
+    contexts = json_command([binary, "context", "list", "--output", "json"])
+    if isinstance(contexts, list):
+        names = {item.get("name") for item in contexts if isinstance(item, dict)}
+        previous_default = next(
+            (item.get("name") for item in contexts if isinstance(item, dict) and item.get("default") is True),
+            None,
+        )
+        # A fresh DevPod home reports the implicit `default` context without a
+        # `default: true` field. Creating another context still selects it, so
+        # remember the literal default and restore it afterward.
+        if previous_default is None and "default" in names:
+            previous_default = "default"
+    elif isinstance(contexts, dict):
+        names = set(contexts)
+        previous_default = None
+    else:
+        fail("DevPod returned an invalid context list")
+    created = CONTEXT not in names
+    if created:
+        run([binary, "context", "create", CONTEXT])
+    elif previous_default != CONTEXT:
+        run([binary, "context", "use", CONTEXT])
+    try:
+        # DevPod 0.6.15's context/provider management subcommands inspect the
+        # selected context even when --context is present. Select only for this
+        # bounded operation and always restore the prior context.
+        run(
+            [
+                binary,
+                "context",
+                "set-options",
+                "-o",
+                "SSH_INJECT_GIT_CREDENTIALS=false",
+                "-o",
+                "SSH_INJECT_DOCKER_CREDENTIALS=false",
+                "-o",
+                "GPG_AGENT_FORWARDING=false",
+                "-o",
+                "SSH_ADD_PRIVATE_KEYS=false",
+                "-o",
+                "SSH_AGENT_FORWARDING=false",
+                "-o",
+                "GIT_SSH_SIGNATURE_FORWARDING=false",
+            ]
+        )
+        providers = json_command([binary, "provider", "list", "--output", "json"])
+    finally:
+        if previous_default and previous_default != CONTEXT:
+            run([binary, "context", "use", previous_default], check=False)
+    if isinstance(providers, list):
+        provider_record = next(
+            (item for item in providers if isinstance(item, dict) and item.get("name") == provider),
+            None,
+        )
+    elif isinstance(providers, dict):
+        provider_record = providers.get(provider)
+    else:
+        fail("DevPod returned an invalid provider list")
+    if not isinstance(provider_record, dict):
+        engine = shutil.which(provider)
+        hint = (
+            f"devpod --context {CONTEXT} provider add docker --name {provider} "
+            f"-o DOCKER_PATH={engine or '/absolute/path/to/' + provider}"
+        )
+        fail(f"local provider {provider!r} is not configured; run: {hint}")
+    config = provider_record.get("config")
+    state = provider_record.get("state")
+    source = config.get("source") if isinstance(config, dict) else None
+    agent = config.get("agent") if isinstance(config, dict) else None
+    docker_agent = agent.get("docker") if isinstance(agent, dict) else None
+    if (
+        not isinstance(source, dict)
+        or source.get("internal") is not True
+        or source.get("raw") != "docker"
+        or not isinstance(agent, dict)
+        or str(agent.get("local")).lower() != "true"
+        or not isinstance(docker_agent, dict)
+        or str(docker_agent.get("install")).lower() != "false"
+    ):
+        fail(f"provider {provider!r} is not the local built-in Docker provider")
+    options = state.get("options") if isinstance(state, dict) else None
+    docker_path = options.get("DOCKER_PATH") if isinstance(options, dict) else None
+    engine = docker_path.get("value") if isinstance(docker_path, dict) else None
+    engine = engine or ("docker" if provider == "docker" else None)
+    resolved_engine = shutil.which(engine) if engine else None
+    if not resolved_engine or not pathlib.Path(resolved_engine).is_file() or not os.access(resolved_engine, os.X_OK):
+        fail(f"provider {provider!r} does not resolve an executable local container engine")
+
+
+def manifest_digest(root: pathlib.Path) -> tuple[str, list[dict]]:
+    digest = hashlib.sha256()
+    entries = []
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        if path.is_symlink():
+            fail(f"config snapshot contains a symlink: {path.relative_to(root)}")
+        relative = path.relative_to(root).as_posix()
+        executable = bool(path.stat().st_mode & 0o111)
+        value = sha256_file(path)
+        entry = {"path": relative, "sha256": value, "executable": executable}
+        entries.append(entry)
+        digest.update(relative.encode() + b"\0" + value.encode() + b"\0" + bytes([executable]))
+    return digest.hexdigest(), entries
+
+
+def safe_extract_git_archive(payload: bytes, target: pathlib.Path) -> None:
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+        for member in archive.getmembers():
+            pure = pathlib.PurePosixPath(member.name)
+            if pure.is_absolute() or ".." in pure.parts:
+                fail("Git archive contains an unsafe path")
+            destination = target.joinpath(*pure.parts)
+            if member.isdir():
+                ensure_dir(destination)
+                continue
+            if not member.isfile():
+                fail(f"Git archive contains a non-regular entry: {member.name}")
+            ensure_dir(destination.parent)
+            source = archive.extractfile(member)
+            if source is None:
+                fail(f"could not read Git archive entry: {member.name}")
+            with destination.open("wb") as handle:
+                shutil.copyfileobj(source, handle)
+            destination.chmod(0o700 if member.mode & 0o111 else 0o600)
+
+
+def tracked_dirty_snapshot(config_repo: pathlib.Path, target: pathlib.Path) -> None:
+    result = git(config_repo, "ls-files", "-z")
+    for encoded in result.stdout.split(b"\0"):
+        if not encoded:
+            continue
+        relative = os.fsdecode(encoded)
+        if relative == ".nvim-local.lua" or relative.startswith(("local/", ".git/")):
+            continue
+        source_path = config_repo / relative
+        if source_path.is_symlink():
+            fail(f"dirty config snapshot refuses non-regular tracked path: {relative}")
+        source = source_path.resolve(strict=True)
+        if not contained(config_repo, source) or not source.is_file():
+            fail(f"dirty config snapshot refuses non-regular tracked path: {relative}")
+        destination = target / relative
+        ensure_dir(destination.parent)
+        shutil.copyfile(source, destination)
+        destination.chmod(0o700 if source.stat().st_mode & 0o111 else 0o600)
+
+
+def config_snapshot(root: pathlib.Path, dirty: bool) -> dict:
+    config_repo = pathlib.Path(__file__).resolve().parent.parent
+    commit = git(config_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    staging = pathlib.Path(tempfile.mkdtemp(prefix="snapshot-", dir=root / "snapshots"))
+    content = ensure_dir(staging / "nvim")
+    try:
+        if dirty:
+            tracked_dirty_snapshot(config_repo, content)
+            mode = "experimental-dirty"
+        else:
+            archive = git(config_repo, "archive", "--format=tar", commit).stdout
+            safe_extract_git_archive(archive, content)
+            mode = "commit"
+        digest, entries = manifest_digest(content)
+        manifest = {"version": VERSION, "mode": mode, "commit": commit, "digest": digest, "entries": entries}
+        atomic_json(staging / "manifest.json", manifest)
+        final = root / "snapshots" / digest
+        if final.exists():
+            mode = final.lstat().st_mode
+            if final.is_symlink() or not stat.S_ISDIR(mode):
+                fail(f"config snapshot destination is not a real directory: {final}")
+            shutil.rmtree(staging)
+        else:
+            os.replace(staging, final)
+            for item in sorted(final.rglob("*"), reverse=True):
+                if item.is_file():
+                    item.chmod(0o500 if item.stat().st_mode & 0o111 else 0o400)
+                elif item.is_dir():
+                    item.chmod(0o500)
+            final.chmod(0o500)
+        os.utime(final, None)
+        manifest["path"] = str(final / "nvim")
+        return manifest
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+
+
+def project_fingerprint(root: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    for arguments in (
+        ("status", "--porcelain=v2", "-z", "--untracked-files=all"),
+        ("diff", "--binary", "--no-ext-diff", "HEAD"),
+        ("diff", "--binary", "--no-ext-diff", "--cached", "HEAD"),
+    ):
+        result = git(root, *arguments)
+        digest.update(b"\0".join(item.encode() for item in arguments) + b"\0")
+        digest.update(result.stdout)
+    untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z").stdout.split(b"\0")
+    for encoded in sorted(item for item in untracked if item):
+        relative = os.fsdecode(encoded)
+        path = root / relative
+        digest.update(encoded + b"\0")
+        if path.is_symlink():
+            digest.update(b"L" + os.fsencode(os.readlink(path)))
+        elif path.is_file():
+            digest.update(b"F" + sha256_file(path).encode())
+        else:
+            digest.update(b"?")
+    return digest.hexdigest()
+
+
+def tar_directory(path: pathlib.Path) -> bytes:
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w") as archive:
+        for item in sorted(path.rglob("*")):
+            archive.add(item, arcname=item.relative_to(path), recursive=False)
+    return payload.getvalue()
+
+
+def ssh(binary, provider, workspace, *flags, input_bytes=None, check=True):
+    argv = devpod_args(
+        binary,
+        provider,
+        "--silent",
+        "ssh",
+        "--agent-forwarding=false",
+        "--gpg-agent-forwarding=false",
+        "--start-services=false",
+        *flags,
+        workspace,
+    )
+    return run(argv, input_bytes=input_bytes, check=check)
+
+
+def container_command(binary, provider, workspace, command: str, *, input_bytes=None, check=True):
+    return ssh(binary, provider, workspace, "--command", command, input_bytes=input_bytes, check=check)
+
+
+def provision_config(binary, provider, workspace, snapshot, workspace_id):
+    command = (
+        'umask 077; base="$HOME/.local/state/nvim-devpod/workspaces/' + workspace_id + '"; '
+        'rm -rf "$base/config.new"; mkdir -p "$base/config.new"; '
+        'tar -xpf - -C "$base/config.new"; chmod -R a-w "$base/config.new"; '
+        'rm -rf "$base/config"; mv "$base/config.new" "$base/config"'
+    )
+    container_command(binary, provider, workspace, command, input_bytes=tar_directory(pathlib.Path(snapshot["path"])))
+
+
+def provision_nvim(binary, provider, workspace, state, workspace_id, allow_network):
+    exact = container_command(
+        binary,
+        provider,
+        workspace,
+        f'command -v nvim >/dev/null 2>&1 && '
+        f'nvim --version | {{ IFS= read -r line; [ "$line" = "NVIM v{NVIM_VERSION}" ]; }}',
+        check=False,
+    )
+    if exact.returncode == 0:
+        return "nvim"
+    arch = container_command(binary, provider, workspace, "uname -m").stdout.decode().strip().lower()
+    release = NVIM_RELEASES.get(arch)
+    if not release:
+        fail(f"no verified Neovim {NVIM_VERSION} precompiled asset for container architecture {arch!r}")
+    asset, checksum = release
+    archive = download(
+        f"https://github.com/neovim/neovim/releases/download/v{NVIM_VERSION}/{asset}",
+        state / "downloads" / asset,
+        checksum,
+        allow_network,
+    )
+    command = (
+        'umask 077; base="$HOME/.local/state/nvim-devpod/workspaces/' + workspace_id + '"; '
+        'rm -rf "$base/nvim.new"; mkdir -p "$base/nvim.new"; '
+        'tar -xzf - --strip-components=1 -C "$base/nvim.new"; '
+        'rm -rf "$base/nvim"; mv "$base/nvim.new" "$base/nvim"'
+    )
+    container_command(binary, provider, workspace, command, input_bytes=archive.read_bytes())
+    installed = f'$HOME/.local/state/nvim-devpod/workspaces/{workspace_id}/nvim/bin/nvim'
+    verify = (
+        f'{installed} --version | '
+        f'{{ IFS= read -r line; [ "$line" = "NVIM v{NVIM_VERSION}" ]; }}'
+    )
+    container_command(binary, provider, workspace, verify)
+    return installed
+
+
+def require_cc(binary, provider, workspace):
+    result = container_command(binary, provider, workspace, "command -v cc >/dev/null 2>&1", check=False)
+    if result.returncode != 0:
+        fail("workspace has no cc; add a compiler to the devcontainer image and recreate it")
+
+
+def bootstrap_plugins(binary, provider, workspace, workspace_id, nvim, snapshot_digest, allow_network):
+    if not re.fullmatch(r"[0-9a-f]{64}", snapshot_digest):
+        fail("config snapshot digest is invalid")
+    base = f'$HOME/.local/state/nvim-devpod/workspaces/{workspace_id}'
+    check = (
+        f'test -d "{base}/xdg/data/nvim/lazy/lazy.nvim" && '
+        f'test "$(cat "{base}/bootstrap.digest" 2>/dev/null)" = "{snapshot_digest}"'
+    )
+    if container_command(binary, provider, workspace, check, check=False).returncode == 0:
+        return
+    if not allow_network:
+        fail("first workspace bootstrap needs network; rerun up with --allow-network")
+    command = (
+        f'umask 077; NVIM_CONFIG_OFFLINE=1 XDG_DATA_HOME="{base}/xdg/data" XDG_STATE_HOME="{base}/xdg/state" '
+        f'XDG_CACHE_HOME="{base}/xdg/cache" {nvim} --headless -u "{base}/config/init.lua" '
+        f"'+Lazy! sync' '+quitall' && printf '%s\\n' '{snapshot_digest}' > \"{base}/bootstrap.digest.new\" && "
+        f'mv "{base}/bootstrap.digest.new" "{base}/bootstrap.digest"'
+    )
+    container_command(binary, provider, workspace, command)
+    if container_command(binary, provider, workspace, check, check=False).returncode != 0:
+        fail("workspace plugin bootstrap did not produce the pinned Lazy state")
+
+
+def pid_alive(pid) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def load_records(root: pathlib.Path, repo: pathlib.Path | None = None, active=False) -> list[dict]:
+    records = []
+    for path in sorted((root / "workspaces").glob("*.json")):
+        value = read_json(path)
+        if not value or value.get("version") != VERSION:
+            continue
+        if repo is not None and value.get("repo_root") != str(repo):
+            continue
+        if active and (value.get("status") != "running" or not pid_alive(value.get("pid"))):
+            continue
+        value["_record_path"] = str(path)
+        records.append(value)
+    return records
+
+
+def one_record(root: pathlib.Path, repo: pathlib.Path, *, active=True) -> dict:
+    records = load_records(root, repo, active=active)
+    if not records:
+        fail(f"no {'active ' if active else ''}DevPod editor owns repository {repo}")
+    if len(records) != 1:
+        fail("more than one DevPod workspace matches; select an exact provider/config with up")
+    return records[0]
+
+
+def rpc(record: dict, request: dict) -> dict:
+    socket_path = pathlib.Path(record["host_socket"])
+    if not socket_path.exists():
+        fail("active DevPod editor socket is unavailable")
+    request.update({"version": VERSION, "token": record["token"]})
+    encoded = json.dumps(request, separators=(",", ":")).encode().hex()
+    nvim = shutil.which("nvim")
+    if not nvim:
+        fail("host nvim is required for DevPod RPC")
+    expression = f'luaeval("require(\'config.devpod\').rpc_hex(_A)", "{encoded}")'
+    result = run([nvim, "--headless", "--server", socket_path, "--remote-expr", expression], check=False)
+    if result.returncode != 0:
+        fail("DevPod editor is temporarily unreachable: " + result.stderr.decode("utf-8", "replace").strip())
+    try:
+        value = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        fail(f"DevPod editor returned invalid RPC JSON: {error}")
+    if not isinstance(value, dict) or value.get("ok") is not True:
+        fail(str(value.get("error", "DevPod editor rejected RPC")) if isinstance(value, dict) else "invalid RPC")
+    return value
+
+
+class Controller(socketserver.StreamRequestHandler):
+    def handle(self):
+        try:
+            line = self.rfile.readline(MAX_JSON + 1)
+            if len(line) > MAX_JSON or not line.endswith(b"\n"):
+                fail("controller request exceeds 64 KiB")
+            value = json.loads(line)
+            if not isinstance(value, dict) or set(value) != {"version", "token", "action"}:
+                fail("invalid controller request")
+            if value["version"] != VERSION or value["token"] != self.server.context["token"]:
+                fail("controller authentication failed")
+            action = value["action"]
+            if action not in {"tuicr", "host_editor", "lazygit"}:
+                fail("unsupported controller action")
+            self.wfile.write(b'{"ok":true}\n')
+            self.wfile.flush()
+            threading.Thread(target=self.server.context["action"], args=(action,), daemon=True).start()
+        except (DevPodError, UnicodeError, json.JSONDecodeError) as error:
+            payload = json.dumps({"ok": False, "error": str(error)}, separators=(",", ":")).encode() + b"\n"
+            self.wfile.write(payload)
+
+
+class UnixServer(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+
+def tmux_action(context: dict, action: str):
+    pane = context.get("tmux_pane")
+    if not pane or not shutil.which("tmux"):
+        return
+    repo = context["repo_root"]
+    if action == "tuicr":
+        script = pathlib.Path.home() / ".config/tmux/scripts/tuicr-review.sh"
+        run(
+            ["tmux", "display-popup", "-E", "-t", pane, "-d", repo, "-w", "95%", "-h", "95%", "-T", " review ", "-e", f"TMUX_PALETTE_SOURCE_PATH={repo}", script],
+            check=False,
+        )
+    elif action == "lazygit":
+        session = run(["tmux", "display-message", "-p", "-t", pane, "#{session_name}"], check=False)
+        if session.returncode == 0:
+            run(["tmux", "select-window", "-t", session.stdout.decode().strip() + ":=git"], check=False)
+    elif action == "host_editor":
+        time.sleep(0.1)
+        run(["tmux", "select-pane", "-t", pane, "-T", ""], check=False)
+        run(["tmux", "set-option", "-p", "-u", "-t", pane, "@devpod_active"], check=False)
+        run(["tmux", "respawn-pane", "-k", "-t", pane, "-c", repo, "nvim"], check=False)
+
+
+def socket_paths(workspace: str) -> tuple[pathlib.Path, pathlib.Path]:
+    temporary = pathlib.Path("/private/tmp") if pathlib.Path("/private/tmp").is_dir() else pathlib.Path("/tmp")
+    base = ensure_dir(temporary / f"nvd-{os.getuid()}")
+    workspace_dir = ensure_dir(base / hashlib.sha256(workspace.encode()).hexdigest()[:12])
+    nvim_socket = workspace_dir / "n.sock"
+    controller_socket = workspace_dir / "c.sock"
+    if max(len(os.fsencode(str(nvim_socket))), len(os.fsencode(str(controller_socket)))) >= 100:
+        fail("private Unix socket path exceeds the portable length limit")
+    return nvim_socket, controller_socket
+
+
+def selection(root, repo_key):
+    return read_json(root / "selections" / f"{repo_key}.json")
+
+
+def require_editor_pane(prepare_only: bool) -> None:
+    if prepare_only:
+        return
+    pane = os.environ.get("TMUX_PANE")
+    tmux = shutil.which("tmux")
+    if not pane or not tmux:
+        fail("DevPod editor must run in tmux's single-pane editor window")
+    result = run(
+        [tmux, "display-message", "-p", "-t", pane, "#{window_name}\t#{window_panes}"],
+        check=False,
+    )
+    fields = result.stdout.decode("utf-8", "replace").strip().split("\t")
+    if result.returncode != 0 or fields != ["editor", "1"]:
+        fail("DevPod editor must run in tmux's single-pane editor window")
+
+
+def cmd_up(args):
+    private = prepare_state()
+    repo = repo_root(args.repo or os.getcwd())
+    require_editor_pane(args.prepare_only)
+    existing_key = hashlib.sha256(os.fsencode(str(repo))).hexdigest()
+    saved = selection(private, existing_key) or {}
+    provider = args.provider or saved.get("provider") or ("podman" if shutil.which("podman") else "docker")
+    if provider not in PROVIDERS:
+        fail("provider must be docker or podman")
+    config = discover_config(repo, args.config or saved.get("devcontainer_path"))
+    repo_key, workspace = identities(repo, provider, config)
+    atomic_json(
+        private / "selections" / f"{repo_key}.json",
+        {"version": VERSION, "repo_root": str(repo), "provider": provider, "devcontainer_path": config, "workspace": workspace},
+    )
+    allow_network = args.allow_network
+    if not allow_network and sys.stdin.isatty():
+        answer = input("Allow a verified network download if this workspace needs its first bootstrap? [y/N] ")
+        allow_network = answer.strip().lower() in {"y", "yes"}
+    devpod = devpod_binary(private, allow_network)
+    ensure_context_provider(devpod, provider)
+    snapshot = config_snapshot(private, args.experimental_dirty_config)
+    before = project_fingerprint(repo)
+    up = devpod_args(
+        devpod,
+        provider,
+        "up",
+        str(repo),
+        "--id",
+        workspace,
+        "--devcontainer-path",
+        config,
+        "--ide",
+        "none",
+        "--open-ide=false",
+        "--configure-ssh=false",
+        "--gpg-agent-forwarding=false",
+        "--disable-daemon",
+    )
+    if args.recreate:
+        up.append("--recreate")
+    run(up, timeout=600)
+    after = project_fingerprint(repo)
+    mutated = before != after
+    require_cc(devpod, provider, workspace)
+    container_root = container_command(devpod, provider, workspace, "pwd").stdout.decode().strip()
+    if not container_root.startswith("/") or "\n" in container_root:
+        fail("DevPod returned an invalid container workspace path")
+    provision_config(devpod, provider, workspace, snapshot, workspace)
+    nvim = provision_nvim(devpod, provider, workspace, private, workspace, allow_network)
+    bootstrap_plugins(devpod, provider, workspace, workspace, nvim, snapshot["digest"], allow_network)
+    result = {
+        "ok": True,
+        "command": "up",
+        "repo_root": str(repo),
+        "provider": provider,
+        "devcontainer_path": config,
+        "workspace": workspace,
+        "container_root": container_root,
+        "config_snapshot": {key: snapshot[key] for key in ("mode", "commit", "digest")},
+        "project_mutated": mutated,
+        "git_before": before,
+        "git_after": after,
+    }
+    if mutated:
+        print("devpod-nvim: project lifecycle hooks changed the Git worktree; no rollback was attempted", file=sys.stderr)
+    if args.prepare_only:
+        print(json.dumps(result, sort_keys=True))
+        return
+    launch_editor(private, devpod, result, nvim)
+
+
+def launch_editor(private, devpod, prepared, nvim):
+    workspace = prepared["workspace"]
+    provider = prepared["provider"]
+    host_socket, controller_socket = socket_paths(workspace)
+    for path in (host_socket, controller_socket):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    token = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
+    context = dict(prepared)
+    context.update({"token": token, "tmux_pane": os.environ.get("TMUX_PANE")})
+    server = UnixServer(str(controller_socket), Controller)
+    server.context = context
+    server.context["action"] = lambda action: tmux_action(context, action)
+    controller_socket.chmod(0o600)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    container_base = f"/tmp/nvim-devpod-{workspace}"
+    # DevPod 0.6.15's embedded SSH server rejects direct-streamlocal even
+    # though its client accepts a Unix-to-Unix -L specification. Keep the
+    # private host endpoint as a Unix socket and bind Neovim only to container
+    # loopback for the remote side of that tunnel.
+    container_nvim_port = 20000 + int.from_bytes(hashlib.sha256(token.encode()).digest()[:2], "big") % 40000
+    container_nvim_address = f"127.0.0.1:{container_nvim_port}"
+    container_controller = container_base + "/host.sock"
+    record_path = private / "workspaces" / f"{workspace}.json"
+    record = {
+        "version": VERSION,
+        **{key: prepared[key] for key in ("repo_root", "provider", "devcontainer_path", "workspace", "container_root", "config_snapshot", "project_mutated")},
+        "pid": os.getpid(),
+        "status": "running",
+        "host_socket": str(host_socket),
+        "controller_socket": str(controller_socket),
+        "token": token,
+        "tmux_pane": os.environ.get("TMUX_PANE"),
+        "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    atomic_json(record_path, record)
+    project = pathlib.Path(prepared["repo_root"]).name
+    title = f"DevPod · {provider} · {project}"
+    if context.get("tmux_pane") and shutil.which("tmux"):
+        run(["tmux", "select-pane", "-t", context["tmux_pane"], "-T", title], check=False)
+        run(["tmux", "set-option", "-p", "-t", context["tmux_pane"], "@devpod_active", "1"], check=False)
+    base = f'$HOME/.local/state/nvim-devpod/workspaces/{workspace}'
+    # SSH establishes Unix forwards before it starts the editor command. The
+    # remote parent must therefore exist before -R tries to bind host.sock.
+    container_command(
+        devpod,
+        provider,
+        workspace,
+        f'umask 077; mkdir -p "{container_base}"; chmod 700 "{container_base}"',
+    )
+    command = (
+        f'umask 077; mkdir -p "{container_base}"; chmod 700 "{container_base}"; '
+        f'XDG_DATA_HOME="{base}/xdg/data" XDG_STATE_HOME="{base}/xdg/state" '
+        f'XDG_CACHE_HOME="{base}/xdg/cache" {nvim} -u "{base}/config/init.lua" '
+        f'--listen "{container_nvim_address}"'
+    )
+    secure_ssh = [
+        "ssh",
+        "--agent-forwarding=false",
+        "--gpg-agent-forwarding=false",
+        "--start-services=false",
+    ]
+    forward_argv = devpod_args(
+        devpod,
+        provider,
+        *secure_ssh,
+        "-L",
+        f"{host_socket}:{container_nvim_address}",
+        workspace,
+    )
+    reverse_argv = devpod_args(
+        devpod,
+        provider,
+        *secure_ssh,
+        "-R",
+        f"{container_controller}:{controller_socket}",
+        workspace,
+    )
+    editor_argv = devpod_args(
+        devpod,
+        provider,
+        *secure_ssh,
+        "--workdir",
+        prepared["container_root"],
+        "--set-env",
+        "NVIM_DEVPOD=1",
+        "--set-env",
+        f"NVIM_DEVPOD_TOKEN={token}",
+        "--set-env",
+        f"NVIM_DEVPOD_CONTROLLER_SOCKET={container_controller}",
+        "--set-env",
+        f"NVIM_DEVPOD_PROVIDER={provider}",
+        "--set-env",
+        f"NVIM_DEVPOD_PROJECT={project}",
+        "--set-env",
+        f"NVIM_DEVPOD_HOST_ROOT={prepared['repo_root']}",
+        "--set-env",
+        f"NVIM_DEVPOD_CONTAINER_ROOT={prepared['container_root']}",
+        "--command",
+        command,
+        workspace,
+    )
+    forward_process = None
+    reverse_process = None
+    code = None
+    previous_signals = {name: signal.getsignal(name) for name in (signal.SIGTERM, signal.SIGHUP)}
+
+    def terminate_cleanly(_signum, _frame):
+        raise SystemExit(0)
+
+    for name in previous_signals:
+        signal.signal(name, terminate_cleanly)
+
+    def stop_tunnel(process):
+        if not process or process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+
+    try:
+        forward_process = subprocess.Popen(
+            forward_argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        reverse_process = subprocess.Popen(
+            reverse_argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        for _ in range(100):
+            if forward_process.poll() is not None:
+                fail("host-to-container forwarding exited before its socket became ready")
+            if reverse_process.poll() is not None:
+                fail("container-to-host forwarding exited during startup")
+            if host_socket.exists():
+                break
+            time.sleep(0.05)
+        else:
+            fail("host-to-container forwarding did not create its private socket")
+        host_socket.chmod(0o600)
+        reverse_ready = (
+            f'i=0; while [ "$i" -lt 100 ]; do '
+            f'if [ -S "{container_controller}" ]; then chmod 600 "{container_controller}"; exit 0; fi; '
+            'i=$((i + 1)); sleep 0.05; done; exit 1'
+        )
+        container_command(devpod, provider, workspace, reverse_ready)
+        code = subprocess.call(editor_argv)
+    finally:
+        stop_tunnel(forward_process)
+        stop_tunnel(reverse_process)
+        server.shutdown()
+        server.server_close()
+        for path in (host_socket, controller_socket):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        record["status"] = "stopped"
+        record["exit_code"] = code
+        record["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        atomic_json(record_path, record)
+        for name, handler in previous_signals.items():
+            signal.signal(name, handler)
+    if code:
+        fail(f"DevPod editor exited {code}")
+
+
+def cmd_status(args):
+    private = prepare_state()
+    repo = repo_root(args.repo or os.getcwd()) if args.repo or not args.all else None
+    records = load_records(private, repo, active=False)
+    for value in records:
+        value.pop("_record_path", None)
+        value.pop("token", None)
+    payload = {"ok": True, "command": "status", "records": records}
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        if not records:
+            print("No DevPod workspace state")
+        for value in records:
+            print(f"{value['workspace']}\t{value['status']}\t{value['provider']}\t{value['repo_root']}")
+
+
+def cmd_open_location(args):
+    private = prepare_state()
+    cwd = pathlib.Path(args.cwd).expanduser().resolve(strict=True)
+    repo = repo_root(cwd)
+    relative, _ = relative_file(repo, args.file)
+    records = load_records(private, repo, active=True)
+    if not records:
+        raise NoActiveEditor(f"no active DevPod editor owns repository {repo}")
+    if len(records) != 1:
+        fail("more than one active DevPod workspace matches")
+    record = records[0]
+    value = rpc(record, {"action": "open_location", "path": relative, "line": args.line, "column": args.column})
+    print(json.dumps(value, sort_keys=True))
+
+
+def cmd_exec(args):
+    private = prepare_state()
+    argv = list(args.argv)
+    if not argv or argv.pop(0) != "--" or not argv:
+        fail("exec requires -- followed by argv")
+    if len(argv) > 256 or any(not item or "\0" in item for item in argv):
+        fail("exec argv is invalid")
+    cwd = pathlib.Path(args.cwd or os.getcwd()).expanduser().resolve(strict=True)
+    if not cwd.is_dir():
+        fail("exec cwd must be a directory")
+    repo = repo_root(cwd)
+    relative_cwd = cwd.relative_to(repo).as_posix()
+    record = one_record(private, repo)
+    value = rpc(record, {"action": "exec", "argv": argv, "cwd": relative_cwd})
+    stdout = bytes.fromhex(value.get("stdout_hex", ""))
+    stderr = bytes.fromhex(value.get("stderr_hex", ""))
+    sys.stdout.buffer.write(stdout)
+    sys.stderr.buffer.write(stderr)
+    raise SystemExit(value.get("code", 1))
+
+
+def cmd_host(args):
+    private = prepare_state()
+    repo = repo_root(args.repo or os.getcwd())
+    record = one_record(private, repo)
+    pane = record.get("tmux_pane")
+    if not pane or not shutil.which("tmux"):
+        fail("HostEditor requires the registered tmux editor pane")
+    run(["tmux", "select-pane", "-t", pane, "-T", ""], check=False)
+    run(["tmux", "set-option", "-p", "-u", "-t", pane, "@devpod_active"], check=False)
+    run(["tmux", "respawn-pane", "-k", "-t", pane, "-c", str(repo), "nvim"])
+
+
+def parser():
+    value = argparse.ArgumentParser(prog="devpod-nvim")
+    commands = value.add_subparsers(dest="command", required=True)
+    up = commands.add_parser("up")
+    up.add_argument("--repo")
+    up.add_argument("--provider", choices=sorted(PROVIDERS))
+    up.add_argument("--config")
+    up.add_argument("--allow-network", action="store_true")
+    up.add_argument("--recreate", action="store_true")
+    up.add_argument("--experimental-dirty-config", action="store_true")
+    up.add_argument("--prepare-only", action="store_true", help=argparse.SUPPRESS)
+    up.set_defaults(callback=cmd_up)
+    host = commands.add_parser("host")
+    host.add_argument("--repo")
+    host.set_defaults(callback=cmd_host)
+    execute = commands.add_parser("exec")
+    execute.add_argument("--cwd")
+    execute.add_argument("argv", nargs=argparse.REMAINDER)
+    execute.set_defaults(callback=cmd_exec)
+    status = commands.add_parser("status")
+    status.add_argument("--repo")
+    status.add_argument("--json", action="store_true")
+    status.add_argument("--all", action="store_true")
+    status.set_defaults(callback=cmd_status)
+    location = commands.add_parser("open-location")
+    location.add_argument("--cwd", required=True)
+    location.add_argument("--file", required=True)
+    location.add_argument("--line", type=int, default=1)
+    location.add_argument("--column", type=int, default=1)
+    location.set_defaults(callback=cmd_open_location)
+    return value
+
+
+def main():
+    arguments = parser().parse_args()
+    if getattr(arguments, "line", 1) < 1 or getattr(arguments, "column", 1) < 1:
+        fail("line and column must be positive integers")
+    arguments.callback(arguments)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except NoActiveEditor as error:
+        print(f"devpod-nvim: {error}", file=sys.stderr)
+        raise SystemExit(3)
+    except DevPodError as error:
+        print(f"devpod-nvim: {error}", file=sys.stderr)
+        raise SystemExit(2)
+    except KeyboardInterrupt:
+        raise SystemExit(130)

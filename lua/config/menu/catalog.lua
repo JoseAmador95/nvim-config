@@ -158,9 +158,11 @@ function M.definitions(dispatch)
 			item("log.highlight_regex", "Add Highlight (regex)"),
 			item("command.log_highlight_clear", "Clear All Highlights"),
 		}),
-		section("devcontainer", "Devcontainer", {
-			item("command.devcontainer_shell", "Shell"),
-			item("command.devcontainer_workspace", "Set Workspace"),
+		section("devpod", "DevPod", {
+			item("command.devpod_up", "Open Container Editor"),
+			item("command.devpod_recreate", "Recreate Container Editor"),
+			item("command.devpod_status", "Show Status"),
+			item("command.devpod_host", "Return to Host Editor"),
 		}),
 		section("file.plantuml", "File (plantuml)", {
 			item("command.diagram_show", "Show Diagram", "<leader>md"),
