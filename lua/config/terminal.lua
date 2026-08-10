@@ -5,6 +5,9 @@ local M = {}
 
 local uv = vim.uv
 local terminals = {}
+local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve config.terminal source")
+local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
+local devpod_bashrc = vim.fs.joinpath(config_root, "scripts", "devpod-bashrc")
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Terminal" })
@@ -400,11 +403,19 @@ end
 
 function M.shell_spec(root)
 	local shell = vim.env.SHELL or vim.o.shell
+	local argv = { shell }
+	if vim.env.NVIM_DEVPOD == "1" then
+		local bash = vim.fn.exepath("bash")
+		if bash ~= "" then
+			shell = bash
+			argv = { bash, "--rcfile", devpod_bashrc, "-i" }
+		end
+	end
 	return {
 		runtime = "host",
 		root = root,
 		id = "shell",
-		argv = { shell },
+		argv = argv,
 		cwd = root,
 		env = {},
 		layout = "bottom",
@@ -412,6 +423,8 @@ function M.shell_spec(root)
 		passthrough = { "<Tab>", "<S-Tab>" },
 	}
 end
+
+M._devpod_bashrc = devpod_bashrc
 
 function M.toggle_shell()
 	local root = require("config.repo").current_root(0) or (uv.cwd() or vim.fn.getcwd())

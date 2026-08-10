@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -237,6 +238,56 @@ class DevPodLauncherTest(unittest.TestCase):
             else:
                 os.environ["NVIM_DEVPOD_STATE_HOME"] = old
 
+    def test_private_workspace_log_is_bounded_and_owner_only(self):
+        old_state = os.environ.get("NVIM_DEVPOD_STATE_HOME")
+        old_log = MODULE.CURRENT_LOG
+        os.environ["NVIM_DEVPOD_STATE_HOME"] = str(self.root / "state")
+        try:
+            private = MODULE.prepare_state()
+            path = MODULE.start_log(private, "nvim-fixture-123")
+            with mock.patch.object(MODULE.sys, "stderr", io.StringIO()):
+                MODULE.progress("workspace bootstrap started")
+            for index in range(20):
+                MODULE.append_log(path, f"entry-{index:02d}-" + "x" * 16000)
+            with mock.patch.object(MODULE.sys, "stderr", io.StringIO()):
+                MODULE.progress("workspace bootstrap completed")
+            payload = path.read_bytes()
+            self.assertLessEqual(len(payload), MODULE.MAX_LOG)
+            self.assertNotIn(b"entry-00-", payload)
+            self.assertIn(b"entry-19-", payload)
+            self.assertIn(b"workspace bootstrap completed", payload)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+        finally:
+            MODULE.CURRENT_LOG = old_log
+            if old_state is None:
+                os.environ.pop("NVIM_DEVPOD_STATE_HOME", None)
+            else:
+                os.environ["NVIM_DEVPOD_STATE_HOME"] = old_state
+
+    def test_selected_log_is_exact_and_rejects_symlinks(self):
+        private = MODULE.ensure_dir(self.root / "state")
+        MODULE.ensure_dir(private / "selections")
+        MODULE.ensure_dir(private / "logs")
+        repo = self.root.resolve()
+        repo_key = MODULE.hashlib.sha256(os.fsencode(str(repo))).hexdigest()
+        selection = private / "selections" / f"{repo_key}.json"
+        MODULE.atomic_json(
+            selection,
+            {
+                "version": MODULE.VERSION,
+                "repo_root": str(repo),
+                "workspace": "nvim-fixture-123",
+            },
+        )
+        log = MODULE.workspace_log(private, "nvim-fixture-123")
+        MODULE.atomic_bytes(log, b"fixture log\n", 0o600)
+        self.assertEqual(MODULE.selected_log(private, repo), log)
+        log.unlink()
+        log.symlink_to(self.root / "tracked.txt")
+        with self.assertRaisesRegex(MODULE.DevPodError, "unsafe"):
+            MODULE.selected_log(private, repo)
+
     def test_git_archive_rejects_links_and_traversal(self):
         import io
         import tarfile
@@ -260,6 +311,31 @@ class DevPodLauncherTest(unittest.TestCase):
         self.assertIn("argv", help_result.stdout)
         self.assertNotIn("shell-command", help_result.stdout)
         self.assertEqual(MODULE.parser().parse_args(["exec", "--", "printf", "a b"]).argv, ["--", "printf", "a b"])
+        log = MODULE.parser().parse_args(["log", "--repo", str(self.root), "--pager"])
+        self.assertEqual(log.repo, str(self.root))
+        self.assertTrue(log.pager)
+
+    def test_log_host_action_opens_the_exact_launcher_in_a_popup(self):
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.object(MODULE.shutil, "which", return_value="/usr/bin/tmux"), mock.patch.object(
+            MODULE, "run", return_value=completed
+        ) as runner:
+            MODULE.tmux_action(
+                {"tmux_pane": "%7", "repo_root": "/tmp/project with spaces"},
+                "devpod_log",
+            )
+        argv = [str(value) for value in runner.call_args.args[0]]
+        self.assertEqual(argv[:5], ["tmux", "display-popup", "-E", "-t", "%7"])
+        self.assertEqual(
+            MODULE.shlex.split(argv[-1]),
+            [
+                str((REPO / "scripts/devpod-nvim").resolve()),
+                "log",
+                "--repo",
+                "/tmp/project with spaces",
+                "--pager",
+            ],
+        )
 
     def test_state_root_rejects_symlink(self):
         destination = self.root / "real-state"

@@ -136,6 +136,13 @@ test("host requests use one authenticated JSON line", function()
 	assert(written:sub(-1) == "\n")
 	local value = vim.json.decode(written)
 	assert(vim.deep_equal(value, { version = 1, token = "secret", action = "tuicr" }))
+	assert(devpod.request_host("devpod_log", {
+		new_pipe = function()
+			return pipe
+		end,
+	}))
+	value = vim.json.decode(written)
+	assert(vim.deep_equal(value, { version = 1, token = "secret", action = "devpod_log" }))
 	assert(devpod.request_host("execute") == nil)
 end)
 

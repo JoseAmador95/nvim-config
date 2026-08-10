@@ -63,9 +63,17 @@ normalmente del editor del container deja el pane detenido por
 
 El launcher escribe etapas y un heartbeat periódico en stderr mientras
 `devpod up` está construyendo o reutilizando el workspace; la salida JSON de
-automatización permanece limpia en stdout. La terminal general (`<leader>t`)
-pasa `<Tab>` y `<S-Tab>` literalmente al shell, incluida la terminal dentro del
-container.
+automatización permanece limpia en stdout. También conserva el último registro
+por workspace en estado privado (máximo 256 KiB, modo `0600`, poda a los 30
+días); ya dentro del container, `:DevPodLog` lo abre en un popup del host.
+
+La terminal general (`<leader>t`) pasa `<Tab>` y `<S-Tab>` literalmente al
+shell. Dentro de DevPod abre explícitamente Bash interactivo con un rc mínimo de
+esta configuración: carga primero el `.bashrc` de la imagen y después activa su
+`bash-completion` si venía deshabilitado; fuera del container conserva el shell
+configurado en el host. Esto no requiere montar dotfiles adicionales. Se puede
+añadir después un rc personal acotado si se quieren aliases o prompt propios,
+sin montar todo `~/.ssh` ni los dotfiles del host.
 
 La CLI pública es:
 
@@ -74,6 +82,7 @@ scripts/devpod-nvim up [--provider podman|docker] [--config RUTA] [--recreate]
 scripts/devpod-nvim host [--repo RUTA]
 scripts/devpod-nvim exec [--cwd RUTA] -- programa argumento...
 scripts/devpod-nvim status --json [--repo RUTA]
+scripts/devpod-nvim log [--repo RUTA] [--pager]
 scripts/devpod-nvim open-location --cwd RUTA --file ARCHIVO --line 1 --column 1
 ```
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import fcntl
 import hashlib
 import io
 import json
@@ -43,9 +44,11 @@ MAX_JSON = 64 * 1024
 MAX_RPC_OUTPUT = 1024 * 1024
 MAX_DOCKERFILE = 10 * 1024 * 1024
 MAX_GITCONFIG = 1024 * 1024
+MAX_LOG = 256 * 1024
 STALE_SECONDS = 30 * 24 * 60 * 60
 PROVIDERS = {"docker", "podman"}
 GITCONFIG_TARGET = "/tmp/nvim-devpod-host.gitconfig"
+CURRENT_LOG = None
 GIT_ENV = {
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CEILING_DIRECTORIES",
@@ -94,6 +97,8 @@ def fail(message: str) -> "None":
 
 
 def progress(message: str) -> None:
+    if CURRENT_LOG is not None:
+        append_log(CURRENT_LOG, message)
     print(f"devpod-nvim: {message}", file=sys.stderr, flush=True)
 
 
@@ -116,7 +121,7 @@ def ensure_dir(path: pathlib.Path) -> pathlib.Path:
 
 def prepare_state() -> pathlib.Path:
     root = ensure_dir(state_root())
-    for name in ("bin", "docker-config", "downloads", "overlays", "selections", "snapshots", "workspaces"):
+    for name in ("bin", "docker-config", "downloads", "logs", "overlays", "selections", "snapshots", "workspaces"):
         ensure_dir(root / name)
     prune(root)
     return root
@@ -147,6 +152,55 @@ def atomic_bytes(path: pathlib.Path, payload: bytes, mode: int) -> None:
             pass
 
 
+def workspace_log(root: pathlib.Path, workspace: str) -> pathlib.Path:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", workspace):
+        fail("workspace is invalid for private log storage")
+    return root / "logs" / f"{workspace}.log"
+
+
+def start_log(root: pathlib.Path, workspace: str) -> pathlib.Path:
+    global CURRENT_LOG
+    path = workspace_log(root, workspace)
+    atomic_bytes(path, b"", 0o600)
+    CURRENT_LOG = path
+    return path
+
+
+def append_log(path: pathlib.Path, message: str) -> None:
+    encoded = (
+        dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        + " "
+        + message.replace("\0", "�")
+        + "\n"
+    ).encode("utf-8")
+    if len(encoded) > 16 * 1024:
+        encoded = encoded[: 16 * 1024 - 20] + b"...[truncated]\n"
+    lock_path = path.with_suffix(".lock")
+    ensure_dir(path.parent)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        existing = b""
+        try:
+            mode = path.lstat().st_mode
+            if path.is_symlink() or not stat.S_ISREG(mode) or path.stat().st_size > MAX_LOG:
+                fail("private DevPod log is unsafe or exceeds 256 KiB")
+            existing = path.read_bytes()
+        except FileNotFoundError:
+            pass
+        payload = existing + encoded
+        if len(payload) > MAX_LOG:
+            payload = payload[-MAX_LOG:]
+            newline = payload.find(b"\n")
+            if newline >= 0:
+                payload = payload[newline + 1 :]
+        atomic_bytes(path, payload, 0o600)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def read_json(path: pathlib.Path) -> dict | None:
     try:
         mode = path.lstat().st_mode
@@ -160,7 +214,7 @@ def read_json(path: pathlib.Path) -> dict | None:
 
 def prune(root: pathlib.Path) -> None:
     cutoff = time.time() - STALE_SECONDS
-    for directory in (root / "workspaces", root / "snapshots", root / "overlays"):
+    for directory in (root / "workspaces", root / "snapshots", root / "overlays", root / "logs"):
         if not directory.is_dir():
             continue
         for item in directory.iterdir():
@@ -1177,7 +1231,7 @@ class Controller(socketserver.StreamRequestHandler):
             if value["version"] != VERSION or value["token"] != self.server.context["token"]:
                 fail("controller authentication failed")
             action = value["action"]
-            if action not in {"tuicr", "host_editor", "lazygit"}:
+            if action not in {"tuicr", "host_editor", "lazygit", "devpod_log"}:
                 fail("unsupported controller action")
             self.wfile.write(b'{"ok":true}\n')
             self.wfile.flush()
@@ -1207,6 +1261,29 @@ def tmux_action(context: dict, action: str):
         session = run(["tmux", "display-message", "-p", "-t", pane, "#{session_name}"], check=False)
         if session.returncode == 0:
             run(["tmux", "select-window", "-t", session.stdout.decode().strip() + ":=git"], check=False)
+    elif action == "devpod_log":
+        command = shlex.join(
+            [str(pathlib.Path(__file__).resolve()), "log", "--repo", repo, "--pager"]
+        )
+        run(
+            [
+                "tmux",
+                "display-popup",
+                "-E",
+                "-t",
+                pane,
+                "-d",
+                repo,
+                "-w",
+                "90%",
+                "-h",
+                "80%",
+                "-T",
+                " DevPod log ",
+                command,
+            ],
+            check=False,
+        )
     elif action == "host_editor":
         time.sleep(0.1)
         run(["tmux", "select-pane", "-t", pane, "-T", ""], check=False)
@@ -1261,6 +1338,8 @@ def cmd_up(args):
         private, repo, config, gitconfig
     )
     repo_key, workspace = identities(repo, provider, config_identity)
+    log_path = start_log(private, workspace)
+    progress(f"private log: {log_path}")
     atomic_json(
         private / "selections" / f"{repo_key}.json",
         {"version": VERSION, "repo_root": str(repo), "provider": provider, "devcontainer_path": config, "workspace": workspace},
@@ -1324,6 +1403,7 @@ def cmd_up(args):
         "git_before": before,
         "git_after": after,
         "gitconfig_target": gitconfig_target,
+        "log_path": str(log_path),
         "ssh_agent_forwarding": ssh_agent_available(),
     }
     if mutated:
@@ -1364,7 +1444,19 @@ def launch_editor(private, devpod, prepared, nvim):
     record_path = private / "workspaces" / f"{workspace}.json"
     record = {
         "version": VERSION,
-        **{key: prepared[key] for key in ("repo_root", "provider", "devcontainer_path", "workspace", "container_root", "config_snapshot", "project_mutated")},
+        **{
+            key: prepared[key]
+            for key in (
+                "repo_root",
+                "provider",
+                "devcontainer_path",
+                "workspace",
+                "container_root",
+                "config_snapshot",
+                "project_mutated",
+                "log_path",
+            )
+        },
         "pid": os.getpid(),
         "status": "running",
         "host_socket": str(host_socket),
@@ -1511,6 +1603,7 @@ def launch_editor(private, devpod, prepared, nvim):
         record["exit_code"] = code
         record["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         atomic_json(record_path, record)
+        progress(f"editor session stopped (exit={code})")
         for name, handler in previous_signals.items():
             signal.signal(name, handler)
     if code:
@@ -1532,6 +1625,40 @@ def cmd_status(args):
             print("No DevPod workspace state")
         for value in records:
             print(f"{value['workspace']}\t{value['status']}\t{value['provider']}\t{value['repo_root']}")
+
+
+def selected_log(private: pathlib.Path, repo: pathlib.Path) -> pathlib.Path:
+    repo_key = hashlib.sha256(os.fsencode(str(repo))).hexdigest()
+    saved = selection(private, repo_key)
+    if (
+        not saved
+        or saved.get("version") != VERSION
+        or saved.get("repo_root") != str(repo)
+        or not isinstance(saved.get("workspace"), str)
+    ):
+        fail(f"no DevPod workspace selection exists for {repo}")
+    path = workspace_log(private, saved["workspace"])
+    try:
+        mode = path.lstat().st_mode
+        size = path.stat().st_size
+    except FileNotFoundError:
+        fail("no private DevPod log exists yet; enter the workspace once first")
+    if path.is_symlink() or not stat.S_ISREG(mode) or size > MAX_LOG:
+        fail("private DevPod log is unsafe or exceeds 256 KiB")
+    path.chmod(0o600)
+    return path
+
+
+def cmd_log(args):
+    private = prepare_state()
+    repo = repo_root(args.repo or os.getcwd())
+    path = selected_log(private, repo)
+    if args.pager:
+        pager = shutil.which("less")
+        if not pager:
+            fail("host less is required to view the DevPod log popup")
+        os.execv(pager, [pager, "+G", "-R", "--", str(path)])
+    sys.stdout.buffer.write(path.read_bytes())
 
 
 def cmd_open_location(args):
@@ -1606,6 +1733,10 @@ def parser():
     status.add_argument("--json", action="store_true")
     status.add_argument("--all", action="store_true")
     status.set_defaults(callback=cmd_status)
+    log = commands.add_parser("log")
+    log.add_argument("--repo")
+    log.add_argument("--pager", action="store_true")
+    log.set_defaults(callback=cmd_log)
     location = commands.add_parser("open-location")
     location.add_argument("--cwd", required=True)
     location.add_argument("--file", required=True)
@@ -1626,10 +1757,11 @@ if __name__ == "__main__":
     try:
         main()
     except NoActiveEditor as error:
-        print(f"devpod-nvim: {error}", file=sys.stderr)
+        progress(str(error))
         raise SystemExit(3)
     except DevPodError as error:
-        print(f"devpod-nvim: {error}", file=sys.stderr)
+        progress(str(error))
         raise SystemExit(2)
     except KeyboardInterrupt:
+        progress("interrupted")
         raise SystemExit(130)

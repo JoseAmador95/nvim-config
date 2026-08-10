@@ -200,9 +200,10 @@ saved atomically and prunes only inactive files older than 30 days when opened.
 `Alt-Space` in tmux exposes stable `editor: DevPod` and `editor: host` actions.
 The former replaces only the dev session's `editor` pane, using a private
 host-first bridge pinned to DevPod `0.6.15`; agent/Git/LazyGit/tuicr stay on the
-host. `:DevPodUp[!]`, `:DevPodRecreate[!]`, `:DevPodStatus` and `:HostEditor`
-provide the editor surfaces. A commit-backed read-only config snapshot and an
-exact Neovim `0.12.4` runtime are provisioned outside the project. See
+host. `:DevPodUp[!]`, `:DevPodRecreate[!]`, `:DevPodStatus`, `:DevPodLog` and
+`:HostEditor` provide the editor surfaces. A commit-backed read-only config
+snapshot and an exact Neovim `0.12.4` runtime are provisioned outside the
+project. See
 [Neovim inside DevPod](docs/devpod-neovim.md) for provider setup, network
 confirmation, path mapping, structured `exec --` and the security boundary.
 

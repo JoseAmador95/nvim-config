@@ -184,7 +184,7 @@ function M.request_host(action, dependencies)
 	if not M.in_workspace() then
 		return nil, "not running inside a DevPod editor"
 	end
-	if action ~= "tuicr" and action ~= "host_editor" and action ~= "lazygit" then
+	if action ~= "tuicr" and action ~= "host_editor" and action ~= "lazygit" and action ~= "devpod_log" then
 		return nil, "unsupported host action"
 	end
 	local socket_path = vim.env.NVIM_DEVPOD_CONTROLLER_SOCKET
@@ -305,6 +305,13 @@ function M.setup()
 			end)
 		end)
 	end, { desc = "Show private DevPod workspace state" })
+
+	vim.api.nvim_create_user_command("DevPodLog", function()
+		local ok, err = M.request_host("devpod_log")
+		if not ok then
+			notify(err, vim.log.levels.ERROR)
+		end
+	end, { desc = "Open the private DevPod bootstrap log on the host" })
 
 	vim.api.nvim_create_user_command("HostEditor", function()
 		local ok, err = M.request_host("host_editor")

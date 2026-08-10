@@ -147,6 +147,20 @@ test("an empty environment map opens the default shell", function()
 	opened = {}
 end)
 
+test("DevPod opens Bash with the explicit interactive completion rc", function()
+	local previous = vim.env.NVIM_DEVPOD
+	vim.env.NVIM_DEVPOD = "1"
+	local bash = vim.fn.exepath("bash")
+	assert(bash ~= "", "test host has no Bash")
+	local shell = terminal.shell_spec(repo)
+	vim.env.NVIM_DEVPOD = previous
+	assert(
+		vim.deep_equal(shell.argv, { bash, "--rcfile", terminal._devpod_bashrc, "-i" }),
+		"DevPod shell is not explicit interactive Bash"
+	)
+	assert(vim.fn.filereadable(terminal._devpod_bashrc) == 1, "DevPod Bash rc is missing")
+end)
+
 test("toggle creates visibly, then hides and restores one process", function()
 	local value = spec("shell")
 	local record = assert(terminal.toggle(value))
