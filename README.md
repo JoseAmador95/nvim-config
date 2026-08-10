@@ -43,6 +43,12 @@ alternative with `dap = { ui = "dap-view" }` in local config, or for one
 process with `NVIM_DAP_UI=dap-view nvim`. The selection is fixed at startup and
 only the selected UI is loaded.
 
+The versioned editor and pager theme remains VSCode. `:Theme catppuccin`
+persists Catppuccin as a machine-local alternative; it follows the detected
+terminal background with Latte in light mode and Mocha in dark mode.
+`:Theme vscode` switches back, while `:ThemeReset` discards the local choice
+and restores the versioned VSCode default.
+
 The effective executable order is deliberate:
 
 1. directories in `local_config.path`, in declared order;

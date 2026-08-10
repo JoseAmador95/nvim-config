@@ -41,7 +41,7 @@ function M.specs()
 
 	return {
 		require("plugins.core"), -- plenary (dormant) + nvim-web-devicons
-		require("plugins.colorscheme"), -- vscode.nvim theme (+ OSC11 bg detection)
+		require("plugins.colorscheme"), -- VSCode/Catppuccin themes (+ OSC11 bg detection)
 		snacks, -- picker engine used by :SetFileType; no editor keymaps
 		require("plugins.render-markdown"), -- activates on ft=markdown
 		{

@@ -137,7 +137,7 @@ ensure_contained_directory() {
 	esac
 }
 
-for xdg_child in data state cache log tmp; do
+for xdg_child in config data state cache log tmp; do
 	ensure_contained_directory "$xdg_root/$xdg_child" "XDG $xdg_child directory"
 done
 for profile_name in nvim nvimpager; do
@@ -164,6 +164,7 @@ cp "$repo_root/lazy-lock.json" "$lock_snapshot"
 cp "$repo_root/lazy-lock.json" "$lock_working"
 
 export XDG_DATA_HOME="$stage_data"
+export XDG_CONFIG_HOME="$xdg_root/config"
 export XDG_STATE_HOME="$xdg_root/state"
 export XDG_CACHE_HOME="$xdg_root/cache"
 export NVIM_LOG_FILE="$xdg_root/log/nvim.log"

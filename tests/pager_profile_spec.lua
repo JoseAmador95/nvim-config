@@ -13,6 +13,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			local ok, err = xpcall(function()
 				local pager = require("config.pager")
 				assert(pager.active, "pager profile was not selected")
+				assert(require("config.theme").selection().colorscheme == "vscode", "pager default theme changed")
+				assert(vim.g.colors_name == "vscode", "pager did not apply the VSCode default")
 				assert(vim.bo.filetype == "markdown", "forced pager filetype was not applied")
 
 				for _, command in ipairs({
@@ -77,6 +79,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 				assert(has_plugin("render-markdown.nvim"), "render-markdown is missing from the pager")
 				assert(has_plugin("nvim-treesitter"), "Tree-sitter is missing from the pager")
+				assert(has_plugin("catppuccin"), "Catppuccin alternative is missing from the pager")
 				assert(Snacks.config.dashboard.enabled == false, "editor dashboard leaked into the pager")
 				assert(Snacks.config.notifier.enabled == false, "notifier leaked into the pager")
 				assert(Snacks.config.terminal.enabled == false, "terminal service leaked into the pager")

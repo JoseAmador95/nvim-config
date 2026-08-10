@@ -56,7 +56,14 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					end
 					return false
 				end
-				for _, plugin in ipairs({ "mason.nvim", "nvim-lint", "remote-nvim.nvim", "menu", "vscode.nvim" }) do
+				for _, plugin in ipairs({
+					"catppuccin",
+					"mason.nvim",
+					"nvim-lint",
+					"remote-nvim.nvim",
+					"menu",
+					"vscode.nvim",
+				}) do
 					assert(not has_plugin(plugin), plugin .. " loaded in VSCode")
 				end
 				assert(has_plugin("vscode-multi-cursor.nvim"), "VSCode multi-cursor integration did not load")

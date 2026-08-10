@@ -28,6 +28,8 @@ byte-for-byte to a profile-local state file before Lazy starts; Lazy may prune
 that writable copy for the allowlist but can never rewrite the committed lock.
 Bootstrap snapshots the source lock, fails if any profile changes it, and
 checks every active pager checkout against the corresponding source-lock SHA.
+Both bootstrap and the offline gate isolate `XDG_CONFIG_HOME`, so a persisted
+`:Theme` choice on the host cannot change their versioned-default assertions.
 
 ## Runtime tool installation
 
@@ -67,6 +69,7 @@ been removed; PlantUML diagram rendering is unchanged.
 | Terminal editor | Startup, argv lifecycle, commands, LSP config and plugin API contracts | Interactive completion and long editing sessions |
 | nvimpager | Allowlist, source-lock SHA parity, parser set, argv/stdin filetype behavior, mappings and absence of editor-only services | Rendering in the real `nvimpager` executable |
 | VSCode Neovim | Stubbed profile and action mappings; terminal-only commands/plugins stay absent | A live VS Code extension host |
+| Themes | VSCode default, Catppuccin Latte/Mocha switching, local persistence, editor/pager availability and VSCode exclusion | Visual judgement in the real terminal and pager |
 | Tree-sitter | Installed/missing parser lifecycle, completion retry, large-file guard and textobject surfaces | Language-specific highlighting judgement |
 | LSP | Server catalog, native neoconf disable/live-reload behavior, merge order, single/multiple-result tab navigation and clangd command construction | Connecting to every external language server |
 | DAP | Adapter resolution, VSCode aliases, exclusive UI selection, lifecycle, views and tab-aware fixture navigation | Real adapter behavior and interactive UI judgement |

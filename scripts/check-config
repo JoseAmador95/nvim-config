@@ -13,7 +13,8 @@ cleanup() {
 }
 trap cleanup 0 HUP INT TERM
 
-mkdir -p "$check_tmp/state" "$check_tmp/cache" "$check_tmp/log" "$check_tmp/tmp"
+mkdir -p "$check_tmp/config" "$check_tmp/state" "$check_tmp/cache" "$check_tmp/log" "$check_tmp/tmp"
+export XDG_CONFIG_HOME="$check_tmp/config"
 export XDG_STATE_HOME="$check_tmp/state"
 export XDG_CACHE_HOME="$check_tmp/cache"
 export NVIM_LOG_FILE="$check_tmp/log/nvim.log"
@@ -165,6 +166,21 @@ run_dap_session_test() {
 		--cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
 }
 
+run_theme_profile_test() {
+	profile=$1
+	background=$2
+	test_path=$3
+	if [ "$profile" = "pager" ]; then
+		run_check "theme_profile_spec ($profile/$background)" env NVIM_APPNAME=nvimpager \
+			NVIM_CONFIG_THEME_BACKGROUND="$background" "NVIM_CONFIG_TEST=$test_path" "$NVIM_BIN" \
+			--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
+		return
+	fi
+	run_check "theme_profile_spec ($profile/$background)" env NVIM_CONFIG_THEME_BACKGROUND="$background" \
+		"NVIM_CONFIG_TEST=$test_path" "$NVIM_BIN" --headless -i NONE \
+		--cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
+}
+
 run_pager_test() {
 	run_check "pager_profile_spec" env NVIM_APPNAME=nvimpager NVIMPAGER_FILETYPE=markdown \
 		NVIM_CONFIG_TEST="$repo_root/tests/pager_profile_spec.lua" "$NVIM_BIN" \
@@ -202,6 +218,10 @@ run_config_test tooling_ui_spec "$repo_root/tests/tooling_ui_spec.lua"
 run_dap_view_test dap_view_profile_spec "$repo_root/tests/dap_view_profile_spec.lua"
 run_dap_session_test python "$repo_root/tests/dap_session_spec.lua"
 run_dap_session_test cpp "$repo_root/tests/dap_session_spec.lua"
+run_theme_profile_test editor dark "$repo_root/tests/theme_profile_spec.lua"
+run_theme_profile_test editor light "$repo_root/tests/theme_profile_spec.lua"
+run_theme_profile_test pager dark "$repo_root/tests/theme_profile_spec.lua"
+run_theme_profile_test pager light "$repo_root/tests/theme_profile_spec.lua"
 run_config_test dependency_spec "$repo_root/tests/dependency_spec.lua"
 run_config_test coverage_spec "$repo_root/tests/coverage_spec.lua"
 run_pager_lock_test

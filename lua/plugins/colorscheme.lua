@@ -1,5 +1,55 @@
 return {
 	{
+		"catppuccin/nvim",
+		name = "catppuccin",
+		commit = "605b4603797de970e9f3a4238c199c850da03186",
+		lazy = false,
+		priority = 1001,
+		cond = function()
+			return not vim.g.vscode
+		end,
+		config = function()
+			local selector = require("config.theme")
+			local theme = require("config.local_config").get("theme", {})
+			local transparent = theme.transparent == true
+			local italic_comments = theme.italic_comments ~= false
+
+			require("catppuccin").setup({
+				flavour = "auto",
+				background = {
+					light = "latte",
+					dark = "mocha",
+				},
+				transparent_background = transparent,
+				float = {
+					transparent = transparent,
+				},
+				styles = {
+					comments = italic_comments and { "italic" } or {},
+				},
+				integrations = {
+					diffview = true,
+					navic = {
+						enabled = true,
+						custom_bg = "NONE",
+					},
+					snacks = { enabled = true },
+				},
+			})
+
+			local last_flavour = nil
+			selector.register("catppuccin", function(bg)
+				local flavour = bg == "light" and "latte" or "mocha"
+				local colorscheme = "catppuccin-" .. flavour
+				if flavour == last_flavour and vim.g.colors_name == colorscheme then
+					return
+				end
+				last_flavour = flavour
+				vim.cmd.colorscheme(colorscheme)
+			end)
+		end,
+	},
+	{
 		"Mofiqul/vscode.nvim",
 		lazy = false,
 		priority = 1000,
@@ -86,7 +136,7 @@ return {
 			-- Paint once with whatever Neovim detected (works on a normal boot).
 			selector.repaint()
 
-			local group = vim.api.nvim_create_augroup("VscodeBgFollow", { clear = true })
+			local group = vim.api.nvim_create_augroup("NvimConfigThemeBgFollow", { clear = true })
 
 			-- Re-apply the matching style whenever 'background' changes, driven
 			-- either by Neovim's own startup detection, by the OSC 11 re-query
