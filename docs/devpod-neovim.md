@@ -1,8 +1,10 @@
 # Neovim dentro de DevPod
 
 `scripts/devpod-nvim` mantiene el agente, Git, LazyGit, tmux y tuicr en el host,
-y reemplaza únicamente el pane `editor` con Neovim dentro del workspace. DevPod
-queda fijado a `0.6.15`; sólo se aceptan providers locales `podman` o `docker`.
+y reemplaza únicamente el pane `editor` con Neovim dentro del workspace. Cada
+arranque resuelve las últimas releases estables oficiales de DevPod y Neovim;
+no acepta prereleases ni fija sus versiones en la configuración. Sólo se
+aceptan providers locales `podman` o `docker`.
 
 ## Preparación del provider
 
@@ -27,9 +29,10 @@ contexto no cambia permanentemente el contexto default que ya tenía el usuario.
 Sólo se forwardea el agente que ya está cargado en `SSH_AUTH_SOCK`: no se copian
 ni se buscan llaves privadas en `~/.ssh`.
 
-DevPod 0.6.15 no aplica por sí solo el build arg automático `TARGETARCH` al
-inspeccionar un Dockerfile con una etapa como `FROM base-$TARGETARCH`. Si el
-proyecto no declara ese arg en `build.args` y en el preámbulo del Dockerfile, el
+Algunas releases de DevPod no aplican por sí solas el build arg automático
+`TARGETARCH` al inspeccionar etapas parametrizadas del Dockerfile. Por ejemplo,
+pueden interpretar mal `FROM base-$TARGETARCH`. Si el proyecto no declara ese
+arg en `build.args` y en el preámbulo del Dockerfile, el
 launcher genera un overlay privado y determinista bajo su estado, copia allí el
 Dockerfile, completa ambos valores y pasa la arquitectura efectiva (`arm64` o
 `amd64`) sin escribir en el repo. Un `credsStore` de
@@ -55,9 +58,13 @@ puedes reemplazar el pane actual desde Neovim:
 :DevPodRecreate!
 ```
 
-El `!` autoriza descargas verificadas durante el primer bootstrap. Sin `!`, el
-launcher pregunta si posee un TTY; en automatización falla cerrado y pide
-`--allow-network`. `:HostEditor` regresa explícitamente a Neovim del host. Salir
+El `!` autoriza la consulta de las releases estables actuales y, si hace falta,
+la descarga verificada de Neovim y el bootstrap de plugins. Sin `!`, el launcher
+pregunta si posee un TTY; responder que no hace que falle cerrado porque sin red
+no puede garantizar que ambas versiones sean las más actuales. En automatización
+se usa `--allow-network`. `devpod up` puede además usar la red del provider para
+descargar la imagen o Features del proyecto. `:HostEditor` regresa explícitamente
+a Neovim del host. Salir
 normalmente del editor del container deja el pane detenido por
 `remain-on-exit`; no relanza nada.
 
@@ -103,20 +110,27 @@ copia fuera del proyecto y queda read-only en el workspace. El modo
 excluye configuración local; nunca es el default. `--recreate` vuelve a aplicar
 la snapshot.
 
-Primero se usa un Neovim `0.12.4` exacto ya presente en la imagen. Si falta, el
-launcher descarga el tar oficial Linux correspondiente a arm64/x86_64, verifica
-su SHA-256 y lo instala en el estado privado del workspace. `cc` es obligatorio.
-No instala npm, Go, Cargo, compiladores ni package managers. El bootstrap de
-plugins usa el lock existente y los instaladores exactos de esta configuración.
+El launcher consulta `releases/latest` de ambos proyectos. El binario DevPod del
+host debe reportar exactamente la última versión estable; si falta o está
+desactualizado, el flujo pide actualizarlo con el package manager del host y no
+lo sustituye automáticamente. DevPod no publica todavía un digest SHA-256 para
+ese asset que permita conservar el mismo límite de confianza del fallback.
+
+Dentro de la imagen se reutiliza Neovim sólo si reporta exactamente la última
+versión estable. Si no, el launcher descarga el tar oficial Linux correspondiente
+a arm64/x86_64 y verifica tanto el SHA-256 como el tamaño publicados por GitHub
+antes de instalarlo en el estado privado del workspace. `cc` es obligatorio. No
+instala npm, Go, Cargo, compiladores ni package managers. El bootstrap de plugins
+usa el lock existente y se repite cuando cambia la release efectiva de Neovim.
 
 Las conexiones de control desactivan agent/GPG forwarding y los credential
 services de DevPod. Sólo la conexión que posee el Neovim interactivo habilita el
 SSH agent del host; GPG, inyección de llaves y servicios de credenciales siguen
 deshabilitados. Los sockets Unix y registros del host son privados (directorios
-`0700`, archivos `0600`). DevPod 0.6.15 deshabilita el forwarding directo hacia un
-socket Unix remoto, por lo que el bridge host→editor termina en un puerto TCP
-aleatorio ligado únicamente a `127.0.0.1` dentro del container; nunca se
-publica fuera de él. El bridge inverso conserva Unix→Unix. `:TuicrReview`
+`0700`, archivos `0600`). Para conservar compatibilidad entre releases, el
+bridge host→editor termina en un puerto TCP aleatorio ligado únicamente a
+`127.0.0.1` dentro del container; nunca se publica fuera de él. El bridge inverso
+conserva Unix→Unix. `:TuicrReview`
 delega al popup host; `:LazyGit` selecciona la ventana host. Lualine y el frame
 de tmux muestran `DevPod · provider · project`.
 

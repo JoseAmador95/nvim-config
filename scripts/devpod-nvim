@@ -18,7 +18,6 @@ import json
 import os
 import pathlib
 import platform
-import plistlib
 import re
 import signal
 import shlex
@@ -37,10 +36,10 @@ import urllib.error
 
 
 VERSION = 1
-DEVPOD_VERSION = "0.6.15"
-NVIM_VERSION = "0.12.4"
 CONTEXT = "nvim-devpod"
 MAX_JSON = 64 * 1024
+MAX_RELEASE_JSON = 2 * 1024 * 1024
+MAX_RELEASE_ASSET = 512 * 1024 * 1024
 MAX_RPC_OUTPUT = 1024 * 1024
 MAX_DOCKERFILE = 10 * 1024 * 1024
 MAX_GITCONFIG = 1024 * 1024
@@ -49,6 +48,7 @@ STALE_SECONDS = 30 * 24 * 60 * 60
 PROVIDERS = {"docker", "podman"}
 GITCONFIG_TARGET = "/tmp/nvim-devpod-host.gitconfig"
 CURRENT_LOG = None
+RELEASE_REPOSITORIES = {"loft-sh/devpod", "neovim/neovim"}
 GIT_ENV = {
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CEILING_DIRECTORIES",
@@ -60,28 +60,12 @@ GIT_ENV = {
     "GIT_PREFIX",
     "GIT_WORK_TREE",
 }
-NVIM_RELEASES = {
-    "aarch64": (
-        "nvim-linux-arm64.tar.gz",
-        "ceb7e88c6b681f0515d135dcdfad54f5eb4373b25ce6172197cd9a69c758063f",
-    ),
-    "arm64": (
-        "nvim-linux-arm64.tar.gz",
-        "ceb7e88c6b681f0515d135dcdfad54f5eb4373b25ce6172197cd9a69c758063f",
-    ),
-    "x86_64": (
-        "nvim-linux-x86_64.tar.gz",
-        "012bf3fcac5ade43914df3f174668bf64d05e049a4f032a388c027b1ebd78628",
-    ),
-    "amd64": (
-        "nvim-linux-x86_64.tar.gz",
-        "012bf3fcac5ade43914df3f174668bf64d05e049a4f032a388c027b1ebd78628",
-    ),
+NVIM_RELEASE_ASSETS = {
+    "aarch64": "nvim-linux-arm64.tar.gz",
+    "arm64": "nvim-linux-arm64.tar.gz",
+    "x86_64": "nvim-linux-x86_64.tar.gz",
+    "amd64": "nvim-linux-x86_64.tar.gz",
 }
-DEVPOD_DARWIN_ARM64 = (
-    "DevPod_macos_aarch64.dmg",
-    "63fea2f91762be167a53267722b1f37b95214bb1824957e2eeaf38d41f6a16af",
-)
 
 
 class DevPodError(Exception):
@@ -525,7 +509,7 @@ def compatibility_config(
 ) -> tuple[str, str, str | None]:
     """Return DevPod's config path, workspace identity key, and Git config target.
 
-    DevPod 0.6.15 resolves Dockerfile stage variables using devcontainer
+    Some DevPod releases resolve Dockerfile stage variables using devcontainer
     build args before asking the local engine for the base image. Docker's
     automatic TARGETARCH is otherwise absent at that point, so a final stage
     such as `FROM base-$TARGETARCH` is misread as the remote image `base-`.
@@ -688,6 +672,85 @@ def executable_version(path: pathlib.Path, expected: str) -> bool:
     return result.returncode == 0 and re.search(rf"\bv?{re.escape(expected)}\b", text) is not None
 
 
+def latest_release(repository: str, allow_network: bool) -> dict:
+    if repository not in RELEASE_REPOSITORIES:
+        fail(f"unsupported latest-release repository: {repository}")
+    if not allow_network:
+        fail("confirming the latest stable DevPod and Neovim releases requires network access")
+    api_url = f"https://api.github.com/repos/{repository}/releases/latest"
+    request = urllib.request.Request(
+        api_url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "nvim-devpod-bootstrap",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = response.read(MAX_RELEASE_JSON + 1)
+    except (OSError, urllib.error.URLError) as error:
+        fail(f"could not resolve the latest stable release for {repository}: {error}")
+    if len(payload) > MAX_RELEASE_JSON:
+        fail(f"latest-release metadata for {repository} exceeds 2 MiB")
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        fail(f"latest-release metadata for {repository} is invalid JSON: {error}")
+    if not isinstance(value, dict) or value.get("draft") is not False or value.get("prerelease") is not False:
+        fail(f"GitHub did not return one stable release for {repository}")
+    tag = value.get("tag_name")
+    match = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag or "")
+    expected_page = f"https://github.com/{repository}/releases/tag/{tag}"
+    if not match or value.get("html_url") != expected_page:
+        fail(f"latest stable release identity for {repository} is invalid")
+    assets = value.get("assets")
+    if not isinstance(assets, list) or not assets:
+        fail(f"latest stable release for {repository} has no assets")
+    normalized_assets = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            fail(f"latest stable release assets for {repository} are invalid")
+        name = asset.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+            fail(f"latest stable release for {repository} contains an unsafe asset name")
+        expected_url = f"https://github.com/{repository}/releases/download/{tag}/{name}"
+        if asset.get("browser_download_url") != expected_url:
+            fail(f"latest stable release for {repository} contains an unexpected asset URL")
+        normalized_assets.append(
+            {
+                "name": name,
+                "url": expected_url,
+                "digest": asset.get("digest"),
+                "size": asset.get("size"),
+            }
+        )
+    return {
+        "repository": repository,
+        "tag": tag,
+        "version": match.group(1),
+        "assets": normalized_assets,
+    }
+
+
+def release_asset(release: dict, name: str) -> dict:
+    assets = release.get("assets", [])
+    if not isinstance(assets, list):
+        fail("latest stable release assets are invalid")
+    matches = [asset for asset in assets if isinstance(asset, dict) and asset.get("name") == name]
+    if len(matches) != 1:
+        fail(f"latest stable {release.get('repository', 'release')} has no unique {name} asset")
+    asset = matches[0]
+    digest = asset.get("digest")
+    match = re.fullmatch(r"sha256:([0-9a-f]{64})", digest or "")
+    if not match:
+        fail(f"latest stable {release.get('repository', 'release')} does not publish a SHA-256 for {name}")
+    size = asset.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > MAX_RELEASE_ASSET:
+        fail(f"latest stable {release.get('repository', 'release')} publishes an invalid size for {name}")
+    return {"name": name, "url": asset["url"], "sha256": match.group(1), "size": size}
+
+
 def sha256_file(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -699,17 +762,36 @@ def sha256_file(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def download(url: str, target: pathlib.Path, expected: str, allow_network: bool) -> pathlib.Path:
-    if target.is_file() and not target.is_symlink() and sha256_file(target) == expected:
-        return target
+def download(
+    url: str,
+    target: pathlib.Path,
+    expected: str,
+    allow_network: bool,
+    *,
+    expected_size: int | None = None,
+) -> pathlib.Path:
+    if target.is_file() and not target.is_symlink():
+        size_matches = expected_size is None or target.stat().st_size == expected_size
+        if size_matches and sha256_file(target) == expected:
+            return target
     if not allow_network:
         fail(f"verified download is absent: {target.name}; rerun with --allow-network")
     temp = target.with_name(f".{target.name}.{os.getpid()}.download")
     try:
         with urllib.request.urlopen(url, timeout=60) as response, temp.open("wb") as handle:
-            shutil.copyfileobj(response, handle)
+            total = 0
+            while True:
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                total += len(block)
+                if expected_size is not None and total > expected_size:
+                    fail(f"download exceeds the published size for {target.name}")
+                handle.write(block)
             handle.flush()
             os.fsync(handle.fileno())
+        if expected_size is not None and total != expected_size:
+            fail(f"download size does not match the release metadata for {target.name}")
         if sha256_file(temp) != expected:
             fail(f"SHA-256 mismatch for {target.name}")
         os.replace(temp, target)
@@ -724,44 +806,17 @@ def download(url: str, target: pathlib.Path, expected: str, allow_network: bool)
     return target
 
 
-def devpod_binary(root: pathlib.Path, allow_network: bool) -> pathlib.Path:
+def devpod_binary(release: dict) -> pathlib.Path:
+    expected = release["version"]
     override = os.environ.get("NVIM_DEVPOD_BIN")
     found = pathlib.Path(override or shutil.which("devpod") or "")
-    if found and found.is_file() and executable_version(found, DEVPOD_VERSION):
+    if found and found.is_file() and executable_version(found, expected):
         return found.resolve()
-    if platform.system() != "Darwin" or platform.machine().lower() not in {"arm64", "aarch64"}:
-        fail(f"DevPod {DEVPOD_VERSION} is required; no verified fallback exists for this host")
-    asset, checksum = DEVPOD_DARWIN_ARM64
-    dmg = download(
-        f"https://github.com/loft-sh/devpod/releases/download/v{DEVPOD_VERSION}/{asset}",
-        root / "downloads" / asset,
-        checksum,
-        allow_network,
+    source = f"NVIM_DEVPOD_BIN={override}" if override else "host PATH"
+    fail(
+        f"latest stable DevPod {expected} is required but {source} does not provide it; "
+        "update DevPod with the host package manager"
     )
-    destination = root / "bin" / "devpod"
-    attach = run(["hdiutil", "attach", "-readonly", "-nobrowse", "-plist", dmg])
-    value = plistlib.loads(attach.stdout)
-    mounts = [
-        entity.get("mount-point")
-        for entity in value.get("system-entities", [])
-        if entity.get("mount-point")
-    ]
-    if len(mounts) != 1:
-        fail("could not identify the verified DevPod disk image mount")
-    mount = pathlib.Path(mounts[0])
-    try:
-        binary = mount / "DevPod.app/Contents/MacOS/devpod"
-        if not binary.is_file():
-            fail("verified DevPod image does not contain its CLI")
-        temp = destination.with_suffix(".tmp")
-        shutil.copyfile(binary, temp)
-        temp.chmod(0o700)
-        os.replace(temp, destination)
-    finally:
-        run(["hdiutil", "detach", mount], check=False)
-    if not executable_version(destination, DEVPOD_VERSION):
-        fail("verified DevPod fallback did not report the pinned version")
-    return destination
 
 
 def devpod_args(binary: pathlib.Path, provider: str, *args: str) -> list[str]:
@@ -800,7 +855,7 @@ def ensure_context_provider(binary: pathlib.Path, provider: str) -> pathlib.Path
     elif previous_default != CONTEXT:
         run([binary, "context", "use", CONTEXT])
     try:
-        # DevPod 0.6.15's context/provider management subcommands inspect the
+        # DevPod's context/provider management subcommands inspect the
         # selected context even when --context is present. Select only for this
         # bounded operation and always restore the prior context.
         run(
@@ -1094,27 +1149,29 @@ def provision_config(binary, provider, workspace, snapshot, workspace_id):
     container_command(binary, provider, workspace, command, input_bytes=tar_directory(pathlib.Path(snapshot["path"])))
 
 
-def provision_nvim(binary, provider, workspace, state, workspace_id, allow_network):
+def provision_nvim(binary, provider, workspace, state, workspace_id, release, allow_network):
+    version = release["version"]
     exact = container_command(
         binary,
         provider,
         workspace,
         f'command -v nvim >/dev/null 2>&1 && '
-        f'nvim --version | {{ IFS= read -r line; [ "$line" = "NVIM v{NVIM_VERSION}" ]; }}',
+        f'nvim --version | {{ IFS= read -r line; [ "$line" = "NVIM v{version}" ]; }}',
         check=False,
     )
     if exact.returncode == 0:
-        return "nvim"
+        return "nvim", version
     arch = container_command(binary, provider, workspace, "uname -m").stdout.decode().strip().lower()
-    release = NVIM_RELEASES.get(arch)
-    if not release:
-        fail(f"no verified Neovim {NVIM_VERSION} precompiled asset for container architecture {arch!r}")
-    asset, checksum = release
+    asset_name = NVIM_RELEASE_ASSETS.get(arch)
+    if not asset_name:
+        fail(f"no official Neovim precompiled asset for container architecture {arch!r}")
+    asset = release_asset(release, asset_name)
     archive = download(
-        f"https://github.com/neovim/neovim/releases/download/v{NVIM_VERSION}/{asset}",
-        state / "downloads" / asset,
-        checksum,
+        asset["url"],
+        state / "downloads" / asset["name"],
+        asset["sha256"],
         allow_network,
+        expected_size=asset["size"],
     )
     command = (
         'umask 077; base="$HOME/.local/state/nvim-devpod/workspaces/' + workspace_id + '"; '
@@ -1126,10 +1183,10 @@ def provision_nvim(binary, provider, workspace, state, workspace_id, allow_netwo
     installed = f'$HOME/.local/state/nvim-devpod/workspaces/{workspace_id}/nvim/bin/nvim'
     verify = (
         f'{installed} --version | '
-        f'{{ IFS= read -r line; [ "$line" = "NVIM v{NVIM_VERSION}" ]; }}'
+        f'{{ IFS= read -r line; [ "$line" = "NVIM v{version}" ]; }}'
     )
     container_command(binary, provider, workspace, verify)
-    return installed
+    return installed, version
 
 
 def require_cc(binary, provider, workspace):
@@ -1346,11 +1403,18 @@ def cmd_up(args):
     )
     allow_network = args.allow_network
     if not allow_network and sys.stdin.isatty():
-        answer = input("Allow a verified network download if this workspace needs its first bootstrap? [y/N] ")
+        answer = input("Resolve the latest stable DevPod and Neovim releases over the network? [y/N] ")
         allow_network = answer.strip().lower() in {"y", "yes"}
-    progress(f"validating DevPod {DEVPOD_VERSION} and local {provider} provider")
+    progress("resolving the latest stable DevPod and Neovim releases")
+    devpod_release = latest_release("loft-sh/devpod", allow_network)
+    nvim_release = latest_release("neovim/neovim", allow_network)
+    progress(
+        f"latest stable releases: DevPod {devpod_release['version']}, "
+        f"Neovim {nvim_release['version']}"
+    )
+    progress(f"validating latest stable DevPod and local {provider} provider")
     configure_registry_environment(private)
-    devpod = devpod_binary(private, allow_network)
+    devpod = devpod_binary(devpod_release)
     engine = ensure_context_provider(devpod, provider)
     snapshot = config_snapshot(private, args.experimental_dirty_config)
     before = project_fingerprint(repo)
@@ -1386,10 +1450,21 @@ def cmd_up(args):
         fail("DevPod returned an invalid container workspace path")
     progress("provisioning the verified read-only Neovim configuration")
     provision_config(devpod, provider, workspace, snapshot, workspace)
-    progress(f"verifying Neovim {NVIM_VERSION}")
-    nvim = provision_nvim(devpod, provider, workspace, private, workspace, allow_network)
+    progress(f"verifying latest stable Neovim {nvim_release['version']}")
+    nvim, nvim_version = provision_nvim(
+        devpod,
+        provider,
+        workspace,
+        private,
+        workspace,
+        nvim_release,
+        allow_network,
+    )
     progress("checking the pinned plugin bootstrap")
-    bootstrap_plugins(devpod, provider, workspace, workspace, nvim, snapshot["digest"], allow_network)
+    bootstrap_identity = hashlib.sha256(
+        (snapshot["digest"] + "\0" + nvim_release["tag"]).encode()
+    ).hexdigest()
+    bootstrap_plugins(devpod, provider, workspace, workspace, nvim, bootstrap_identity, allow_network)
     result = {
         "ok": True,
         "command": "up",
@@ -1404,6 +1479,8 @@ def cmd_up(args):
         "git_after": after,
         "gitconfig_target": gitconfig_target,
         "log_path": str(log_path),
+        "devpod_version": devpod_release["version"],
+        "nvim_version": nvim_version,
         "ssh_agent_forwarding": ssh_agent_available(),
     }
     if mutated:
@@ -1434,10 +1511,9 @@ def launch_editor(private, devpod, prepared, nvim):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     container_base = f"/tmp/nvim-devpod-{workspace}"
-    # DevPod 0.6.15's embedded SSH server rejects direct-streamlocal even
-    # though its client accepts a Unix-to-Unix -L specification. Keep the
-    # private host endpoint as a Unix socket and bind Neovim only to container
-    # loopback for the remote side of that tunnel.
+    # Keep the bridge compatible with DevPod releases whose embedded SSH server
+    # rejects direct-streamlocal: the host endpoint remains a private Unix
+    # socket and Neovim binds only to container loopback on the remote side.
     container_nvim_port = 20000 + int.from_bytes(hashlib.sha256(token.encode()).digest()[:2], "big") % 40000
     container_nvim_address = f"127.0.0.1:{container_nvim_port}"
     container_controller = container_base + "/host.sock"
@@ -1455,6 +1531,8 @@ def launch_editor(private, devpod, prepared, nvim):
                 "config_snapshot",
                 "project_mutated",
                 "log_path",
+                "devpod_version",
+                "nvim_version",
             )
         },
         "pid": os.getpid(),

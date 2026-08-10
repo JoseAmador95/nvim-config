@@ -285,7 +285,7 @@ function M.setup()
 		if not ok then
 			notify(err, vim.log.levels.ERROR)
 		end
-	end, { bang = true, desc = "Replace the tmux editor pane with DevPod Neovim (! permits first network bootstrap)" })
+	end, { bang = true, desc = "Replace the tmux editor pane with DevPod Neovim (! resolves latest stable releases)" })
 
 	vim.api.nvim_create_user_command("DevPodRecreate", function(command)
 		local ok, err = replace_editor(true, command.bang)

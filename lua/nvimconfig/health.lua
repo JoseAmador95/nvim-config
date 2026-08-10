@@ -478,8 +478,8 @@ function M.check()
 	check_tool("lazygit", "Git terminal UI", "Install lazygit with the host package manager.", false, configured)
 	check_tool(
 		"devpod",
-		"DevPod 0.6.15 container editor",
-		"Install the exact host release or run scripts/devpod-nvim up for the verified macOS arm64 fallback.",
+		"latest-stable DevPod container editor",
+		"Install or update host DevPod; scripts/devpod-nvim up verifies it against GitHub's latest stable release.",
 		false,
 		configured
 	)

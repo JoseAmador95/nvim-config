@@ -32,6 +32,26 @@ class DevPodLauncherTest(unittest.TestCase):
             "state": {"options": {"DOCKER_PATH": {"value": f"/usr/bin/{name}"}}},
         }
 
+    @staticmethod
+    def release_payload(repository="neovim/neovim", version="9.8.7", *, digest=None):
+        name = "nvim-linux-arm64.tar.gz"
+        return {
+            "tag_name": f"v{version}",
+            "html_url": f"https://github.com/{repository}/releases/tag/v{version}",
+            "draft": False,
+            "prerelease": False,
+            "assets": [
+                {
+                    "name": name,
+                    "browser_download_url": (
+                        f"https://github.com/{repository}/releases/download/v{version}/{name}"
+                    ),
+                    "digest": digest or "sha256:" + "a" * 64,
+                    "size": 12345,
+                }
+            ],
+        }
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="devpod-nvim-spec.")
         self.root = pathlib.Path(self.temp.name)
@@ -569,6 +589,147 @@ class DevPodLauncherTest(unittest.TestCase):
                 "0" * 64,
                 False,
             )
+
+    def test_verified_download_replaces_bad_cache_and_enforces_published_size(self):
+        target = self.root / "asset.tar.gz"
+        target.write_bytes(b"bad cache")
+        payload = b"verified release asset"
+        checksum = MODULE.hashlib.sha256(payload).hexdigest()
+        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=io.BytesIO(payload)):
+            result = MODULE.download(
+                "https://github.com/example/project/releases/download/v1.2.3/asset.tar.gz",
+                target,
+                checksum,
+                True,
+                expected_size=len(payload),
+            )
+        self.assertEqual(result.read_bytes(), payload)
+
+        oversized = self.root / "oversized.tar.gz"
+        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=io.BytesIO(b"too long")):
+            with self.assertRaisesRegex(MODULE.DevPodError, "exceeds the published size"):
+                MODULE.download(
+                    "https://github.com/example/project/releases/download/v1.2.3/oversized.tar.gz",
+                    oversized,
+                    MODULE.hashlib.sha256(b"too long").hexdigest(),
+                    True,
+                    expected_size=1,
+                )
+        self.assertFalse(oversized.exists())
+
+    def test_latest_release_uses_official_stable_metadata_and_asset_digest(self):
+        class Response:
+            def __init__(self, value):
+                self.payload = json.dumps(value).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, limit):
+                self.limit = limit
+                return self.payload
+
+        response = Response(self.release_payload())
+        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=response) as opener:
+            release = MODULE.latest_release("neovim/neovim", True)
+        request = opener.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.github.com/repos/neovim/neovim/releases/latest")
+        self.assertEqual(request.get_header("User-agent"), "nvim-devpod-bootstrap")
+        self.assertEqual(response.limit, MODULE.MAX_RELEASE_JSON + 1)
+        self.assertEqual(release["version"], "9.8.7")
+        asset = MODULE.release_asset(release, "nvim-linux-arm64.tar.gz")
+        self.assertEqual(asset["sha256"], "a" * 64)
+        self.assertEqual(asset["size"], 12345)
+
+    def test_latest_release_requires_network_and_fails_closed_on_untrusted_metadata(self):
+        with self.assertRaisesRegex(MODULE.DevPodError, "requires network"):
+            MODULE.latest_release("neovim/neovim", False)
+
+        class Response:
+            def __init__(self, value):
+                self.payload = json.dumps(value).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return self.payload
+
+        prerelease = self.release_payload()
+        prerelease["prerelease"] = True
+        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=Response(prerelease)):
+            with self.assertRaisesRegex(MODULE.DevPodError, "stable release"):
+                MODULE.latest_release("neovim/neovim", True)
+
+        foreign = self.release_payload()
+        foreign["assets"][0]["browser_download_url"] = "https://example.invalid/nvim.tar.gz"
+        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=Response(foreign)):
+            with self.assertRaisesRegex(MODULE.DevPodError, "unexpected asset URL"):
+                MODULE.latest_release("neovim/neovim", True)
+
+        missing_digest = self.release_payload(digest="missing")
+        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=Response(missing_digest)):
+            release = MODULE.latest_release("neovim/neovim", True)
+        with self.assertRaisesRegex(MODULE.DevPodError, "does not publish a SHA-256"):
+            MODULE.release_asset(release, "nvim-linux-arm64.tar.gz")
+
+    def test_devpod_must_match_the_resolved_latest_host_release(self):
+        binary = self.root / "devpod"
+        binary.write_bytes(b"fixture")
+        release = {"version": "9.8.7"}
+        with mock.patch.dict(os.environ, {"NVIM_DEVPOD_BIN": str(binary)}), mock.patch.object(
+            MODULE, "executable_version", return_value=True
+        ):
+            self.assertEqual(MODULE.devpod_binary(release), binary.resolve())
+        with mock.patch.dict(os.environ, {"NVIM_DEVPOD_BIN": str(binary)}), mock.patch.object(
+            MODULE, "executable_version", return_value=False
+        ), self.assertRaisesRegex(MODULE.DevPodError, "latest stable DevPod 9.8.7"):
+            MODULE.devpod_binary(release)
+
+    def test_neovim_provisioning_consumes_the_resolved_latest_asset(self):
+        archive = self.root / "nvim-linux-arm64.tar.gz"
+        archive.write_bytes(b"fixture archive")
+        release = {
+            "repository": "neovim/neovim",
+            "tag": "v9.8.7",
+            "version": "9.8.7",
+            "assets": [
+                {
+                    "name": "nvim-linux-arm64.tar.gz",
+                    "url": "https://github.com/neovim/neovim/releases/download/v9.8.7/nvim-linux-arm64.tar.gz",
+                    "digest": "sha256:" + "b" * 64,
+                    "size": len(archive.read_bytes()),
+                }
+            ],
+        }
+        missing = subprocess.CompletedProcess([], 1, b"", b"")
+        architecture = subprocess.CompletedProcess([], 0, b"aarch64\n", b"")
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.object(
+            MODULE,
+            "container_command",
+            side_effect=[missing, architecture, completed, completed],
+        ) as container, mock.patch.object(MODULE, "download", return_value=archive) as downloader:
+            path, version = MODULE.provision_nvim(
+                pathlib.Path("/tmp/devpod"),
+                "podman",
+                "fixture",
+                self.root,
+                "workspace-id",
+                release,
+                True,
+            )
+        self.assertEqual(version, "9.8.7")
+        self.assertIn("/nvim/bin/nvim", path)
+        self.assertEqual(downloader.call_args.args[2], "b" * 64)
+        self.assertEqual(downloader.call_args.kwargs["expected_size"], len(archive.read_bytes()))
+        self.assertIn("NVIM v9.8.7", container.call_args_list[-1].args[3])
 
 
 if __name__ == "__main__":

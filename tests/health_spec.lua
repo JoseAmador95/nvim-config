@@ -32,7 +32,8 @@ for _, required in ipairs({
 	"managed and Mason copies are intentionally ignored",
 	"CMake language intelligence",
 	"Git terminal UI",
-	"DevPod 0.6.15 container editor",
+	"latest-stable DevPod container editor",
+	"verifies it against GitHub's latest stable release",
 	"scripts/devpod-nvim up",
 }) do
 	assert(source:find(required, 1, true), "health contract is missing: " .. required)
