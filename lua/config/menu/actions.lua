@@ -239,15 +239,15 @@ local handlers = {
 		end)
 	end,
 	["dapui.eval"] = function()
-		local dapui = require_or_notify("dapui", "DAP UI")
-		if dapui then
-			dapui.eval()
+		local dap_ui = require_or_notify("config.dap_ui", "DAP UI")
+		if dap_ui then
+			dap_ui.eval()
 		end
 	end,
 	["dapui.toggle"] = function()
-		local dapui = require_or_notify("dapui", "DAP UI")
-		if dapui then
-			dapui.toggle()
+		local dap_ui = require_or_notify("config.dap_ui", "DAP UI")
+		if dap_ui then
+			dap_ui.toggle()
 		end
 	end,
 	["format.buffer"] = format_buffer,

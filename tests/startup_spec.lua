@@ -51,6 +51,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 	callback = function()
 		vim.schedule(function()
 			local ok, err = xpcall(function()
+				assert(require("config.dap_ui").selected() == "dap-ui", "startup did not select the default DAP UI")
+				assert(package.loaded.dapui == nil, "dap-ui loaded eagerly during startup")
+				assert(package.loaded["dap-view"] == nil, "dap-view loaded eagerly during startup")
 				assert(vim.fn.exists(":CloseTab") == 2, "full editor CloseTab command is missing")
 				for _, command in ipairs({
 					"ReviewRoundStart",

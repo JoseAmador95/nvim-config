@@ -69,7 +69,7 @@ been removed; PlantUML diagram rendering is unchanged.
 | VSCode Neovim | Stubbed profile and action mappings; terminal-only commands/plugins stay absent | A live VS Code extension host |
 | Tree-sitter | Installed/missing parser lifecycle, completion retry, large-file guard and textobject surfaces | Language-specific highlighting judgement |
 | LSP | Server catalog, native neoconf disable/live-reload behavior, merge order, single/multiple-result tab navigation and clangd command construction | Connecting to every external language server |
-| DAP | Adapter resolution and VSCode adapter aliases | Real Python and C/C++ debug sessions |
+| DAP | Adapter resolution, VSCode aliases, exclusive UI selection, lifecycle, views and tab-aware fixture navigation | Real adapter behavior and interactive UI judgement |
 | Lint/format | Save-only lint routing, formatter chains, no-LSP fallback and missing-tool behavior | Project-specific linter configuration |
 | Diagrams | Scanner, renderer generations, atomic cache writes, corruption and pruning | Kitty image display, browser opening and visual layout |
 | LogWatch | Append, partial lines, truncation, rotation, deletion/recreation and retention limits | Sustained observation of a high-volume production log |

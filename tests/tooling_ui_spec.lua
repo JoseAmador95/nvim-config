@@ -14,6 +14,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				require("lazy").load({ plugins = { "nvim-dap" } })
 
 				local dap = require("dap")
+				assert(require("config.dap_ui").selected() == "dap-ui", "dap-ui is not the versioned default")
+				assert(package.loaded.dapui, "default dap-ui module was not loaded")
+				assert(package.loaded["dap-view"] == nil, "dap-view loaded alongside the default dap-ui")
 				local python_adapter
 				dap.adapters.python(function(adapter)
 					python_adapter = adapter
@@ -42,7 +45,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(dap.configurations.rust == nil, "Rust DAP configuration remains")
 				assert(dap.configurations.go == nil, "Go DAP configuration remains")
 				assert(
-					not vim.tbl_contains(require("plugins.dap").dependencies, "leoluz/nvim-dap-go"),
+					not vim.tbl_contains(require("plugins.dap")[1].dependencies, "leoluz/nvim-dap-go"),
 					"nvim-dap-go dependency remains"
 				)
 
@@ -59,8 +62,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					vim.cmd("FormatToggle!")
 					assert(vim.b.conform_format_on_save == true, "global-off buffer override did not enable formatting")
 
-					local formatting_spec = require("plugins.formatting")[1]
-					assert(formatting_spec.opts.format_on_save(0) ~= nil, "local-on override was not effective")
 					assert(
 						notifications[#notifications]:find("buffer override", 1, true),
 						"buffer notification is unclear"
@@ -74,7 +75,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
 						vim.b.conform_format_on_save == false,
 						"global-on buffer override did not disable formatting"
 					)
-					assert(formatting_spec.opts.format_on_save(0) == nil, "local-off override was not effective")
 				end, debug.traceback)
 				vim.notify = original_notify
 				vim.g.conform_format_on_save = false

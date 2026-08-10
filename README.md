@@ -38,6 +38,11 @@ Host-specific settings belong in `~/.nvim-local.lua`; create a documented
 template with `:NvimConfigInit`. `:NvimConfigDump` recursively redacts
 environment values.
 
+The debug UI defaults to `dap-ui`. Select the pinned `nvim-dap-view`
+alternative with `dap = { ui = "dap-view" }` in local config, or for one
+process with `NVIM_DAP_UI=dap-view nvim`. The selection is fixed at startup and
+only the selected UI is loaded.
+
 The effective executable order is deliberate:
 
 1. directories in `local_config.path`, in declared order;

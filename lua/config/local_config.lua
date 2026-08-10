@@ -20,6 +20,7 @@
 --       italic_comments = true,
 --     },
 --     clangd = { path = "clangd", profile = "full" },
+--     dap = { ui = "dap-ui" }, -- dap-ui | dap-view
 --     mason = { auto_install = true },
 --     log_watch = { max_lines = 100000, max_bytes = 67108864 },
 --     diagram_cache = { max_age_seconds = 2592000, max_bytes = 268435456 },
@@ -49,6 +50,12 @@ local SCHEMA = {
 		fields = {
 			path = { type = "string", default = "clangd" },
 			profile = { type = "enum", values = { "full", "light" }, default = "full" },
+		},
+	},
+	dap = {
+		type = "table",
+		fields = {
+			ui = { type = "enum", values = { "dap-ui", "dap-view" }, default = "dap-ui" },
 		},
 	},
 	mason = {
@@ -442,7 +449,10 @@ return {
     italic_comments = true,
   },
   -- Override the clangd binary on this host.
-	clangd = { path = "clangd", profile = "full" }, -- full | light
+  clangd = { path = "clangd", profile = "full" }, -- full | light
+
+  -- Debug UI selected at startup. $NVIM_DAP_UI overrides this value.
+  dap = { ui = "dap-ui" }, -- dap-ui | dap-view
 
   -- Attempt each exact Mason/managed tool pin once on interactive startup.
   mason = { auto_install = true },
