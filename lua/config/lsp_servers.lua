@@ -59,7 +59,11 @@ function M.setup(context)
 			},
 		},
 	})
-	register("taplo", { capabilities = client_capabilities })
+	register("tombi", {
+		capabilities = client_capabilities,
+		cmd_env = require("config.tombi").env(),
+		settings = require("config.tombi").settings(),
+	})
 	register("bashls", { capabilities = client_capabilities })
 	register("marksman", { capabilities = client_capabilities })
 	register("lua_ls", {

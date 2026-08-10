@@ -40,7 +40,7 @@ return {
 				sh = { "shfmt" },
 				bash = { "shfmt" },
 				zsh = { "shfmt" },
-				toml = { "taplo" },
+				toml = { "tombi" },
 				rust = { "rustfmt" },
 				javascript = { "prettierd", "prettier", stop_after_first = true },
 				typescript = { "prettierd", "prettier", stop_after_first = true },
@@ -52,6 +52,9 @@ return {
 				markdown = { "prettierd", "prettier", stop_after_first = true },
 			},
 			formatters = {
+				tombi = {
+					env = require("config.tombi").env(),
+				},
 				rustfmt = {
 					command = function()
 						return require("config.rust_tools").rustfmt() or "rustfmt-not-available-outside-managed-paths"

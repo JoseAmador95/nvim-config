@@ -15,7 +15,7 @@ M.servers = {
 	{ name = "pyright", package = "pyright" },
 	{ name = "ruff", package = "ruff" },
 	{ name = "rust_analyzer", external = "rust-analyzer" },
-	{ name = "taplo", package = "taplo" },
+	{ name = "tombi", package = "tombi" },
 	{ name = "vtsls", package = "vtsls" },
 	{ name = "yamlls", package = "yaml-language-server" },
 }

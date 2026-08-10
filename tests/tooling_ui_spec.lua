@@ -85,6 +85,11 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				local formatters = formatting_spec.opts.formatters_by_ft
 				assert(formatters.go == nil, "Go formatter remains configured")
 				assert(vim.deep_equal(formatters.python, { "ruff_format" }), "Python is not ruff-format only")
+				assert(vim.deep_equal(formatters.toml, { "tombi" }), "TOML is not Tombi-only")
+				assert(
+					formatting_spec.opts.formatters.tombi.env.XDG_CONFIG_HOME == vim.fn.stdpath("config"),
+					"Tombi formatter does not use the versioned default config"
+				)
 				for _, ft in ipairs({
 					"javascript",
 					"typescript",

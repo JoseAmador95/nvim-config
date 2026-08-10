@@ -175,7 +175,7 @@ run_pure_test diagram_spec
 run_pure_test security_spec
 run_check "devpod_nvim_spec" python3 "$repo_root/tests/devpod_nvim_spec.py"
 
-for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint_spec menu_spec tabs_spec notification_spec ux_spec toolchain_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec review_spec agent_context_spec agent_results_spec editor_rpc_spec nvim_review_open_spec devpod_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec; do
+for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint_spec menu_spec tabs_spec notification_spec ux_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec review_spec agent_context_spec agent_results_spec editor_rpc_spec nvim_review_open_spec devpod_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec; do
 	run_pure_test "$pure_spec"
 done
 

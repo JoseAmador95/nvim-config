@@ -71,7 +71,7 @@ and their host prerequisites are:
 
 | Backend | Packages | Host prerequisite |
 | --- | --- | --- |
-| Prebuilt | clangd, Docker LS, lemminx, Lua LS, marksman, ruff, taplo, codelldb, hadolint, jq, ShellCheck, shfmt, StyLua, tree-sitter CLI | None |
+| Prebuilt | clangd, Docker LS, lemminx, Lua LS, marksman, ruff, Tombi, codelldb, hadolint, jq, ShellCheck, shfmt, StyLua, tree-sitter CLI | None |
 | npm | Bash/JSON/TypeScript/YAML language servers, pyright, markdownlint-cli2, prettierd | `node` and `npm` |
 | PyPI | cmake-language-server, clang-format, debugpy | Python with `venv` |
 
@@ -80,6 +80,13 @@ activate only for external host/user `rust-analyzer` and `rustfmt` executables;
 `:checkhealth nvimconfig` explains the edit-only state when they are absent. The
 ASM and PlantUML language servers are intentionally absent. PlantUML rendering
 remains available through the precompiled renderer above.
+
+TOML language intelligence and formatting use the exact Mason pin Tombi 1.2.7.
+The versioned user default in `tombi/config.toml` keeps schema strict mode off
+and disables schema catalogs. Projects can opt in with a project-level
+`tombi.toml`; an individual document can use a leading `#:schema` directive
+followed by a blank line. Remote schema URLs are therefore fetched only when a
+project or document names one explicitly.
 
 The unified viewer is `:DiagramShow [svg|ascii]`. Rendering is asynchronous,
 superseded work is cancelled, and content-addressed results are bounded under
