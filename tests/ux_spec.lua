@@ -28,6 +28,10 @@ local snacks_opts = require("plugins.snacks").opts
 for _, item in ipairs(snacks_opts.dashboard.preset.keys) do
 	dashboard_keys[item.key] = item
 end
+assert(
+	dashboard_keys.n and dashboard_keys.n.desc == "New file" and type(dashboard_keys.n.action) == "function",
+	"dashboard new-file action is missing"
+)
 assert(dashboard_keys.s and dashboard_keys.s.action == ":AutoSession search", "dashboard restore is not explicit")
 assert(dashboard_keys.p and dashboard_keys.p.action == ":MenuOpen", "dashboard palette action is missing")
 local projects

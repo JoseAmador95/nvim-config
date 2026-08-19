@@ -119,6 +119,42 @@ test("home requires an explicit marker and exactly one pristine normal window", 
 	assert(not tabs.is_home(home), "modified scratch buffer remained home")
 end)
 
+test("dashboard new file reuses the home tab as an unnamed normal buffer", function()
+	reset_editor()
+	local home = vim.api.nvim_get_current_tabpage()
+	local dashboard_buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_buf_set_lines(dashboard_buf, 0, -1, false, { "Dashboard" })
+	vim.bo[dashboard_buf].bufhidden = "wipe"
+	vim.bo[dashboard_buf].buftype = "nofile"
+	vim.bo[dashboard_buf].filetype = "snacks_dashboard"
+	vim.bo[dashboard_buf].modified = false
+	vim.bo[dashboard_buf].modifiable = false
+	assert(tabs.mark_home(home), "could not mark dashboard fixture home")
+
+	local new_file
+	for _, item in ipairs(require("plugins.snacks").opts.dashboard.preset.keys) do
+		if item.key == "n" then
+			new_file = item
+			break
+		end
+	end
+	assert(new_file and type(new_file.action) == "function", "dashboard new-file action is missing")
+
+	new_file.action()
+
+	equal({ home }, vim.api.nvim_list_tabpages(), "new file did not reuse the home tab")
+	equal(home, vim.api.nvim_get_current_tabpage(), "new file changed the current tab handle")
+	local buf = vim.api.nvim_get_current_buf()
+	assert(buf ~= dashboard_buf, "new file retained the dashboard buffer")
+	equal("", vim.api.nvim_buf_get_name(buf), "new buffer has a filename")
+	equal("", vim.bo[buf].buftype, "new buffer is not normal")
+	equal(false, vim.bo[buf].modified, "new buffer is modified")
+	equal({ "" }, vim.api.nvim_buf_get_lines(buf, 0, -1, false), "new buffer is not empty")
+	equal("n", vim.api.nvim_get_mode().mode, "new file did not remain in Normal mode")
+	assert(not tabs.is_home(home), "new-file work tab retained its home marker")
+	equal(nil, tabs.find_home(), "new-file work tab is still discoverable as home")
+end)
+
 test("closing the last work tab preserves its modified buffer and opens dashboard home", function()
 	reset_editor()
 	local target = vim.api.nvim_get_current_tabpage()

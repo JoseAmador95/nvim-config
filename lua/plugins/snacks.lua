@@ -79,6 +79,16 @@ return {
 				keys = {
 					{
 						icon = " ",
+						key = "n",
+						desc = "New file",
+						action = function()
+							local tabpage = vim.api.nvim_get_current_tabpage()
+							vim.api.nvim_cmd({ cmd = "enew" }, {})
+							require("config.tabs").unmark_home(tabpage)
+						end,
+					},
+					{
+						icon = " ",
 						key = "f",
 						desc = "Find file",
 						action = function()
