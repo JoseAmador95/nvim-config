@@ -53,9 +53,11 @@ local lsp_actions = {
 	code_action = { "textDocument/codeAction", "code_action" },
 	declaration = { "textDocument/declaration", "declaration" },
 	definition = { "textDocument/definition", "definition" },
+	hover = { "textDocument/hover", "hover", { border = "rounded" } },
 	incoming_calls = { "callHierarchy/incomingCalls", "incoming_calls" },
 	outgoing_calls = { "callHierarchy/outgoingCalls", "outgoing_calls" },
 	rename = { "textDocument/rename", "rename" },
+	signature_help = { "textDocument/signatureHelp", "signature_help" },
 }
 
 local gitsigns_actions = {
@@ -66,10 +68,17 @@ local gitsigns_actions = {
 	preview_hunk = { "preview_hunk" },
 	reset_buffer = { "reset_buffer" },
 	reset_hunk = { "reset_hunk" },
+	reset_selection = { "reset_hunk" },
 	stage_buffer = { "stage_buffer" },
 	stage_hunk = { "stage_hunk" },
+	stage_selection = { "stage_hunk" },
 	toggle_current_line_blame = { "toggle_current_line_blame" },
 	toggle_deleted = { "toggle_deleted" },
+}
+
+local flash_actions = {
+	jump = "jump",
+	treesitter = "treesitter",
 }
 
 local neotest_actions = {
@@ -133,6 +142,8 @@ local commands = {
 	just_run = { "JustRun" },
 	lazygit = { "LazyGit" },
 	log_watch = { "LogWatchCurrentFile" },
+	log_watch_disable = { name = "LogWatchCurrentFile", args = { "off" } },
+	log_watch_enable = { name = "LogWatchCurrentFile", args = { "on" } },
 	log_highlight_clear = { "LogHlClear" },
 	markdown_preview = { "MarkdownPreviewToggle" },
 	markdown_preview_open = { "MarkdownPreview" },
@@ -203,16 +214,47 @@ local function run_lsp(name)
 		notify("LSP action not available", vim.log.levels.WARN)
 		return
 	end
-	vim.lsp.buf[action[2]]()
+	local callback = vim.lsp.buf[action[2]]
+	if type(callback) ~= "function" then
+		notify("LSP action not available: " .. name, vim.log.levels.WARN)
+		return
+	end
+	if action[3] then
+		callback(action[3])
+	else
+		callback()
+	end
 end
 
-local function run_gitsigns(name)
+local function ordered_selection(target)
+	local selection = target and target.selection
+	if not selection then
+		return nil
+	end
+	local anchor = selection.anchor
+	local cursor = selection.cursor
+	if anchor.line < cursor.line or (anchor.line == cursor.line and anchor.col <= cursor.col) then
+		return anchor, cursor
+	end
+	return cursor, anchor
+end
+
+local function run_gitsigns(name, target)
 	local action = gitsigns_actions[name]
 	local gitsigns = require_or_notify("gitsigns", "Gitsigns action")
 	if not gitsigns or type(gitsigns[action[1]]) ~= "function" then
 		if gitsigns then
-			notify("Gitsigns action not available", vim.log.levels.WARN)
+			notify("Gitsigns action not available: " .. name, vim.log.levels.WARN)
 		end
+		return
+	end
+	if name == "stage_selection" or name == "reset_selection" then
+		local first, last = ordered_selection(target)
+		if not first then
+			notify("Git selection is no longer available", vim.log.levels.WARN)
+			return
+		end
+		gitsigns[action[1]]({ first.line, last.line })
 		return
 	end
 	gitsigns[action[1]](unpack(action, 2))
@@ -297,23 +339,25 @@ local function target_command(target, name, args, bang, range)
 	end)
 end
 
+local function run_flash(name, target)
+	return on_target(target, { window = true }, function()
+		local flash = require_or_notify("flash", "flash.nvim")
+		local action = flash_actions[name]
+		if not flash then
+			return
+		end
+		if type(flash[action]) ~= "function" then
+			notify("Flash action not available: " .. name, vim.log.levels.WARN)
+			return
+		end
+		flash[action]()
+	end)
+end
+
 local function format_buffer(target)
 	return on_target(target, { window = true }, function()
 		require("config.formatting").format({ async = true })
 	end)
-end
-
-local function ordered_selection(target)
-	local selection = target and target.selection
-	if not selection then
-		return nil
-	end
-	local anchor = selection.anchor
-	local cursor = selection.cursor
-	if anchor.line < cursor.line or (anchor.line == cursor.line and anchor.col <= cursor.col) then
-		return anchor, cursor
-	end
-	return cursor, anchor
 end
 
 local function restore_selection_marks(target)
@@ -532,6 +576,10 @@ local smart_split_actions = {
 	focus_down = "move_cursor_down",
 	focus_up = "move_cursor_up",
 	focus_right = "move_cursor_right",
+	resize_left = "resize_left",
+	resize_down = "resize_down",
+	resize_up = "resize_up",
+	resize_right = "resize_right",
 }
 
 local function run_window(name, target)
@@ -543,9 +591,14 @@ local function run_window(name, target)
 	local action = smart_split_actions[name]
 	on_target(target, { window = true }, function()
 		local splits = require_or_notify("smart-splits", "smart-splits")
-		if splits and type(splits[action]) == "function" then
-			splits[action]()
+		if not splits then
+			return
 		end
+		if type(splits[action]) ~= "function" then
+			notify("smart-splits action not available: " .. name, vim.log.levels.WARN)
+			return
+		end
+		splits[action]()
 	end)
 end
 
@@ -592,13 +645,38 @@ local multicursor_actions = {
 	prev = "prevCursor",
 }
 
+local multicursor_flash_actions = {
+	flash_cursor = "flash_cursor",
+	flash_word_selection = "flash_word_selection",
+}
+
 local function run_multicursor(name, target)
 	on_target(target, { window = true }, function()
 		local multicursor = require_or_notify("multicursor-nvim", "multicursor")
 		local action = multicursor_actions[name]
-		if multicursor and type(multicursor[action]) == "function" then
-			multicursor[action]()
+		if not multicursor then
+			return
 		end
+		if type(multicursor[action]) ~= "function" then
+			notify("Multicursor action not available: " .. name, vim.log.levels.WARN)
+			return
+		end
+		multicursor[action]()
+	end)
+end
+
+local function run_multicursor_flash(name, target)
+	on_target(target, { window = true }, function()
+		local helpers = require_or_notify("config.multicursor", "Multicursor Flash actions")
+		local action = multicursor_flash_actions[name]
+		if not helpers then
+			return
+		end
+		if type(helpers[action]) ~= "function" then
+			notify("Multicursor Flash action not available: " .. name, vim.log.levels.WARN)
+			return
+		end
+		helpers[action]()
 	end)
 end
 
@@ -633,6 +711,7 @@ end
 local confirmation_prompts = {
 	["file.revert"] = "Discard unsaved changes and reload this file?",
 	["gitsigns.reset_hunk"] = "Discard the current Git hunk?",
+	["gitsigns.reset_selection"] = "Discard Git changes in the selected lines?",
 	["gitsigns.reset_buffer"] = "Discard all Git hunks in this buffer?",
 	["command.devpod_recreate"] = "Recreate the DevPod workspace editor?",
 	["command.hex_assemble"] = "Assemble the current hex buffer?",
@@ -650,6 +729,13 @@ local function confirm(prompt, callback)
 end
 
 local handlers = {
+	["coverage.load_report"] = function(target)
+		vim.ui.input({ prompt = "Coverage report: ", completion = "file" }, function(path)
+			if path and path ~= "" then
+				target_command(target, "CoverageLoad", { path })
+			end
+		end)
+	end,
 	["dap.conditional_breakpoint"] = function(target)
 		vim.ui.input({ prompt = "Condition: " }, function(condition)
 			if not condition then
@@ -862,10 +948,11 @@ function M.supports(id)
 		or (namespace == "diagnostic" and diagnostic_actions[name] ~= nil)
 		or (namespace == "edit" and edit_actions[name] ~= nil)
 		or (namespace == "file" and file_actions[name] ~= nil)
+		or (namespace == "flash" and flash_actions[name] ~= nil)
 		or (namespace == "gitsigns" and gitsigns_actions[name] ~= nil)
 		or (namespace == "go" and (go_actions[name] ~= nil or treesitter_moves[name] ~= nil))
 		or (namespace == "lsp" and lsp_actions[name] ~= nil)
-		or (namespace == "multicursor" and multicursor_actions[name] ~= nil)
+		or (namespace == "multicursor" and (multicursor_actions[name] ~= nil or multicursor_flash_actions[name] ~= nil))
 		or (namespace == "picker" and picker_sources[name] ~= nil)
 		or (namespace == "python" and python_actions[name] ~= nil)
 		or (namespace == "tab" and tab_commands[name] ~= nil)
@@ -900,9 +987,11 @@ local function execute(id, target)
 		return edit_actions[name](target)
 	elseif namespace == "file" and file_actions[name] then
 		return file_actions[name](target)
+	elseif namespace == "flash" and flash_actions[name] then
+		return run_flash(name, target)
 	elseif namespace == "gitsigns" and gitsigns_actions[name] then
 		return on_target(target, { window = true }, function()
-			run_gitsigns(name)
+			run_gitsigns(name, target)
 		end)
 	elseif namespace == "go" and go_actions[name] then
 		return go_actions[name](target)
@@ -914,6 +1003,8 @@ local function execute(id, target)
 		end)
 	elseif namespace == "multicursor" and multicursor_actions[name] then
 		return run_multicursor(name, target)
+	elseif namespace == "multicursor" and multicursor_flash_actions[name] then
+		return run_multicursor_flash(name, target)
 	elseif namespace == "picker" and picker_sources[name] then
 		return on_target(target, { window = true }, function()
 			run_picker(name)

@@ -242,6 +242,56 @@ test("expanded curated catalog stays palette-only and context-aware", function()
 	assert(find_item(visual, "transform.upper_selection"), "visual transform was filtered out")
 end)
 
+test("selected mapping actions are palette-only and respect visual selection state", function()
+	local dispatch = function() end
+	local normal = context.new({ filetype = "lua", mode = "n", modifiable = true })
+	local visual = context.new({ filetype = "lua", mode = "v", modifiable = true })
+	local readonly_visual = context.new({ filetype = "lua", mode = "v", modifiable = false })
+	local palette = catalog.build(normal, dispatch, "palette")
+	local menu = catalog.build(normal, dispatch, "context")
+	local selected = {
+		"lsp.hover",
+		"lsp.signature_help",
+		"flash.jump",
+		"flash.treesitter",
+		"window.resize_left",
+		"window.resize_down",
+		"window.resize_up",
+		"window.resize_right",
+		"multicursor.flash_cursor",
+		"multicursor.flash_word_selection",
+		"coverage.load_report",
+		"command.log_watch_enable",
+		"command.log_watch_disable",
+	}
+	for _, id in ipairs(selected) do
+		assert(find_item(palette, id), "selected palette action missing: " .. id)
+		assert(not find_item(menu, id), "selected palette action leaked into context menu: " .. id)
+	end
+
+	local visual_palette = catalog.build(visual, dispatch, "palette")
+	local visual_menu = catalog.build(visual, dispatch, "context")
+	for _, id in ipairs({ "gitsigns.stage_selection", "gitsigns.reset_selection" }) do
+		assert(find_item(visual_palette, id), "visual Git action missing: " .. id)
+		assert(not find_item(palette, id), "visual Git action leaked into normal mode: " .. id)
+		assert(not find_item(visual_menu, id), "visual Git action leaked into context menu: " .. id)
+		assert(
+			not find_item(catalog.build(readonly_visual, dispatch, "palette"), id),
+			"visual Git action leaked into a readonly buffer: " .. id
+		)
+	end
+
+	for _, id in ipairs({
+		"flash.treesitter_search",
+		"go.function_end_next",
+		"go.function_end_prev",
+		"go.swap_argument_next",
+		"go.swap_argument_prev",
+	}) do
+		assert(not find_item(palette, id), "excluded Tree-sitter manipulation action was added: " .. id)
+	end
+end)
+
 test("shared wrap action keeps wrap and linebreak in sync", function()
 	local editor_actions = require("config.editor_actions")
 	local original_wrap = vim.wo.wrap
@@ -434,6 +484,272 @@ test("command wrappers preserve structured plugin arguments", function()
 	end, debug.traceback)
 
 	vim.api.nvim_cmd = original_cmd
+	assert(ok, err)
+end)
+
+test("selected LSP, Flash, window, and multicursor actions dispatch exact APIs", function()
+	local actions = require("config.menu.actions")
+	local original_get_clients = vim.lsp.get_clients
+	local original_hover = vim.lsp.buf.hover
+	local original_signature_help = vim.lsp.buf.signature_help
+	local original_flash = package.loaded.flash
+	local original_splits = package.loaded["smart-splits"]
+	local original_multicursor = package.loaded["config.multicursor"]
+	local original_notify = vim.notify
+	local calls = {}
+	local warnings = {}
+	local target = context.capture().target
+
+	local ok, err = xpcall(function()
+		vim.lsp.get_clients = function(options)
+			calls[#calls + 1] = { "clients", options.bufnr, options.method }
+			return { {} }
+		end
+		vim.lsp.buf.hover = function(options)
+			calls[#calls + 1] = { "hover", options }
+		end
+		vim.lsp.buf.signature_help = function()
+			calls[#calls + 1] = { "signature_help" }
+		end
+		package.loaded.flash = {
+			jump = function()
+				calls[#calls + 1] = { "flash.jump" }
+			end,
+			treesitter = function()
+				calls[#calls + 1] = { "flash.treesitter" }
+			end,
+		}
+		package.loaded["smart-splits"] = {}
+		for _, name in ipairs({ "resize_left", "resize_down", "resize_up", "resize_right" }) do
+			package.loaded["smart-splits"][name] = function()
+				calls[#calls + 1] = { "smart-splits." .. name }
+			end
+		end
+		package.loaded["config.multicursor"] = {
+			flash_cursor = function()
+				calls[#calls + 1] = { "multicursor.flash_cursor" }
+			end,
+			flash_word_selection = function()
+				calls[#calls + 1] = { "multicursor.flash_word_selection" }
+			end,
+		}
+		vim.notify = function(message)
+			warnings[#warnings + 1] = message
+		end
+
+		actions.run("lsp.hover", target)
+		actions.run("lsp.signature_help", target)
+		actions.run("flash.jump", target)
+		actions.run("flash.treesitter", target)
+		for _, name in ipairs({ "resize_left", "resize_down", "resize_up", "resize_right" }) do
+			actions.run("window." .. name, target)
+		end
+		actions.run("multicursor.flash_cursor", target)
+		actions.run("multicursor.flash_word_selection", target)
+
+		equal({ "clients", 0, "textDocument/hover" }, calls[1], "hover client method")
+		equal({ "hover", { border = "rounded" } }, calls[2], "hover API and border")
+		equal({ "clients", 0, "textDocument/signatureHelp" }, calls[3], "signature client method")
+		equal({ "signature_help" }, calls[4], "signature API")
+		equal({ "flash.jump" }, calls[5], "Flash jump API")
+		equal({ "flash.treesitter" }, calls[6], "Flash Treesitter API")
+		equal({ "smart-splits.resize_left" }, calls[7], "resize left API")
+		equal({ "smart-splits.resize_down" }, calls[8], "resize down API")
+		equal({ "smart-splits.resize_up" }, calls[9], "resize up API")
+		equal({ "smart-splits.resize_right" }, calls[10], "resize right API")
+		equal({ "multicursor.flash_cursor" }, calls[11], "multicursor cursor helper")
+		equal({ "multicursor.flash_word_selection" }, calls[12], "multicursor selection helper")
+
+		package.loaded["smart-splits"].resize_left = nil
+		actions.run("window.resize_left", target)
+		assert(
+			warnings[#warnings]:find("smart-splits action not available", 1, true),
+			"missing smart-splits method did not notify"
+		)
+	end, debug.traceback)
+
+	vim.lsp.get_clients = original_get_clients
+	vim.lsp.buf.hover = original_hover
+	vim.lsp.buf.signature_help = original_signature_help
+	package.loaded.flash = original_flash
+	package.loaded["smart-splits"] = original_splits
+	package.loaded["config.multicursor"] = original_multicursor
+	vim.notify = original_notify
+	assert(ok, err)
+end)
+
+test("Git selection actions use the captured normalized range and confirm reset", function()
+	local actions = require("config.menu.actions")
+	local original_buf = vim.api.nvim_get_current_buf()
+	local original_gitsigns = package.loaded.gitsigns
+	local original_select = vim.ui.select
+	local origin = vim.api.nvim_create_buf(false, true)
+	local calls = {}
+	local choice = "Cancel"
+
+	local ok, err = xpcall(function()
+		vim.api.nvim_set_current_buf(origin)
+		vim.api.nvim_buf_set_lines(origin, 0, -1, false, { "one", "two", "three", "four" })
+		local target = context.capture().target
+		target.surface = "palette"
+		target.selection = {
+			mode = "v",
+			anchor = { line = 4, col = 2 },
+			cursor = { line = 2, col = 0 },
+		}
+		vim.cmd("new")
+		local picker_buf = vim.api.nvim_get_current_buf()
+		package.loaded.gitsigns = {
+			stage_hunk = function(range)
+				calls[#calls + 1] = { action = "stage", range = range, bufnr = vim.api.nvim_get_current_buf() }
+			end,
+			reset_hunk = function(range)
+				calls[#calls + 1] = { action = "reset", range = range, bufnr = vim.api.nvim_get_current_buf() }
+			end,
+		}
+		vim.ui.select = function(items, options, callback)
+			equal({ "Cancel", "Continue" }, items, "Git reset confirmation choices")
+			assert(options.prompt:find("selected lines", 1, true), "Git reset prompt does not name the selection")
+			callback(choice)
+		end
+
+		actions.run("gitsigns.stage_selection", target)
+		equal({ action = "stage", range = { 2, 4 }, bufnr = origin }, calls[1], "captured Git stage range")
+		actions.run("gitsigns.reset_selection", target)
+		equal(1, #calls, "cancelled Git reset executed")
+		choice = "Continue"
+		actions.run("gitsigns.reset_selection", target)
+		equal({ action = "reset", range = { 2, 4 }, bufnr = origin }, calls[2], "confirmed Git reset range")
+
+		vim.cmd("close")
+		vim.api.nvim_buf_delete(picker_buf, { force = true })
+	end, debug.traceback)
+
+	package.loaded.gitsigns = original_gitsigns
+	vim.ui.select = original_select
+	if vim.api.nvim_buf_is_valid(origin) then
+		vim.api.nvim_set_current_buf(original_buf)
+		vim.api.nvim_buf_delete(origin, { force = true })
+	end
+	assert(ok, err)
+end)
+
+test("coverage and log actions preserve structured arguments", function()
+	local actions = require("config.menu.actions")
+	local original_cmd = vim.api.nvim_cmd
+	local original_input = vim.ui.input
+	local calls = {}
+	local input_options
+	local path = [[reports/run a;$(echo nope)|coverage.info]]
+	local target = context.capture().target
+
+	local ok, err = xpcall(function()
+		vim.api.nvim_cmd = function(specification, options)
+			calls[#calls + 1] = { specification = specification, options = options }
+		end
+		vim.ui.input = function(options, callback)
+			input_options = options
+			callback(path)
+		end
+
+		actions.run("coverage.load_report", target)
+		actions.run("command.log_watch_enable", target)
+		actions.run("command.log_watch_disable", target)
+		equal({ prompt = "Coverage report: ", completion = "file" }, input_options, "coverage file prompt")
+		equal(
+			{ cmd = "CoverageLoad", args = { path }, bang = false },
+			calls[1].specification,
+			"coverage path was not structured"
+		)
+		equal(
+			{ cmd = "LogWatchCurrentFile", args = { "on" }, bang = false },
+			calls[2].specification,
+			"log start arguments"
+		)
+		equal(
+			{ cmd = "LogWatchCurrentFile", args = { "off" }, bang = false },
+			calls[3].specification,
+			"log stop arguments"
+		)
+		equal(3, #calls, "structured inputs executed an extra command")
+	end, debug.traceback)
+
+	vim.api.nvim_cmd = original_cmd
+	vim.ui.input = original_input
+	assert(ok, err)
+end)
+
+test("shared multicursor Flash helper preserves cursor and word-selection semantics", function()
+	local original_helper = package.loaded["config.multicursor"]
+	local original_flash = package.loaded.flash
+	local original_multicursor = package.loaded["multicursor-nvim"]
+	local jumps = {}
+	local cursor_position
+	local visual_range
+	local main_selected = 0
+	local restored = 0
+
+	local ok, err = xpcall(function()
+		package.loaded.flash = {
+			jump = function(options)
+				jumps[#jumps + 1] = options
+			end,
+		}
+		package.loaded["multicursor-nvim"] = {
+			action = function(callback)
+				callback({
+					mainCursor = function()
+						return {
+							select = function()
+								main_selected = main_selected + 1
+							end,
+						}
+					end,
+					addCursor = function()
+						return {
+							setPos = function(_, position)
+								cursor_position = position
+							end,
+							setVisual = function(_, first, last)
+								visual_range = { first, last }
+							end,
+						}
+					end,
+				})
+			end,
+		}
+		package.loaded["config.multicursor"] = nil
+		local helper = require("config.multicursor")
+
+		helper.flash_cursor()
+		equal({ multi_window = false }, jumps[1].search, "cursor Flash search scope")
+		assert(jumps[1].pattern == nil and jumps[1].jump == nil, "cursor Flash gained word-selection options")
+		jumps[1].action({ pos = { 3, 4 } }, {
+			restore = function()
+				restored = restored + 1
+			end,
+		})
+		equal({ 3, 5 }, cursor_position, "Flash cursor column conversion")
+		assert(visual_range == nil, "Flash cursor created a visual selection")
+
+		helper.flash_word_selection()
+		equal([[\<\k\+\>]], jumps[2].pattern, "word-selection pattern")
+		equal({ mode = "search", multi_window = false }, jumps[2].search, "word-selection search")
+		equal({ pos = "range" }, jumps[2].jump, "word-selection jump range")
+		jumps[2].action({ pos = { 6, 1 }, end_pos = { 6, 5 } }, {
+			restore = function()
+				restored = restored + 1
+			end,
+		})
+		equal({ 6, 2 }, cursor_position, "word-selection start conversion")
+		equal({ { 6, 2 }, { 6, 6 } }, visual_range, "word-selection visual range")
+		equal(2, main_selected, "main cursor selection count")
+		equal(2, restored, "Flash state restore count")
+	end, debug.traceback)
+
+	package.loaded["config.multicursor"] = original_helper
+	package.loaded.flash = original_flash
+	package.loaded["multicursor-nvim"] = original_multicursor
 	assert(ok, err)
 end)
 
