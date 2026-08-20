@@ -95,6 +95,10 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				local menu_map = vim.fn.maparg("<leader><leader>", "n", false, true)
 				assert(vim.tbl_isempty(menu_map), "menu mapping leaked into the pager")
+				assert(
+					vim.tbl_isempty(vim.fn.maparg("<leader><leader>", "x", false, true)),
+					"visual menu mapping leaked into the pager"
+				)
 				local close_map = vim.fn.maparg("<leader>q", "n", false, true)
 				assert(close_map.rhs == ":q<CR>", "pager close mapping was replaced by tab ownership")
 				for _, lhs in ipairs({ "[b", "]b" }) do

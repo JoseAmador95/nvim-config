@@ -110,7 +110,7 @@ if not pager.active then
 		menu.open_palette()
 	end, { desc = "Open action palette" })
 
-	vim.keymap.set("n", "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open action palette" })
+	vim.keymap.set({ "n", "x" }, "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open action palette" })
 end
 
 vim.api.nvim_create_user_command("LogHlAdd", function(opts)

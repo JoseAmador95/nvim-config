@@ -48,10 +48,31 @@ local context = require("config.menu.context")
 test("context is pure and derives visual modes", function()
 	local values = { filetype = "json", mode = "V" }
 	local menu_context = context.new(values)
-	equal({ filetype = "json", mode = "V", visual = true }, menu_context, "visual context")
+	equal({
+		filetype = "json",
+		mode = "V",
+		visual = true,
+		buftype = "",
+		modifiable = true,
+	}, menu_context, "visual context")
 	assert(values.visual == nil, "context constructor mutated its input")
 	equal(false, context.new({ mode = "n" }).visual, "normal mode was treated as visual")
 	equal(true, context.new({ mode = "n", visual = true }).visual, "explicit visual override was ignored")
+
+	local target = { bufnr = 7, cursor = { line = 3, col = 2 } }
+	local targeted = context.new({ target = target })
+	target.cursor.line = 99
+	equal(3, targeted.target.cursor.line, "context retained a mutable target reference")
+end)
+
+test("context capture records the origin editor target", function()
+	local captured = context.capture()
+	equal(vim.api.nvim_get_current_buf(), captured.target.bufnr, "captured buffer")
+	equal(vim.api.nvim_get_current_win(), captured.target.winid, "captured window")
+	equal(vim.api.nvim_get_current_tabpage(), captured.target.tabpage, "captured tab")
+	equal(vim.api.nvim_win_get_cursor(0)[1], captured.target.cursor.line, "captured cursor line")
+	equal(vim.bo.buftype, captured.buftype, "captured buffer type")
+	equal(vim.bo.modifiable, captured.modifiable, "captured modifiable state")
 end)
 
 test("catalog exposes stable descriptor ids, labels, hints, and dispatch", function()
@@ -98,6 +119,15 @@ test("catalog exposes stable descriptor ids, labels, hints, and dispatch", funct
 	assert(not find_section(sections, "bookmarks"), "removed bookmarks section remains")
 end)
 
+test("every curated definition has an executable action", function()
+	local actions = require("config.menu.actions")
+	for _, section in ipairs(catalog.definitions(function() end)) do
+		for _, item in ipairs(section.items) do
+			assert(actions.supports(item.id), "definition has no action: " .. item.id)
+		end
+	end
+end)
+
 test("catalog filters visual, filetype, and CMake descriptors from context", function()
 	local dispatch = function() end
 	local lua_sections = catalog.build(context.new({ filetype = "lua", mode = "n" }), dispatch)
@@ -123,6 +153,148 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 	assert(find_item(markdown_sections, "command.diagram_show"), "unified Markdown diagram viewer is missing")
 	assert(not find_section(catalog.build(context.new({ filetype = "yaml" }), dispatch), "file.yaml"))
 	assert(not find_section(catalog.build(context.new({ filetype = "xml" }), dispatch), "file.xml"))
+end)
+
+test("catalog filters palette-only descriptors by surface", function()
+	local run = function() end
+	local sections = {
+		{
+			id = "shared",
+			label = "Shared",
+			items = {
+				{ id = "shared.item", label = "Shared item", run = run },
+				{
+					id = "palette.item",
+					label = "Palette item",
+					run = run,
+					surfaces = { palette = true, context = false },
+				},
+			},
+		},
+	}
+
+	local palette = catalog.filter(sections, context.new(), "palette")
+	local menu = catalog.filter(sections, context.new(), "context")
+	assert(find_item(palette, "shared.item") and find_item(palette, "palette.item"), "palette surface lost items")
+	assert(find_item(menu, "shared.item"), "context surface lost a shared item")
+	assert(not find_item(menu, "palette.item"), "palette-only item leaked into context menu")
+end)
+
+test("expanded curated catalog stays palette-only and context-aware", function()
+	local dispatch = function() end
+	local normal = context.new({ filetype = "lua", mode = "n", modifiable = true })
+	local palette = catalog.build(normal, dispatch, "palette")
+	local menu = catalog.build(normal, dispatch, "context")
+	local count = 0
+	for _, section in ipairs(palette) do
+		count = count + #section.items
+	end
+	assert(count >= 200, "expanded palette has fewer than 200 actions")
+	for _, id in ipairs({
+		"file.save",
+		"edit.undo",
+		"transform.upper_word",
+		"go.function_next",
+		"window.focus_left",
+		"tab.next",
+		"diagnostic.float",
+		"picker.keymaps",
+		"command.tools_install",
+	}) do
+		assert(find_item(palette, id), "expanded palette action missing: " .. id)
+		assert(not find_item(menu, id), "palette-only action leaked into context menu: " .. id)
+	end
+	assert(not find_item(palette, "transform.upper_selection"), "visual transform leaked into normal mode")
+	local visual = catalog.build(context.new({ filetype = "lua", mode = "v" }), dispatch, "palette")
+	assert(find_item(visual, "transform.upper_selection"), "visual transform was filtered out")
+end)
+
+test("shared wrap action keeps wrap and linebreak in sync", function()
+	local editor_actions = require("config.editor_actions")
+	local original_wrap = vim.wo.wrap
+	local original_linebreak = vim.wo.linebreak
+	local target = context.capture().target
+
+	local enabled, err = editor_actions.set_wrap(false, target)
+	assert(enabled == false and err == nil, "could not disable wrap")
+	equal(false, vim.wo.wrap, "wrap remained enabled")
+	equal(false, vim.wo.linebreak, "linebreak remained enabled")
+	enabled, err = editor_actions.toggle_wrap(target)
+	assert(enabled == true and err == nil, "could not toggle wrap")
+	equal(true, vim.wo.wrap, "wrap was not enabled")
+	equal(true, vim.wo.linebreak, "linebreak was not synchronized")
+
+	vim.wo.wrap = original_wrap
+	vim.wo.linebreak = original_linebreak
+end)
+
+test("case transforms target words, lines, and exact visual ranges", function()
+	local transforms = require("config.menu.transforms")
+	local original = vim.api.nvim_get_current_buf()
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_set_current_buf(buf)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "hello world", "hello World-value", "ab cd", "ef gh", "ábc" })
+	local winid = vim.api.nvim_get_current_win()
+	local base = { bufnr = buf, winid = winid, tabpage = vim.api.nvim_get_current_tabpage() }
+
+	local ok, err = transforms.apply(
+		"upper",
+		"word",
+		vim.tbl_extend("force", base, {
+			cursor = { line = 1, col = 1 },
+		})
+	)
+	assert(ok, err)
+	equal("HELLO world", vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1], "word uppercase")
+
+	ok, err = transforms.apply(
+		"snake",
+		"line",
+		vim.tbl_extend("force", base, {
+			cursor = { line = 2, col = 0 },
+		})
+	)
+	assert(ok, err)
+	equal("hello_world_value", vim.api.nvim_buf_get_lines(buf, 1, 2, false)[1], "line snake case")
+
+	ok, err = transforms.apply(
+		"upper",
+		"selection",
+		vim.tbl_extend("force", base, {
+			cursor = { line = 3, col = 0 },
+			selection = {
+				mode = "\22",
+				anchor = { line = 3, col = 0 },
+				cursor = { line = 4, col = 1 },
+			},
+		})
+	)
+	assert(ok, err)
+	equal({ "AB cd", "EF gh" }, vim.api.nvim_buf_get_lines(buf, 2, 4, false), "blockwise uppercase")
+
+	ok, err = transforms.apply(
+		"upper",
+		"word",
+		vim.tbl_extend("force", base, {
+			cursor = { line = 5, col = 0 },
+		})
+	)
+	assert(ok, err)
+	equal("ÁBC", vim.api.nvim_buf_get_lines(buf, 4, 5, false)[1], "multibyte uppercase")
+
+	vim.bo[buf].modifiable = false
+	ok, err = transforms.apply(
+		"lower",
+		"line",
+		vim.tbl_extend("force", base, {
+			cursor = { line = 1, col = 0 },
+		})
+	)
+	assert(not ok and err:find("not modifiable", 1, true), "readonly transform did not fail closed")
+	vim.bo[buf].modifiable = true
+
+	vim.api.nvim_set_current_buf(original)
+	vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
 test("user text reaches Ex commands as structured argv without concatenation", function()
@@ -167,6 +339,117 @@ test("user text reaches Ex commands as structured argv without concatenation", f
 	vim.api.nvim_cmd = original_cmd
 	vim.ui.input = original_input
 	vim.ui.select = original_select
+	assert(ok, err)
+end)
+
+test("high-impact palette actions require confirmation", function()
+	local actions = require("config.menu.actions")
+	local original_cmd = vim.api.nvim_cmd
+	local original_select = vim.ui.select
+	local calls = {}
+	local choice = "Cancel"
+	local target = context.capture().target
+	target.surface = "palette"
+
+	local ok, err = xpcall(function()
+		vim.api.nvim_cmd = function(specification, options)
+			calls[#calls + 1] = { specification = specification, options = options }
+		end
+		vim.ui.select = function(items, options, callback)
+			equal({ "Cancel", "Continue" }, items, "confirmation choices")
+			assert(options.prompt:find("Discard", 1, true), "confirmation prompt is ambiguous")
+			callback(choice)
+		end
+
+		actions.run("file.revert", target)
+		equal(0, #calls, "cancelled destructive action executed")
+		choice = "Continue"
+		actions.run("file.revert", target)
+		equal({ cmd = "edit", args = {}, bang = true }, calls[1].specification, "confirmed revert command")
+	end, debug.traceback)
+
+	vim.api.nvim_cmd = original_cmd
+	vim.ui.select = original_select
+	assert(ok, err)
+end)
+
+test("command wrappers preserve structured plugin arguments", function()
+	local actions = require("config.menu.actions")
+	local original_cmd = vim.api.nvim_cmd
+	local calls = {}
+	local target = context.capture().target
+
+	local ok, err = xpcall(function()
+		vim.api.nvim_cmd = function(specification, options)
+			calls[#calls + 1] = { specification = specification, options = options }
+		end
+		actions.run("command.trouble_buffer", target)
+		equal({
+			cmd = "Trouble",
+			args = { "diagnostics", "toggle", "filter.buf=0" },
+			bang = false,
+		}, calls[1].specification, "Trouble wrapper arguments")
+		equal({}, calls[1].options, "Trouble wrapper options")
+	end, debug.traceback)
+
+	vim.api.nvim_cmd = original_cmd
+	assert(ok, err)
+end)
+
+test("selection actions restore the captured range in the origin buffer", function()
+	local actions = require("config.menu.actions")
+	local original_buf = vim.api.nvim_get_current_buf()
+	local original_python = package.loaded["config.python"]
+	local original_grug = package.loaded["grug-far"]
+	local original_cmd = vim.api.nvim_cmd
+	local buf = vim.api.nvim_create_buf(false, true)
+	local commands = {}
+	local sent_selection = false
+	local searched_selection = false
+
+	local ok, err = xpcall(function()
+		vim.api.nvim_set_current_buf(buf)
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three" })
+		local target = context.capture().target
+		target.selection = {
+			mode = "v",
+			anchor = { line = 3, col = 2 },
+			cursor = { line = 1, col = 1 },
+		}
+		package.loaded["config.python"] = {
+			send = function(selection)
+				sent_selection = selection
+			end,
+		}
+		package.loaded["grug-far"] = {
+			with_visual_selection = function()
+				searched_selection = true
+				equal({ 1, 1 }, vim.api.nvim_buf_get_mark(buf, "<"), "search selection start mark")
+				equal({ 3, 2 }, vim.api.nvim_buf_get_mark(buf, ">"), "search selection end mark")
+			end,
+		}
+		vim.api.nvim_cmd = function(specification)
+			commands[#commands + 1] = specification
+		end
+
+		actions.run("python.send_selection", target)
+		assert(sent_selection == true, "Python action did not send a selection")
+		equal({ 1, 1 }, vim.api.nvim_buf_get_mark(buf, "<"), "selection start mark")
+		equal({ 3, 2 }, vim.api.nvim_buf_get_mark(buf, ">"), "selection end mark")
+		vim.api.nvim_buf_set_mark(buf, "<", 2, 0, {})
+		vim.api.nvim_buf_set_mark(buf, ">", 2, 1, {})
+		actions.run("search.selection", target)
+		assert(searched_selection, "search action did not use the visual selection")
+
+		actions.run("agent.context", target)
+		equal({ cmd = "AgentContext", args = {}, bang = false, range = { 1, 3 } }, commands[1], "agent range")
+	end, debug.traceback)
+
+	vim.api.nvim_cmd = original_cmd
+	package.loaded["config.python"] = original_python
+	package.loaded["grug-far"] = original_grug
+	vim.api.nvim_set_current_buf(original_buf)
+	vim.api.nvim_buf_delete(buf, { force = true })
 	assert(ok, err)
 end)
 
@@ -431,11 +714,12 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 	local original_pager = package.loaded["config.pager"]
 	local captured
 	local dispatched = {}
+	local origin = vim.api.nvim_get_current_buf()
 
 	local ok, err = xpcall(function()
 		package.loaded["config.menu.actions"] = {
-			run = function(id)
-				dispatched[#dispatched + 1] = id
+			run = function(id, target)
+				dispatched[#dispatched + 1] = { id = id, target = target }
 			end,
 		}
 		package.loaded.snacks = {
@@ -452,7 +736,7 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 		menu.open_palette()
 		assert(captured, "palette did not open")
 		equal("menu_actions", captured.source, "palette source")
-		equal("text", captured.format, "palette format")
+		assert(type(captured.format) == "function", "palette format is not custom")
 		local session_item
 		for _, item in ipairs(captured.items) do
 			if item.id == "session.search" then
@@ -461,7 +745,24 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 			end
 		end
 		assert(session_item, "session search is absent from the shared palette")
-		assert(session_item.text:find("Sessions", 1, true), "palette item lost its section")
+		equal("Sessions: Search and Restore", session_item.display, "palette item is not namespaced")
+		assert(session_item.text:find(session_item.display, 1, true), "palette searchable text lost its display")
+		local expected_labels = {
+			["search.open"] = "Search / Replace: Open",
+			["view.toggle_wrap"] = "View: Toggle Wrap",
+		}
+		for _, item in ipairs(captured.items) do
+			if expected_labels[item.id] then
+				equal(expected_labels[item.id], item.display, "palette label repeats its namespace")
+				expected_labels[item.id] = nil
+			end
+		end
+		assert(next(expected_labels) == nil, "palette label fixtures are missing")
+		equal(
+			{ { session_item.display }, { "  <leader>Sp", "Comment" } },
+			captured.format(session_item),
+			"palette format"
+		)
 
 		local closes = 0
 		local picker = {
@@ -469,12 +770,14 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 				closes = closes + 1
 			end,
 		}
+		vim.api.nvim_set_current_buf(vim.api.nvim_create_buf(false, true))
 		captured.confirm(picker, session_item)
 		captured.confirm(picker, session_item)
 		vim.wait(500, function()
 			return #dispatched == 1
 		end, 5)
-		equal({ "session.search" }, dispatched, "palette confirmed an action more than once")
+		equal("session.search", dispatched[1].id, "palette dispatched the wrong action")
+		equal(origin, dispatched[1].target.bufnr, "palette lost the origin buffer")
 		equal(1, closes, "palette closed more than once")
 	end, debug.traceback)
 

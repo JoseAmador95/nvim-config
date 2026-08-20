@@ -6,24 +6,36 @@ local context = require("config.menu.context")
 local M = {}
 
 local function current_context()
-	return context.new({
-		filetype = vim.bo.filetype,
-		mode = vim.fn.mode(),
-	})
+	return context.capture()
 end
 
-local function descriptors(menu_context)
-	return catalog.build(menu_context, actions.run)
+local function descriptors(menu_context, surface)
+	local target = vim.deepcopy(menu_context.target or {})
+	target.surface = surface
+	return catalog.build(menu_context, function(id)
+		return actions.run(id, target)
+	end, surface)
 end
 
 local function palette_items(sections)
 	local items = {}
 	for _, section in ipairs(sections) do
 		for _, descriptor in ipairs(section.items) do
-			local hint = descriptor.hint and ("  " .. descriptor.hint) or ""
+			local display = (section.palette_label or section.label)
+				.. ": "
+				.. (descriptor.palette_label or descriptor.label)
+			local search = { display }
+			if descriptor.hint then
+				search[#search + 1] = descriptor.hint
+			end
+			if descriptor.keywords then
+				vim.list_extend(search, descriptor.keywords)
+			end
 			items[#items + 1] = {
 				id = descriptor.id,
-				text = section.label .. "  " .. descriptor.label .. hint,
+				text = table.concat(search, " "),
+				display = display,
+				hint = descriptor.hint,
 				section = section.label,
 				label = descriptor.label,
 				run = descriptor.run,
@@ -67,8 +79,14 @@ function M.open_palette()
 	snacks.picker.pick({
 		source = "menu_actions",
 		title = "Actions",
-		items = palette_items(descriptors(current_context())),
-		format = "text",
+		items = palette_items(descriptors(current_context(), "palette")),
+		format = function(item)
+			local formatted = { { item.display } }
+			if item.hint then
+				formatted[#formatted + 1] = { "  " .. item.hint, "Comment" }
+			end
+			return formatted
+		end,
 		preview = false,
 		layout = { preset = "select" },
 		confirm = function(picker, item)
@@ -88,7 +106,7 @@ function M.ensure_open()
 	if not M.enabled() or backend:is_open() then
 		return
 	end
-	backend:show(descriptors(current_context()), { border = true })
+	backend:show(descriptors(current_context(), "context"), { border = true })
 end
 
 ---Dismiss any displayed menu or recover stale menu.nvim state.
@@ -123,8 +141,9 @@ function M.open_context(options)
 	local menu_context = current_context()
 	if not menu_context.visual and options.move_cursor ~= false then
 		pcall(vim.cmd, "normal! \\<RightMouse>")
+		menu_context = current_context()
 	end
-	backend:show(descriptors(menu_context), { mouse = true, border = true })
+	backend:show(descriptors(menu_context, "context"), { mouse = true, border = true })
 end
 
 function M.setup()

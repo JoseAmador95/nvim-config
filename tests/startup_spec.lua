@@ -100,6 +100,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 				local menu_map = vim.fn.maparg("<leader><leader>", "n", false, true)
 				assert(menu_map.rhs == "<cmd>MenuOpen<cr>", "action palette mapping drifted")
+				local visual_menu_map = vim.fn.maparg("<leader><leader>", "x", false, true)
+				assert(visual_menu_map.rhs == "<cmd>MenuOpen<cr>", "visual action palette mapping is missing")
 				assert(not vim.lsp.inlay_hint.is_enabled({ bufnr = 0 }), "inlay hints must default off")
 				require("lazy").load({ plugins = { "bufferline.nvim" } })
 

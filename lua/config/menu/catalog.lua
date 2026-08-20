@@ -6,19 +6,40 @@ local cmake_filetypes = {
 	cpp = true,
 }
 
+local blocked_edit_buftypes = {
+	help = true,
+	prompt = true,
+	quickfix = true,
+	terminal = true,
+}
+
+local palette_only = { palette = true, context = false }
+
+local function editable(context)
+	return context.modifiable and not blocked_edit_buftypes[context.buftype]
+end
+
+local function visual_editable(context)
+	return context.visual and editable(context)
+end
+
 local function is_filetype(filetype)
 	return function(context)
 		return context.filetype == filetype
 	end
 end
 
-local function descriptor(dispatch, id, label, hint, when)
+local function descriptor(dispatch, id, label, hint, when, metadata)
+	metadata = metadata or {}
 	local item = {
 		id = id,
 		label = label,
 		run = function()
 			return dispatch(id)
 		end,
+		surfaces = metadata.surfaces,
+		palette_label = metadata.palette_label,
+		keywords = metadata.keywords,
 	}
 	if hint then
 		item.hint = hint
@@ -29,13 +50,20 @@ local function descriptor(dispatch, id, label, hint, when)
 	return item
 end
 
-local function section(id, label, items, when)
+local function section(id, label, items, when, metadata)
+	metadata = metadata or {}
 	return {
 		id = id,
 		label = label,
 		items = items,
 		when = when,
+		surfaces = metadata.surfaces,
+		palette_label = metadata.palette_label,
 	}
+end
+
+local function supports_surface(candidate, surface)
+	return not surface or candidate.surfaces == nil or candidate.surfaces[surface] == true
 end
 
 ---Return every menu descriptor before context filtering.
@@ -43,18 +71,103 @@ end
 ---@return table[]
 function M.definitions(dispatch)
 	assert(type(dispatch) == "function", "menu dispatch must be a function")
-	local item = function(id, label, hint, when)
-		return descriptor(dispatch, id, label, hint, when)
+	local item = function(id, label, hint, when, metadata)
+		return descriptor(dispatch, id, label, hint, when, metadata)
+	end
+	local palette_item = function(id, label, hint, when, keywords)
+		return descriptor(dispatch, id, label, hint, when, {
+			surfaces = palette_only,
+			keywords = keywords,
+		})
 	end
 
 	return {
+		section("file", "File", {
+			palette_item("file.new", "New Untitled File", nil, nil, { "enew", "new buffer" }),
+			palette_item("file.save", "Save", "<leader>w", nil, { "write" }),
+			palette_item("file.save_as", "Save As...", nil, nil, { "saveas", "rename" }),
+			palette_item("file.save_all", "Save All", nil, nil, { "wall" }),
+			palette_item("file.revert", "Revert File...", nil, nil, { "reload", "discard changes" }),
+			palette_item("file.close_tab", "Close Tab", "<leader>q"),
+			palette_item("file.close_all", "Close All...", "<leader>Q", nil, { "quit all" }),
+			palette_item("file.open_under_cursor", "Open File Under Cursor", "gf"),
+			palette_item("file.set_filetype", "Set File Type...", nil, nil, { "setfiletype", "set ft" }),
+		}),
+		section("edit", "Edit", {
+			palette_item("edit.undo", "Undo", "u"),
+			palette_item("edit.redo", "Redo", "<C-r>"),
+			palette_item("picker.undo", "Show Undo History", "<leader>u"),
+			palette_item("edit.clear_search", "Clear Search Highlight", "<leader><CR>", nil, { "nohlsearch" }),
+			palette_item("edit.join_line", "Join Line", "J", editable),
+			palette_item("edit.duplicate_line", "Duplicate Line", nil, editable),
+			palette_item("edit.trim_whitespace", "Trim Trailing Whitespace", nil, editable),
+		}),
+		section("transform", "Transform", {
+			palette_item("transform.upper_word", "Uppercase Word", nil, editable, { "case", "gU" }),
+			palette_item("transform.upper_line", "Uppercase Line", nil, editable, { "case", "gUU" }),
+			palette_item("transform.upper_selection", "Uppercase Selection", nil, visual_editable, { "case" }),
+			palette_item("transform.lower_word", "Lowercase Word", nil, editable, { "case", "gu" }),
+			palette_item("transform.lower_line", "Lowercase Line", nil, editable, { "case", "guu" }),
+			palette_item("transform.lower_selection", "Lowercase Selection", nil, visual_editable, { "case" }),
+			palette_item("transform.toggle_word", "Toggle Case of Word", nil, editable, { "case", "g~" }),
+			palette_item("transform.toggle_line", "Toggle Case of Line", nil, editable, { "case", "g~~" }),
+			palette_item("transform.toggle_selection", "Toggle Case of Selection", nil, visual_editable, { "case" }),
+			palette_item("transform.title_word", "Title Case Word", nil, editable, { "case" }),
+			palette_item("transform.title_line", "Title Case Line", nil, editable, { "case" }),
+			palette_item("transform.title_selection", "Title Case Selection", nil, visual_editable, { "case" }),
+			palette_item("transform.camel_word", "camelCase Word", nil, editable, { "case" }),
+			palette_item("transform.camel_line", "camelCase Line", nil, editable, { "case" }),
+			palette_item("transform.camel_selection", "camelCase Selection", nil, visual_editable, { "case" }),
+			palette_item("transform.pascal_word", "PascalCase Word", nil, editable, { "case" }),
+			palette_item("transform.pascal_line", "PascalCase Line", nil, editable, { "case" }),
+			palette_item("transform.pascal_selection", "PascalCase Selection", nil, visual_editable, { "case" }),
+			palette_item("transform.snake_word", "snake_case Word", nil, editable, { "case" }),
+			palette_item("transform.snake_line", "snake_case Line", nil, editable, { "case" }),
+			palette_item("transform.snake_selection", "snake_case Selection", nil, visual_editable, { "case" }),
+			palette_item("transform.kebab_word", "kebab-case Word", nil, editable, { "case" }),
+			palette_item("transform.kebab_line", "kebab-case Line", nil, editable, { "case" }),
+			palette_item("transform.kebab_selection", "kebab-case Selection", nil, visual_editable, { "case" }),
+		}),
+		section("go", "Go", {
+			palette_item("go.line", "Go to Line...", nil, nil, { "jump" }),
+			palette_item("go.matching_bracket", "Go to Matching Bracket", "%"),
+			palette_item("go.todo_next", "Next TODO", "]t"),
+			palette_item("go.todo_prev", "Previous TODO", "[t"),
+			palette_item("go.reference_next", "Next Semantic Reference", "<A-*>"),
+			palette_item("go.reference_prev", "Previous Semantic Reference", "<A-#>"),
+			palette_item("go.reference_freeze", "Toggle Frozen Reference Highlight", "<leader>li"),
+			palette_item("go.function_next", "Next Function", "]f"),
+			palette_item("go.function_prev", "Previous Function", "[f"),
+			palette_item("go.class_next", "Next Class", "]c"),
+			palette_item("go.class_prev", "Previous Class", "[c"),
+		}),
+		section("window", "Window", {
+			palette_item("window.split_horizontal", "Split Horizontal"),
+			palette_item("window.split_vertical", "Split Vertical"),
+			palette_item("window.close", "Close Split"),
+			palette_item("window.only", "Close Other Splits"),
+			palette_item("window.equalize", "Equalize Splits", "<C-w>="),
+			palette_item("window.focus_left", "Focus Left", "<A-h>"),
+			palette_item("window.focus_down", "Focus Down", "<A-j>"),
+			palette_item("window.focus_up", "Focus Up", "<A-k>"),
+			palette_item("window.focus_right", "Focus Right", "<A-l>"),
+		}),
+		section("tabs", "Tabs", {
+			palette_item("tab.new", "New Tab"),
+			palette_item("tab.previous", "Previous Tab", "<leader>j"),
+			palette_item("tab.next", "Next Tab", "<leader>k"),
+			palette_item("tab.first", "First Tab"),
+			palette_item("tab.last", "Last Tab"),
+			palette_item("tab.move_left", "Move Tab Left"),
+			palette_item("tab.move_right", "Move Tab Right"),
+		}),
 		section("search", "Search / Replace", {
-			item("search.open", "Search & Replace: Open"),
-			item("search.word", "Search & Replace: Search Word"),
+			item("search.open", "Search & Replace: Open", nil, nil, { palette_label = "Open" }),
+			item("search.word", "Search & Replace: Search Word", nil, nil, { palette_label = "Search Word" }),
 			item("search.selection", "Search & Replace: Search Selection", nil, function(context)
 				return context.visual
-			end),
-			item("search.file", "Search & Replace: Search in File"),
+			end, { palette_label = "Search Selection" }),
+			item("search.file", "Search & Replace: Search in File", nil, nil, { palette_label = "Search in File" }),
 			item("picker.live_grep", "Live Grep"),
 			item("picker.grep_string", "Grep String (cursor)"),
 		}),
@@ -66,6 +179,7 @@ function M.definitions(dispatch)
 			item("picker.command_history", "Command History"),
 			item("picker.git_commits", "Git Commits"),
 			item("picker.git_bcommits", "File History"),
+			palette_item("picker.todo", "TODO Comments"),
 		}),
 		section("lsp", "LSP", {
 			item("lsp.definition", "Go to Definition", "gd"),
@@ -97,6 +211,11 @@ function M.definitions(dispatch)
 			item("command.lazygit", "LazyGit", "<leader>gl"),
 			item("command.diffview_open", "Diffview Open"),
 			item("command.diffview_file_history", "Diffview File History"),
+			palette_item("gitsigns.blame_line", "Blame Current Line", "<leader>hb"),
+			palette_item("command.diffview_close", "Close Diffview"),
+			palette_item("picker.git_branches", "Branches"),
+			palette_item("picker.git_status", "Status"),
+			palette_item("picker.git_stash", "Stash"),
 		}),
 		section("tests", "Tests", {
 			item("test.nearest", "Run Nearest"),
@@ -109,6 +228,7 @@ function M.definitions(dispatch)
 			item("test.summary", "Toggle Summary"),
 			item("test.next_failed", "Next Failed"),
 			item("test.prev_failed", "Prev Failed"),
+			palette_item("test.debug_nearest", "Debug Nearest", "<leader>rd"),
 		}),
 		section("cmake", "CMake", {
 			item("command.cmake_generate", "Generate"),
@@ -120,6 +240,7 @@ function M.definitions(dispatch)
 			item("command.cmake_launch_target", "Select Launch Target"),
 			item("command.cmake_build_type", "Select Build Type"),
 			item("command.cmake_configure_preset", "Select Configure Preset"),
+			palette_item("command.cmake_build_preset", "Select Build Preset"),
 		}, function(context)
 			return cmake_filetypes[context.filetype] == true
 		end),
@@ -163,6 +284,76 @@ function M.definitions(dispatch)
 			item("command.devpod_recreate", "Recreate Container Editor"),
 			item("command.devpod_status", "Show Status"),
 			item("command.devpod_host", "Return to Host Editor"),
+			palette_item("command.devpod_log", "Open Bootstrap Log"),
+		}),
+		section("problems", "Problems", {
+			palette_item("diagnostic.float", "Show Diagnostic at Cursor", "<leader>ld"),
+			palette_item("diagnostic.next", "Next Diagnostic", "]d"),
+			palette_item("diagnostic.prev", "Previous Diagnostic", "[d"),
+			palette_item("diagnostic.loclist", "Send Diagnostics to Location List", "<leader>lq"),
+			palette_item("command.trouble_diagnostics", "Toggle Workspace Diagnostics", "<leader>xx"),
+			palette_item("command.trouble_buffer", "Toggle Buffer Diagnostics", "<leader>xd"),
+			palette_item("command.trouble_quickfix", "Toggle Quickfix List", "<leader>xq"),
+			palette_item("command.trouble_loclist", "Toggle Location List", "<leader>xl"),
+			palette_item("command.trouble_references", "Toggle LSP References", "<leader>xr"),
+			palette_item("command.trouble_todos", "Toggle TODOs", "<leader>xt"),
+		}),
+		section("python", "Python", {
+			palette_item("command.venv_select", "Select Environment...", nil, is_filetype("python")),
+			palette_item("command.venv_cached", "Use Cached Environment", nil, is_filetype("python")),
+			palette_item("python.repl", "Toggle REPL", "<leader>rp", is_filetype("python")),
+			palette_item("python.send_line", "Send Line to REPL", "<leader>rs", is_filetype("python")),
+			palette_item("python.send_selection", "Send Selection to REPL", "<leader>rs", function(context)
+				return context.filetype == "python" and context.visual
+			end),
+		}),
+		section("multicursor", "Multicursor", {
+			palette_item("multicursor.match_all", "Add Cursors to All Matches", "mM"),
+			palette_item("multicursor.clear", "Clear All Cursors", "mcc"),
+			palette_item("multicursor.next", "Go to Next Cursor", "]mc"),
+			palette_item("multicursor.prev", "Go to Previous Cursor", "[mc"),
+		}),
+		section("coverage", "Coverage", {
+			palette_item("command.coverage_load", "Load Report..."),
+			palette_item("command.coverage_summary", "Show Summary"),
+			palette_item("command.coverage_clear", "Clear Loaded Coverage"),
+		}),
+		section("review", "Review", {
+			palette_item("command.review_start", "Start TUICR Round"),
+			palette_item("review.open", "Open TUICR Round..."),
+			palette_item("agent.context", "Copy Agent Context"),
+			palette_item("agent.results", "Import Agent Results..."),
+		}),
+		section("tools", "Tools", {
+			palette_item("command.theme", "Select Theme..."),
+			palette_item("command.theme_reset", "Reset Theme"),
+			palette_item("clangd.compile_commands", "Set clangd Compile Database...", nil, function(context)
+				return cmake_filetypes[context.filetype] == true
+			end),
+			palette_item("command.clangd_switch", "Switch Source/Header", nil, function(context)
+				return context.filetype == "c" or context.filetype == "cpp"
+			end),
+			palette_item("command.hex_toggle", "Toggle Hex View"),
+			palette_item("command.hex_dump", "Convert Buffer to Hex"),
+			palette_item("command.hex_assemble", "Assemble Hex Buffer..."),
+			palette_item("command.nvim_config_dump", "Show Effective Local Config"),
+			palette_item("command.nvim_config_edit", "Edit Local Config"),
+			palette_item("command.nvim_config_reload", "Reload Local Config Cache"),
+			palette_item("command.nvim_config_init", "Create Local Config Template..."),
+			palette_item("command.tools_install", "Install Managed Tools..."),
+			palette_item("command.parsers_install", "Install Tree-sitter Parsers..."),
+			palette_item("command.log_watch", "Follow Current Log File"),
+			palette_item("command.toggle_log_highlight", "Toggle Log Highlight", "<leader>lh"),
+		}),
+		section("help", "Help", {
+			palette_item("picker.keymaps", "Show Keyboard Shortcuts", nil, nil, { "cheatsheet", "bindings" }),
+			palette_item("picker.commands", "Show User Commands", nil, nil, { "cheatsheet", "command palette" }),
+			palette_item("command.messages", "Show Messages", "<leader>fn"),
+			palette_item("notification.dismiss", "Dismiss Notifications", "<leader>fN"),
+			palette_item("notification.history", "Show Notification History"),
+			palette_item("picker.marks", "Show Marks"),
+			palette_item("picker.jumps", "Show Jump List"),
+			palette_item("picker.registers", "Show Registers"),
 		}),
 		section("file.plantuml", "File (plantuml)", {
 			item("command.diagram_show", "Show Diagram", "<leader>md"),
@@ -185,26 +376,36 @@ function M.definitions(dispatch)
 			item("command.fold_close", "Fold Close All"),
 			item("view.peek_fold", "Peek Fold"),
 			item("view.toggle_wrap", "Toggle Wrap"),
+			palette_item("view.enable_wrap", "Enable Word Wrap", nil, nil, { "soft wrap" }),
+			palette_item("view.disable_wrap", "Disable Word Wrap", nil, nil, { "soft wrap" }),
 			item("view.toggle_spell", "Toggle Spell"),
+			palette_item("view.enable_spell", "Enable Spell Checking"),
+			palette_item("view.disable_spell", "Disable Spell Checking"),
+			palette_item("view.toggle_number", "Toggle Line Numbers"),
 			item("view.toggle_relative_number", "Toggle Relative Number"),
+			palette_item("view.enable_relative_number", "Enable Relative Line Numbers"),
+			palette_item("view.disable_relative_number", "Disable Relative Line Numbers"),
+			palette_item("view.toggle_cursorline", "Toggle Cursor Line"),
+			palette_item("view.toggle_list", "Toggle Invisible Characters", nil, nil, { "whitespace", "listchars" }),
 			item("view.toggle_paste", "Toggle Paste"),
 			item("command.reload_config", "Reload Config"),
 			item("command.mason", "Mason"),
-		}),
+		}, nil, { palette_label = "View" }),
 	}
 end
 
 ---Filter descriptors without mutating the catalogue or context.
 ---@param sections table[]
 ---@param context table
+---@param surface? "palette"|"context"
 ---@return table[]
-function M.filter(sections, context)
+function M.filter(sections, context, surface)
 	local visible = {}
 	for _, candidate in ipairs(sections) do
-		if not candidate.when or candidate.when(context) then
+		if supports_surface(candidate, surface) and (not candidate.when or candidate.when(context)) then
 			local items = {}
 			for _, item in ipairs(candidate.items) do
-				if not item.when or item.when(context) then
+				if supports_surface(item, surface) and (not item.when or item.when(context)) then
 					table.insert(items, item)
 				end
 			end
@@ -212,6 +413,7 @@ function M.filter(sections, context)
 				table.insert(visible, {
 					id = candidate.id,
 					label = candidate.label,
+					palette_label = candidate.palette_label,
 					items = items,
 				})
 			end
@@ -222,9 +424,10 @@ end
 
 ---@param context table
 ---@param dispatch fun(id: string): any
+---@param surface? "palette"|"context"
 ---@return table[]
-function M.build(context, dispatch)
-	return M.filter(M.definitions(dispatch), context)
+function M.build(context, dispatch, surface)
+	return M.filter(M.definitions(dispatch), context, surface)
 end
 
 return M

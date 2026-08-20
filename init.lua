@@ -163,25 +163,9 @@ vim.keymap.set("n", "H", "^", {
 })
 
 -- Open file under cursor in new tab
-local function open_file_under_cursor_in_tab()
-	local file = vim.fn.expand("<cfile>")
-	local line = 1
-	local col = 1
-
-	local f, l, c = file:match("^(.-):(%d+):(%d+)$")
-	if f then
-		file, line, col = f, l, c
-	else
-		f, l = file:match("^(.-):(%d+)$")
-		if f then
-			file, line = f, l
-		end
-	end
-
-	require("config.editor").open_file_in_tab(file, { lnum = tonumber(line) or 1, col = tonumber(col) or 1 })
-end
-
-vim.keymap.set("n", "gf", open_file_under_cursor_in_tab, { desc = "Open file under cursor in new tab" })
+vim.keymap.set("n", "gf", require("config.editor_actions").open_file_under_cursor, {
+	desc = "Open file under cursor in new tab",
+})
 
 -- Neovim 0.11+ ships gr-prefixed LSP maps (grr/grn/gri/gra/grt). This config
 -- defines its own equivalents (gr, gi, <leader>rn, <leader>ca in lsp.lua);
