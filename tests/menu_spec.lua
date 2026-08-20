@@ -147,10 +147,43 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 	assert(find_item(cpp_sections, "test.nearest"), "focused Neotest-GTest action missing for C++")
 	assert(not find_item(cpp_sections, "test.file"), "project-wide Neotest-GTest action displaced CTest")
 
-	local plantuml_sections = catalog.build(context.new({ filetype = "plantuml" }), dispatch)
-	assert(find_item(plantuml_sections, "command.diagram_show"), "unified PlantUML viewer is missing")
-	local markdown_sections = catalog.build(context.new({ filetype = "markdown" }), dispatch)
-	assert(find_item(markdown_sections, "command.diagram_show"), "unified Markdown diagram viewer is missing")
+	local plantuml_context = context.new({ filetype = "plantuml" })
+	local plantuml_palette = catalog.build(plantuml_context, dispatch, "palette")
+	local plantuml_menu = catalog.build(plantuml_context, dispatch, "context")
+	assert(find_section(plantuml_palette, "render"), "PlantUML render section is missing")
+	for _, id in ipairs({ "command.diagram_show", "command.diagram_show_svg", "command.diagram_show_ascii" }) do
+		assert(find_item(plantuml_palette, id), "PlantUML render action is missing: " .. id)
+	end
+	assert(find_item(plantuml_menu, "command.diagram_show"), "context menu lost its PlantUML viewer")
+	assert(not find_item(plantuml_menu, "command.diagram_show_svg"), "palette-only SVG action leaked into context")
+
+	local markdown_context = context.new({ filetype = "markdown" })
+	local markdown_palette = catalog.build(markdown_context, dispatch, "palette")
+	local markdown_menu = catalog.build(markdown_context, dispatch, "context")
+	for _, id in ipairs({
+		"command.diagram_show",
+		"command.diagram_show_svg",
+		"command.diagram_show_ascii",
+		"markdown.render_toggle",
+		"command.markdown_render_enable",
+		"command.markdown_render_disable",
+		"command.markdown_render_buffer_toggle",
+		"command.markdown_render_buffer_enable",
+		"command.markdown_render_buffer_disable",
+		"command.markdown_render_preview",
+		"command.markdown_render_expand",
+		"command.markdown_render_contract",
+		"command.markdown_preview",
+		"command.markdown_preview_open",
+		"command.markdown_preview_stop",
+	}) do
+		assert(find_item(markdown_palette, id), "Markdown render action is missing: " .. id)
+	end
+	for _, id in ipairs({ "command.diagram_show", "markdown.render_toggle", "command.markdown_preview" }) do
+		assert(find_item(markdown_menu, id), "context menu lost a Markdown render action: " .. id)
+	end
+	assert(not find_item(markdown_menu, "command.markdown_render_enable"), "palette render action leaked into context")
+	assert(not find_section(lua_sections, "render"), "render section leaked into Lua")
 	assert(not find_section(catalog.build(context.new({ filetype = "yaml" }), dispatch), "file.yaml"))
 	assert(not find_section(catalog.build(context.new({ filetype = "xml" }), dispatch), "file.xml"))
 end)
@@ -390,6 +423,14 @@ test("command wrappers preserve structured plugin arguments", function()
 			bang = false,
 		}, calls[1].specification, "Trouble wrapper arguments")
 		equal({}, calls[1].options, "Trouble wrapper options")
+		actions.run("command.diagram_show_svg", target)
+		equal({ cmd = "DiagramShow", args = { "svg" }, bang = false }, calls[2].specification, "SVG wrapper")
+		actions.run("command.markdown_render_enable", target)
+		equal(
+			{ cmd = "MarkdownRender", args = { "enable" }, bang = false },
+			calls[3].specification,
+			"Markdown render wrapper"
+		)
 	end, debug.traceback)
 
 	vim.api.nvim_cmd = original_cmd
@@ -715,6 +756,7 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 	local captured
 	local dispatched = {}
 	local origin = vim.api.nvim_get_current_buf()
+	local original_filetype = vim.bo.filetype
 
 	local ok, err = xpcall(function()
 		package.loaded["config.menu.actions"] = {
@@ -731,6 +773,7 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 		}
 		package.loaded["config.pager"] = { active = false }
 		package.loaded["config.menu"] = nil
+		vim.bo.filetype = "markdown"
 
 		local menu = require("config.menu")
 		menu.open_palette()
@@ -748,6 +791,9 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 		equal("Sessions: Search and Restore", session_item.display, "palette item is not namespaced")
 		assert(session_item.text:find(session_item.display, 1, true), "palette searchable text lost its display")
 		local expected_labels = {
+			["command.diagram_show_svg"] = "Render: Diagram as SVG",
+			["command.markdown_preview_open"] = "Render: Open Markdown Browser Preview",
+			["command.markdown_render_enable"] = "Render: Enable Markdown Inline Rendering",
 			["search.open"] = "Search / Replace: Open",
 			["view.toggle_wrap"] = "View: Toggle Wrap",
 		}
@@ -785,6 +831,7 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 	package.loaded["config.menu.actions"] = original_actions
 	package.loaded.snacks = original_snacks
 	package.loaded["config.pager"] = original_pager
+	vim.bo.filetype = original_filetype
 	assert(ok, err)
 end)
 

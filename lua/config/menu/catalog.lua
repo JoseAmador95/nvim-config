@@ -29,6 +29,10 @@ local function is_filetype(filetype)
 	end
 end
 
+local function supports_diagrams(context)
+	return context.filetype == "markdown" or context.filetype == "plantuml"
+end
+
 local function descriptor(dispatch, id, label, hint, when, metadata)
 	metadata = metadata or {}
 	local item = {
@@ -170,6 +174,76 @@ function M.definitions(dispatch)
 			item("search.file", "Search & Replace: Search in File", nil, nil, { palette_label = "Search in File" }),
 			item("picker.live_grep", "Live Grep"),
 			item("picker.grep_string", "Grep String (cursor)"),
+		}),
+		section("render", "Render", {
+			item("command.diagram_show", "Diagram (Automatic SVG/ASCII)", "<leader>md", supports_diagrams),
+			palette_item("command.diagram_show_svg", "Diagram as SVG", nil, supports_diagrams, {
+				"mermaid",
+				"plantuml",
+				"image",
+			}),
+			palette_item("command.diagram_show_ascii", "Diagram as ASCII", nil, supports_diagrams, {
+				"mermaid",
+				"plantuml",
+				"text",
+			}),
+			item("markdown.render_toggle", "Toggle Markdown Inline Rendering", "<leader>mr", is_filetype("markdown")),
+			palette_item(
+				"command.markdown_render_enable",
+				"Enable Markdown Inline Rendering",
+				nil,
+				is_filetype("markdown")
+			),
+			palette_item(
+				"command.markdown_render_disable",
+				"Disable Markdown Inline Rendering",
+				nil,
+				is_filetype("markdown")
+			),
+			palette_item(
+				"command.markdown_render_buffer_toggle",
+				"Toggle Markdown Rendering in Buffer",
+				nil,
+				is_filetype("markdown")
+			),
+			palette_item(
+				"command.markdown_render_buffer_enable",
+				"Enable Markdown Rendering in Buffer",
+				nil,
+				is_filetype("markdown")
+			),
+			palette_item(
+				"command.markdown_render_buffer_disable",
+				"Disable Markdown Rendering in Buffer",
+				nil,
+				is_filetype("markdown")
+			),
+			palette_item(
+				"command.markdown_render_preview",
+				"Preview Markdown Inline Rendering",
+				nil,
+				is_filetype("markdown")
+			),
+			palette_item("command.markdown_render_expand", "Expand Markdown Decorations", nil, is_filetype("markdown")),
+			palette_item(
+				"command.markdown_render_contract",
+				"Contract Markdown Decorations",
+				nil,
+				is_filetype("markdown")
+			),
+			item("command.markdown_preview", "Toggle Markdown Browser Preview", "<leader>mp", is_filetype("markdown")),
+			palette_item(
+				"command.markdown_preview_open",
+				"Open Markdown Browser Preview",
+				nil,
+				is_filetype("markdown")
+			),
+			palette_item(
+				"command.markdown_preview_stop",
+				"Stop Markdown Browser Preview",
+				nil,
+				is_filetype("markdown")
+			),
 		}),
 		section("navigation", "Navigation", {
 			item("picker.find_files", "Find Files"),
@@ -355,18 +429,10 @@ function M.definitions(dispatch)
 			palette_item("picker.jumps", "Show Jump List"),
 			palette_item("picker.registers", "Show Registers"),
 		}),
-		section("file.plantuml", "File (plantuml)", {
-			item("command.diagram_show", "Show Diagram", "<leader>md"),
-		}, is_filetype("plantuml")),
 		section("file.json", "File (json)", {
 			item("command.json_tree", "JSON Tree"),
 			item("json.jqx_query", "JQX Query"),
 		}, is_filetype("json")),
-		section("file.markdown", "File (markdown)", {
-			item("command.diagram_show", "Show Diagram", "<leader>md"),
-			item("command.markdown_preview", "Markdown Preview Toggle"),
-			item("markdown.render_toggle", "Render Markdown Toggle"),
-		}, is_filetype("markdown")),
 		section("view", "View / Utils", {
 			item("view.oil", "File Explorer (oil)"),
 			item("view.terminal", "Terminal", "<leader>t"),
