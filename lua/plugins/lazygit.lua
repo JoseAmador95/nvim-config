@@ -8,6 +8,14 @@
 --
 -- `promptToReturnFromSubprocess: false` lets LazyGit resume without displaying
 -- its default "press ENTER to return" prompt after the edit command.
+local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve lazygit config source")
+local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
+local review_open = vim.fs.joinpath(config_root, "scripts", "nvim-review-open")
+
+local function gh_editor()
+	return vim.fn.shellescape(review_open) .. " --wait-editor"
+end
+
 local function ensure_config()
 	local path = vim.fn.stdpath("cache") .. "/lazygit-nvim.yml"
 	local lines = {
@@ -60,7 +68,7 @@ local function toggle_lazygit()
 		id = "lazygit",
 		argv = { "lazygit" },
 		cwd = root,
-		env = { LG_CONFIG_FILE = config_files() },
+		env = { LG_CONFIG_FILE = config_files(), GH_EDITOR = gh_editor() },
 		layout = "float",
 		title = "LazyGit",
 		passthrough = { "j", "<space>" },

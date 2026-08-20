@@ -35,6 +35,15 @@ assert(vim.fn.writefile({ "outside" }, outside) == 0)
 git({ "-C", fixture, "init", "-q" })
 assert(vim.uv.fs_symlink(outside, fixture .. "/escape.lua"))
 local root = assert(vim.uv.fs_realpath(fixture))
+local external = assert(vim.uv.fs_realpath(outside))
+local external_files = { outside }
+
+local function temporary_text(lines)
+	local path = vim.fn.tempname()
+	assert(vim.fn.writefile(lines or { "outside" }, path) == 0)
+	external_files[#external_files + 1] = path
+	return assert(vim.uv.fs_realpath(path))
+end
 
 local rpc = require("config.editor_rpc")
 assert(rpc._prepare_state(state))
@@ -68,6 +77,37 @@ local function write_request(value)
 	return path
 end
 
+local function wait_request(request_id, path, overrides)
+	local value = {
+		version = 2,
+		request_id = request_id,
+		instance_id = instance.instance_id,
+		repo_root = root,
+		path = path,
+		created_at = "2026-08-09T12:00:00Z",
+	}
+	for key, item in pairs(overrides or {}) do
+		value[key] = item
+	end
+	return value
+end
+
+local function wait_state(request_id)
+	local path = state .. "/waits/" .. request_id .. ".json"
+	local encoded = assert(require("config.fs").read_binary(path))
+	local value = vim.json.decode(encoded)
+	for key in pairs(rpc._wait_state_keys) do
+		assert(value[key] ~= nil, "wait state omitted " .. key)
+	end
+	return value, path
+end
+
+local function drain()
+	vim.wait(100, function()
+		return false
+	end, 10)
+end
+
 test("state root follows override, XDG, then home modes", function()
 	local old_override = vim.env.NVIM_REVIEW_STATE_HOME
 	local old_xdg = vim.env.XDG_STATE_HOME
@@ -89,7 +129,13 @@ test("state directories and atomic registry are owner-only", function()
 	local record = assert(rpc.write_registry(instance))
 	assert(record.version == 1 and record.instance_id == instance.instance_id)
 	assert(vim.deep_equal(record.repo_roots, { root }))
-	for _, directory in ipairs({ state, state .. "/editors", state .. "/requests", state .. "/sockets" }) do
+	for _, directory in ipairs({
+		state,
+		state .. "/editors",
+		state .. "/requests",
+		state .. "/waits",
+		state .. "/sockets",
+	}) do
 		assert(assert(vim.uv.fs_lstat(directory)).mode % 512 == 448, directory .. " is not 0700")
 	end
 	local path = state .. "/editors/" .. instance.instance_id .. ".json"
@@ -98,6 +144,125 @@ test("state directories and atomic registry are owner-only", function()
 	for key in pairs(rpc._record_keys) do
 		assert(decoded[key] ~= nil or key == "TMUX_PANE", "registry omitted " .. key)
 	end
+end)
+
+test("version-2 editor request arms durable state before acknowledging and finishes only after close", function()
+	local request_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	local value = wait_request(request_id, external)
+	write_request(value)
+	local handled, err = rpc.consume_request(request_id, instance)
+	assert(handled == 1, err)
+	local waiting, wait_file = wait_state(request_id)
+	assert(waiting.status == "waiting")
+	assert(assert(vim.uv.fs_lstat(wait_file)).mode % 512 == 384, "wait state is not 0600")
+	local buf = vim.api.nvim_get_current_buf()
+	assert(assert(vim.uv.fs_realpath(vim.api.nvim_buf_get_name(buf))) == external)
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "saved editor text" })
+	vim.api.nvim_buf_call(buf, function()
+		vim.cmd.write()
+	end)
+	assert(wait_state(request_id).status == "waiting", "BufWritePost completed the editor request")
+
+	local finish
+	for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+		if mapping.desc == "Save and finish external editor" then
+			finish = mapping.callback
+		end
+	end
+	assert(type(finish) == "function", "temporary editor mapping is missing")
+	finish()
+	drain()
+	assert(wait_state(request_id).status == "completed")
+	assert(table.concat(vim.fn.readfile(external), "\n") == "saved editor text")
+end)
+
+test("closing a modified editor window aborts and preserves the exact buffer", function()
+	local request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	local target = temporary_text()
+	local value = wait_request(request_id, target)
+	write_request(value)
+	assert(rpc.consume_request(request_id, instance) == 1)
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "unsaved window text" })
+	vim.bo[buf].modified = true
+	vim.api.nvim_win_close(win, true)
+	drain()
+	assert(wait_state(request_id).status == "aborted")
+	assert(vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified, "modified buffer was discarded")
+	assert(vim.api.nvim_buf_get_lines(buf, 0, -1, false)[1] == "unsaved window text")
+end)
+
+test("deleting a modified editor buffer aborts and preserves a recovery buffer", function()
+	local request_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	local target = temporary_text()
+	local value = wait_request(request_id, target)
+	write_request(value)
+	assert(rpc.consume_request(request_id, instance) == 1)
+	local buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "unsaved deleted text" })
+	vim.bo[buf].modified = true
+	vim.api.nvim_buf_delete(buf, { force = true })
+	drain()
+	assert(wait_state(request_id).status == "aborted")
+	local recovery
+	for _, candidate in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_valid(candidate) and vim.b[candidate].nvim_editor_recovery_target == target then
+			recovery = candidate
+		end
+	end
+	assert(recovery and vim.api.nvim_buf_is_valid(recovery), "modified text was not recovered")
+	assert(vim.bo[recovery].modified, "recovery buffer is not modified")
+	assert(vim.api.nvim_buf_get_lines(recovery, 0, -1, false)[1] == "unsaved deleted text")
+end)
+
+test("version-2 requests reject schema injection, symlinks, binary files, and a different opened target", function()
+	local symlink = fixture .. "/external-link"
+	assert(vim.uv.fs_symlink(external, symlink))
+	local binary = vim.fn.tempname()
+	assert(require("config.fs").write_binary_atomic(binary, "binary\0payload"))
+	external_files[#external_files + 1] = binary
+	local binary_path = assert(vim.uv.fs_realpath(binary))
+	local cases = {
+		wait_request("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", external, { action = "execute" }),
+		wait_request("ffffffff-ffff-4fff-8fff-ffffffffffff", symlink),
+		wait_request("12121212-3434-4567-8899-121212121212", binary_path),
+	}
+	for _, value in ipairs(cases) do
+		write_request(value)
+		local handled = rpc.consume_request(value.request_id, instance)
+		assert(not handled, "unsafe version-2 request was accepted")
+	end
+
+	local request_id = "23232323-4545-4678-8999-232323232323"
+	write_request(wait_request(request_id, external))
+	local handled, err = rpc.consume_request(request_id, instance, {
+		open_file = function()
+			vim.cmd("tabedit " .. vim.fn.fnameescape(root .. "/target.lua"))
+		end,
+	})
+	assert(not handled and err:find("different target", 1, true))
+	assert(vim.uv.fs_lstat(state .. "/waits/" .. request_id .. ".json") == nil)
+end)
+
+test("VimLeavePre completes saved work and aborts modified work", function()
+	local saved_id = "34343434-5656-4789-8aaa-343434343434"
+	local saved_path = temporary_text()
+	write_request(wait_request(saved_id, saved_path))
+	assert(rpc.consume_request(saved_id, instance) == 1)
+
+	local modified_path = temporary_text({ "initial" })
+	local modified_id = "45454545-6767-489a-8bbb-454545454545"
+	write_request(wait_request(modified_id, modified_path))
+	assert(rpc.consume_request(modified_id, instance) == 1)
+	local modified_buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_buf_set_lines(modified_buf, 0, -1, false, { "not written" })
+	vim.bo[modified_buf].modified = true
+
+	vim.api.nvim_exec_autocmds("VimLeavePre", {})
+	assert(wait_state(saved_id).status == "completed")
+	assert(wait_state(modified_id).status == "aborted")
 end)
 
 test("opaque UUID request is consumed once and delegates exact tab position", function()
@@ -172,7 +337,9 @@ end)
 
 vim.fn.delete(fixture, "rf")
 vim.fn.delete(state, "rf")
-vim.fn.delete(outside)
+for _, path in ipairs(external_files) do
+	vim.fn.delete(path)
+end
 
 if #failures > 0 then
 	for _, failure in ipairs(failures) do

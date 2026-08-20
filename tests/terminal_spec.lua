@@ -147,6 +147,68 @@ test("an empty environment map opens the default shell", function()
 	opened = {}
 end)
 
+test("embedded LazyGit keeps its edit preset and adds process-local blocking GH_EDITOR", function()
+	local old_devpod = package.loaded["config.devpod"]
+	local old_repo = package.loaded["config.repo"]
+	local old_terminal = package.loaded["config.terminal"]
+	local old_fs = package.loaded["config.fs"]
+	local old_executable = vim.fn.executable
+	local old_systemlist = vim.fn.systemlist
+	local old_filereadable = vim.fn.filereadable
+	local captured
+	local generated
+
+	package.loaded["config.devpod"] = {
+		in_workspace = function()
+			return false
+		end,
+	}
+	package.loaded["config.repo"] = {
+		current_root = function()
+			return repo
+		end,
+	}
+	package.loaded["config.terminal"] = {
+		toggle = function(options)
+			captured = options
+			return {}
+		end,
+	}
+	package.loaded["config.fs"] = {
+		write_binary_atomic = function(path, data)
+			generated = { path = path, data = data }
+			return true
+		end,
+	}
+	vim.fn.executable = function(name)
+		return name == "lazygit" and 1 or 0
+	end
+	vim.fn.systemlist = function()
+		return { "/missing/lazygit/config" }
+	end
+	vim.fn.filereadable = function()
+		return 0
+	end
+
+	local lazygit = dofile(repo .. "/lua/plugins/lazygit.lua")
+	lazygit.keys[1][2]()
+	assert(captured and captured.cwd == repo and captured.argv[1] == "lazygit")
+	assert(captured.env.LG_CONFIG_FILE == generated.path)
+	assert(generated.data:find("editPreset: nvim%-remote"), "LazyGit edit preset changed")
+	assert(
+		captured.env.GH_EDITOR == vim.fn.shellescape(repo .. "/scripts/nvim-review-open") .. " --wait-editor",
+		"LazyGit GH_EDITOR did not contain only the fixed helper and mode"
+	)
+
+	package.loaded["config.devpod"] = old_devpod
+	package.loaded["config.repo"] = old_repo
+	package.loaded["config.terminal"] = old_terminal
+	package.loaded["config.fs"] = old_fs
+	vim.fn.executable = old_executable
+	vim.fn.systemlist = old_systemlist
+	vim.fn.filereadable = old_filereadable
+end)
+
 test("DevPod opens Bash with the explicit interactive completion rc", function()
 	local previous = vim.env.NVIM_DEVPOD
 	vim.env.NVIM_DEVPOD = "1"

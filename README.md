@@ -155,7 +155,7 @@ Unix RPC socket and an owner-only JSON record under the review state root. This
 keeps socket and Git discovery off the startup critical path; headless validators
 are not editor targets. The root is
 `$NVIM_REVIEW_STATE_HOME`, otherwise `$XDG_STATE_HOME/nvim-review`, otherwise
-`~/.local/state/nvim-review`; its `editors`, `requests`, and `sockets`
+`~/.local/state/nvim-review`; its `editors`, `requests`, `waits`, and `sockets`
 directories are mode 0700 and JSON files are mode 0600. Registry roots update
 only on `BufEnter` and `DirChanged`, and the editor removes its record and socket
 on exit.
@@ -180,6 +180,21 @@ the request and path again inside Neovim before routing through the shared tab
 opener. Zero or multiple matches are errors: it never starts plain Neovim and
 never falls back to another editor.
 
+The same helper has an explicit blocking mode for tools such as `gh` whose
+temporary editor file lives outside the repository:
+
+```sh
+~/.config/nvim/scripts/nvim-review-open --wait-editor /absolute/temporary-file
+```
+
+This mode derives the repository used for editor selection from its working
+directory, accepts one existing canonical regular non-symlink text file, and
+waits outside Neovim on owner-only durable state. `--signal-ready` prints
+`READY` only after Neovim has opened the file and armed its exact window/buffer
+lifecycle. Writing alone does not finish the editor. Save and close the window,
+delete an unmodified buffer, or use buffer-local `<leader>q` to write and close;
+closing a modified window aborts the caller while preserving the buffer.
+
 ## Development workflows
 
 `<leader>t` opens a host shell in a lower split. Shells, Python REPLs, LazyGit,
@@ -188,6 +203,10 @@ lifecycle keyed by runtime, repository and purpose. Hiding a terminal preserves
 its process; a failed process keeps its output. LazyGit and tuicr use 95% floats,
 while shells, REPLs and recipe output use the lower split. `gf` on a contained
 `file:line[:column]` location opens or reuses the corresponding editor tab.
+Embedded LazyGit also sets a process-local `GH_EDITOR` to the blocking helper,
+so `gh pr create` keeps its interactive questions in the LazyGit terminal while
+its title/body file opens in the parent editor. LazyGit's ordinary `e` action
+continues to use its `nvim-remote` preset.
 
 Python environment discovery remains in `:VenvSelect`, but selection never
 changes global `PATH`, `VIRTUAL_ENV` or terminal activation. The selected

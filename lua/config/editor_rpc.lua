@@ -25,6 +25,21 @@ local REQUEST_KEYS = {
 	column = true,
 	created_at = true,
 }
+local WAIT_REQUEST_KEYS = {
+	version = true,
+	request_id = true,
+	instance_id = true,
+	repo_root = true,
+	path = true,
+	created_at = true,
+}
+local WAIT_STATE_KEYS = {
+	version = true,
+	request_id = true,
+	instance_id = true,
+	status = true,
+	updated_at = true,
+}
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Editor RPC" })
@@ -86,6 +101,7 @@ local function prepare_state(root)
 		root,
 		vim.fs.joinpath(root, "editors"),
 		vim.fs.joinpath(root, "requests"),
+		vim.fs.joinpath(root, "waits"),
 		vim.fs.joinpath(root, "sockets"),
 	}) do
 		local ok, err = ensure_directory(path)
@@ -102,6 +118,10 @@ end
 
 local function request_path(instance, request_id)
 	return vim.fs.joinpath(instance.root, "requests", request_id .. ".json")
+end
+
+local function wait_path(instance, request_id)
+	return vim.fs.joinpath(instance.root, "waits", request_id .. ".json")
 end
 
 local function sorted_roots(instance)
@@ -145,6 +165,210 @@ local function positive_integer(value)
 	return type(value) == "number" and value >= 1 and value % 1 == 0
 end
 
+local function write_wait_state(instance, request_id, status)
+	if status ~= "waiting" and status ~= "completed" and status ~= "aborted" then
+		return nil, "wait state status is invalid"
+	end
+	local state = {
+		version = 1,
+		request_id = request_id,
+		instance_id = instance.instance_id,
+		status = status,
+		updated_at = timestamp(),
+	}
+	local path = wait_path(instance, request_id)
+	local ok, err = fs.write_binary_atomic(path, vim.json.encode(state) .. "\n")
+	if not ok then
+		return nil, err
+	end
+	local chmod_ok, chmod_err = uv.fs_chmod(path, tonumber("600", 8))
+	if not chmod_ok then
+		return nil, "cannot secure editor wait state: " .. tostring(chmod_err)
+	end
+	return state
+end
+
+local function canonical_editor_file(path)
+	if type(path) ~= "string" or path == "" or path:sub(1, 1) ~= "/" or path:find("\0", 1, true) then
+		return nil, "editor path must be an absolute path"
+	end
+	local normalized = vim.fs.normalize(path)
+	local resolved = uv.fs_realpath(normalized)
+	if not resolved or vim.fs.normalize(resolved) ~= normalized then
+		return nil, "editor path is missing or is not canonical"
+	end
+	local stat = uv.fs_lstat(normalized)
+	if not stat or stat.type ~= "file" then
+		return nil, "editor path is not a regular non-symlink file"
+	end
+	local fd, open_err = uv.fs_open(normalized, "r", 0)
+	if not fd then
+		return nil, "cannot open editor path: " .. tostring(open_err)
+	end
+	local opened_stat, opened_stat_err = uv.fs_fstat(fd)
+	if not opened_stat or opened_stat.type ~= "file" or opened_stat.dev ~= stat.dev or opened_stat.ino ~= stat.ino then
+		pcall(uv.fs_close, fd)
+		return nil, "editor path changed while opening: " .. tostring(opened_stat_err or "identity mismatch")
+	end
+	local offset = 0
+	local read_err
+	while offset < opened_stat.size do
+		local chunk
+		chunk, read_err = uv.fs_read(fd, math.min(64 * 1024, opened_stat.size - offset), offset)
+		if chunk == nil or chunk == "" then
+			break
+		end
+		if chunk:find("\0", 1, true) then
+			pcall(uv.fs_close, fd)
+			return nil, "editor path is not a text file"
+		end
+		offset = offset + #chunk
+	end
+	local closed, close_err = uv.fs_close(fd)
+	if offset ~= opened_stat.size then
+		return nil, "cannot inspect editor path: " .. tostring(read_err)
+	end
+	if not closed then
+		return nil, "cannot close editor path: " .. tostring(close_err)
+	end
+	local final_stat = uv.fs_lstat(normalized)
+	if
+		not final_stat
+		or final_stat.type ~= "file"
+		or final_stat.dev ~= opened_stat.dev
+		or final_stat.ino ~= opened_stat.ino
+	then
+		return nil, "editor path changed while validating"
+	end
+	return normalized
+end
+
+local function preserve_modified_buffer(buf, target)
+	if not vim.api.nvim_buf_is_valid(buf) or not vim.bo[buf].modified then
+		return
+	end
+	local ok, lines = pcall(vim.api.nvim_buf_get_lines, buf, 0, -1, false)
+	if not ok then
+		return
+	end
+	local filetype = vim.bo[buf].filetype
+	vim.schedule(function()
+		if vim.api.nvim_buf_is_valid(buf) then
+			return
+		end
+		local recovery = vim.api.nvim_create_buf(true, false)
+		vim.api.nvim_buf_set_lines(recovery, 0, -1, false, lines)
+		vim.bo[recovery].filetype = filetype
+		vim.bo[recovery].modified = true
+		vim.b[recovery].nvim_editor_recovery_target = target
+		if not vim.api.nvim_buf_is_valid(recovery) then
+			return
+		end
+		if vim.fn.bufnr(target) == -1 then
+			pcall(vim.api.nvim_buf_set_name, recovery, target)
+		end
+		notify(("Unsaved external-editor text was preserved in buffer %d"):format(recovery), vim.log.levels.WARN)
+	end)
+end
+
+local function arm_editor_wait(instance, request_id, target, win, buf)
+	local group = vim.api.nvim_create_augroup("config_editor_wait_" .. request_id:gsub("%-", "_"), { clear = true })
+	local finished = false
+	local recovery_created = false
+
+	local function cleanup()
+		pcall(vim.api.nvim_del_augroup_by_id, group)
+		if vim.api.nvim_buf_is_valid(buf) then
+			pcall(vim.keymap.del, "n", "<leader>q", { buffer = buf })
+		end
+	end
+
+	local function finish(status)
+		if finished then
+			return true
+		end
+		if status ~= "aborted" and vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified then
+			status = "aborted"
+		end
+		local state, err = write_wait_state(instance, request_id, status)
+		if not state then
+			notify("Could not update editor wait state: " .. tostring(err), vim.log.levels.ERROR)
+			return nil
+		end
+		finished = true
+		cleanup()
+		return true
+	end
+
+	vim.api.nvim_create_autocmd("WinClosed", {
+		group = group,
+		pattern = tostring(win),
+		callback = function()
+			local modified = vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified
+			local completed = not modified
+			if modified and not recovery_created then
+				recovery_created = true
+				preserve_modified_buffer(buf, target)
+			end
+			finish("completed")
+			if completed then
+				vim.schedule(function()
+					if
+						vim.api.nvim_buf_is_valid(buf)
+						and not vim.bo[buf].modified
+						and #vim.fn.win_findbuf(buf) == 0
+					then
+						pcall(vim.api.nvim_buf_delete, buf, { force = false })
+					end
+				end)
+			end
+		end,
+	})
+	vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
+		group = group,
+		buffer = buf,
+		callback = function()
+			if vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified and not recovery_created then
+				recovery_created = true
+				preserve_modified_buffer(buf, target)
+			end
+			finish("completed")
+		end,
+	})
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		group = group,
+		callback = function()
+			finish("completed")
+		end,
+	})
+	vim.keymap.set("n", "<leader>q", function()
+		local wrote, write_err = pcall(vim.api.nvim_buf_call, buf, function()
+			vim.cmd.write()
+		end)
+		if not wrote or (vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified) then
+			finish("aborted")
+			notify("Could not save external-editor text: " .. tostring(write_err), vim.log.levels.ERROR)
+			return
+		end
+		if vim.api.nvim_win_is_valid(win) then
+			local closed, close_window_err = pcall(vim.api.nvim_win_close, win, false)
+			if not closed then
+				finish("aborted")
+				notify("Could not close external-editor window: " .. tostring(close_window_err), vim.log.levels.ERROR)
+			end
+		else
+			finish("completed")
+		end
+	end, { buffer = buf, nowait = true, silent = true, desc = "Save and finish external editor" })
+
+	local state, state_err = write_wait_state(instance, request_id, "waiting")
+	if not state then
+		cleanup()
+		return nil, state_err
+	end
+	return true
+end
+
 local function consume(request_id, instance, dependencies)
 	if not is_uuid(request_id) then
 		return nil, "request id must be a lowercase UUID"
@@ -167,22 +391,27 @@ local function consume(request_id, instance, dependencies)
 	if not ok or type(value) ~= "table" or vim.islist(value) then
 		return nil, "request must be one JSON object"
 	end
-	local keys_ok, keys_err = exact_keys(value, REQUEST_KEYS, "request")
+	local request_keys = value.version == 2 and WAIT_REQUEST_KEYS or REQUEST_KEYS
+	local keys_ok, keys_err = exact_keys(value, request_keys, "request")
 	if not keys_ok then
 		return nil, keys_err
 	end
-	for key in pairs(REQUEST_KEYS) do
+	for key in pairs(request_keys) do
 		if value[key] == nil then
 			return nil, "request is missing " .. key
 		end
 	end
-	if value.version ~= 1 or value.request_id ~= request_id or value.instance_id ~= instance.instance_id then
+	if
+		(value.version ~= 1 and value.version ~= 2)
+		or value.request_id ~= request_id
+		or value.instance_id ~= instance.instance_id
+	then
 		return nil, "request identity does not match the selected editor"
 	end
 	if type(value.created_at) ~= "string" or value.created_at == "" then
 		return nil, "request created_at is invalid"
 	end
-	if not positive_integer(value.line) or not positive_integer(value.column) then
+	if value.version == 1 and (not positive_integer(value.line) or not positive_integer(value.column)) then
 		return nil, "request line and column must be positive integers"
 	end
 	if type(value.repo_root) ~= "string" or not instance.roots[value.repo_root] then
@@ -192,12 +421,38 @@ local function consume(request_id, instance, dependencies)
 	if not canonical or canonical ~= value.repo_root then
 		return nil, root_err or "request repository is not canonical"
 	end
-	local target, target_err = require("config.repo").resolve_relative(canonical, value.path)
+	local open_file = dependencies and dependencies.open_file or require("config.editor").open_file_in_tab
+	if value.version == 1 then
+		local target, target_err = require("config.repo").resolve_relative(canonical, value.path)
+		if not target then
+			return nil, target_err
+		end
+		open_file(target, { lnum = value.line, col = value.column })
+		return 1
+	end
+
+	local target, target_err = canonical_editor_file(value.path)
 	if not target then
 		return nil, target_err
 	end
-	local open_file = dependencies and dependencies.open_file or require("config.editor").open_file_in_tab
-	open_file(target, { lnum = value.line, col = value.column })
+	open_file(target, { lnum = 1, col = 1 })
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_get_current_buf()
+	if not vim.api.nvim_win_is_valid(win) or vim.api.nvim_win_get_buf(win) ~= buf then
+		return nil, "editor did not leave one observable current window"
+	end
+	local opened = uv.fs_realpath(vim.api.nvim_buf_get_name(buf))
+	if not opened or vim.fs.normalize(opened) ~= target then
+		return nil, "editor opened a different target"
+	end
+	local revalidated, revalidate_err = canonical_editor_file(target)
+	if not revalidated then
+		return nil, revalidate_err
+	end
+	local armed, arm_err = arm_editor_wait(instance, request_id, target, win, buf)
+	if not armed then
+		return nil, arm_err
+	end
 	return 1
 end
 
@@ -357,6 +612,8 @@ end
 
 M._cleanup = cleanup
 M._record_keys = RECORD_KEYS
+M._wait_request_keys = WAIT_REQUEST_KEYS
+M._wait_state_keys = WAIT_STATE_KEYS
 M._prepare_state = prepare_state
 
 return M

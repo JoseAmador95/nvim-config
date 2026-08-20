@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open one contained file in exactly one registered Neovim instance."""
+"""Open one file in exactly one registered Neovim instance."""
 
 import argparse
 import datetime
@@ -17,8 +17,12 @@ import uuid
 MAX_RECORD_BYTES = 64 * 1024
 RECORD_MAX_AGE = 7 * 24 * 60 * 60
 REQUEST_MAX_AGE = 10 * 60
+WAIT_MAX_AGE = 7 * 24 * 60 * 60
 PROBE_ATTEMPTS = 3
 PROBE_RETRY_DELAY = 0.05
+RPC_TIMEOUT = 1.0
+WAIT_POLL_DELAY = 0.05
+TEXT_CHUNK_BYTES = 64 * 1024
 RECORD_KEYS = {
     "version",
     "instance_id",
@@ -39,6 +43,14 @@ GIT_ROUTING_ENV = {
     "GIT_PREFIX",
     "GIT_WORK_TREE",
 }
+WAIT_KEYS = {
+    "version",
+    "request_id",
+    "instance_id",
+    "status",
+    "updated_at",
+}
+WAIT_STATUSES = {"waiting", "completed", "aborted"}
 
 
 class OpenError(Exception):
@@ -68,8 +80,9 @@ def prepare_state(root):
     ensure_dir(root)
     editors = ensure_dir(root / "editors")
     requests = ensure_dir(root / "requests")
+    waits = ensure_dir(root / "waits")
     ensure_dir(root / "sockets")
-    return editors, requests
+    return editors, requests, waits
 
 
 def regular_nonsymlink(path):
@@ -149,14 +162,24 @@ def pid_alive(pid):
 
 
 def run_nvim(nvim, socket, expression):
-    return subprocess.run(
-        [nvim, "--headless", "--server", socket, "--remote-expr", expression],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        text=True,
-    )
+    command = [nvim, "--headless", "--server", socket, "--remote-expr", expression]
+    try:
+        return subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=RPC_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout="",
+            stderr="nvim RPC timed out after " + str(RPC_TIMEOUT) + " seconds",
+        )
 
 
 def load_live_records(editors, nvim):
@@ -189,14 +212,24 @@ def load_live_records(editors, nvim):
     return records, unreachable
 
 
-def matching_live_records(editors, nvim, repo):
+def matching_live_records(editors, nvim, repo, expected_pane=None):
     repo_text = str(repo)
     matching = []
     unreachable = []
     for attempt in range(PROBE_ATTEMPTS):
         records, unavailable = load_live_records(editors, nvim)
-        matching = [record for record in records if repo_text in record["repo_roots"]]
-        unreachable = [record for record in unavailable if repo_text in record["repo_roots"]]
+        matching = [
+            record
+            for record in records
+            if repo_text in record["repo_roots"]
+            and (expected_pane is None or record["TMUX_PANE"] == expected_pane)
+        ]
+        unreachable = [
+            record
+            for record in unavailable
+            if repo_text in record["repo_roots"]
+            and (expected_pane is None or record["TMUX_PANE"] == expected_pane)
+        ]
         if not unreachable and matching:
             break
         if attempt + 1 < PROBE_ATTEMPTS:
@@ -204,9 +237,9 @@ def matching_live_records(editors, nvim, repo):
     return matching, unreachable
 
 
-def prune_requests(requests):
-    cutoff = time.time() - REQUEST_MAX_AGE
-    for path in requests.iterdir():
+def prune_old_files(directory, max_age):
+    cutoff = time.time() - max_age
+    for path in directory.iterdir():
         if not regular_nonsymlink(path):
             continue
         try:
@@ -215,6 +248,11 @@ def prune_requests(requests):
             stale = False
         if stale:
             unlink_regular(path)
+
+
+def prune_state(requests, waits):
+    prune_old_files(requests, REQUEST_MAX_AGE)
+    prune_old_files(waits, WAIT_MAX_AGE)
 
 
 def git_root(path):
@@ -268,6 +306,50 @@ def resolve_inputs(arguments):
     return repo, target, relative.as_posix()
 
 
+def validate_text_file(path):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise OpenError("editor target is not a regular file")
+        while True:
+            chunk = os.read(descriptor, TEXT_CHUNK_BYTES)
+            if not chunk:
+                break
+            if b"\0" in chunk:
+                raise OpenError("editor target is not a text file")
+    finally:
+        os.close(descriptor)
+
+
+def resolve_editor_input(filename):
+    try:
+        cwd = pathlib.Path.cwd().resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise OpenError("cwd does not exist: " + str(error))
+    if not cwd.is_dir():
+        raise OpenError("cwd is not a directory")
+    repo = git_root(cwd)
+    requested = pathlib.Path(filename).expanduser()
+    if not requested.is_absolute():
+        requested = cwd / requested
+    try:
+        requested_stat = requested.lstat()
+    except OSError as error:
+        raise OpenError("editor target does not exist: " + str(error))
+    if stat.S_ISLNK(requested_stat.st_mode):
+        raise OpenError("editor target must not be a symlink")
+    if not stat.S_ISREG(requested_stat.st_mode):
+        raise OpenError("editor target is not a regular file")
+    try:
+        target = requested.resolve(strict=True)
+        validate_text_file(target)
+    except (OSError, RuntimeError) as error:
+        raise OpenError("could not validate editor target: " + str(error))
+    return repo, target
+
+
 def atomic_json(path, value):
     encoded = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     temporary = path.with_name(path.name + ".tmp." + str(os.getpid()) + "." + uuid.uuid4().hex)
@@ -288,29 +370,115 @@ def atomic_json(path, value):
         raise
 
 
+def validate_wait_state(value, path, selected, now):
+    if not isinstance(value, dict) or set(value) != WAIT_KEYS:
+        return None, "wait state must contain the exact version-1 fields"
+    request_id = canonical_uuid(value.get("request_id"))
+    if request_id is None or path.name != request_id + ".json":
+        return None, "wait state request identity is invalid"
+    if value.get("version") != 1 or value.get("instance_id") != selected["instance_id"]:
+        return None, "wait state does not belong to the selected editor"
+    if value.get("status") not in WAIT_STATUSES:
+        return None, "wait state status is invalid"
+    updated = parse_timestamp(value.get("updated_at"))
+    if updated is None or updated > now + 300 or now - updated > WAIT_MAX_AGE:
+        return None, "wait state timestamp is invalid or stale"
+    return value, None
+
+
+def load_wait_state(path, selected):
+    descriptor = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(str(path), flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise OpenError("editor wait state is missing or is not a regular non-symlink file")
+        if info.st_size > MAX_RECORD_BYTES:
+            raise OpenError("editor wait state exceeds 64 KiB")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise OpenError("editor wait state is not owner-only")
+        encoded = os.read(descriptor, info.st_size + 1)
+        value = json.loads(encoded.decode("utf-8"))
+    except OpenError:
+        raise
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        raise OpenError("editor wait state is malformed: " + str(error))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    state, state_error = validate_wait_state(value, path, selected, time.time())
+    if state is None:
+        raise OpenError(state_error)
+    return state
+
+
+def wait_for_editor(wait_path, selected, signal_ready):
+    try:
+        state = load_wait_state(wait_path, selected)
+        if signal_ready:
+            print("READY", flush=True)
+        while True:
+            if state["status"] == "completed":
+                return
+            if state["status"] == "aborted":
+                raise OpenError("editor closed without saving the temporary file")
+            if not pid_alive(selected["pid"]):
+                raise OpenError("registered editor exited before editing completed")
+            time.sleep(WAIT_POLL_DELAY)
+            state = load_wait_state(wait_path, selected)
+    finally:
+        unlink_regular(wait_path)
+
+
 def parser():
     value = argparse.ArgumentParser(description=__doc__)
-    value.add_argument("--cwd", required=True)
-    value.add_argument("--file", required=True)
+    value.add_argument("--cwd")
+    value.add_argument("--file")
     value.add_argument("--line", type=int, default=1)
     value.add_argument("--column", type=int, default=1)
+    value.add_argument("--wait-editor", action="store_true")
+    value.add_argument("--signal-ready", action="store_true")
+    value.add_argument("--tmux-pane")
+    value.add_argument("editor_file", nargs="?")
     return value
 
 
 def main(argv=None):
     os.umask(0o077)
-    arguments = parser().parse_args(argv)
+    argument_parser = parser()
+    arguments = argument_parser.parse_args(argv)
+    editor_mode = arguments.wait_editor
+    if editor_mode:
+        if arguments.cwd is not None or arguments.file is not None:
+            argument_parser.error("--wait-editor cannot be combined with --cwd or --file")
+        if arguments.editor_file is None:
+            argument_parser.error("--wait-editor requires exactly one FILE")
+    elif arguments.cwd is None or arguments.file is None:
+        argument_parser.error("--cwd and --file are required unless --wait-editor is used")
+    elif arguments.editor_file is not None:
+        argument_parser.error("unexpected FILE without --wait-editor")
+    elif arguments.signal_ready:
+        argument_parser.error("--signal-ready requires --wait-editor")
+    if arguments.tmux_pane is not None:
+        if not editor_mode:
+            argument_parser.error("--tmux-pane requires --wait-editor")
+        if not arguments.tmux_pane.startswith("%") or not arguments.tmux_pane[1:].isdigit():
+            argument_parser.error("--tmux-pane must be an exact tmux pane id")
     try:
         if not positive_integer(arguments.line) or not positive_integer(arguments.column):
             raise OpenError("line and column must be positive integers")
-        repo, unused_target, relative = resolve_inputs(arguments)
+        if editor_mode:
+            repo, target = resolve_editor_input(arguments.editor_file)
+        else:
+            repo, unused_target, relative = resolve_inputs(arguments)
         root = state_root()
-        editors, requests = prepare_state(root)
-        prune_requests(requests)
+        editors, requests, waits = prepare_state(root)
+        prune_state(requests, waits)
         nvim = shutil.which("nvim")
         if nvim is None:
             raise OpenError("nvim was not found in PATH")
-        matching, unreachable = matching_live_records(editors, nvim, repo)
+        matching, unreachable = matching_live_records(editors, nvim, repo, arguments.tmux_pane)
         if unreachable:
             raise OpenError(
                 "registered editor for repository "
@@ -327,24 +495,38 @@ def main(argv=None):
             )
         selected = matching[0]
         request_id = str(uuid.uuid4())
-        request = {
-            "version": 1,
-            "request_id": request_id,
-            "instance_id": selected["instance_id"],
-            "repo_root": str(repo),
-            "path": relative,
-            "line": arguments.line,
-            "column": arguments.column,
-            "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
+        if editor_mode:
+            request = {
+                "version": 2,
+                "request_id": request_id,
+                "instance_id": selected["instance_id"],
+                "repo_root": str(repo),
+                "path": str(target),
+                "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        else:
+            request = {
+                "version": 1,
+                "request_id": request_id,
+                "instance_id": selected["instance_id"],
+                "repo_root": str(repo),
+                "path": relative,
+                "line": arguments.line,
+                "column": arguments.column,
+                "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
         request_file = requests / (request_id + ".json")
+        wait_file = waits / (request_id + ".json")
         atomic_json(request_file, request)
         expression = 'v:lua.NvimReviewOpenRequest("' + request_id + '")'
         result = run_nvim(nvim, selected["socket"], expression)
         if result.returncode != 0 or result.stdout.strip() != "1":
             unlink_regular(request_file)
+            unlink_regular(wait_file)
             detail = result.stderr.strip() or result.stdout.strip()
             raise OpenError("registered editor rejected the request: " + detail)
+        if editor_mode:
+            wait_for_editor(wait_file, selected, arguments.signal_ready)
         return 0
     except OpenError as error:
         print("nvim-review-open: " + str(error), file=sys.stderr)
