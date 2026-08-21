@@ -18,6 +18,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(vim.g.nvim_config_initialized == true, "init.lua did not complete in the VSCode profile")
 				for _, command in ipairs({
 					"MenuOpen",
+					"NavigationBack",
+					"NavigationForward",
+					"NavigationHistory",
 					"CloseTab",
 					"DiagramShow",
 					"ClangdSetCompileCommands",

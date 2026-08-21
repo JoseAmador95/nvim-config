@@ -213,6 +213,7 @@ end
 if is_editor then
 	local devpod = require("config.devpod")
 	devpod.setup()
+	require("config.navigation_history").setup()
 	require("config.review").setup()
 	require("config.agent_context").setup()
 	require("config.agent_results").setup()

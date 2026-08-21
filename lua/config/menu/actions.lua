@@ -730,6 +730,15 @@ local function confirm(prompt, callback)
 end
 
 local handlers = {
+	["navigation.back"] = function()
+		require("config.navigation_history").back()
+	end,
+	["navigation.forward"] = function()
+		require("config.navigation_history").forward()
+	end,
+	["navigation.history"] = function()
+		require("config.navigation_history").select()
+	end,
 	["tmux.refresh_dev_session"] = function()
 		local refresh = require_or_notify("config.dev_session_refresh", "Dev session refresh")
 		if refresh then

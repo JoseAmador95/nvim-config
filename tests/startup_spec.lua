@@ -59,6 +59,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(package.loaded["dap-view"] == nil, "dap-view loaded eagerly during startup")
 				assert(vim.fn.exists(":CloseTab") == 2, "full editor CloseTab command is missing")
 				for _, command in ipairs({
+					"NavigationBack",
+					"NavigationForward",
+					"NavigationHistory",
 					"ReviewRoundStart",
 					"TuicrReview",
 					"AgentContext",
@@ -102,6 +105,14 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(menu_map.rhs == "<cmd>MenuOpen<cr>", "action palette mapping drifted")
 				local visual_menu_map = vim.fn.maparg("<leader><leader>", "x", false, true)
 				assert(visual_menu_map.rhs == "<cmd>MenuOpen<cr>", "visual action palette mapping is missing")
+				assert(
+					vim.fn.maparg("<C-o>", "n", false, true).desc == "Navigation back",
+					"semantic back mapping is missing"
+				)
+				assert(
+					vim.fn.maparg("<C-i>", "n", false, true).desc == "Navigation forward",
+					"semantic forward mapping is missing"
+				)
 				assert(not vim.lsp.inlay_hint.is_enabled({ bufnr = 0 }), "inlay hints must default off")
 				require("lazy").load({ plugins = { "bufferline.nvim" } })
 

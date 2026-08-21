@@ -35,6 +35,16 @@ function M.open_file_in_tab(filepath, opts)
 	opts = opts or {}
 	local lnum = tonumber(opts.lnum) or 1
 	local col = tonumber(opts.col) or 1
+	local history
+	if opts.record_history ~= false then
+		history = require("config.navigation_history")
+	end
+	local origin = history and history.capture() or nil
+	local function record_destination()
+		if history then
+			history.record_transition(origin, history.capture())
+		end
+	end
 
 	filepath = vim.fn.fnamemodify(filepath, ":p")
 	local target_path = normalized_path(filepath)
@@ -50,6 +60,7 @@ function M.open_file_in_tab(filepath, opts)
 						vim.api.nvim_set_current_tabpage(tabpage)
 						vim.api.nvim_set_current_win(win)
 						set_cursor_position(buf, win, lnum, col)
+						record_destination()
 						return
 					end
 				end
@@ -63,11 +74,13 @@ function M.open_file_in_tab(filepath, opts)
 		vim.api.nvim_cmd({ cmd = "edit", args = { filepath } }, {})
 		require("config.tabs").unmark_home(home)
 		set_cursor_position(0, 0, lnum, col)
+		record_destination()
 		return
 	end
 
 	vim.cmd("tabedit " .. vim.fn.fnameescape(filepath))
 	set_cursor_position(0, 0, lnum, col)
+	record_destination()
 end
 
 return M

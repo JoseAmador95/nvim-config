@@ -19,6 +19,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				for _, command in ipairs({
 					"MenuOpen",
+					"NavigationBack",
+					"NavigationForward",
+					"NavigationHistory",
 					"CloseTab",
 					"ClangdSetCompileCommands",
 					"ClangdSwitchSourceHeader",
