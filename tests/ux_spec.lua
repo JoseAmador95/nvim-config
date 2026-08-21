@@ -12,6 +12,58 @@ assert(session.opts.auto_restore == false, "sessions still auto-restore")
 assert(session.opts.auto_restore_last_session == false, "last session still auto-restores")
 assert(session.opts.auto_delete_empty_sessions == false, "empty home deletes saved sessions")
 
+do
+	local original_auto_session = package.loaded["auto-session"]
+	local original_create_autocmd = vim.api.nvim_create_autocmd
+	local original_notify = vim.notify
+	local original_restore = vim.env.NVIM_TMUX_REFRESH_RESTORE
+	local autocmd
+	local setups = 0
+	local restores = 0
+	local notifications = {}
+	local ok, err = xpcall(function()
+		package.loaded["auto-session"] = {
+			setup = function(options)
+				setups = setups + 1
+				assert(options.auto_restore == false, "one-shot restore enabled normal auto-restore")
+			end,
+			restore_session = function(name, options)
+				restores = restores + 1
+				assert(name == nil and options.show_message == false, "one-shot restore arguments changed")
+				return false
+			end,
+		}
+		vim.api.nvim_create_autocmd = function(event, options)
+			autocmd = { event = event, options = options }
+			return 1
+		end
+		vim.notify = function(message)
+			notifications[#notifications + 1] = message
+		end
+		vim.env.NVIM_TMUX_REFRESH_RESTORE = "1"
+		session.config(nil, session.opts)
+		assert(setups == 1 and restores == 0, "session restored before VimEnter")
+		assert(vim.env.NVIM_TMUX_REFRESH_RESTORE == nil, "one-shot restore environment was not consumed")
+		assert(autocmd.event == "VimEnter" and autocmd.options.once == true, "one-shot restore autocmd is not once")
+		autocmd.options.callback()
+		assert(restores == 1, "one-shot restore did not run on VimEnter")
+		assert(
+			notifications[#notifications]:find("declined to restore", 1, true),
+			"false one-shot restore result was hidden"
+		)
+
+		autocmd = nil
+		session.config(nil, session.opts)
+		assert(setups == 2 and autocmd == nil, "one-shot restore repeated without its environment flag")
+	end, debug.traceback)
+
+	package.loaded["auto-session"] = original_auto_session
+	vim.api.nvim_create_autocmd = original_create_autocmd
+	vim.notify = original_notify
+	vim.env.NVIM_TMUX_REFRESH_RESTORE = original_restore
+	assert(ok, err)
+end
+
 local expected_session_keys = {
 	["<leader>Ss"] = true,
 	["<leader>Sr"] = true,

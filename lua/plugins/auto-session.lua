@@ -60,6 +60,20 @@ return {
 	},
 	config = function(_, opts)
 		vim.o.sessionoptions = "blank,buffers,curdir,folds,help,tabpages,winsize,winpos,terminal,localoptions"
-		require("auto-session").setup(opts)
+		local auto_session = require("auto-session")
+		auto_session.setup(opts)
+		if vim.env.NVIM_TMUX_REFRESH_RESTORE == "1" then
+			vim.env.NVIM_TMUX_REFRESH_RESTORE = nil
+			vim.api.nvim_create_autocmd("VimEnter", {
+				once = true,
+				callback = function()
+					local ok, restored = pcall(auto_session.restore_session, nil, { show_message = false })
+					if not ok or restored ~= true then
+						local detail = not ok and tostring(restored) or "auto-session declined to restore"
+						vim.notify("Could not restore refreshed dev session: " .. detail, vim.log.levels.ERROR)
+					end
+				end,
+			})
+		end
 	end,
 }

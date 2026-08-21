@@ -128,6 +128,19 @@ test("every curated definition has an executable action", function()
 	end
 end)
 
+test("tmux refresh is a namespaced palette-only descriptor", function()
+	local dispatch = function() end
+	local menu_context = context.new({ filetype = "lua", mode = "n" })
+	local palette = catalog.build(menu_context, dispatch, "palette")
+	local compact = catalog.build(menu_context, dispatch, "context")
+	local section = assert(find_section(palette, "tmux"), "Tmux palette section is missing")
+	equal("Tmux", section.label, "Tmux namespace label")
+	local item = assert(find_item(palette, "tmux.refresh_dev_session"), "refresh descriptor is missing")
+	equal("Refresh Dev Session...", item.label, "refresh label")
+	equal({ "tp", "layout dev", "reload tmux", "restart windows", "save session" }, item.keywords, "refresh keywords")
+	assert(not find_item(compact, "tmux.refresh_dev_session"), "tmux refresh leaked into the context menu")
+end)
+
 test("catalog filters visual, filetype, and CMake descriptors from context", function()
 	local dispatch = function() end
 	local lua_sections = catalog.build(context.new({ filetype = "lua", mode = "n" }), dispatch)
@@ -453,6 +466,285 @@ test("high-impact palette actions require confirmation", function()
 
 	vim.api.nvim_cmd = original_cmd
 	vim.ui.select = original_select
+	assert(ok, err)
+end)
+
+test("tmux refresh confirmation is explicit and honors Cancel and Continue", function()
+	local actions = require("config.menu.actions")
+	local original_refresh = package.loaded["config.dev_session_refresh"]
+	local original_select = vim.ui.select
+	local calls = 0
+	local choice = "Cancel"
+	local target = context.capture().target
+	target.surface = "palette"
+
+	local ok, err = xpcall(function()
+		package.loaded["config.dev_session_refresh"] = {
+			refresh = function()
+				calls = calls + 1
+			end,
+		}
+		vim.ui.select = function(items, options, callback)
+			equal({ "Cancel", "Continue" }, items, "refresh confirmation choices")
+			equal(
+				"Refresh the tmux dev session? This restarts agent/editor/git, Neovim exits, and term keeps running.",
+				options.prompt,
+				"refresh confirmation prompt"
+			)
+			callback(choice)
+		end
+
+		actions.run("tmux.refresh_dev_session", target)
+		equal(0, calls, "cancelled refresh executed")
+		choice = "Continue"
+		actions.run("tmux.refresh_dev_session", target)
+		equal(1, calls, "confirmed refresh did not execute exactly once")
+	end, debug.traceback)
+
+	package.loaded["config.dev_session_refresh"] = original_refresh
+	vim.ui.select = original_select
+	assert(ok, err)
+end)
+
+test("host dev-session refresh checks, saves, schedules, then exits without bang", function()
+	local refresh = require("config.dev_session_refresh")
+	local original_devpod = package.loaded["config.devpod"]
+	local original_auto_session = package.loaded["auto-session"]
+	local original_executable = vim.fn.executable
+	local original_system = vim.system
+	local original_schedule = vim.schedule
+	local original_cmd = vim.api.nvim_cmd
+	local original_notify = vim.notify
+	local original_pane = vim.env.TMUX_PANE
+	local calls = {}
+	local saved
+	local quit
+
+	local ok, err = xpcall(function()
+		for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_valid(bufnr) then
+				vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
+			end
+		end
+		package.loaded["config.devpod"] = {
+			in_workspace = function()
+				return false
+			end,
+		}
+		package.loaded["auto-session"] = {
+			save_session = function(name, options)
+				saved = { name = name, options = vim.deepcopy(options) }
+				return true
+			end,
+		}
+		vim.env.TMUX_PANE = "%42"
+		vim.fn.executable = function(path)
+			equal(refresh._helper, path, "helper executable check path")
+			return 1
+		end
+		vim.schedule = function(callback)
+			callback()
+		end
+		vim.system = function(argv, options, callback)
+			calls[#calls + 1] = { argv = vim.deepcopy(argv), options = vim.deepcopy(options) }
+			callback({ code = 0, stdout = "", stderr = "" })
+			return {}
+		end
+		vim.api.nvim_cmd = function(specification, options)
+			quit = { specification = specification, options = options }
+		end
+		vim.notify = function() end
+
+		assert(refresh.refresh())
+		equal({ refresh._helper, "check", "%42" }, calls[1].argv, "preflight argv")
+		equal({ text = true }, calls[1].options, "preflight process options")
+		equal({
+			name = nil,
+			options = { show_message = false, is_autosave = true },
+		}, saved, "auto-session save call")
+		equal({ refresh._helper, "schedule", "%42" }, calls[2].argv, "schedule argv")
+		equal({ specification = { cmd = "quitall" }, options = {} }, quit, "safe Neovim exit")
+	end, debug.traceback)
+
+	package.loaded["config.devpod"] = original_devpod
+	package.loaded["auto-session"] = original_auto_session
+	vim.fn.executable = original_executable
+	vim.system = original_system
+	vim.schedule = original_schedule
+	vim.api.nvim_cmd = original_cmd
+	vim.notify = original_notify
+	vim.env.TMUX_PANE = original_pane
+	assert(ok, err)
+end)
+
+test("dev-session refresh aborts for modified buffers and save failures", function()
+	local refresh = require("config.dev_session_refresh")
+	local original_devpod = package.loaded["config.devpod"]
+	local original_auto_session = package.loaded["auto-session"]
+	local original_executable = vim.fn.executable
+	local original_system = vim.system
+	local original_schedule = vim.schedule
+	local original_cmd = vim.api.nvim_cmd
+	local original_notify = vim.notify
+	local original_pane = vim.env.TMUX_PANE
+	local original_buffer = vim.api.nvim_get_current_buf()
+	local buffer
+	local helper_calls = {}
+	local saves = 0
+	local quits = 0
+	local notifications = {}
+	local helper_result = { code = 0, stdout = "", stderr = "" }
+
+	local ok, err = xpcall(function()
+		for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_valid(bufnr) then
+				vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
+			end
+		end
+		package.loaded["config.devpod"] = {
+			in_workspace = function()
+				return false
+			end,
+		}
+		package.loaded["auto-session"] = {
+			save_session = function()
+				saves = saves + 1
+				return false
+			end,
+		}
+		vim.fn.executable = function()
+			return 1
+		end
+		vim.schedule = function(callback)
+			callback()
+		end
+		vim.system = function(argv, _, callback)
+			helper_calls[#helper_calls + 1] = vim.deepcopy(argv)
+			callback(helper_result)
+			return {}
+		end
+		vim.api.nvim_cmd = function()
+			quits = quits + 1
+		end
+		vim.notify = function(message)
+			notifications[#notifications + 1] = message
+		end
+		vim.env.TMUX_PANE = "editor;quit"
+		assert(not refresh.refresh())
+		equal(0, #helper_calls, "invalid TMUX_PANE reached the helper")
+		assert(notifications[#notifications]:find("valid TMUX_PANE", 1, true), "invalid pane error was hidden")
+		vim.env.TMUX_PANE = "%9"
+
+		buffer = vim.api.nvim_create_buf(true, false)
+		vim.api.nvim_set_current_buf(buffer)
+		vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "unsaved" })
+		vim.api.nvim_set_current_buf(original_buffer)
+		assert(vim.api.nvim_get_option_value("modified", { buf = buffer }))
+		assert(refresh.refresh())
+		equal(1, #helper_calls, "modified buffer ran schedule helper")
+		equal(0, saves, "modified buffer was saved")
+		equal(0, quits, "modified buffer exited Neovim")
+		assert(notifications[#notifications]:find("modified buffer", 1, true), "modified buffer error was hidden")
+
+		vim.api.nvim_set_option_value("modified", false, { buf = buffer })
+		helper_calls = {}
+		assert(refresh.refresh())
+		equal(1, saves, "save failure was not observed")
+		equal(1, #helper_calls, "save failure ran schedule helper")
+		equal(0, quits, "save failure exited Neovim")
+		assert(notifications[#notifications]:find("declined", 1, true), "save failure was hidden")
+
+		package.loaded["auto-session"].save_session = function()
+			saves = saves + 1
+			error("disk full")
+		end
+		helper_calls = {}
+		assert(refresh.refresh())
+		equal(2, saves, "save exception was not observed")
+		equal(1, #helper_calls, "save exception ran schedule helper")
+		equal(0, quits, "save exception exited Neovim")
+		assert(notifications[#notifications]:find("disk full", 1, true), "save exception was hidden")
+
+		helper_result = { code = 3, stdout = "", stderr = "not a dev layout" }
+		helper_calls = {}
+		assert(refresh.refresh())
+		equal(1, #helper_calls, "failed preflight invoked another helper action")
+		equal(2, saves, "failed preflight saved the session")
+		equal(0, quits, "failed preflight exited Neovim")
+		assert(notifications[#notifications]:find("not a dev layout", 1, true), "helper failure was hidden")
+	end, debug.traceback)
+
+	if buffer and vim.api.nvim_buf_is_valid(buffer) then
+		vim.api.nvim_buf_delete(buffer, { force = true })
+	end
+	package.loaded["config.devpod"] = original_devpod
+	package.loaded["auto-session"] = original_auto_session
+	vim.fn.executable = original_executable
+	vim.system = original_system
+	vim.schedule = original_schedule
+	vim.api.nvim_cmd = original_cmd
+	vim.notify = original_notify
+	vim.env.TMUX_PANE = original_pane
+	assert(ok, err)
+end)
+
+test("DevPod dev-session refresh waits for both authenticated acknowledgements", function()
+	local refresh = require("config.dev_session_refresh")
+	local original_devpod = package.loaded["config.devpod"]
+	local original_auto_session = package.loaded["auto-session"]
+	local original_cmd = vim.api.nvim_cmd
+	local original_pane = vim.env.TMUX_PANE
+	local requests = {}
+	local callbacks = {}
+	local saves = 0
+	local quits = 0
+
+	local ok, err = xpcall(function()
+		for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_valid(bufnr) then
+				vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
+			end
+		end
+		package.loaded["config.devpod"] = {
+			in_workspace = function()
+				return true
+			end,
+			request_host = function(action, callback)
+				requests[#requests + 1] = action
+				callbacks[action] = callback
+				return true
+			end,
+		}
+		package.loaded["auto-session"] = {
+			save_session = function(_, options)
+				saves = saves + 1
+				equal({ show_message = false, is_autosave = true }, options, "DevPod session save options")
+				return true
+			end,
+		}
+		-- Existing DevPod editors created before this feature do not receive
+		-- TMUX_PANE. The authenticated host controller owns the exact pane.
+		vim.env.TMUX_PANE = nil
+		vim.api.nvim_cmd = function(specification)
+			equal({ cmd = "quitall" }, specification, "DevPod exit command")
+			quits = quits + 1
+		end
+
+		assert(refresh.refresh())
+		equal({ "tmux_dev_refresh_check" }, requests, "DevPod preflight request")
+		equal(0, saves, "DevPod saved before preflight acknowledgement")
+		callbacks.tmux_dev_refresh_check({ ok = true })
+		equal(1, saves, "DevPod did not save after preflight acknowledgement")
+		equal({ "tmux_dev_refresh_check", "tmux_dev_refresh" }, requests, "DevPod schedule request")
+		equal(0, quits, "DevPod exited before schedule acknowledgement")
+		callbacks.tmux_dev_refresh({ ok = true })
+		equal(1, quits, "DevPod did not exit after schedule acknowledgement")
+	end, debug.traceback)
+
+	package.loaded["config.devpod"] = original_devpod
+	package.loaded["auto-session"] = original_auto_session
+	vim.api.nvim_cmd = original_cmd
+	vim.env.TMUX_PANE = original_pane
 	assert(ok, err)
 end)
 

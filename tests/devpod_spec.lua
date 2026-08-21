@@ -146,6 +146,56 @@ test("host requests use one authenticated JSON line", function()
 	assert(devpod.request_host("execute") == nil)
 end)
 
+test("refresh host requests use the exact allowlist and call back only after ACK", function()
+	local written = {}
+	local callbacks = 0
+	local notifications = {}
+	local response = '{"ok":true,"action":"ack"}\n'
+	local function new_pipe()
+		local pipe = {}
+		function pipe:connect(path, callback)
+			assert(path == "/tmp/controller.sock")
+			callback(nil)
+		end
+		function pipe:write(payload)
+			written[#written + 1] = vim.json.decode(payload)
+		end
+		function pipe:read_start(callback)
+			callback(nil, response)
+		end
+		function pipe:read_stop() end
+		function pipe:close() end
+		return pipe
+	end
+	local dependencies = {
+		new_pipe = new_pipe,
+		schedule = function(callback)
+			callback()
+		end,
+		notify = function(message)
+			notifications[#notifications + 1] = message
+		end,
+	}
+
+	assert(devpod.request_host("tmux_dev_refresh_check", dependencies, function(value)
+		assert(value.ok and value.action == "ack")
+		callbacks = callbacks + 1
+	end))
+	assert(devpod.request_host("tmux_dev_refresh", dependencies, function()
+		callbacks = callbacks + 1
+	end))
+	assert(callbacks == 2)
+	assert(written[1].action == "tmux_dev_refresh_check" and written[2].action == "tmux_dev_refresh")
+
+	response = '{"ok":false,"error":"preflight failed"}\n'
+	assert(devpod.request_host("tmux_dev_refresh_check", dependencies, function()
+		callbacks = callbacks + 1
+	end))
+	assert(callbacks == 2, "rejected request invoked success callback")
+	assert(notifications[#notifications]:find("preflight failed", 1, true), "controller error was hidden")
+	assert(devpod.request_host("tmux_dev_refresh_extra") == nil, "unexpected refresh action entered allowlist")
+end)
+
 test("workspace status is event data and never inferred on the host", function()
 	assert(devpod.in_workspace())
 	vim.env.NVIM_DEVPOD = nil

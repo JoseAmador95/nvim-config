@@ -335,6 +335,16 @@ class DevPodLauncherTest(unittest.TestCase):
         self.assertEqual(log.repo, str(self.root))
         self.assertTrue(log.pager)
 
+        up = MODULE.parser().parse_args(["up", "--restore-session"])
+        self.assertTrue(up.restore_session)
+        up_help = subprocess.run(
+            [str(REPO / "scripts/devpod-nvim"), "up", "--help"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        self.assertNotIn("restore-session", up_help.stdout)
+
     def test_log_host_action_opens_the_exact_launcher_in_a_popup(self):
         completed = subprocess.CompletedProcess([], 0, b"", b"")
         with mock.patch.object(MODULE.shutil, "which", return_value="/usr/bin/tmux"), mock.patch.object(
@@ -356,6 +366,70 @@ class DevPodLauncherTest(unittest.TestCase):
                 "--pager",
             ],
         )
+
+    def test_refresh_actions_run_the_exact_helper_argv(self):
+        helper = self.root / ".config/tmux/scripts/dev-session-refresh.sh"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        helper.chmod(0o700)
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.object(MODULE.pathlib.Path, "home", return_value=self.root), mock.patch.object(
+            MODULE, "run", return_value=completed
+        ) as runner:
+            MODULE.tmux_action({"tmux_pane": "%17"}, "tmux_dev_refresh_check")
+            MODULE.tmux_action({"tmux_pane": "%17"}, "tmux_dev_refresh")
+        self.assertEqual(
+            [list(call.args[0]) for call in runner.call_args_list],
+            [[helper, "check", "%17"], [helper, "schedule", "%17"]],
+        )
+
+    def test_refresh_controller_acknowledges_only_after_synchronous_helper(self):
+        handler = object.__new__(MODULE.Controller)
+        handler.rfile = io.BytesIO(
+            b'{"version":1,"token":"secret","action":"tmux_dev_refresh_check"}\n'
+        )
+        handler.wfile = io.BytesIO()
+        observed = []
+
+        def action(name):
+            observed.append((name, handler.wfile.getvalue()))
+
+        handler.server = mock.Mock()
+        handler.server.context = {"token": "secret", "action": action}
+        handler.handle()
+        self.assertEqual(observed, [("tmux_dev_refresh_check", b"")])
+        self.assertEqual(json.loads(handler.wfile.getvalue()), {"ok": True})
+
+        failed = object.__new__(MODULE.Controller)
+        failed.rfile = io.BytesIO(
+            b'{"version":1,"token":"secret","action":"tmux_dev_refresh"}\n'
+        )
+        failed.wfile = io.BytesIO()
+        failed.server = mock.Mock()
+        failed.server.context = {
+            "token": "secret",
+            "action": mock.Mock(side_effect=MODULE.DevPodError("schedule rejected")),
+        }
+        failed.handle()
+        self.assertEqual(
+            json.loads(failed.wfile.getvalue()),
+            {"ok": False, "error": "schedule rejected"},
+        )
+
+    def test_restore_session_flag_sets_only_the_one_shot_editor_environment(self):
+        prepared = {
+            "provider": "podman",
+            "container_root": "/workspaces/project",
+            "repo_root": "/host/project",
+            "restore_session": True,
+        }
+        options = MODULE.devpod_editor_options(prepared, "token", "/tmp/host.sock", "project")
+        self.assertIn("NVIM_TMUX_REFRESH_RESTORE=1", options)
+        self.assertFalse(any(value.startswith("TMUX_PANE=") for value in options))
+        prepared["restore_session"] = False
+        options = MODULE.devpod_editor_options(prepared, "token", "/tmp/host.sock", "project")
+        self.assertNotIn("NVIM_TMUX_REFRESH_RESTORE=1", options)
+        self.assertFalse(any(value.startswith("TMUX_PANE=") for value in options))
 
     def test_state_root_rejects_symlink(self):
         destination = self.root / "real-state"

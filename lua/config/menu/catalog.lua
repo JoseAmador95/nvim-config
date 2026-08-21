@@ -354,6 +354,15 @@ function M.definitions(dispatch)
 			item("session.search", "Search and Restore", "<leader>Sp"),
 			item("session.delete", "Delete Session", "<leader>Sd"),
 		}),
+		section("tmux", "Tmux", {
+			palette_item("tmux.refresh_dev_session", "Refresh Dev Session...", nil, nil, {
+				"tp",
+				"layout dev",
+				"reload tmux",
+				"restart windows",
+				"save session",
+			}),
+		}),
 		section("just", "Just", {
 			item("command.just_run", "Run Recipe"),
 			item("command.just_import_last", "Import Last Locations"),

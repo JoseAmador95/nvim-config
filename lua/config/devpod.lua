@@ -5,6 +5,14 @@ local M = {}
 local uv = vim.uv
 local MAX_OUTPUT = 1024 * 1024
 local MAX_REQUEST = 64 * 1024
+local host_actions = {
+	devpod_log = true,
+	host_editor = true,
+	lazygit = true,
+	tmux_dev_refresh = true,
+	tmux_dev_refresh_check = true,
+	tuicr = true,
+}
 
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve config.devpod source")
 local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
@@ -180,12 +188,19 @@ function M.in_workspace()
 	return vim.env.NVIM_DEVPOD == "1"
 end
 
-function M.request_host(action, dependencies)
+function M.request_host(action, dependencies, on_success)
+	if type(dependencies) == "function" and on_success == nil then
+		on_success = dependencies
+		dependencies = nil
+	end
 	if not M.in_workspace() then
 		return nil, "not running inside a DevPod editor"
 	end
-	if action ~= "tuicr" and action ~= "host_editor" and action ~= "lazygit" and action ~= "devpod_log" then
+	if not host_actions[action] then
 		return nil, "unsupported host action"
+	end
+	if on_success ~= nil and type(on_success) ~= "function" then
+		return nil, "host success callback must be a function"
 	end
 	local socket_path = vim.env.NVIM_DEVPOD_CONTROLLER_SOCKET
 	local token = vim.env.NVIM_DEVPOD_TOKEN
@@ -194,6 +209,7 @@ function M.request_host(action, dependencies)
 	end
 	local deps = dependencies or {}
 	local report = deps.notify or notify
+	local schedule = deps.schedule or vim.schedule
 	local pipe = (deps.new_pipe or uv.new_pipe)(false)
 	local payload = vim.json.encode({ version = 1, token = token, action = action }) .. "\n"
 	local received = ""
@@ -229,6 +245,10 @@ function M.request_host(action, dependencies)
 				if not decoded or type(response) ~= "table" or response.ok ~= true then
 					local detail = decoded and type(response) == "table" and response.error or "invalid response"
 					report("Host controller rejected request: " .. tostring(detail), vim.log.levels.ERROR)
+				elseif on_success then
+					schedule(function()
+						on_success(response)
+					end)
 				end
 			end
 		end)

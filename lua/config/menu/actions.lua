@@ -718,6 +718,7 @@ local confirmation_prompts = {
 	["command.nvim_config_init"] = "Create the local Neovim config template?",
 	["command.tools_install"] = "Install the configured managed tools?",
 	["command.parsers_install"] = "Install the configured Tree-sitter parsers?",
+	["tmux.refresh_dev_session"] = "Refresh the tmux dev session? This restarts agent/editor/git, Neovim exits, and term keeps running.",
 }
 
 local function confirm(prompt, callback)
@@ -729,6 +730,12 @@ local function confirm(prompt, callback)
 end
 
 local handlers = {
+	["tmux.refresh_dev_session"] = function()
+		local refresh = require_or_notify("config.dev_session_refresh", "Dev session refresh")
+		if refresh then
+			refresh.refresh()
+		end
+	end,
 	["coverage.load_report"] = function(target)
 		vim.ui.input({ prompt = "Coverage report: ", completion = "file" }, function(path)
 			if path and path ~= "" then
