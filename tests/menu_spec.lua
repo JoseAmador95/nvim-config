@@ -98,6 +98,9 @@ test("catalog exposes stable descriptor ids, labels, hints, and dispatch", funct
 
 	local history = assert(find_item(sections, "picker.git_bcommits"), "file-history descriptor missing")
 	equal("File History", history.label, "git file history has a misleading label")
+	local navigation_history =
+		assert(find_item(sections, "navigation.history"), "navigation-history descriptor missing")
+	equal("<leader>nh", navigation_history.hint, "navigation-history hint")
 	assert(not find_item(sections, "Git Branches"), "legacy Git Branches descriptor remains")
 	local definition = assert(find_item(sections, "lsp.definition"), "definition descriptor missing")
 	equal("gd", definition.hint, "definition hint")

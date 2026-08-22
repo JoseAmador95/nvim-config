@@ -252,7 +252,7 @@ function M.definitions(dispatch)
 		section("navigation", "Navigation", {
 			palette_item("navigation.back", "Back", "<C-o>", nil, { "history", "previous location" }),
 			palette_item("navigation.forward", "Forward", "<C-i>", nil, { "history", "next location" }),
-			palette_item("navigation.history", "Show History...", nil, nil, { "locations", "back forward" }),
+			palette_item("navigation.history", "Show History...", "<leader>nh", nil, { "locations", "back forward" }),
 			item("picker.find_files", "Find Files"),
 			item("picker.oldfiles", "Recent Files"),
 			item("picker.buffers", "Buffers"),

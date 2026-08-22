@@ -113,6 +113,10 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					vim.fn.maparg("<C-i>", "n", false, true).desc == "Navigation forward",
 					"semantic forward mapping is missing"
 				)
+				assert(
+					vim.fn.maparg("<leader>nh", "n", false, true).desc == "Show navigation history",
+					"navigation-history mapping is missing"
+				)
 				assert(not vim.lsp.inlay_hint.is_enabled({ bufnr = 0 }), "inlay hints must default off")
 				require("lazy").load({ plugins = { "bufferline.nvim" } })
 

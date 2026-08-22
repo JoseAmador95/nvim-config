@@ -265,6 +265,7 @@ function M.setup()
 	})
 	vim.keymap.set("n", "<C-o>", M.back, { silent = true, desc = "Navigation back" })
 	vim.keymap.set("n", "<C-i>", M.forward, { silent = true, desc = "Navigation forward" })
+	vim.keymap.set("n", "<leader>nh", M.select, { silent = true, desc = "Show navigation history" })
 end
 
 return M

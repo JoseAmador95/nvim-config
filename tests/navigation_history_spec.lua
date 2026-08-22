@@ -167,6 +167,7 @@ test("setup exposes commands and back-forward mappings", function()
 	end
 	equal("Navigation back", vim.fn.maparg("<C-o>", "n", false, true).desc, "back mapping")
 	equal("Navigation forward", vim.fn.maparg("<C-i>", "n", false, true).desc, "forward mapping")
+	equal("Show navigation history", vim.fn.maparg("<leader>nh", "n", false, true).desc, "history mapping")
 end)
 
 for _, path in ipairs(paths) do
