@@ -208,9 +208,17 @@ so `gh pr create` keeps its interactive questions in the LazyGit terminal while
 its title/body file opens in the parent editor. LazyGit's ordinary `e` action
 continues to use its `nvim-remote` preset.
 
-Python environment discovery remains in `:VenvSelect`, but selection never
-changes global `PATH`, `VIRTUAL_ENV` or terminal activation. The selected
-interpreter for each root is shared by Pyright, Neotest, DAP and the REPL.
+Python projects automatically use a root-local environment when one exists.
+Resolution is filesystem-only: `UV_PROJECT_ENVIRONMENT`, `.venv`, Pixi's
+default environment, `venv`, `env`, `.conda`, and contained active virtual or
+Conda environments are considered in that order. `:VenvSelect` remains the
+manual override for cached or external environments. Explicit VSCode/neoconf
+Python settings take precedence, and selection never changes global `PATH`,
+`VIRTUAL_ENV` or terminal activation. The effective interpreter for each root
+is shared by Pyright, Neotest, DAP, the REPL and statusline. An attached Pyright
+root or the nearest Python project marker takes precedence over an enclosing Git
+root, so nested Python projects stay independent. Opening a PEP 723 script never
+runs venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
 `<leader>rr` runs the nearest test, `<leader>rd` debugs it, `<leader>rp` toggles
 the project REPL and `<leader>rs` opens or focuses that REPL before sending the
 current line or visual selection.

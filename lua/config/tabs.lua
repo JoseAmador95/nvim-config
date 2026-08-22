@@ -2,6 +2,7 @@ local M = {}
 
 local HOME_VARIABLE = "nvim_config_home"
 local pending = {}
+local focused_windows = {}
 
 local function enabled()
 	local ok, pager = pcall(require, "config.pager")
@@ -21,15 +22,45 @@ local function tab_number(tabpage)
 	return ok and number or nil
 end
 
+local function is_nonfloating_window(win, tabpage)
+	if type(win) ~= "number" or not vim.api.nvim_win_is_valid(win) then
+		return false
+	end
+	if tabpage and vim.api.nvim_win_get_tabpage(win) ~= tabpage then
+		return false
+	end
+
+	local ok, config = pcall(vim.api.nvim_win_get_config, win)
+	return ok and (not config.relative or config.relative == "")
+end
+
 local function nonfloating_windows(tabpage)
 	local windows = {}
 	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
-		local ok, config = pcall(vim.api.nvim_win_get_config, win)
-		if ok and (not config.relative or config.relative == "") then
+		if is_nonfloating_window(win, tabpage) then
 			windows[#windows + 1] = win
 		end
 	end
 	return windows
+end
+
+local function remember_current_window()
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local win = vim.api.nvim_get_current_win()
+	if valid_tab(tabpage) and is_nonfloating_window(win, tabpage) then
+		focused_windows[tabpage] = win
+	end
+end
+
+local function focused_window(tabpage)
+	local win = focused_windows[tabpage]
+	if is_nonfloating_window(win, tabpage) then
+		return win
+	end
+
+	win = nonfloating_windows(tabpage)[1]
+	focused_windows[tabpage] = win
+	return win
 end
 
 local function has_home_marker(tabpage)
@@ -180,6 +211,32 @@ function M.find_home()
 	return nil
 end
 
+---Keep a tab label on its last focused normal window while a UI float is active.
+---The saved value is a window handle so buffer changes in that window stay live.
+---@param item { name: string, tabnr: integer }
+---@return string
+function M.name_formatter(item)
+	local fallback = type(item) == "table" and type(item.name) == "string" and item.name or "[No Name]"
+	if not enabled() or type(item) ~= "table" or not valid_tab(item.tabnr) then
+		return fallback
+	end
+
+	local active = vim.api.nvim_tabpage_get_win(item.tabnr)
+	if is_nonfloating_window(active, item.tabnr) then
+		focused_windows[item.tabnr] = active
+		return item.name
+	end
+
+	local win = focused_window(item.tabnr)
+	if not win then
+		return fallback
+	end
+
+	local buf = vim.api.nvim_win_get_buf(win)
+	local path = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
+	return path ~= "" and vim.fn.fnamemodify(path, ":t") or "[No Name]"
+end
+
 ---Close one stable tab handle without deleting any user buffer.
 ---@param tabpage? integer
 ---@return boolean
@@ -265,6 +322,14 @@ function M.setup()
 	if not enabled() then
 		return
 	end
+
+	local focus_group = vim.api.nvim_create_augroup("NvimConfigTabsFocus", { clear = true })
+	vim.api.nvim_create_autocmd({ "TabEnter", "WinEnter" }, {
+		group = focus_group,
+		desc = "Remember the last focused non-floating window for each tab label",
+		callback = remember_current_window,
+	})
+	remember_current_window()
 
 	vim.api.nvim_create_user_command("CloseTab", function()
 		M.request_close(vim.api.nvim_get_current_tabpage())

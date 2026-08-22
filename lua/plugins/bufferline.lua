@@ -26,6 +26,7 @@ return {
 				close_command = request_close,
 				right_mouse_command = open_context_menu,
 				middle_mouse_command = request_close,
+				name_formatter = tabs.name_formatter,
 				separator_style = "thin",
 				hover = { enabled = true },
 				numbers = "none",

@@ -8,11 +8,11 @@ return {
 	end,
 	dependencies = { "folke/snacks.nvim" },
 	opts = {
-		-- A non-empty no-op hook prevents venv-selector's default LSP restart
-		-- hook. config.python owns the root-scoped Pyright restart; Ruff stays
-		-- attached and untouched.
+		-- Replacing venv-selector's default hooks keeps restart ownership here.
+		-- The hook's bufnr is the Python origin even while its picker has focus.
 		hooks = {
-			function()
+			function(python_path, _, bufnr)
+				require("config.python").refresh_current(bufnr, python_path)
 				return 0
 			end,
 		},
@@ -23,15 +23,14 @@ return {
 			set_environment_variables = false,
 			override_notify = false,
 			notify_user_on_venv_activation = false,
-			on_venv_activate_callback = function()
-				vim.schedule(function()
-					require("config.python").refresh_current()
-				end)
-			end,
 		},
 	},
 	config = function(_, opts)
 		require("venv-selector").setup(opts)
+		-- The pinned plugin registers PEP 723 automation that runs `uv sync`
+		-- merely by opening a script. Discovery here is read-only; retain the
+		-- manual picker while removing that install-capable autocmd surface.
+		vim.api.nvim_del_augroup_by_name("VenvSelectorUvDetect")
 		require("config.python").setup()
 	end,
 }

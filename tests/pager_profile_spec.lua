@@ -68,6 +68,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 				for _, plugin in ipairs({
 					"blink.cmp",
+					"bufferline.nvim",
 					"mason.nvim",
 					"mermaid-nvim",
 					"noice.nvim",

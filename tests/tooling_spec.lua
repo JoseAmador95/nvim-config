@@ -11,6 +11,13 @@ vim.api.nvim_create_autocmd("VimEnter", {
 	callback = function()
 		vim.schedule(function()
 			local ok, err = xpcall(function()
+				require("lazy").load({ plugins = { "venv-selector.nvim" } })
+				assert(vim.fn.exists(":VenvSelect") == 2, "manual Python environment picker is missing")
+				assert(
+					vim.fn.exists("#VenvSelectorUvDetect") == 0,
+					"venv-selector still runs install-capable PEP 723 uv automation"
+				)
+
 				local mason_options = require("mason.settings").current
 				assert(
 					mason_options.install_root_dir == require("config.tool_paths").mason_root(),
@@ -64,7 +71,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				real_config.on_new_config = require("config.lsp_neoconf").wrap_on_new_config("pyright")
 				assert(vim.fn.writefile({
-					'{ "python.analysis.typeCheckingMode": "basic", "python.analysis.autoSearchPaths": true }',
+					'{ "python.analysis.typeCheckingMode": "basic", "python.analysis.autoSearchPaths": true, "python.venvPath": "/explicit/venvs", "python.venv": "chosen" }',
 				}, project .. "/.vscode/settings.json") == 0, "could not update neoconf fixture")
 				local original_get_clients = vim.lsp.get_clients
 				local notification
@@ -96,6 +103,14 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(
 					real_config.settings.python.analysis.diagnosticMode == "openFilesOnly",
 					"neoconf live reload lost original server settings"
+				)
+				local pyright_config = { root_dir = project, settings = {} }
+				vim.lsp.config.pyright.on_new_config(pyright_config, project)
+				assert(pyright_config.settings.python.venvPath == "/explicit/venvs")
+				assert(pyright_config.settings.python.venv == "chosen")
+				assert(
+					pyright_config.settings.python.pythonPath == nil,
+					"automatic Python resolution overrode explicit VSCode venv settings"
 				)
 				assert(
 					notification and notification.method == "workspace/didChangeConfiguration",

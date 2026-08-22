@@ -34,6 +34,7 @@ function M.setup(context)
 		capabilities = client_capabilities,
 		settings = { pyright = { disableOrganizeImports = true } },
 		before_init = require("config.python").before_init,
+		on_new_config = require("config.python").on_new_config,
 	})
 	register("ruff", { capabilities = client_capabilities })
 	register("cmake", {

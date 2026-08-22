@@ -32,7 +32,7 @@ function M.navic()
 end
 
 function M.python()
-	local project = root()
+	local project = require("config.python").root(0)
 	if not project then
 		return ""
 	end

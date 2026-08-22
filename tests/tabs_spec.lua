@@ -273,6 +273,69 @@ test("editor reuses only a valid marked home tab", function()
 	equal(2, #vim.api.nvim_list_tabpages(), "invalid multi-split home was reused")
 end)
 
+test("tab labels retain the last focused normal window while a float is active", function()
+	reset_editor()
+	tabs.setup()
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local first_buf = named_buffer("first-label.py")
+	local first_win = vim.api.nvim_get_current_win()
+	local first_name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(first_buf), ":t")
+
+	vim.cmd("vnew")
+	local second_buf = named_buffer("second-label.py")
+	local second_win = vim.api.nvim_get_current_win()
+	local second_name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(second_buf), ":t")
+
+	local float_buf = vim.api.nvim_create_buf(false, true)
+	local float_win = vim.api.nvim_open_win(float_buf, true, {
+		relative = "editor",
+		width = 20,
+		height = 1,
+		row = 1,
+		col = 1,
+		style = "minimal",
+	})
+	local item = { name = "[No Name]", path = "", bufnr = float_buf, tabnr = tabpage }
+	equal(second_name, tabs.name_formatter(item), "unnamed float replaced the last focused split label")
+
+	local replacement = vim.api.nvim_create_buf(true, false)
+	local replacement_path = vim.fn.tempname() .. "-replacement-label.py"
+	owned_paths[#owned_paths + 1] = replacement_path
+	vim.api.nvim_buf_set_name(replacement, replacement_path)
+	vim.api.nvim_win_set_buf(second_win, replacement)
+	equal(
+		vim.fn.fnamemodify(replacement_path, ":t"),
+		tabs.name_formatter(item),
+		"tab label cached a filename instead of following the saved window"
+	)
+
+	vim.api.nvim_win_close(second_win, true)
+	equal(first_name, tabs.name_formatter(item), "stale focused split did not recover to a live normal window")
+	assert(vim.api.nvim_win_is_valid(first_win), "fallback normal window was closed")
+
+	vim.api.nvim_win_close(float_win, true)
+	vim.api.nvim_buf_delete(float_buf, { force = true })
+	reset_editor()
+	tabs.setup()
+	tabpage = vim.api.nvim_get_current_tabpage()
+	float_buf = vim.api.nvim_create_buf(false, true)
+	float_win = vim.api.nvim_open_win(float_buf, true, {
+		relative = "editor",
+		width = 20,
+		height = 1,
+		row = 1,
+		col = 1,
+		style = "minimal",
+	})
+	equal(
+		"[No Name]",
+		tabs.name_formatter({ name = "[No Name]", path = "", bufnr = float_buf, tabnr = tabpage }),
+		"legitimate unnamed normal buffer received a synthetic label"
+	)
+	vim.api.nvim_win_close(float_win, true)
+	vim.api.nvim_buf_delete(float_buf, { force = true })
+end)
+
 test("bufferline exposes native safe close callbacks and dynamic selected highlights", function()
 	reset_editor()
 	local captured
@@ -294,6 +357,7 @@ test("bufferline exposes native safe close callbacks and dynamic selected highli
 	equal(false, captured.options.show_close_icon, "global bufferline close icon remains enabled")
 	equal(nil, captured.options.custom_areas, "custom global close area remains configured")
 	equal(nil, tabs.close_area, "obsolete tabs.close_area API remains exported")
+	equal(tabs.name_formatter, captured.options.name_formatter, "bufferline does not use the public tab name formatter")
 
 	local requested = {}
 	local original_request = tabs.request_close

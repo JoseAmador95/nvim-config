@@ -119,6 +119,32 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				)
 				assert(not vim.lsp.inlay_hint.is_enabled({ bufnr = 0 }), "inlay hints must default off")
 				require("lazy").load({ plugins = { "bufferline.nvim" } })
+				local tabpage = vim.api.nvim_get_current_tabpage()
+				local normal_buf = vim.api.nvim_get_current_buf()
+				local normal_path = vim.api.nvim_buf_get_name(normal_buf)
+				assert(normal_path ~= "", "startup float-label fixture is not a named normal buffer")
+				local expected_tab_name = vim.fn.fnamemodify(normal_path, ":t")
+				local float_buf = vim.api.nvim_create_buf(false, true)
+				local float_win = vim.api.nvim_open_win(float_buf, true, {
+					relative = "editor",
+					width = 20,
+					height = 1,
+					row = 1,
+					col = 1,
+					style = "minimal",
+				})
+				_G.nvim_bufferline()
+				local active_tab
+				for _, element in ipairs(require("bufferline").get_elements().elements) do
+					if element.id == tabpage then
+						active_tab = element
+						break
+					end
+				end
+				assert(active_tab, "bufferline did not expose the active tab")
+				assert(active_tab.name == expected_tab_name, "focused float replaced the real bufferline tab label")
+				vim.api.nvim_win_close(float_win, true)
+				vim.api.nvim_buf_delete(float_buf, { force = true })
 
 				local original_visual = vim.api.nvim_get_hl(0, { name = "Visual", link = false })
 				local original_pmenu = vim.api.nvim_get_hl(0, { name = "PmenuSel", link = false })

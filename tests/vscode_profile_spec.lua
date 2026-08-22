@@ -68,6 +68,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					return false
 				end
 				for _, plugin in ipairs({
+					"bufferline.nvim",
 					"catppuccin",
 					"mason.nvim",
 					"nvim-lint",
