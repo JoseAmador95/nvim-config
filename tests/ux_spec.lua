@@ -86,13 +86,29 @@ assert(
 )
 assert(dashboard_keys.s and dashboard_keys.s.action == ":AutoSession search", "dashboard restore is not explicit")
 assert(dashboard_keys.p and dashboard_keys.p.action == ":MenuOpen", "dashboard palette action is missing")
-local projects
+local expected_dashboard_icons = {
+	n = " ",
+	f = " ",
+	g = " ",
+	s = " ",
+	p = "󰘳 ",
+	c = " ",
+	l = "󰊢 ",
+	q = " ",
+}
+for key, icon in pairs(expected_dashboard_icons) do
+	assert(dashboard_keys[key] and dashboard_keys[key].icon == icon, "dashboard icon is missing: " .. key)
+end
+local projects, recent
 for _, section in ipairs(snacks_opts.dashboard.sections) do
 	if section.section == "projects" then
 		projects = section
+	elseif section.section == "recent_files" then
+		recent = section
 	end
 end
-assert(projects and projects.session == false, "dashboard projects still restore sessions implicitly")
+assert(projects and projects.session == false and projects.icon == " ", "dashboard projects are misconfigured")
+assert(recent and recent.icon == " ", "dashboard recent-files icon is missing")
 assert(snacks_opts.scroll == nil, "smooth scrolling was enabled")
 assert(snacks_opts.terminal.enabled == true, "Snacks terminal is disabled")
 assert(snacks_opts.notifier.enabled == true, "Snacks notifier is disabled in the editor")

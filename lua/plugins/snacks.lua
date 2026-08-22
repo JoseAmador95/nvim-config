@@ -71,14 +71,14 @@ return {
 			sections = {
 				{ section = "header" },
 				{ section = "keys", gap = 1, padding = 1 },
-				{ icon = " ", title = "Projects", section = "projects", session = false, padding = 1 },
-				{ icon = " ", title = "Recent", section = "recent_files", padding = 1 },
+				{ icon = " ", title = "Projects", section = "projects", session = false, padding = 1 },
+				{ icon = " ", title = "Recent", section = "recent_files", padding = 1 },
 				{ section = "startup" },
 			},
 			preset = {
 				keys = {
 					{
-						icon = " ",
+						icon = " ",
 						key = "n",
 						desc = "New file",
 						action = function()
@@ -88,7 +88,7 @@ return {
 						end,
 					},
 					{
-						icon = " ",
+						icon = " ",
 						key = "f",
 						desc = "Find file",
 						action = function()
@@ -96,17 +96,17 @@ return {
 						end,
 					},
 					{
-						icon = " ",
+						icon = " ",
 						key = "g",
 						desc = "Grep",
 						action = function()
 							Snacks.picker.grep()
 						end,
 					},
-					{ icon = " ", key = "s", desc = "Restore session", action = ":AutoSession search" },
-					{ icon = " ", key = "p", desc = "Action palette", action = ":MenuOpen" },
+					{ icon = " ", key = "s", desc = "Restore session", action = ":AutoSession search" },
+					{ icon = "󰘳 ", key = "p", desc = "Action palette", action = ":MenuOpen" },
 					{
-						icon = " ",
+						icon = " ",
 						key = "c",
 						desc = "Config",
 						action = function()
@@ -114,7 +114,7 @@ return {
 						end,
 					},
 					{
-						icon = "󰊢",
+						icon = "󰊢 ",
 						key = "l",
 						desc = "Lazygit",
 						-- Reuse the existing lazygit flow (<leader>gl -> toggle_lazygit
@@ -126,7 +126,7 @@ return {
 							end)
 						end,
 					},
-					{ icon = " ", key = "q", desc = "Quit", action = ":qa" },
+					{ icon = " ", key = "q", desc = "Quit", action = ":qa" },
 				},
 			},
 		},
