@@ -337,9 +337,17 @@ local function apply_lsp_python(config, root)
 	if not root then
 		return
 	end
-	config.settings = vim.tbl_deep_extend("force", config.settings or {}, {
+	local settings = config.settings or {}
+	local merged = vim.tbl_deep_extend("force", {}, settings, {
 		python = { pythonPath = M.for_root(root) },
 	})
+	for key in pairs(settings) do
+		settings[key] = nil
+	end
+	for key, value in pairs(merged) do
+		settings[key] = value
+	end
+	config.settings = settings
 end
 
 function M.before_init(_, config)

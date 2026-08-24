@@ -474,8 +474,14 @@ test("attached Pyright root scopes manual selection and shared consumers", funct
 	vim.defer_fn = function(callback)
 		callback()
 	end
+	vim.lsp.config("pyright", {
+		settings = { pyright = { disableOrganizeImports = true } },
+		before_init = python.before_init,
+	})
 	vim.lsp.start = function(config, options)
-		started[#started + 1] = { config = config, options = options }
+		local restarted_client = { settings = config.settings }
+		config.before_init({}, config)
+		started[#started + 1] = { config = config, options = options, client = restarted_client }
 	end
 	terminal_running = false
 	vim.api.nvim_set_current_buf(picker_buf)
@@ -487,6 +493,9 @@ test("attached Pyright root scopes manual selection and shared consumers", funct
 		assert(stopped)
 		assert(#started == 1 and started[1].options.bufnr == buf)
 		assert(started[1].config.root_dir == service)
+		assert(rawequal(started[1].config.settings, started[1].client.settings))
+		assert(started[1].client.settings.python.pythonPath == manual)
+		assert(started[1].client.settings.pyright.disableOrganizeImports)
 		assert(vim.deep_equal(python.neotest_python(service), { manual }))
 		vim.api.nvim_set_current_buf(buf)
 		assert(require("config.statusline").python() == "Py:.manual")

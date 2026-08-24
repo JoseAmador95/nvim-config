@@ -47,9 +47,45 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				local project = vim.fn.tempname()
 				assert(vim.fn.mkdir(project .. "/.vscode", "p") == 1, "could not create neoconf fixture")
+				assert(vim.fn.mkdir(project .. "/.venv/bin", "p") == 1, "could not create local Python fixture")
+				project = vim.uv.fs_realpath(project) or project
+				local local_python = project .. "/.venv/bin/python"
+				assert(
+					vim.fn.writefile({ "#!/bin/sh", "exit 0" }, local_python) == 0,
+					"could not write local Python fixture"
+				)
+				assert(
+					vim.uv.fs_chmod(local_python, tonumber("700", 8)),
+					"could not make local Python fixture executable"
+				)
 				assert(vim.fn.writefile({
 					'{ "python.analysis.typeCheckingMode": "strict", "python.analysis.autoSearchPaths": false }',
 				}, project .. "/.vscode/settings.json") == 0, "could not write neoconf fixture")
+				assert(
+					require("config.python").for_root(project) == local_python,
+					"local Python fixture was not detected"
+				)
+				local startup_config = vim.deepcopy(vim.lsp.config.pyright)
+				startup_config.root_dir = project
+				local startup_client = { settings = startup_config.settings }
+				vim.lsp.config.pyright.before_init({}, startup_config)
+				assert(
+					rawequal(startup_config.settings, startup_client.settings),
+					"Pyright startup replaced client.settings"
+				)
+				assert(
+					startup_client.settings.pyright.disableOrganizeImports,
+					"base Pyright settings were not visible to the client"
+				)
+				assert(
+					startup_client.settings.python.analysis.typeCheckingMode == "strict"
+						and startup_client.settings.python.analysis.autoSearchPaths == false,
+					"real .vscode/settings.json was not visible to the client"
+				)
+				assert(
+					startup_client.settings.python.pythonPath == local_python,
+					"local Python was not visible to the client"
+				)
 				local real_config = {
 					name = "pyright",
 					root_dir = project,

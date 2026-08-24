@@ -41,13 +41,21 @@ local function merge_settings(name, config, file)
 	if server == false then
 		return false
 	end
-	config.settings = vim.tbl_deep_extend(
+	local settings = config.settings or {}
+	local merged = vim.tbl_deep_extend(
 		"force",
 		{},
-		config.settings or {},
+		settings,
 		type(vscode) == "table" and vscode or {},
 		type(server) == "table" and server or {}
 	)
+	for key in pairs(settings) do
+		settings[key] = nil
+	end
+	for key, value in pairs(merged) do
+		settings[key] = value
+	end
+	config.settings = settings
 	return true
 end
 
