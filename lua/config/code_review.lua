@@ -4,6 +4,7 @@ local M = {}
 local review_diffview = require("config.review_diffview")
 local review_export = require("config.review_export")
 local review_scope = require("config.review_scope")
+local review_source = require("config.review_source")
 local review_store = require("config.review_store")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review")
@@ -20,7 +21,6 @@ local TYPE_SIGNS = {
 }
 
 local workspaces = {}
-local source_tabs = {}
 local suspended
 local publishing_sessions = {}
 local export_workspace
@@ -69,15 +69,13 @@ local function active_workspace()
 	if workspace then
 		return workspace
 	end
-	local link = source_tabs[vim.api.nvim_get_current_tabpage()]
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local link = review_source.get(tabpage)
 	workspace = link and link.workspace
 	if not workspace or workspaces[workspace.root] ~= workspace then
-		return nil
-	end
-	local buf = vim.api.nvim_get_current_buf()
-	local named_file = vim.bo[buf].buftype == "" and vim.api.nvim_buf_get_name(buf) ~= ""
-	if named_file and not buffer_in_root(workspace.root, buf) then
-		source_tabs[vim.api.nvim_get_current_tabpage()] = nil
+		if link then
+			review_source.clear(tabpage)
+		end
 		return nil
 	end
 	return workspace
@@ -355,14 +353,6 @@ local function open_workspace_view(workspace, mode, path, target)
 	return opened, err
 end
 
-local function migrate_source_tabs(previous, replacement)
-	for _, link in pairs(source_tabs) do
-		if link.workspace == previous then
-			link.workspace = replacement
-		end
-	end
-end
-
 local function start_workspace(root, session, mode, origin)
 	local workspace = {
 		root = root,
@@ -438,16 +428,12 @@ local function replace_workspace(root, session, mode)
 	local replacement, start_err = start_workspace(root, session, mode, origin)
 	if not replacement then
 		if existing then
-			for tabpage, link in pairs(source_tabs) do
-				if link.workspace == existing then
-					source_tabs[tabpage] = nil
-				end
-			end
+			review_source.clear_workspace(existing)
 		end
 		return nil, start_err
 	end
 	if existing then
-		migrate_source_tabs(existing, replacement)
+		review_source.migrate(existing, replacement)
 	end
 	if thread_state then
 		thread_state.owner.workspace = replacement
@@ -1008,24 +994,30 @@ function M.code()
 			column = cursor[2],
 		}
 		require("config.editor").open_file_in_tab(lexical, { lnum = cursor[1], col = cursor[2] + 1 })
-		source_tabs[vim.api.nvim_get_current_tabpage()] = { workspace = workspace, target = saved_target }
+		review_source.set(vim.api.nvim_get_current_tabpage(), workspace, saved_target)
 		return
 	end
 
 	local source_tab = vim.api.nvim_get_current_tabpage()
+	local link = review_source.get(source_tab)
 	workspace = source_workspace()
 	if not workspace or not valid_tab(workspace.tabpage) then
 		return notify("No review workspace is linked to this source tab", vim.log.levels.ERROR)
 	end
-	local relative, relative_err =
-		require("config.repo").relative_existing(workspace.root, vim.api.nvim_buf_get_name(0))
+	if link and link.workspace ~= workspace then
+		link = nil
+	end
+	local target = link and link.target or nil
+	local relative = target and target.current_path or nil
 	if not relative then
-		return notify("Could not return to review location: " .. tostring(relative_err), vim.log.levels.ERROR)
+		local relative_err
+		relative, relative_err = require("config.repo").relative_existing(workspace.root, vim.api.nvim_buf_get_name(0))
+		if not relative then
+			return notify("Could not return to review location: " .. tostring(relative_err), vim.log.levels.ERROR)
+		end
 	end
 	vim.api.nvim_set_current_tabpage(workspace.tabpage)
-	local link = source_tabs[source_tab]
-	local target = link and link.workspace == workspace and link.target or nil
-	local layer = target and target.current_path == relative and target.layer or nil
+	local layer = target and target.layer or nil
 	if not review_diffview.select_file(relative, layer, target) then
 		notify("The exact review file and layer are no longer available", vim.log.levels.ERROR)
 	end
@@ -1747,6 +1739,12 @@ local function setup_commands()
 		end
 	end, { desc = "Show commits in the review scope" })
 	vim.api.nvim_create_user_command("ReviewCode", M.code, { desc = "Toggle current source and exact review diff" })
+	vim.api.nvim_create_user_command("ReviewLayout", function()
+		local changed, err = review_diffview.layout()
+		if not changed then
+			notify(err, vim.log.levels.WARN)
+		end
+	end, { desc = "Toggle side-by-side and unified inline review layouts" })
 	vim.api.nvim_create_user_command("ReviewComment", function(command)
 		M.comment(command.line1, command.line2, command.args ~= "" and command.args or nil)
 	end, {
@@ -1794,6 +1792,7 @@ local function setup_mappings()
 		{ "<leader>Rf", "<cmd>ReviewFiles<cr>", "Review files" },
 		{ "<leader>Rh", "<cmd>ReviewCommits<cr>", "Review commits/history" },
 		{ "<leader>Rv", "<cmd>ReviewCode<cr>", "Toggle review code/diff" },
+		{ "<leader>Rl", "<cmd>ReviewLayout<cr>", "Toggle review layout" },
 		{ "<leader>Ra", "<cmd>ReviewComment<cr>", "Add review comment" },
 		{ "<leader>Rt", "<cmd>ReviewThreads<cr>", "Review threads" },
 		{ "<leader>Re", "<cmd>ReviewExport<cr>", "Export review" },
@@ -1901,11 +1900,7 @@ function M.setup()
 					notify("Review tab closed and recovery failed: " .. tostring(err), vim.log.levels.ERROR)
 				end
 			end
-			for tabpage, linked in pairs(source_tabs) do
-				if linked.workspace == workspace then
-					source_tabs[tabpage] = nil
-				end
-			end
+			review_source.clear_workspace(workspace)
 			close_review_threads(workspace)
 		end,
 	})

@@ -21,12 +21,18 @@ Neovim owns a review workspace with an explicit Git identity:
   frozen merge base.
 - Diffview renders historical scopes exactly and the working scope as an
   explicitly live, fingerprint-guarded view in a transient, read-only tab. Raw
-  Diffview remains unchanged. Each review-owned Git adapter gets an isolated
+  Diffview remains independent. Review tabs start with a side-by-side diff and
+  can switch in place to a unified inline diff. The review-only toggle
+  (`:ReviewLayout`, `<leader>Rl`, or `g<C-x>` inside a review buffer) moves
+  deterministically between those two layouts without changing ordinary
+  Diffview's layout cycle. Each review-owned Git adapter gets an isolated
   environment that rejects inherited repository routing and ignores local
   shallow/graft metadata, so later Diffview jobs keep the stored object graph.
-  `:ReviewCode` opens the current real source
-  buffer for LSP use and toggles back to the same file, layer, side, line, and
-  history entry, independently for every source tab.
+  `:ReviewCode` opens the current real source buffer for LSP use and toggles
+  back to the same file, layer, side, line, and history entry. That exact return
+  target follows normal tab-based editor navigation, including LSP and picker
+  destinations outside the reviewed diff or repository, until the review is
+  replaced or closed.
 - Comments use six explicit types: issue, suggestion, rationale, question,
   pedantic, and praise. They are persisted under
   `stdpath("state")/nvim-config/reviews/v1`, rendered with their original code
@@ -50,9 +56,12 @@ of remapping its anchors.
 
 ## Consequences
 
-Historical diff buffers intentionally do not run LSP, and commit history is
-browse-only because a persisted comment anchor does not encode a log entry.
-The source toggle is the supported LSP path. The integration isolates pinned
+Historical diff buffers intentionally do not run LSP in either presentation
+layout, and commit history is browse-only because a persisted comment anchor
+does not encode a log entry. `:ReviewCode` followed by ordinary source
+navigation remains the supported LSP path; inherited source tabs return to the
+original exact review target rather than treating the definition destination
+as part of the diff. The integration isolates pinned
 Diffview seams for the selected file, history entries, file-open lifecycle, and
 exact file selection in `config.review_diffview`; plugin upgrades must exercise
 its focused tests and the full offline config check.

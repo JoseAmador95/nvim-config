@@ -171,6 +171,7 @@ local commands = {
 	review_export = { "ReviewExport" },
 	review_files = { "ReviewFiles" },
 	review_link_tuicr = { "ReviewLinkTuicr" },
+	review_layout = { "ReviewLayout" },
 	review_next = { "ReviewNext" },
 	review_open = { "ReviewOpen" },
 	review_prev = { "ReviewPrev" },

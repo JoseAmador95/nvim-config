@@ -526,6 +526,120 @@ test("session suspension vetoes close failures and restores the original focus",
 	assert(ok, err)
 end)
 
+test("ReviewCode returns inherited external navigation to the exact review target", function()
+	local diffview = require("config.review_diffview")
+	local review_source = require("config.review_source")
+	local root = vim.fn.tempname() .. "-review-root"
+	local external = vim.fn.tempname() .. "-external-source.lua"
+	assert(vim.fn.mkdir(root, "p") == 1)
+	assert(vim.fn.writefile({ "return true" }, external) == 0)
+	pcall(vim.cmd, "silent! tabonly!")
+	vim.cmd("edit! " .. vim.fn.fnameescape(external))
+	local source_tab = vim.api.nvim_get_current_tabpage()
+	vim.cmd("tabnew")
+	local review_tab = vim.api.nvim_get_current_tabpage()
+	local workspace = {
+		root = root,
+		tabpage = review_tab,
+		view_mode = "files",
+		scope = { kind = "branch" },
+		session = { id = "external-navigation", items = {} },
+	}
+	local target = {
+		current_path = "lua/config/original.lua",
+		layer = "working",
+		revision = "LOCAL",
+		side = "right",
+		line = 41,
+		column = 7,
+	}
+	review._workspaces[root] = workspace
+	assert(review_source.set(source_tab, workspace, target))
+	vim.api.nvim_set_current_tabpage(source_tab)
+	local original_workspace = diffview.workspace
+	local original_select_file = diffview.select_file
+	local selected
+	diffview.workspace = function()
+		return nil
+	end
+	diffview.select_file = function(path, layer, value)
+		selected = { path = path, layer = layer, target = value }
+		return true
+	end
+
+	local ok, err = xpcall(function()
+		review.code()
+		assert(vim.api.nvim_get_current_tabpage() == review_tab, "ReviewCode did not return to the review tab")
+		assert(selected and selected.path == target.current_path and selected.layer == target.layer)
+		assert(vim.deep_equal(selected.target, target), "ReviewCode did not restore the captured exact target")
+	end, debug.traceback)
+	diffview.workspace = original_workspace
+	diffview.select_file = original_select_file
+	review_source.clear_workspace(workspace)
+	review._workspaces[root] = nil
+	pcall(vim.cmd, "silent! tabonly!")
+	vim.fn.delete(external)
+	vim.fn.delete(root, "d")
+	assert(ok, err)
+end)
+
+test("ReviewCode preserves current-repository fallback without explicit lineage", function()
+	local diffview = require("config.review_diffview")
+	local repo_module = require("config.repo")
+	local review_source = require("config.review_source")
+	pcall(vim.cmd, "silent! tabonly!")
+	vim.cmd("enew!")
+	local source_tab = vim.api.nvim_get_current_tabpage()
+	vim.cmd("tabnew")
+	local review_tab = vim.api.nvim_get_current_tabpage()
+	local root = "/tmp/review-repository-fallback"
+	local workspace = {
+		root = root,
+		tabpage = review_tab,
+		view_mode = "files",
+		scope = { kind = "branch" },
+		session = { id = "repository-fallback", items = {} },
+	}
+	review._workspaces[root] = workspace
+	review_source.clear(source_tab)
+	vim.api.nvim_set_current_tabpage(source_tab)
+	local originals = {
+		workspace = diffview.workspace,
+		select_file = diffview.select_file,
+		current_root = repo_module.current_root,
+		relative_existing = repo_module.relative_existing,
+	}
+	local selected
+	diffview.workspace = function()
+		return nil
+	end
+	diffview.select_file = function(path, layer, target)
+		selected = { path = path, layer = layer, target = target }
+		return true
+	end
+	repo_module.current_root = function()
+		return root
+	end
+	repo_module.relative_existing = function(value, path)
+		assert(value == root and type(path) == "string")
+		return "lua/config/current.lua"
+	end
+
+	local ok, err = xpcall(function()
+		review.code()
+		assert(vim.api.nvim_get_current_tabpage() == review_tab)
+		assert(selected and selected.path == "lua/config/current.lua")
+		assert(selected.layer == nil and selected.target == nil)
+	end, debug.traceback)
+	diffview.workspace = originals.workspace
+	diffview.select_file = originals.select_file
+	repo_module.current_root = originals.current_root
+	repo_module.relative_existing = originals.relative_existing
+	review._workspaces[root] = nil
+	pcall(vim.cmd, "silent! tabonly!")
+	assert(ok, err)
+end)
+
 test("setup exposes the namespaced command and mapping surface", function()
 	local diffview = require("config.review_diffview")
 	local original_set_controller = diffview.set_controller
@@ -543,6 +657,7 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"ReviewFiles",
 		"ReviewCommits",
 		"ReviewCode",
+		"ReviewLayout",
 		"ReviewComment",
 		"ReviewThreads",
 		"ReviewReply",
@@ -565,6 +680,7 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"<leader>Rf",
 		"<leader>Rh",
 		"<leader>Rv",
+		"<leader>Rl",
 		"<leader>Ra",
 		"<leader>Rt",
 		"<leader>Re",
@@ -602,6 +718,20 @@ test("setup exposes the namespaced command and mapping surface", function()
 	assert(closed == 2, "fully exported recovery could not be discarded")
 	diffview.workspace = original_workspace
 	diffview.close = original_close
+end)
+
+test("closing a review clears every inherited source lineage", function()
+	local review_source = require("config.review_source")
+	local workspace = {
+		root = "/tmp/review-lineage-close",
+		tabpage = vim.api.nvim_get_current_tabpage(),
+		session = { id = "lineage-close", items = {} },
+	}
+	review._workspaces[workspace.root] = workspace
+	assert(review_source.set(vim.api.nvim_get_current_tabpage(), workspace, { current_path = "closed.lua" }))
+	installed_controller.view_closed(workspace)
+	assert(review._workspaces[workspace.root] == nil, "closed review remained current")
+	assert(review_source.get(vim.api.nvim_get_current_tabpage()) == nil, "closed review kept inherited lineage")
 end)
 
 test("global teardown persists every unsaved conflict recovery", function()

@@ -27,6 +27,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				require("lazy").load({
 					plugins = {
 						"SchemaStore.nvim",
+						"diffview-plus.nvim",
 						"grug-far.nvim",
 						"mason-lspconfig.nvim",
 						"neoconf.nvim",
@@ -72,6 +73,39 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(icon ~= nil, "updated devicons HEIC entry is unavailable")
 
 				assert(type(require_table("rainbow-delimiters").strategy) == "table")
+				local diffview_actions = require_table("diffview.actions")
+				assert(type(diffview_actions.cycle_layout) == "function", "Diffview layout cycle API is missing")
+				assert(type(diffview_actions.set_layout) == "function", "Diffview layout selection API is missing")
+				local diffview_config = require_table("diffview.config").get_config()
+				assert(diffview_config.view.default.layout == "diff2_horizontal", "Diffview default layout drifted")
+				assert(diffview_config.view.inline.style == "unified", "Diffview inline layout style drifted")
+				assert(
+					vim.deep_equal(diffview_config.view.cycle_layouts.default, {
+						"diff2_horizontal",
+						"diff2_vertical",
+					}),
+					"ordinary Diffview layout cycle was changed"
+				)
+				local layout_mapping
+				for _, mapping in ipairs(diffview_config.keymaps.view) do
+					if mapping[2] == "g<C-x>" then
+						layout_mapping = mapping[3]
+					end
+				end
+				assert(
+					type(layout_mapping) == "function" and layout_mapping ~= diffview_actions.cycle_layout,
+					"review-aware layout mapping is missing"
+				)
+				local inline_diffget
+				for _, mapping in ipairs(diffview_config.keymaps.diff1_inline) do
+					if mapping[2] == "do" then
+						inline_diffget = mapping[3]
+					end
+				end
+				assert(
+					type(inline_diffget) == "function" and inline_diffget ~= diffview_actions.diffget_inline,
+					"inline diffget is not protected by the review guard"
+				)
 
 				local splits = require_table("smart-splits")
 				assert(type(splits.resize_left) == "function", "smart-splits resize API is missing")
@@ -140,9 +174,11 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				}) do
 					assert(plugins[name] == nil, "removed plugin remains in the full profile: " .. name)
 				end
-				for _, name in ipairs({ "diffview.nvim", "gitsigns.nvim", "snacks.nvim" }) do
+				for _, name in ipairs({ "diffview-plus.nvim", "gitsigns.nvim", "snacks.nvim" }) do
 					assert(plugins[name] ~= nil, "retained Git workflow is missing: " .. name)
 				end
+				assert(plugins["diffview.nvim"] == nil, "retired Diffview source remains in the full profile")
+				assert(plugins["diffview-plus.nvim"].version == "v0.37", "diffview-plus version constraint drifted")
 				for _, name in ipairs({ "nvim-coverage", "nvim-navic", "venv-selector.nvim" }) do
 					assert(plugins[name] ~= nil, "Phase 2 dependency is missing: " .. name)
 				end

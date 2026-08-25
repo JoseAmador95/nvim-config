@@ -232,6 +232,102 @@ test("mutating mappings are guarded only while a review view is active", functio
 	diffview._on_view_closed(view)
 end)
 
+test("layout cycling is review-only and protects inline buffers", function()
+	local calls = {}
+	local fallback_calls = 0
+	diffview.layout_or(function()
+		fallback_calls = fallback_calls + 1
+	end)()
+	assert(fallback_calls == 1, "ordinary Diffview did not retain its layout cycle")
+	local changed, err = diffview.layout({
+		view = { cur_layout = { name = "diff2_horizontal" } },
+		set_layout = function(name)
+			return function()
+				calls[#calls + 1] = name
+			end
+		end,
+	})
+	assert(not changed and err:find("not a review workspace", 1, true) and #calls == 0)
+
+	local value = workspace()
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_get_current_buf()
+	local previous = {
+		diff = vim.wo[win].diff,
+		modifiable = vim.bo[buf].modifiable,
+		readonly = vim.bo[buf].readonly,
+		symbol = vim.w[win].nvim_review_diff_symbol,
+	}
+	local view = { tabpage = tabpage, adapter = adapter() }
+	vim.wo[win].diff = false
+	vim.bo[buf].modifiable = true
+	vim.bo[buf].readonly = false
+	vim.w[win].nvim_review_diff_symbol = nil
+	assert(diffview.open(value, "files", nil, {
+		command = function()
+			diffview._on_view_opened(view)
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+	}))
+
+	local original_lib = package.loaded["diffview.lib"]
+	package.loaded["diffview.lib"] = {
+		get_current_view = function()
+			return view
+		end,
+	}
+	diffview.hooks().diff_buf_win_enter(buf, win, { symbol = "b", layout_name = "diff1_inline" })
+	package.loaded["diffview.lib"] = original_lib
+	assert(not vim.bo[buf].modifiable and vim.bo[buf].readonly, "inline review buffer remained writable")
+	local original_layout = diffview.layout
+	local routed = 0
+	diffview.layout = function()
+		routed = routed + 1
+		return true
+	end
+	diffview.layout_or(function()
+		fallback_calls = fallback_calls + 1
+	end)()
+	diffview.layout = original_layout
+	assert(routed == 1 and fallback_calls == 1, "review layout mapping used the ordinary Diffview cycle")
+
+	changed, err = diffview.layout({
+		view = { cur_layout = { name = "diff2_horizontal" } },
+		set_layout = function(name)
+			return function()
+				calls[#calls + 1] = name
+			end
+		end,
+	})
+	assert(changed and err == nil and calls[1] == "diff1_inline", "side-by-side did not switch to inline")
+	changed, err = diffview.layout({
+		view = { cur_layout = { name = "diff1_inline" } },
+		set_layout = function(name)
+			return function()
+				calls[#calls + 1] = name
+			end
+		end,
+	})
+	assert(changed and err == nil and calls[2] == "diff2_horizontal", "inline did not switch to side-by-side")
+	changed, err = diffview.layout({
+		view = { cur_layout = { name = "diff3_horizontal" } },
+		set_layout = function()
+			error("merge layout must not be converted")
+		end,
+	})
+	assert(not changed and err:find("unavailable", 1, true), "merge layout did not fail clearly")
+	diffview._on_view_closed(view)
+	assert(vim.bo[buf].modifiable and not vim.bo[buf].readonly, "source options were not restored")
+
+	vim.wo[win].diff = previous.diff
+	vim.bo[buf].modifiable = previous.modifiable
+	vim.bo[buf].readonly = previous.readonly
+	vim.w[win].nvim_review_diff_symbol = previous.symbol
+end)
+
 test("working file selection distinguishes staged, unstaged, untracked, and renamed entries", function()
 	local value = workspace()
 	local entries = {

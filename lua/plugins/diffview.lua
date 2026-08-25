@@ -1,5 +1,6 @@
 return {
-	"sindrets/diffview.nvim",
+	"dlyongemallo/diffview-plus.nvim",
+	version = "v0.37",
 	cmd = { "DiffviewOpen", "DiffviewClose", "DiffviewFileHistory" },
 	cond = function()
 		return not vim.g.vscode
@@ -15,6 +16,7 @@ return {
 				view = {
 					["<tab>"] = actions.select_next_entry,
 					["<s-tab>"] = actions.select_prev_entry,
+					["g<C-x>"] = review.layout_or(actions.cycle_layout),
 					["q"] = review.close_or(actions.close),
 					["gf"] = review.code_or(actions.goto_file_edit),
 					["<C-w><C-f>"] = review.code_or(actions.goto_file_split),
@@ -57,6 +59,14 @@ return {
 					["<C-w><C-f>"] = review.code_or(actions.goto_file_split),
 					["<C-w>gf"] = review.code_or(actions.goto_file_tab),
 					["X"] = review.guard(actions.restore_entry),
+				},
+				diff1_inline = {
+					{
+						{ "n", "x" },
+						"do",
+						review.guard(actions.diffget_inline),
+						{ desc = "Obtain the old-side hunk unless the view is read-only" },
+					},
 				},
 				diff3 = {
 					{

@@ -144,6 +144,17 @@ test("tmux refresh is a namespaced palette-only descriptor", function()
 	assert(not find_item(compact, "tmux.refresh_dev_session"), "tmux refresh leaked into the context menu")
 end)
 
+test("review layout is a namespaced palette command with its mapping hint", function()
+	local menu_context = context.new({ filetype = "lua", mode = "n" })
+	local palette = catalog.build(menu_context, function() end, "palette")
+	local compact = catalog.build(menu_context, function() end, "context")
+	local item = assert(find_item(palette, "command.review_layout"), "review layout descriptor is missing")
+	equal("Toggle Side-by-side / Unified Inline Diff", item.label, "review layout label")
+	equal("<leader>Rl", item.hint, "review layout mapping hint")
+	equal({ "layout", "interleaved", "inline", "unified" }, item.keywords, "review layout search terms")
+	assert(not find_item(compact, "command.review_layout"), "review layout leaked into the context menu")
+end)
+
 test("catalog filters visual, filetype, and CMake descriptors from context", function()
 	local dispatch = function() end
 	local lua_sections = catalog.build(context.new({ filetype = "lua", mode = "n" }), dispatch)

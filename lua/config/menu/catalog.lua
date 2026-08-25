@@ -430,6 +430,13 @@ function M.definitions(dispatch)
 			palette_item("command.review_files", "Show Review Files", "<leader>Rf"),
 			palette_item("command.review_commits", "Show Review Commits", "<leader>Rh"),
 			palette_item("command.review_code", "Toggle Review Code and Diff", "<leader>Rv"),
+			palette_item(
+				"command.review_layout",
+				"Toggle Side-by-side / Unified Inline Diff",
+				"<leader>Rl",
+				nil,
+				{ "layout", "interleaved", "inline", "unified" }
+			),
 			palette_item("command.review_comment", "Add Review Comment", "<leader>Ra"),
 			palette_item("command.review_threads", "Show Review Threads", "<leader>Rt"),
 			palette_item("command.review_export", "Export Review", "<leader>Re"),

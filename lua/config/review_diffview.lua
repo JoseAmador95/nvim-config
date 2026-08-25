@@ -49,7 +49,8 @@ local function protect_view(view)
 	end
 	local saved = buffer_options[tabpage] or {}
 	for _, win in ipairs(view_windows(view)) do
-		if vim.api.nvim_win_is_valid(win) and vim.wo[win].diff then
+		local marked = vim.api.nvim_win_is_valid(win) and vim.w[win].nvim_review_diff_symbol ~= nil
+		if vim.api.nvim_win_is_valid(win) and (vim.wo[win].diff or marked) then
 			local buf = vim.api.nvim_win_get_buf(win)
 			if not saved[buf] and vim.api.nvim_buf_is_valid(buf) then
 				saved[buf] = { modifiable = vim.bo[buf].modifiable, readonly = vim.bo[buf].readonly }
@@ -672,6 +673,53 @@ function M.refresh_or(fallback)
 		end
 		return fallback(...)
 	end
+end
+
+---Use the review-only layout toggle without changing ordinary Diffview cycling.
+---@param fallback function
+---@return function
+function M.layout_or(fallback)
+	return function(...)
+		if M.active() then
+			local changed, err = M.layout()
+			if not changed then
+				notify(err, vim.log.levels.WARN)
+			end
+			return
+		end
+		return fallback(...)
+	end
+end
+
+---Cycle the presentation layout of the current review-owned Diffview tab.
+---@param dependencies? table
+---@return boolean? changed
+---@return string? error_message
+function M.layout(dependencies)
+	if not current_review() then
+		return nil, "current tab is not a review workspace"
+	end
+	local deps = dependencies or {}
+	local view = deps.view or require("diffview.lib").get_current_view()
+	local current = view and type(view.cur_layout) == "table" and view.cur_layout.name or nil
+	local next_layout
+	if current == "diff2_horizontal" or current == "diff2_horizontal_pinned" then
+		next_layout = "diff1_inline"
+	elseif current == "diff1_inline" or current == "diff1_inline_pinned" then
+		next_layout = "diff2_horizontal"
+	else
+		return nil, "side-by-side / inline toggle is unavailable for the current review layout"
+	end
+	local set_layout = deps.set_layout or require("diffview.actions").set_layout
+	local action = set_layout(next_layout)
+	if type(action) ~= "function" then
+		return nil, "Diffview did not expose the requested review layout"
+	end
+	local ok, err = pcall(action)
+	if not ok then
+		return nil, tostring(err)
+	end
+	return true
 end
 
 ---Install callbacks owned by the review controller.
