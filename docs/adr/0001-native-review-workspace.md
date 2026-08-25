@@ -23,12 +23,12 @@ Neovim owns a review workspace with an explicit Git identity:
   explicitly live, fingerprint-guarded view in a transient, read-only tab. Raw
   Diffview remains independent. Review tabs start with a side-by-side diff and
   can switch in place to a unified inline diff. The review-only toggle
-  (`:ReviewLayout`, `<leader>Rl`, or `g<C-x>` inside a review buffer) moves
+  (`:ReviewLayout`, `<leader>Rv`, or `g<C-x>` inside a review buffer) moves
   deterministically between those two layouts without changing ordinary
   Diffview's layout cycle. Each review-owned Git adapter gets an isolated
   environment that rejects inherited repository routing and ignores local
   shallow/graft metadata, so later Diffview jobs keep the stored object graph.
-  `:ReviewCode` opens the current real source buffer for LSP use and toggles
+  `:ReviewCode` (`<leader>Rg`) opens the current real source buffer for LSP use and toggles
   back to the same file, layer, side, line, and history entry. That exact return
   target follows normal tab-based editor navigation, including LSP and picker
   destinations outside the reviewed diff or repository, until the review is
@@ -37,6 +37,9 @@ Neovim owns a review workspace with an explicit Git identity:
   pedantic, and praise. They are persisted under
   `stdpath("state")/nvim-config/reviews/v1`, rendered with their original code
   context, and shown through a dedicated Trouble source and sign namespace.
+  `<leader>Rl` lists navigable comments without mutating them, `<leader>Rd`
+  deletes the unique comment on the exact current diff line, and `<leader>Rc`
+  changes its type. `<leader>Rt` remains the persistent Trouble thread panel.
 - Clipboard export locks only comments that were copied successfully. A linked
   TUICR round is accessed only through `tuicr-round`; successful remote writes
   use stable delivery keys and are persisted one at a time. Review state uses

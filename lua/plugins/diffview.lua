@@ -33,6 +33,7 @@ return {
 					["dX"] = review.guard(actions.conflict_choose_all("none")),
 				},
 				file_panel = {
+					["<cr>"] = review.focus_entry_or(actions.select_entry, actions.focus_entry),
 					["j"] = actions.next_entry,
 					["k"] = actions.prev_entry,
 					["q"] = review.close_or(actions.close),
@@ -52,6 +53,7 @@ return {
 					["dX"] = review.guard(actions.conflict_choose_all("none")),
 				},
 				file_history_panel = {
+					["<cr>"] = review.focus_entry_or(actions.select_entry, actions.focus_entry),
 					["q"] = review.close_or(actions.close),
 					["g!"] = review.guard(actions.options),
 					["<C-A-d>"] = review.guard(actions.open_in_diffview),

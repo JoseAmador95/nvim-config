@@ -675,6 +675,19 @@ function M.refresh_or(fallback)
 	end
 end
 
+---Focus a selected file only when the panel belongs to a review view.
+---@param fallback function
+---@param focus function
+---@return function
+function M.focus_entry_or(fallback, focus)
+	return function(...)
+		if M.active() then
+			return focus(...)
+		end
+		return fallback(...)
+	end
+end
+
 ---Use the review-only layout toggle without changing ordinary Diffview cycling.
 ---@param fallback function
 ---@return function

@@ -232,6 +232,34 @@ test("mutating mappings are guarded only while a review view is active", functio
 	diffview._on_view_closed(view)
 end)
 
+test("panel entry selection focuses only review-owned views", function()
+	local selected = {}
+	local focused = {}
+	local select_entry = diffview.focus_entry_or(function(...)
+		selected[#selected + 1] = { ... }
+		return "selected"
+	end, function(...)
+		focused[#focused + 1] = { ... }
+		return "focused"
+	end)
+	assert(select_entry("ordinary", 1) == "selected")
+	assert(vim.deep_equal(selected, { { "ordinary", 1 } }) and #focused == 0)
+
+	local value = workspace()
+	local view = { tabpage = vim.api.nvim_get_current_tabpage(), adapter = adapter() }
+	assert(diffview.open(value, "files", nil, {
+		command = function()
+			diffview._on_view_opened(view)
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+	}))
+	assert(select_entry("review", 2) == "focused")
+	assert(#selected == 1 and vim.deep_equal(focused, { { "review", 2 } }))
+	diffview._on_view_closed(view)
+end)
+
 test("layout cycling is review-only and protects inline buffers", function()
 	local calls = {}
 	local fallback_calls = 0

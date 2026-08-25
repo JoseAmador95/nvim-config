@@ -150,9 +150,20 @@ test("review layout is a namespaced palette command with its mapping hint", func
 	local compact = catalog.build(menu_context, function() end, "context")
 	local item = assert(find_item(palette, "command.review_layout"), "review layout descriptor is missing")
 	equal("Toggle Side-by-side / Unified Inline Diff", item.label, "review layout label")
-	equal("<leader>Rl", item.hint, "review layout mapping hint")
+	equal("<leader>Rv", item.hint, "review layout mapping hint")
 	equal({ "layout", "interleaved", "inline", "unified" }, item.keywords, "review layout search terms")
 	assert(not find_item(compact, "command.review_layout"), "review layout leaked into the context menu")
+	for id, expected in pairs({
+		["command.review_code"] = { "Toggle Review Code and Diff", "<leader>Rg" },
+		["command.review_comments"] = { "List Review Comments", "<leader>Rl" },
+		["command.review_change_type"] = { "Change Comment Type at Current Line", "<leader>Rc" },
+		["command.review_delete"] = { "Delete Comment at Current Line", "<leader>Rd" },
+	}) do
+		local descriptor = assert(find_item(palette, id), id .. " descriptor is missing")
+		equal(expected[1], descriptor.label, id .. " label")
+		equal(expected[2], descriptor.hint, id .. " mapping hint")
+		assert(not find_item(compact, id), id .. " leaked into the context menu")
+	end
 end)
 
 test("catalog filters visual, filetype, and CMake descriptors from context", function()

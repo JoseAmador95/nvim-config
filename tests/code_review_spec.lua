@@ -640,6 +640,432 @@ test("ReviewCode preserves current-repository fallback without explicit lineage"
 	assert(ok, err)
 end)
 
+test("delete without an ID targets only the unique comment on the current review line", function()
+	local diffview = require("config.review_diffview")
+	local scope = require("config.review_scope")
+	local store = require("config.review_store")
+	local root = "/tmp/review-line-delete"
+	local function item(id, status, anchor)
+		return {
+			id = id,
+			sequence = 1,
+			type = "issue",
+			status = status or "draft",
+			body = id,
+			reply_to = vim.NIL,
+			anchor = anchor or {
+				path = "lua/config/example.lua",
+				side = "right",
+				layer = "historical",
+				start_line = 14,
+				stale = false,
+			},
+		}
+	end
+	local workspace = {
+		root = root,
+		tabpage = vim.api.nvim_get_current_tabpage(),
+		view_mode = "files",
+		scope = { kind = "commit" },
+		session = {
+			id = "session",
+			repo_root = root,
+			scope = { kind = "commit" },
+			stale = false,
+			items = {},
+		},
+	}
+	local originals = {
+		workspace = diffview.workspace,
+		current_target = diffview.current_target,
+		update_title = diffview.update_title,
+		detect_drift = scope.detect_drift,
+		delete = store.delete,
+		save = store.save,
+		refresh_marks = review.refresh_marks,
+		notify = vim.notify,
+		select = vim.ui.select,
+	}
+	local notices = {}
+	local deleted = {}
+	local target_calls = 0
+	diffview.workspace = function()
+		return workspace
+	end
+	diffview.current_target = function()
+		target_calls = target_calls + 1
+		return {
+			path = "lua/config/example.lua",
+			side = "right",
+			layer = "historical",
+			winid = vim.api.nvim_get_current_win(),
+		}
+	end
+	diffview.update_title = function() end
+	scope.detect_drift = function()
+		return { stale = false }
+	end
+	store.delete = function(session, id)
+		deleted[#deleted + 1] = id
+		local copy = vim.deepcopy(session)
+		for index, candidate in ipairs(copy.items) do
+			if candidate.id == id then
+				table.remove(copy.items, index)
+				break
+			end
+		end
+		return copy
+	end
+	store.save = function(_, session)
+		return session
+	end
+	review.refresh_marks = function() end
+	vim.notify = function(message, _, options)
+		notices[#notices + 1] = { message = message, title = options and options.title }
+	end
+	vim.ui.select = function()
+		error("line deletion opened a global picker")
+	end
+	local buffer_lines = {}
+	for _ = 1, 14 do
+		buffer_lines[#buffer_lines + 1] = ""
+	end
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
+	vim.api.nvim_win_set_cursor(0, { 14, 0 })
+
+	local ok, err = xpcall(function()
+		review.delete()
+		assert(#deleted == 0)
+		assert(notices[#notices].message == "No review comment on the current line")
+		assert(notices[#notices].title == "Review")
+
+		workspace.session.items = { item("first"), item("second") }
+		review.delete()
+		assert(#deleted == 0 and notices[#notices].message:find("Multiple review comments", 1, true))
+
+		local stale = item("stale")
+		stale.anchor.stale = true
+		workspace.session.items = { stale }
+		review.delete()
+		assert(#deleted == 0 and notices[#notices].message:find("unavailable", 1, true))
+
+		workspace.session.items = { item("exported", "exported"), item("local") }
+		review.delete()
+		assert(vim.deep_equal(deleted, { "local" }))
+		assert(#workspace.session.items == 1 and workspace.session.items[1].id == "exported")
+
+		workspace.session.items = { item("explicit") }
+		local calls_before = target_calls
+		review.delete("explicit")
+		assert(vim.deep_equal(deleted, { "local", "explicit" }))
+		assert(target_calls == calls_before, "explicit ID deletion inspected the current line")
+	end, debug.traceback)
+	diffview.workspace = originals.workspace
+	diffview.current_target = originals.current_target
+	diffview.update_title = originals.update_title
+	scope.detect_drift = originals.detect_drift
+	store.delete = originals.delete
+	store.save = originals.save
+	review.refresh_marks = originals.refresh_marks
+	vim.notify = originals.notify
+	vim.ui.select = originals.select
+	assert(ok, err)
+end)
+
+test("changing a line comment type uses the ordered picker and latest item state", function()
+	local diffview = require("config.review_diffview")
+	local scope = require("config.review_scope")
+	local store = require("config.review_store")
+	local root = "/tmp/review-line-type"
+	local anchor = {
+		path = "lua/config/example.lua",
+		side = "right",
+		layer = "historical",
+		start_line = 9,
+		stale = false,
+	}
+	local workspace = {
+		root = root,
+		tabpage = vim.api.nvim_get_current_tabpage(),
+		view_mode = "files",
+		scope = { kind = "commit" },
+		session = {
+			id = "session",
+			repo_root = root,
+			scope = { kind = "commit" },
+			stale = false,
+			items = {
+				{
+					id = "resolved",
+					sequence = 1,
+					type = "question",
+					status = "resolved",
+					body = "Original body",
+					reply_to = vim.NIL,
+					anchor = anchor,
+				},
+			},
+		},
+	}
+	local originals = {
+		workspace = diffview.workspace,
+		current_target = diffview.current_target,
+		update_title = diffview.update_title,
+		detect_drift = scope.detect_drift,
+		set_type = store.set_type,
+		save = store.save,
+		refresh_marks = review.refresh_marks,
+		select = vim.ui.select,
+	}
+	local picker_callback
+	local drift_checks = 0
+	local mutations = 0
+	diffview.workspace = function()
+		return workspace
+	end
+	diffview.current_target = function()
+		return {
+			path = anchor.path,
+			side = anchor.side,
+			layer = anchor.layer,
+			winid = vim.api.nvim_get_current_win(),
+		}
+	end
+	diffview.update_title = function() end
+	scope.detect_drift = function()
+		drift_checks = drift_checks + 1
+		return { stale = false }
+	end
+	store.set_type = function(session, id, item_type)
+		mutations = mutations + 1
+		assert(id == "resolved" and item_type == "rationale")
+		assert(session.items[1].body == "Latest body", "type change used the pre-picker item")
+		assert(session.items[1].status == "resolved")
+		local copy = vim.deepcopy(session)
+		copy.items[1].type = item_type
+		return copy
+	end
+	store.save = function(_, session)
+		return session
+	end
+	review.refresh_marks = function() end
+	vim.ui.select = function(items, _, callback)
+		assert(vim.deep_equal(items, { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }))
+		picker_callback = callback
+	end
+	local buffer_lines = {}
+	for _ = 1, 9 do
+		buffer_lines[#buffer_lines + 1] = ""
+	end
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
+	vim.api.nvim_win_set_cursor(0, { 9, 0 })
+
+	local ok, err = xpcall(function()
+		review.change_type()
+		assert(type(picker_callback) == "function" and drift_checks == 1)
+		workspace.session.items[1].body = "Latest body"
+		picker_callback("rationale")
+		assert(drift_checks == 2 and mutations == 1)
+		assert(workspace.session.items[1].type == "rationale")
+		assert(workspace.session.items[1].status == "resolved")
+	end, debug.traceback)
+	diffview.workspace = originals.workspace
+	diffview.current_target = originals.current_target
+	diffview.update_title = originals.update_title
+	scope.detect_drift = originals.detect_drift
+	store.set_type = originals.set_type
+	store.save = originals.save
+	review.refresh_marks = originals.refresh_marks
+	vim.ui.select = originals.select
+	assert(ok, err)
+end)
+
+test("changing a comment type rechecks the exact current line after the picker", function()
+	local diffview = require("config.review_diffview")
+	local scope = require("config.review_scope")
+	local store = require("config.review_store")
+	local root = "/tmp/review-line-type-recheck"
+	local function item(id)
+		return {
+			id = id,
+			sequence = 1,
+			type = "question",
+			status = "draft",
+			body = id,
+			reply_to = vim.NIL,
+			anchor = {
+				path = "lua/config/example.lua",
+				side = "right",
+				layer = "historical",
+				start_line = 9,
+				stale = false,
+			},
+		}
+	end
+	local workspace = {
+		root = root,
+		tabpage = vim.api.nvim_get_current_tabpage(),
+		view_mode = "files",
+		scope = { kind = "commit" },
+		session = {
+			id = "session",
+			repo_root = root,
+			scope = { kind = "commit" },
+			stale = false,
+			items = { item("original") },
+		},
+	}
+	local originals = {
+		workspace = diffview.workspace,
+		current_target = diffview.current_target,
+		detect_drift = scope.detect_drift,
+		set_type = store.set_type,
+		notify = vim.notify,
+		select = vim.ui.select,
+	}
+	local picker_callback
+	local mutations = 0
+	local notices = {}
+	diffview.workspace = function()
+		return workspace
+	end
+	diffview.current_target = function()
+		return {
+			path = "lua/config/example.lua",
+			side = "right",
+			layer = "historical",
+			winid = vim.api.nvim_get_current_win(),
+		}
+	end
+	scope.detect_drift = function()
+		return { stale = false }
+	end
+	store.set_type = function()
+		mutations = mutations + 1
+	end
+	vim.notify = function(message, _, options)
+		notices[#notices + 1] = { message = message, title = options and options.title }
+	end
+	vim.ui.select = function(_, _, callback)
+		picker_callback = callback
+	end
+	local buffer_lines = {}
+	for _ = 1, 9 do
+		buffer_lines[#buffer_lines + 1] = ""
+	end
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
+
+	local ok, err = xpcall(function()
+		vim.api.nvim_win_set_cursor(0, { 9, 0 })
+		review.change_type()
+		assert(type(picker_callback) == "function")
+		vim.api.nvim_win_set_cursor(0, { 8, 0 })
+		picker_callback("rationale")
+		assert(mutations == 0)
+		assert(notices[#notices].message == "No review comment on the current line")
+		assert(notices[#notices].title == "Review")
+
+		vim.api.nvim_win_set_cursor(0, { 9, 0 })
+		picker_callback = nil
+		review.change_type()
+		assert(type(picker_callback) == "function")
+		workspace.session.items[#workspace.session.items + 1] = item("second")
+		picker_callback("rationale")
+		assert(mutations == 0)
+		assert(notices[#notices].message:find("Multiple review comments", 1, true))
+	end, debug.traceback)
+	diffview.workspace = originals.workspace
+	diffview.current_target = originals.current_target
+	scope.detect_drift = originals.detect_drift
+	store.set_type = originals.set_type
+	vim.notify = originals.notify
+	vim.ui.select = originals.select
+	assert(ok, err)
+end)
+
+test("comment list picker jumps without mutating review state", function()
+	local diffview = require("config.review_diffview")
+	local workspace = {
+		root = "/tmp/review-comment-list",
+		tabpage = vim.api.nvim_get_current_tabpage(),
+		view_mode = "files",
+		session = {
+			stale = false,
+			items = {
+				{
+					id = "navigable",
+					sequence = 1,
+					type = "suggestion",
+					status = "draft",
+					body = "Use the helper",
+					anchor = {
+						path = "lua/config/example.lua",
+						side = "right",
+						layer = "historical",
+						start_line = 22,
+						start_column = 4,
+						stale = false,
+					},
+				},
+				{
+					id = "stale",
+					sequence = 2,
+					type = "issue",
+					status = "draft",
+					body = "Old location",
+					anchor = {
+						path = "lua/old.lua",
+						side = "right",
+						layer = "historical",
+						start_line = 3,
+						stale = true,
+					},
+				},
+			},
+		},
+	}
+	local before = vim.deepcopy(workspace.session)
+	local originals = {
+		workspace = diffview.workspace,
+		select_file = diffview.select_file,
+		select = vim.ui.select,
+	}
+	local selected
+	local selection_calls = 0
+	diffview.workspace = function()
+		return workspace
+	end
+	diffview.select_file = function(path, layer, target)
+		selection_calls = selection_calls + 1
+		selected = { path = path, layer = layer, target = target }
+		return true
+	end
+	vim.ui.select = function(items, options, callback)
+		assert(options.prompt == "Review comments")
+		assert(#items == 1 and items[1].id == "navigable")
+		callback(items[1])
+	end
+
+	local ok, err = xpcall(function()
+		review.comments()
+		assert(selection_calls == 1)
+		assert(selected.path == "lua/config/example.lua" and selected.layer == "historical")
+		assert(selected.target.side == "right" and selected.target.line == 22 and selected.target.column == 3)
+		assert(vim.deep_equal(workspace.session, before), "comment navigation mutated the review")
+
+		vim.ui.select = function(items, _, callback)
+			assert(#items == 1)
+			callback(nil)
+		end
+		review.comments()
+		assert(selection_calls == 1, "picker cancellation changed the selected review location")
+	end, debug.traceback)
+	diffview.workspace = originals.workspace
+	diffview.select_file = originals.select_file
+	vim.ui.select = originals.select
+	assert(ok, err)
+end)
+
 test("setup exposes the namespaced command and mapping surface", function()
 	local diffview = require("config.review_diffview")
 	local original_set_controller = diffview.set_controller
@@ -658,11 +1084,13 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"ReviewCommits",
 		"ReviewCode",
 		"ReviewLayout",
+		"ReviewComments",
 		"ReviewComment",
 		"ReviewThreads",
 		"ReviewReply",
 		"ReviewEdit",
 		"ReviewDeleteDraft",
+		"ReviewChangeType",
 		"ReviewResolve",
 		"ReviewReopen",
 		"ReviewNext",
@@ -679,9 +1107,11 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"<leader>Rs",
 		"<leader>Rf",
 		"<leader>Rh",
+		"<leader>Rg",
 		"<leader>Rv",
 		"<leader>Rl",
 		"<leader>Ra",
+		"<leader>Rc",
 		"<leader>Rd",
 		"<leader>Rt",
 		"<leader>Re",
@@ -691,6 +1121,15 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"]r",
 	}) do
 		assert(vim.fn.maparg(mapping, "n") ~= "", mapping .. " is missing")
+	end
+	for lhs, rhs in pairs({
+		["<leader>Rg"] = "<Cmd>ReviewCode<CR>",
+		["<leader>Rv"] = "<Cmd>ReviewLayout<CR>",
+		["<leader>Rl"] = "<Cmd>ReviewComments<CR>",
+		["<leader>Rc"] = "<Cmd>ReviewChangeType<CR>",
+		["<leader>Rd"] = "<Cmd>ReviewDeleteDraft<CR>",
+	}) do
+		assert(vim.fn.maparg(lhs, "n") == rhs, lhs .. " has unexpected RHS " .. vim.fn.maparg(lhs, "n"))
 	end
 
 	local original_workspace = diffview.workspace

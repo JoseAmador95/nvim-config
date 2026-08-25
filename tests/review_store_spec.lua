@@ -204,6 +204,26 @@ test("six types, normalized anchors, replies, resolution, and export lifecycle a
 	assert(not deleted and delete_err:find("has replies", 1, true))
 end)
 
+test("type changes preserve resolved lifecycle metadata", function()
+	local session = add_root(fresh())
+	local id = session.items[1].id
+	session = assert(store.set_status(session, id, "resolved", deps))
+	local before = vim.deepcopy(session.items[1])
+	session = assert(store.set_type(session, id, "rationale", deps))
+	local changed = session.items[1]
+	local expected = vim.deepcopy(before)
+	expected.type = "rationale"
+	expected.updated_at = changed.updated_at
+	assert(vim.deep_equal(changed, expected), "type mutation changed review lifecycle metadata")
+	assert(changed.status == "resolved" and changed.updated_at ~= before.updated_at)
+
+	local invalid, invalid_err = store.set_type(session, id, "note", deps)
+	assert(not invalid and invalid_err:find("six supported", 1, true))
+	session = assert(store.mark_exported(session, id, "clipboard:resolved", deps))
+	local exported, exported_err = store.set_type(session, id, "question", deps)
+	assert(not exported and exported_err:find("immutable", 1, true))
+end)
+
 test("exported findings remain replyable without unlocking the parent", function()
 	local session = add_root(fresh())
 	local parent = session.items[1]

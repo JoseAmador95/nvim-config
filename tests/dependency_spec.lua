@@ -75,6 +75,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(type(require_table("rainbow-delimiters").strategy) == "table")
 				local diffview_actions = require_table("diffview.actions")
 				assert(type(diffview_actions.cycle_layout) == "function", "Diffview layout cycle API is missing")
+				assert(type(diffview_actions.focus_entry) == "function", "Diffview focus-entry API is missing")
 				assert(type(diffview_actions.set_layout) == "function", "Diffview layout selection API is missing")
 				local diffview_config = require_table("diffview.config").get_config()
 				assert(diffview_config.view.default.layout == "diff2_horizontal", "Diffview default layout drifted")
@@ -96,6 +97,21 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					type(layout_mapping) == "function" and layout_mapping ~= diffview_actions.cycle_layout,
 					"review-aware layout mapping is missing"
 				)
+				for _, panel in ipairs({ "file_panel", "file_history_panel" }) do
+					local entry_mappings = {}
+					for _, mapping in ipairs(diffview_config.keymaps[panel]) do
+						if mapping[2] == "<cr>" then
+							entry_mappings[#entry_mappings + 1] = mapping[3]
+						end
+					end
+					assert(#entry_mappings == 1, panel .. " must have exactly one lowercase <cr> mapping")
+					assert(
+						type(entry_mappings[1]) == "function"
+							and entry_mappings[1] ~= diffview_actions.select_entry
+							and entry_mappings[1] ~= diffview_actions.focus_entry,
+						panel .. " is missing its review-aware entry mapping"
+					)
+				end
 				local inline_diffget
 				for _, mapping in ipairs(diffview_config.keymaps.diff1_inline) do
 					if mapping[2] == "do" then

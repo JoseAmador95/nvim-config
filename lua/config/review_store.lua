@@ -1107,6 +1107,24 @@ function M.edit(session, id, changes, options)
 	end)
 end
 
+function M.set_type(session, id, item_type, options)
+	return mutate(session, options, function(copy, deps)
+		local item = find_item(copy, id)
+		if not item then
+			return nil, "review item does not exist"
+		end
+		if item.status == "exported" then
+			return nil, "exported review items are immutable"
+		end
+		if not TYPES[item_type] then
+			return nil, "review item type must be one of the six supported types"
+		end
+		item.type = item_type
+		item.updated_at = deps.now()
+		return true
+	end)
+end
+
 function M.delete(session, id, options)
 	return mutate(session, options, function(copy)
 		local item, index = find_item(copy, id)

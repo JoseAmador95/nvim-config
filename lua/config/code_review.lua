@@ -511,13 +511,17 @@ local function select_item(workspace, prompt, predicate, callback)
 	}, callback)
 end
 
-local function find_item(workspace, id)
-	for _, item in ipairs(workspace.session.items) do
+local function find_session_item(session, id)
+	for _, item in ipairs(session.items) do
 		if item.id == id then
 			return item
 		end
 	end
 	return nil
+end
+
+local function find_item(workspace, id)
+	return find_session_item(workspace.session, id)
 end
 
 local function with_item(workspace, id, prompt, predicate, callback)
@@ -600,6 +604,79 @@ local function choose_type(callback)
 			return value:sub(1, 1):upper() .. value:sub(2)
 		end,
 	}, callback)
+end
+
+local function anchor_location(item)
+	local anchor = item.anchor
+	if type(anchor) ~= "table" then
+		return nil
+	end
+	return {
+		path = anchor.path,
+		side = anchor.side,
+		layer = anchor.layer,
+		line = anchor.start_line,
+	}
+end
+
+local function same_location(left, right)
+	return left
+		and right
+		and left.path == right.path
+		and left.side == right.side
+		and left.layer == right.layer
+		and left.line == right.line
+end
+
+local function navigable_item(workspace, item)
+	local location = anchor_location(item)
+	return location ~= nil
+		and not workspace.session.stale
+		and not item.anchor.stale
+		and type(location.path) == "string"
+		and location.path ~= ""
+		and type(location.side) == "string"
+		and type(location.layer) == "string"
+		and type(location.line) == "number"
+end
+
+local function current_line_item(workspace, session, predicate)
+	if workspace.view_mode == "history" then
+		return nil, nil, "Commit history is browse-only; use :ReviewFiles before changing comments"
+	end
+	if session.stale then
+		return nil, nil, "Review is stale; open a new scope before changing comments"
+	end
+	local target, target_err = review_diffview.current_target()
+	if not target then
+		return nil, nil, target_err
+	end
+	local location = {
+		path = target.path,
+		side = target.side,
+		layer = target.layer,
+		line = vim.api.nvim_win_get_cursor(target.winid)[1],
+	}
+	local matches = {}
+	local eligible = {}
+	for _, item in ipairs(session.items) do
+		if same_location(anchor_location(item), location) then
+			matches[#matches + 1] = item
+			if not item.anchor.stale and (not predicate or predicate(item)) then
+				eligible[#eligible + 1] = item
+			end
+		end
+	end
+	if #matches == 0 then
+		return nil, nil, "No review comment on the current line"
+	end
+	if #eligible == 0 then
+		return nil, nil, "The review comment on the current line is unavailable for this action"
+	end
+	if #eligible > 1 then
+		return nil, nil, "Multiple review comments are anchored on the current line"
+	end
+	return eligible[1], location
 end
 
 local function composer_recovery(workspace, title, body, anchor)
@@ -877,7 +954,7 @@ function M.edit(id)
 	end)
 end
 
----Delete one local draft after an explicit picker selection.
+---Delete one local draft by ID or at the exact current review line.
 ---@param id? string
 function M.delete(id)
 	local workspace = active_workspace()
@@ -885,6 +962,24 @@ function M.delete(id)
 		return notify("No active review", vim.log.levels.ERROR)
 	end
 	if not allow_mutation(workspace) then
+		return
+	end
+	if not id or id == "" then
+		local current = composer_session(workspace, false, "Review is stale; open a new scope before deleting comments")
+		if not current then
+			return
+		end
+		local item, _, item_err = current_line_item(workspace, current, function(candidate)
+			return candidate.status ~= "exported"
+		end)
+		if not item then
+			return notify(item_err, vim.log.levels.WARN)
+		end
+		local session, err = review_store.delete(current, item.id)
+		if not session then
+			return notify("Could not delete comment: " .. tostring(err), vim.log.levels.ERROR)
+		end
+		save_session(workspace, session)
 		return
 	end
 	with_item(workspace, id, "Delete review draft", function(item)
@@ -897,6 +992,51 @@ function M.delete(id)
 		if not session then
 			notify("Could not delete comment: " .. tostring(err), vim.log.levels.ERROR)
 			return
+		end
+		save_session(workspace, session)
+	end)
+end
+
+---Change the type of the comment at the exact current review line.
+function M.change_type()
+	local workspace = active_workspace()
+	if not workspace then
+		return notify("No active review", vim.log.levels.ERROR)
+	end
+	if not allow_mutation(workspace) then
+		return
+	end
+	local current = composer_session(workspace, false, "Review is stale; open a new scope before changing comments")
+	if not current then
+		return
+	end
+	local item, _, item_err = current_line_item(workspace, current, function(candidate)
+		return candidate.status ~= "exported"
+	end)
+	if not item then
+		return notify(item_err, vim.log.levels.WARN)
+	end
+	local id = item.id
+	choose_type(function(item_type)
+		if not item_type or not allow_mutation(workspace) then
+			return
+		end
+		local latest = composer_session(workspace, false, "Review is stale; open a new scope before changing comments")
+		if not latest then
+			return
+		end
+		local resolved, _, resolved_err = current_line_item(workspace, latest, function(candidate)
+			return candidate.status ~= "exported"
+		end)
+		if not resolved then
+			return notify(resolved_err, vim.log.levels.WARN)
+		end
+		if resolved.id ~= id then
+			return notify("The review comment on the current line is unavailable for this action", vim.log.levels.WARN)
+		end
+		local session, err = review_store.set_type(latest, id, item_type)
+		if not session then
+			return notify("Could not change comment type: " .. tostring(err), vim.log.levels.ERROR)
 		end
 		save_session(workspace, session)
 	end)
@@ -1094,6 +1234,25 @@ function M.jump(id, owned_threads)
 	if not item or not focus_item(workspace, item) then
 		notify("Review location is unavailable", vim.log.levels.ERROR)
 	end
+end
+
+---Choose an anchored review comment and jump to its exact diff location.
+function M.comments()
+	local workspace = active_workspace()
+	if not workspace then
+		return notify("No active review", vim.log.levels.ERROR)
+	end
+	select_item(workspace, "Review comments", function(item)
+		return navigable_item(workspace, item)
+	end, function(selected)
+		if not selected then
+			return
+		end
+		local item = find_item(workspace, selected.id)
+		if not item or not navigable_item(workspace, item) or not focus_item(workspace, item) then
+			notify("Review location is unavailable", vim.log.levels.ERROR)
+		end
+	end)
 end
 
 local function navigate(direction)
@@ -1756,6 +1915,7 @@ local function setup_commands()
 		desc = "Add a typed review comment",
 	})
 	vim.api.nvim_create_user_command("ReviewThreads", M.threads, { desc = "Toggle review threads in Trouble" })
+	vim.api.nvim_create_user_command("ReviewComments", M.comments, { desc = "Choose and jump to a review comment" })
 	vim.api.nvim_create_user_command("ReviewReply", function(command)
 		M.reply(command.args)
 	end, { nargs = "?", desc = "Reply to a review comment" })
@@ -1764,7 +1924,10 @@ local function setup_commands()
 	end, { nargs = "?", desc = "Edit a review draft" })
 	vim.api.nvim_create_user_command("ReviewDeleteDraft", function(command)
 		M.delete(command.args)
-	end, { nargs = "?", desc = "Delete a review draft" })
+	end, { nargs = "?", desc = "Delete a review comment at the current line or by ID" })
+	vim.api.nvim_create_user_command("ReviewChangeType", M.change_type, {
+		desc = "Change the review comment type at the current line",
+	})
 	vim.api.nvim_create_user_command("ReviewResolve", function(command)
 		set_item_status(command.args, "resolved")
 	end, { nargs = "?", desc = "Resolve a review comment" })
@@ -1791,10 +1954,12 @@ local function setup_mappings()
 		{ "<leader>Rs", "<cmd>ReviewScope<cr>", "Review scope/session" },
 		{ "<leader>Rf", "<cmd>ReviewFiles<cr>", "Review files" },
 		{ "<leader>Rh", "<cmd>ReviewCommits<cr>", "Review commits/history" },
-		{ "<leader>Rv", "<cmd>ReviewCode<cr>", "Toggle review code/diff" },
-		{ "<leader>Rl", "<cmd>ReviewLayout<cr>", "Toggle review layout" },
+		{ "<leader>Rg", "<cmd>ReviewCode<cr>", "Toggle review code/diff" },
+		{ "<leader>Rv", "<cmd>ReviewLayout<cr>", "Toggle review layout" },
+		{ "<leader>Rl", "<cmd>ReviewComments<cr>", "List review comments" },
 		{ "<leader>Ra", "<cmd>ReviewComment<cr>", "Add review comment" },
-		{ "<leader>Rd", "<cmd>ReviewDeleteDraft<cr>", "Delete review draft" },
+		{ "<leader>Rc", "<cmd>ReviewChangeType<cr>", "Change review comment type" },
+		{ "<leader>Rd", "<cmd>ReviewDeleteDraft<cr>", "Delete comment on current line" },
 		{ "<leader>Rt", "<cmd>ReviewThreads<cr>", "Review threads" },
 		{ "<leader>Re", "<cmd>ReviewExport<cr>", "Export review" },
 		{ "<leader>Rr", "<cmd>ReviewRefresh<cr>", "Refresh review" },
