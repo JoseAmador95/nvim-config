@@ -6,6 +6,7 @@ local review_export = require("config.review_export")
 local review_scope = require("config.review_scope")
 local review_source = require("config.review_source")
 local review_store = require("config.review_store")
+local tab_config = require("config.tabs")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review")
 local THREAD_RESTORE_ATTEMPTS = 500
@@ -2051,7 +2052,7 @@ function M.setup()
 			end
 		end,
 		view_closed = function(workspace)
-			if workspace.suspending or workspace.replacing then
+			if workspace.suspending or workspace.replacing or workspace.reopening then
 				workspace.replacing = nil
 				return
 			end
@@ -2068,6 +2069,9 @@ function M.setup()
 			end
 			review_source.clear_workspace(workspace)
 			close_review_threads(workspace)
+			if next(workspaces) == nil then
+				tab_config.ensure_home()
+			end
 		end,
 	})
 	setup_commands()

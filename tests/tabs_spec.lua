@@ -44,9 +44,12 @@ package.loaded.snacks = {
 	dashboard = {
 		open = function(opts)
 			dashboard_opens = dashboard_opens + 1
+			vim.bo[opts.buf].modifiable = true
 			vim.bo[opts.buf].buftype = "nofile"
 			vim.bo[opts.buf].filetype = "snacks_dashboard"
+			vim.api.nvim_buf_set_lines(opts.buf, 0, -1, false, { "Dashboard" })
 			vim.bo[opts.buf].modified = false
+			vim.bo[opts.buf].modifiable = false
 			vim.api.nvim_exec_autocmds("User", { pattern = "SnacksDashboardOpened" })
 		end,
 	},
@@ -86,12 +89,25 @@ local function reset_editor()
 	pcall(vim.cmd, "silent! tabonly!")
 	pcall(vim.cmd, "silent! only!")
 	vim.cmd("enew!")
+	vim.wo.diff = false
 	tabs.unmark_home(vim.api.nvim_get_current_tabpage())
 	tabs.unmark_transient(vim.api.nvim_get_current_tabpage())
 	dashboard_opens = 0
 	menu_dismisses = 0
 	menu_context_options = {}
 	notifications = {}
+end
+
+local function stale_dashboard()
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local buf = vim.api.nvim_get_current_buf()
+	vim.bo[buf].modifiable = true
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
+	vim.bo[buf].buftype = "nofile"
+	vim.bo[buf].filetype = "snacks_dashboard"
+	vim.bo[buf].modified = false
+	tabs.unmark_home(tabpage)
+	return tabpage, buf
 end
 
 local function named_buffer(label)
@@ -118,6 +134,132 @@ test("home requires an explicit marker and exactly one pristine normal window", 
 
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "changed" })
 	assert(not tabs.is_home(home), "modified scratch buffer remained home")
+end)
+
+test("home recovery repairs one stale dashboard and coalesces queued requests", function()
+	reset_editor()
+	local home = stale_dashboard()
+
+	assert(tabs.ensure_home(), "stale dashboard recovery was not queued")
+	assert(not tabs.ensure_home(), "duplicate dashboard recovery was queued")
+	equal(0, dashboard_opens, "dashboard recovery ran synchronously")
+	drain()
+	equal(1, dashboard_opens, "stale dashboard was not opened exactly once")
+	assert(tabs.is_home(home), "recovered dashboard was not marked home")
+
+	assert(tabs.ensure_home(), "idempotency check was not queued")
+	drain()
+	equal(1, dashboard_opens, "rendered dashboard was opened again")
+end)
+
+test("home recovery adopts a rendered dashboard without reopening it", function()
+	reset_editor()
+	local home, buf = stale_dashboard()
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Rendered dashboard" })
+	vim.bo[buf].modified = false
+
+	assert(tabs.ensure_home(), "rendered dashboard adoption was not queued")
+	drain()
+	equal(0, dashboard_opens, "rendered dashboard was reopened")
+	assert(tabs.is_home(home), "rendered dashboard did not regain its home marker")
+end)
+
+test("home recovery remains retryable after Snacks fails", function()
+	reset_editor()
+	local home = stale_dashboard()
+	local original_open = package.loaded.snacks.dashboard.open
+	local attempts = 0
+	package.loaded.snacks.dashboard.open = function()
+		attempts = attempts + 1
+		error("fixture dashboard failure")
+	end
+
+	local ok, err = xpcall(function()
+		assert(tabs.ensure_home(), "failing dashboard recovery was not queued")
+		drain()
+		equal(1, attempts, "dashboard failure was not attempted exactly once")
+		assert(not tabs.is_home(home), "failed dashboard recovery marked the tab home")
+		assert(
+			#notifications == 1 and notifications[1].message:find("fixture dashboard failure", 1, true),
+			"dashboard failure was not notified"
+		)
+
+		package.loaded.snacks.dashboard.open = original_open
+		assert(tabs.ensure_home(), "dashboard recovery could not be retried")
+		drain()
+		equal(1, dashboard_opens, "dashboard retry did not open the dashboard")
+		assert(tabs.is_home(home), "successful retry did not mark the dashboard home")
+	end, debug.traceback)
+	package.loaded.snacks.dashboard.open = original_open
+	assert(ok, err)
+end)
+
+test("home recovery refuses non-dashboard and unsafe editor state", function()
+	local function refused(label, prepare)
+		reset_editor()
+		prepare()
+		assert(tabs.ensure_home(), label .. " check was not queued")
+		drain()
+		equal(0, dashboard_opens, label .. " was replaced with the dashboard")
+	end
+
+	refused("normal blank new file", function() end)
+	refused("named dashboard", function()
+		local _, buf = stale_dashboard()
+		local path = vim.fn.tempname() .. "-named-dashboard"
+		owned_paths[#owned_paths + 1] = path
+		vim.api.nvim_buf_set_name(buf, path)
+	end)
+	refused("modified buffer", function()
+		local tabpage = vim.api.nvim_get_current_tabpage()
+		local buf = vim.api.nvim_get_current_buf()
+		assert(tabs.mark_home(tabpage))
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "changed" })
+		assert(vim.bo[buf].modified)
+	end)
+	refused("help buffer", function()
+		local buf = vim.api.nvim_get_current_buf()
+		vim.bo[buf].buftype = "help"
+		vim.bo[buf].filetype = "help"
+	end)
+	refused("terminal buffer", function()
+		vim.api.nvim_open_term(vim.api.nvim_get_current_buf(), {})
+	end)
+	refused("diff window", function()
+		stale_dashboard()
+		vim.wo.diff = true
+	end)
+	refused("transient tab", function()
+		local tabpage = stale_dashboard()
+		assert(tabs.mark_transient(tabpage, "Review"))
+	end)
+	refused("multi-split tab", function()
+		stale_dashboard()
+		vim.cmd("vsplit")
+	end)
+	refused("multi-tab editor", function()
+		stale_dashboard()
+		vim.cmd("tabnew")
+	end)
+
+	reset_editor()
+	stale_dashboard()
+	local original_vscode = vim.g.vscode
+	vim.g.vscode = true
+	local vscode_queued = tabs.ensure_home()
+	drain()
+	vim.g.vscode = original_vscode
+	assert(not vscode_queued, "VS Code queued dashboard recovery")
+	equal(0, dashboard_opens, "VS Code state was replaced with the dashboard")
+
+	reset_editor()
+	stale_dashboard()
+	package.loaded["config.pager"] = { active = true }
+	local pager_queued = tabs.ensure_home()
+	drain()
+	package.loaded["config.pager"] = { active = false }
+	assert(not pager_queued, "pager queued dashboard recovery")
+	equal(0, dashboard_opens, "pager state was replaced with the dashboard")
 end)
 
 test("transient tabs expose a stable title without becoming reusable home tabs", function()
@@ -472,6 +614,16 @@ test("bufferline exposes native safe close callbacks and dynamic selected highli
 	assert(not spec.cond(), "bufferline leaked into nvimpager")
 	package.loaded["config.pager"] = { active = false }
 	vim.g.vscode = original_vscode
+end)
+
+test("UI startup recovers a dashboard restored without its Snacks instance", function()
+	reset_editor()
+	local home = stale_dashboard()
+	tabs.setup()
+	vim.api.nvim_exec_autocmds("UIEnter", {})
+	drain()
+	equal(1, dashboard_opens, "startup did not recover the stale dashboard")
+	assert(tabs.is_home(home), "startup recovery did not restore the home marker")
 end)
 
 test("setup owns CloseTab only in the full terminal editor", function()

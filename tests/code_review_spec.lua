@@ -1160,6 +1160,55 @@ test("setup exposes the namespaced command and mapping surface", function()
 	diffview.close = original_close
 end)
 
+test("only a final non-transition review closure requests home recovery", function()
+	local tab_config = require("config.tabs")
+	local original_ensure_home = tab_config.ensure_home
+	local requests = 0
+	tab_config.ensure_home = function()
+		requests = requests + 1
+		return true
+	end
+
+	local owned_roots = {}
+	local function workspace(label)
+		local value = {
+			root = "/tmp/review-home-recovery-" .. label,
+			session = { id = label, items = {} },
+		}
+		review._workspaces[value.root] = value
+		owned_roots[#owned_roots + 1] = value.root
+		return value
+	end
+
+	local ok, err = xpcall(function()
+		local final = workspace("final")
+		installed_controller.view_closed(final)
+		assert(review._workspaces[final.root] == nil, "final closed review remained registered")
+		assert(requests == 1, "final review closure did not request home recovery")
+
+		local first = workspace("first-of-two")
+		local remaining = workspace("remaining")
+		installed_controller.view_closed(first)
+		assert(review._workspaces[first.root] == nil and review._workspaces[remaining.root] == remaining)
+		assert(requests == 1, "non-final review closure requested home recovery")
+		review._workspaces[remaining.root] = nil
+
+		for _, transition in ipairs({ "suspending", "replacing", "reopening" }) do
+			local current = workspace(transition)
+			current[transition] = true
+			installed_controller.view_closed(current)
+			assert(review._workspaces[current.root] == current, transition .. " closure removed the review workspace")
+			assert(requests == 1, transition .. " closure requested home recovery")
+			review._workspaces[current.root] = nil
+		end
+	end, debug.traceback)
+	tab_config.ensure_home = original_ensure_home
+	for _, root in ipairs(owned_roots) do
+		review._workspaces[root] = nil
+	end
+	assert(ok, err)
+end)
+
 test("closing a review clears every inherited source lineage", function()
 	local review_source = require("config.review_source")
 	local workspace = {

@@ -4,6 +4,7 @@ local HOME_VARIABLE = "nvim_config_home"
 local TRANSIENT_TITLE_VARIABLE = "nvim_config_transient_title"
 local pending = {}
 local focused_windows = {}
+local home_recovery_pending = false
 
 local function enabled()
 	local ok, pager = pcall(require, "config.pager")
@@ -90,20 +91,28 @@ local function has_home_shape(tabpage)
 	if not win then
 		return false
 	end
+	if vim.wo[win].diff then
+		return false
+	end
 
 	local buf = vim.api.nvim_win_get_buf(win)
 	if not vim.api.nvim_buf_is_valid(buf) then
 		return false
 	end
 	if vim.bo[buf].filetype == "snacks_dashboard" then
-		return vim.bo[buf].buftype == "nofile" and not vim.bo[buf].modified
+		return vim.bo[buf].buftype == "nofile" and vim.api.nvim_buf_get_name(buf) == "" and not vim.bo[buf].modified
 	end
 
 	return vim.bo[buf].buftype == ""
+		and vim.bo[buf].filetype == ""
 		and vim.api.nvim_buf_get_name(buf) == ""
 		and not vim.bo[buf].modified
 		and vim.api.nvim_buf_line_count(buf) == 1
 		and (vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] or "") == ""
+end
+
+local function buffer_is_blank(buf)
+	return vim.api.nvim_buf_line_count(buf) == 1 and (vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] or "") == ""
 end
 
 local function notify_close_failure(message)
@@ -151,30 +160,74 @@ local function rollback_landing(landing, landing_buf, landing_buf_owned, restore
 	end
 end
 
-local function open_dashboard_when_home_is_alone(home)
+local function notify_dashboard_failure(message)
+	vim.notify("Could not open home dashboard: " .. tostring(message), vim.log.levels.ERROR, { title = "Tabs" })
+end
+
+local function recover_home()
+	local tabpages = vim.api.nvim_list_tabpages()
+	if #tabpages ~= 1 then
+		return
+	end
+
+	local tabpage = tabpages[1]
+	if M.is_transient(tabpage) then
+		return
+	end
+	local win = home_window(tabpage)
+	if not win or vim.wo[win].diff then
+		return
+	end
+	local buf = vim.api.nvim_win_get_buf(win)
+	if not vim.api.nvim_buf_is_valid(buf) or vim.api.nvim_buf_get_name(buf) ~= "" or vim.bo[buf].modified then
+		return
+	end
+
+	local dashboard = vim.bo[buf].buftype == "nofile" and vim.bo[buf].filetype == "snacks_dashboard"
+	local marked = has_home_marker(tabpage)
+	local marked_landing = marked and vim.bo[buf].buftype == "" and vim.bo[buf].filetype == ""
+	if not dashboard and not marked_landing then
+		return
+	end
+	if dashboard and not buffer_is_blank(buf) then
+		if not marked then
+			M.mark_home(tabpage)
+		end
+		return
+	end
+	if not buffer_is_blank(buf) then
+		return
+	end
+
+	local ok, snacks = pcall(require, "snacks")
+	if not ok or type(snacks.dashboard) ~= "table" or type(snacks.dashboard.open) ~= "function" then
+		notify_dashboard_failure(ok and "Snacks dashboard is unavailable" or snacks)
+		return
+	end
+	local opened, error_message = pcall(snacks.dashboard.open, { buf = buf, win = win })
+	if not opened then
+		notify_dashboard_failure(error_message)
+		return
+	end
+	M.mark_home(tabpage)
+end
+
+---Schedule one safe attempt to restore the sole home dashboard.
+---Repeated requests coalesce until the scheduled attempt has run.
+---@return boolean queued
+function M.ensure_home()
+	if not enabled() or home_recovery_pending then
+		return false
+	end
+
+	home_recovery_pending = true
 	vim.schedule(function()
-		local tabs = vim.api.nvim_list_tabpages()
-		if #tabs ~= 1 or tabs[1] ~= home or not M.is_home(home) then
-			return
+		home_recovery_pending = false
+		if enabled() then
+			recover_home()
 		end
-
-		vim.api.nvim_set_current_tabpage(home)
-		local win = home_window(home)
-		if not win then
-			return
-		end
-		local buf = vim.api.nvim_win_get_buf(win)
-		if vim.bo[buf].filetype == "snacks_dashboard" then
-			return
-		end
-
-		local ok, snacks = pcall(require, "snacks")
-		if not ok or not snacks.dashboard then
-			vim.notify("Could not open home dashboard", vim.log.levels.ERROR, { title = "Tabs" })
-			return
-		end
-		snacks.dashboard.open({ buf = buf, win = win })
 	end)
+	return true
 end
 
 ---Whether a tab is the explicitly marked, still-pristine home landing page.
@@ -304,7 +357,7 @@ function M.close(tabpage)
 	end
 
 	if M.is_home(tabpage) and #vim.api.nvim_list_tabpages() == 1 then
-		open_dashboard_when_home_is_alone(tabpage)
+		M.ensure_home()
 		return true
 	end
 
@@ -350,7 +403,7 @@ function M.close(tabpage)
 
 	local home = landing or M.find_home()
 	if home then
-		open_dashboard_when_home_is_alone(home)
+		M.ensure_home()
 	end
 	return true
 end
@@ -398,9 +451,16 @@ function M.setup()
 		desc = "Close tab",
 	})
 
+	local home_group = vim.api.nvim_create_augroup("NvimConfigTabsHome", { clear = true })
+	vim.api.nvim_create_autocmd("UIEnter", {
+		group = home_group,
+		once = true,
+		desc = "Recover a dashboard restored without its Snacks instance",
+		callback = M.ensure_home,
+	})
 	vim.api.nvim_create_autocmd("User", {
 		pattern = "SnacksDashboardOpened",
-		group = vim.api.nvim_create_augroup("NvimConfigTabsHome", { clear = true }),
+		group = home_group,
 		desc = "Mark an in-place Snacks dashboard as the reusable home tab",
 		callback = function()
 			local tabpage = vim.api.nvim_get_current_tabpage()
@@ -409,6 +469,9 @@ function M.setup()
 			end
 		end,
 	})
+	if vim.v.vim_did_enter == 1 then
+		M.ensure_home()
+	end
 end
 
 return M
