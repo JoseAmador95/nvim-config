@@ -5,10 +5,14 @@ vim.api.nvim_create_user_command("CodeActions", function()
 	H.CodeActions()
 end, { desc = "Show LSP code actions" })
 
--- Toggle inline diagnostics (virtual text)
+-- Toggle current-line inline diagnostics
 vim.api.nvim_create_user_command("ToggleInlineDiagnostics", function()
 	H.ToggleInlineDiagnostics()
-end, { desc = "Toggle inline diagnostics (virtual text)" })
+end, { desc = "Toggle current-line inline diagnostics" })
+
+vim.keymap.set("n", "<leader>lt", "<cmd>ToggleInlineDiagnostics<cr>", {
+	desc = "Toggle inline diagnostics",
+})
 
 -- Show diagnostics in a floating tooltip at cursor
 vim.api.nvim_create_user_command("DiagFloat", function()

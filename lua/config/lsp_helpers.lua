@@ -10,14 +10,18 @@ function M.CodeActions()
 end
 
 -- === Extra helpers you might want from earlier steps ===
--- Toggle inline diagnostics (virtual text) on/off
+-- Toggle current-line inline diagnostics on/off
 function M.ToggleInlineDiagnostics()
-	local cfg = vim.diagnostic.config()
-	local current = cfg.virtual_text
-	-- `virtual_text` may be a table or boolean; normalize to boolean
-	local enabled = (type(current) == "table") and true or (current ~= false)
-	vim.diagnostic.config({ virtual_text = not enabled })
-	notify("Inline diagnostics: " .. ((not enabled) and "ON" or "OFF"))
+	local config = vim.diagnostic.config()
+	local enabled = type(config.virtual_lines) == "table" or config.virtual_lines == true
+	local virtual_lines = false
+	if not enabled then
+		virtual_lines = { current_line = true }
+	end
+	vim.diagnostic.config({
+		virtual_lines = virtual_lines,
+	})
+	notify("Inline diagnostics: " .. (enabled and "OFF" or "ON"))
 end
 
 -- Show diagnostics at cursor in a small float

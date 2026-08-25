@@ -67,6 +67,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"AgentContext",
 					"AgentResultsImport",
 					"ClangdSwitchSourceHeader",
+					"ToggleInlineDiagnostics",
 					"CoverageLoad",
 					"CoverageSummary",
 					"CoverageClear",
@@ -90,6 +91,27 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(
 					type(diagnostics.virtual_lines) == "table" and diagnostics.virtual_lines.current_line == true,
 					"current-line diagnostic virtual lines are not enabled"
+				)
+				local inline_diagnostics_map = vim.fn.maparg("<leader>lt", "n", false, true)
+				assert(
+					inline_diagnostics_map.rhs == "<cmd>ToggleInlineDiagnostics<cr>",
+					"inline-diagnostics mapping drifted"
+				)
+				vim.cmd("ToggleInlineDiagnostics")
+				local diagnostics_disabled = vim.diagnostic.config()
+				assert(diagnostics_disabled.virtual_lines == false, "inline diagnostics were not disabled")
+				for _, field in ipairs({ "virtual_text", "signs", "underline", "float", "severity_sort" }) do
+					assert(
+						vim.deep_equal(diagnostics_disabled[field], diagnostics[field]),
+						"inline diagnostics toggle changed diagnostic " .. field
+					)
+				end
+				vim.cmd("ToggleInlineDiagnostics")
+				local diagnostics_enabled = vim.diagnostic.config()
+				assert(
+					type(diagnostics_enabled.virtual_lines) == "table"
+						and diagnostics_enabled.virtual_lines.current_line == true,
+					"inline diagnostics were not restored"
 				)
 				local close_map = vim.fn.maparg("<leader>q", "n", false, true)
 				assert(close_map.rhs == "<cmd>CloseTab<cr>", "full editor close mapping bypasses CloseTab")
