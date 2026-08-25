@@ -682,6 +682,7 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"<leader>Rv",
 		"<leader>Rl",
 		"<leader>Ra",
+		"<leader>Rd",
 		"<leader>Rt",
 		"<leader>Re",
 		"<leader>Rr",

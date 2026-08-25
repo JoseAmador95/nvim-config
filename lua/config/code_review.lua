@@ -1794,6 +1794,7 @@ local function setup_mappings()
 		{ "<leader>Rv", "<cmd>ReviewCode<cr>", "Toggle review code/diff" },
 		{ "<leader>Rl", "<cmd>ReviewLayout<cr>", "Toggle review layout" },
 		{ "<leader>Ra", "<cmd>ReviewComment<cr>", "Add review comment" },
+		{ "<leader>Rd", "<cmd>ReviewDeleteDraft<cr>", "Delete review draft" },
 		{ "<leader>Rt", "<cmd>ReviewThreads<cr>", "Review threads" },
 		{ "<leader>Re", "<cmd>ReviewExport<cr>", "Export review" },
 		{ "<leader>Rr", "<cmd>ReviewRefresh<cr>", "Refresh review" },
