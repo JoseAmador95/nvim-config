@@ -232,6 +232,33 @@ test("mutating mappings are guarded only while a review view is active", functio
 	diffview._on_view_closed(view)
 end)
 
+test("review help routes only in owned views", function()
+	local calls = {}
+	local routed = diffview.help_or(function(value)
+		calls[#calls + 1] = "ordinary:" .. value
+		return "ordinary"
+	end, function(value)
+		calls[#calls + 1] = "review:" .. value
+		return "review"
+	end)
+	assert(routed("first") == "ordinary")
+	assert(vim.deep_equal(calls, { "ordinary:first" }))
+
+	local value = workspace()
+	local view = { tabpage = vim.api.nvim_get_current_tabpage(), adapter = adapter() }
+	assert(diffview.open(value, "files", nil, {
+		command = function()
+			diffview._on_view_opened(view)
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+	}))
+	assert(routed("second") == "review")
+	assert(vim.deep_equal(calls, { "ordinary:first", "review:second" }))
+	diffview._on_view_closed(view)
+end)
+
 test("panel entry selection focuses only review-owned views", function()
 	local selected = {}
 	local focused = {}

@@ -13,6 +13,30 @@ local function require_table(name)
 	return module
 end
 
+local function function_upvalue(callback, name)
+	for index = 1, 32 do
+		local found, value = debug.getupvalue(callback, index)
+		if not found then
+			break
+		end
+		if found == name then
+			return value
+		end
+	end
+	return nil
+end
+
+local function find_mapping(mappings, lhs)
+	local matches = {}
+	for _, mapping in ipairs(mappings) do
+		if mapping[1] == "n" and mapping[2] == lhs then
+			matches[#matches + 1] = mapping
+		end
+	end
+	assert(#matches == 1, ("expected one normal %s mapping, got %d"):format(lhs, #matches))
+	return matches[1]
+end
+
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,
 	callback = function()
@@ -122,6 +146,65 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					type(inline_diffget) == "function" and inline_diffget ~= diffview_actions.diffget_inline,
 					"inline diffget is not protected by the review guard"
 				)
+
+				local review_commands = require_table("config.code_review")
+				local review_groups = review_commands.help_groups()
+				assert(review_groups.common == "review" and review_groups.diff_line == "review_diff")
+				local common_help = diffview_config.keymaps[review_groups.common]
+				local diff_line_help = diffview_config.keymaps[review_groups.diff_line]
+				assert(type(common_help) == "table" and #common_help == 13, "common review help group is missing")
+				assert(
+					type(diff_line_help) == "table" and #diff_line_help == 3,
+					"diff-line review help group is missing"
+				)
+				for _, mapping in ipairs(vim.list_extend(vim.deepcopy(common_help), diff_line_help)) do
+					assert(mapping[1] == "n", "review help contains a non-normal mapping")
+					assert(type(mapping[2]) == "string" and mapping[2] ~= "", "review help mapping is missing its LHS")
+					assert(type(mapping[3]) == "string" and mapping[3] ~= "", "review help mapping is missing its RHS")
+					assert(
+						type(mapping[4]) == "table" and type(mapping[4].desc) == "string" and mapping[4].desc ~= "",
+						"review help mapping is missing its description"
+					)
+				end
+				assert(vim.deep_equal(
+					vim.tbl_map(function(mapping)
+						return mapping[2]
+					end, diff_line_help),
+					{ "<leader>Ra", "<leader>Rc", "<leader>Rd" }
+				))
+
+				local original_help_groups = {
+					diff1 = { "view", "diff1" },
+					diff1_inline = { "view", "diff1", "diff1_inline" },
+					diff2 = { "view", "diff2" },
+					diff3 = { "view", "diff3" },
+					diff4 = { "view", "diff4" },
+					file_panel = { "file_panel" },
+					file_history_panel = { "file_history_panel" },
+				}
+				for group, original_groups in pairs(original_help_groups) do
+					local mapping = find_mapping(diffview_config.keymaps[group], "g?")
+					assert(mapping[4].desc == "Open the help panel", group .. " help description drifted")
+					local fallback = function_upvalue(mapping[3], "fallback")
+					local review_help = function_upvalue(mapping[3], "review_help")
+					assert(
+						type(fallback) == "function" and type(review_help) == "function",
+						group .. " help router is missing"
+					)
+					assert(
+						vim.deep_equal(function_upvalue(fallback, "keymap_groups"), original_groups),
+						group .. " changed ordinary Diffview help groups"
+					)
+					local expected_review_groups = vim.deepcopy(original_groups)
+					expected_review_groups[#expected_review_groups + 1] = review_groups.common
+					if group ~= "file_panel" and group ~= "file_history_panel" then
+						expected_review_groups[#expected_review_groups + 1] = review_groups.diff_line
+					end
+					assert(
+						vim.deep_equal(function_upvalue(review_help, "keymap_groups"), expected_review_groups),
+						group .. " review help groups are incomplete"
+					)
+				end
 
 				local splits = require_table("smart-splits")
 				assert(type(splits.resize_left) == "function", "smart-splits resize API is missing")

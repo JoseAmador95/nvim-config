@@ -37,9 +37,13 @@ Neovim owns a review workspace with an explicit Git identity:
   pedantic, and praise. They are persisted under
   `stdpath("state")/nvim-config/reviews/v1`, rendered with their original code
   context, and shown through a dedicated Trouble source and sign namespace.
-  `<leader>Rl` lists navigable comments without mutating them, `<leader>Rd`
-  deletes the unique comment on the exact current diff line, and `<leader>Rc`
-  changes its type. `<leader>Rt` remains the persistent Trouble thread panel.
+  Diffview's `g?` help includes the review actions only in review-owned views.
+  Normal-mode `<leader>Ra` comments on the cursor line; Visual-mode
+  `<leader>Ra` comments on every touched line as one inclusive range.
+  `<leader>Rl` lists navigable comments without mutating them, while
+  `<leader>Rd` and `<leader>Rc` find the unique comment covering the current
+  diff line to delete it or change its type. `<leader>Rt` remains the
+  persistent Trouble thread panel.
 - Clipboard export locks only comments that were copied successfully. A linked
   TUICR round is accessed only through `tuicr-round`; successful remote writes
   use stable delivery keys and are persisted one at a time. Review state uses

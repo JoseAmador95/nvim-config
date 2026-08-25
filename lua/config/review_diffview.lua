@@ -748,6 +748,19 @@ function M.layout_or(fallback)
 	end
 end
 
+---Open review-aware help without changing ordinary Diffview help groups.
+---@param fallback function
+---@param review_help function
+---@return function
+function M.help_or(fallback, review_help)
+	return function(...)
+		if M.active() then
+			return review_help(...)
+		end
+		return fallback(...)
+	end
+end
+
 ---Cycle the presentation layout of the current review-owned Diffview tab.
 ---@param dependencies? table
 ---@return boolean? changed

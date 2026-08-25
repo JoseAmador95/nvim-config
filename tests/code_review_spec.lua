@@ -49,6 +49,108 @@ test("ReviewOpen parser keeps explicit scope vocabulary", function()
 	end
 end)
 
+test("review mapping specs build normalized Diffview help groups", function()
+	local groups = review.help_groups()
+	local common = review.help_mappings("common")
+	local diff_line = review.help_mappings("diff_line")
+	assert(groups.common == "review" and groups.diff_line == "review_diff")
+	assert(#review.mapping_specs() == 16 and #common == 13 and #diff_line == 3)
+	for _, mapping in ipairs(vim.list_extend(vim.deepcopy(common), diff_line)) do
+		assert(mapping[1] == "n" and type(mapping[2]) == "string" and mapping[2] ~= "")
+		assert(type(mapping[3]) == "string" and mapping[3] ~= "")
+		assert(type(mapping[4]) == "table" and type(mapping[4].desc) == "string" and mapping[4].desc ~= "")
+	end
+	assert(vim.deep_equal(
+		vim.tbl_map(function(mapping)
+			return mapping[2]
+		end, diff_line),
+		{ "<leader>Ra", "<leader>Rc", "<leader>Rd" }
+	))
+	assert(diff_line[1][4].desc:find("Visual range", 1, true))
+end)
+
+test("review comments preserve normalized inclusive line ranges and context", function()
+	local diffview = require("config.review_diffview")
+	local editor = require("config.review_editor")
+	local scope = require("config.review_scope")
+	local store = require("config.review_store")
+	local root = "/tmp/review-multiline-comment"
+	local workspace = {
+		root = root,
+		view_mode = "files",
+		scope = { kind = "commit" },
+		session = {
+			id = "multiline",
+			repo_root = root,
+			scope = { kind = "commit" },
+			stale = false,
+			items = {},
+		},
+	}
+	local originals = {
+		workspace = diffview.workspace,
+		current_target = diffview.current_target,
+		update_title = diffview.update_title,
+		compose = editor.compose,
+		detect_drift = scope.detect_drift,
+		add = store.add,
+		save = store.save,
+		refresh_marks = review.refresh_marks,
+	}
+	local captured
+	local lines = { "one", "two", "three", "four", "five", "six" }
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
+	diffview.workspace = function()
+		return workspace
+	end
+	diffview.current_target = function()
+		return {
+			path = "lua/config/example.lua",
+			side = "left",
+			layer = "historical",
+			bufnr = vim.api.nvim_get_current_buf(),
+		}
+	end
+	diffview.update_title = function() end
+	editor.compose = function(options, callback)
+		assert(options.title == "New issue")
+		assert(callback("Range body", false))
+		return true
+	end
+	scope.detect_drift = function()
+		return { stale = false }
+	end
+	store.add = function(session, values)
+		captured = vim.deepcopy(values.anchor)
+		local copy = vim.deepcopy(session)
+		copy.items[#copy.items + 1] = values
+		return copy
+	end
+	store.save = function(_, session)
+		return session
+	end
+	review.refresh_marks = function() end
+
+	local ok, err = xpcall(function()
+		review.comment(5, 2, "issue")
+		assert(captured.path == "lua/config/example.lua")
+		assert(captured.side == "left" and captured.layer == "historical")
+		assert(captured.start_line == 2 and captured.end_line == 5)
+		assert(captured.start_column == nil and captured.end_column == nil)
+		assert(captured.context == table.concat(lines, "\n"))
+		assert(captured.context_hash == vim.fn.sha256(captured.context):lower())
+	end, debug.traceback)
+	diffview.workspace = originals.workspace
+	diffview.current_target = originals.current_target
+	diffview.update_title = originals.update_title
+	editor.compose = originals.compose
+	scope.detect_drift = originals.detect_drift
+	store.add = originals.add
+	store.save = originals.save
+	review.refresh_marks = originals.refresh_marks
+	assert(ok, err)
+end)
+
 test("edit and reply recheck drift before opening and submitting composers", function()
 	local diffview = require("config.review_diffview")
 	local editor = require("config.review_editor")
@@ -657,7 +759,8 @@ test("delete without an ID targets only the unique comment on the current review
 				path = "lua/config/example.lua",
 				side = "right",
 				layer = "historical",
-				start_line = 14,
+				start_line = 12,
+				end_line = 16,
 				stale = false,
 			},
 		}
@@ -727,7 +830,7 @@ test("delete without an ID targets only the unique comment on the current review
 		error("line deletion opened a global picker")
 	end
 	local buffer_lines = {}
-	for _ = 1, 14 do
+	for _ = 1, 16 do
 		buffer_lines[#buffer_lines + 1] = ""
 	end
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
@@ -781,7 +884,8 @@ test("changing a line comment type uses the ordered picker and latest item state
 		path = "lua/config/example.lua",
 		side = "right",
 		layer = "historical",
-		start_line = 9,
+		start_line = 7,
+		end_line = 11,
 		stale = false,
 	}
 	local workspace = {
@@ -854,7 +958,7 @@ test("changing a line comment type uses the ordered picker and latest item state
 		picker_callback = callback
 	end
 	local buffer_lines = {}
-	for _ = 1, 9 do
+	for _ = 1, 11 do
 		buffer_lines[#buffer_lines + 1] = ""
 	end
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
@@ -897,7 +1001,8 @@ test("changing a comment type rechecks the exact current line after the picker",
 				path = "lua/config/example.lua",
 				side = "right",
 				layer = "historical",
-				start_line = 9,
+				start_line = 7,
+				end_line = 11,
 				stale = false,
 			},
 		}
@@ -950,7 +1055,7 @@ test("changing a comment type rechecks the exact current line after the picker",
 		picker_callback = callback
 	end
 	local buffer_lines = {}
-	for _ = 1, 9 do
+	for _ = 1, 11 do
 		buffer_lines[#buffer_lines + 1] = ""
 	end
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
@@ -959,7 +1064,7 @@ test("changing a comment type rechecks the exact current line after the picker",
 		vim.api.nvim_win_set_cursor(0, { 9, 0 })
 		review.change_type()
 		assert(type(picker_callback) == "function")
-		vim.api.nvim_win_set_cursor(0, { 8, 0 })
+		vim.api.nvim_win_set_cursor(0, { 6, 0 })
 		picker_callback("rationale")
 		assert(mutations == 0)
 		assert(notices[#notices].message == "No review comment on the current line")
@@ -1131,6 +1236,9 @@ test("setup exposes the namespaced command and mapping surface", function()
 	}) do
 		assert(vim.fn.maparg(lhs, "n") == rhs, lhs .. " has unexpected RHS " .. vim.fn.maparg(lhs, "n"))
 	end
+	assert(vim.fn.maparg("<leader>Ra", "x") == ":<C-U>'<,'>ReviewComment<CR>")
+	local add_mapping = vim.fn.maparg("<leader>Ra", "n", false, true)
+	assert(add_mapping.desc:find("Visual range", 1, true), "normal review comment help omits Visual ranges")
 
 	local original_workspace = diffview.workspace
 	local original_close = diffview.close

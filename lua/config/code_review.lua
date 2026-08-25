@@ -20,6 +20,43 @@ local TYPE_SIGNS = {
 	pedantic = { text = "·", highlight = "DiagnosticSignHint" },
 	praise = { text = "♥", highlight = "DiagnosticSignHint" },
 }
+local REVIEW_HELP_GROUPS = {
+	common = "review",
+	diff_line = "review_diff",
+}
+local REVIEW_MAPPINGS = {
+	{ lhs = "<leader>Ro", rhs = "<cmd>ReviewOpen<cr>", desc = "Open default review", help = "common" },
+	{ lhs = "<leader>Rs", rhs = "<cmd>ReviewScope<cr>", desc = "Review scope/session", help = "common" },
+	{ lhs = "<leader>Rf", rhs = "<cmd>ReviewFiles<cr>", desc = "Review files", help = "common" },
+	{ lhs = "<leader>Rh", rhs = "<cmd>ReviewCommits<cr>", desc = "Review commits/history", help = "common" },
+	{ lhs = "<leader>Rg", rhs = "<cmd>ReviewCode<cr>", desc = "Toggle review code/diff", help = "common" },
+	{ lhs = "<leader>Rv", rhs = "<cmd>ReviewLayout<cr>", desc = "Toggle review layout", help = "common" },
+	{ lhs = "<leader>Rl", rhs = "<cmd>ReviewComments<cr>", desc = "List review comments", help = "common" },
+	{
+		lhs = "<leader>Ra",
+		rhs = "<cmd>ReviewComment<cr>",
+		desc = "Add review comment (Visual range supported)",
+		help = "diff_line",
+	},
+	{
+		lhs = "<leader>Rc",
+		rhs = "<cmd>ReviewChangeType<cr>",
+		desc = "Change review comment type",
+		help = "diff_line",
+	},
+	{
+		lhs = "<leader>Rd",
+		rhs = "<cmd>ReviewDeleteDraft<cr>",
+		desc = "Delete comment on current line",
+		help = "diff_line",
+	},
+	{ lhs = "<leader>Rt", rhs = "<cmd>ReviewThreads<cr>", desc = "Review threads", help = "common" },
+	{ lhs = "<leader>Re", rhs = "<cmd>ReviewExport<cr>", desc = "Export review", help = "common" },
+	{ lhs = "<leader>Rr", rhs = "<cmd>ReviewRefresh<cr>", desc = "Refresh review", help = "common" },
+	{ lhs = "<leader>Rq", rhs = "<cmd>ReviewClose<cr>", desc = "Close review", help = "common" },
+	{ lhs = "]r", rhs = "<cmd>ReviewNext<cr>", desc = "Next review comment", help = "common" },
+	{ lhs = "[r", rhs = "<cmd>ReviewPrev<cr>", desc = "Previous review comment", help = "common" },
+}
 
 local workspaces = {}
 local suspended
@@ -583,8 +620,10 @@ local function current_anchor(workspace, first, last)
 		return nil, err
 	end
 	local line_count = vim.api.nvim_buf_line_count(target.bufnr)
-	first = math.max(1, math.min(first, line_count))
-	last = math.max(first, math.min(last, line_count))
+	local range_first = math.min(first, last)
+	local range_last = math.max(first, last)
+	first = math.max(1, math.min(range_first, line_count))
+	last = math.max(first, math.min(range_last, line_count))
 	local context = context_for_buffer(target.bufnr, first, last)
 	return {
 		path = target.path,
@@ -620,13 +659,21 @@ local function anchor_location(item)
 	}
 end
 
-local function same_location(left, right)
-	return left
-		and right
-		and left.path == right.path
-		and left.side == right.side
-		and left.layer == right.layer
-		and left.line == right.line
+local function contains_location(anchor, location)
+	if not anchor or not location then
+		return false
+	end
+	local first = anchor.start_line
+	local last = anchor.end_line or first
+	if type(first) ~= "number" or type(last) ~= "number" then
+		return false
+	end
+	first, last = math.min(first, last), math.max(first, last)
+	return anchor.path == location.path
+		and anchor.side == location.side
+		and anchor.layer == location.layer
+		and first <= location.line
+		and location.line <= last
 end
 
 local function navigable_item(workspace, item)
@@ -661,7 +708,7 @@ local function current_line_item(workspace, session, predicate)
 	local matches = {}
 	local eligible = {}
 	for _, item in ipairs(session.items) do
-		if same_location(anchor_location(item), location) then
+		if contains_location(item.anchor, location) then
 			matches[#matches + 1] = item
 			if not item.anchor.stale and (not predicate or predicate(item)) then
 				eligible[#eligible + 1] = item
@@ -955,7 +1002,7 @@ function M.edit(id)
 	end)
 end
 
----Delete one local draft by ID or at the exact current review line.
+---Delete one local draft by ID or from the range covering the current review line.
 ---@param id? string
 function M.delete(id)
 	local workspace = active_workspace()
@@ -998,7 +1045,7 @@ function M.delete(id)
 	end)
 end
 
----Change the type of the comment at the exact current review line.
+---Change the type of the comment covering the current review line.
 function M.change_type()
 	local workspace = active_workspace()
 	if not workspace then
@@ -1949,28 +1996,39 @@ local function setup_commands()
 	end, { bang = true, desc = "Close the current review workspace" })
 end
 
-local function setup_mappings()
-	local mappings = {
-		{ "<leader>Ro", "<cmd>ReviewOpen<cr>", "Open default review" },
-		{ "<leader>Rs", "<cmd>ReviewScope<cr>", "Review scope/session" },
-		{ "<leader>Rf", "<cmd>ReviewFiles<cr>", "Review files" },
-		{ "<leader>Rh", "<cmd>ReviewCommits<cr>", "Review commits/history" },
-		{ "<leader>Rg", "<cmd>ReviewCode<cr>", "Toggle review code/diff" },
-		{ "<leader>Rv", "<cmd>ReviewLayout<cr>", "Toggle review layout" },
-		{ "<leader>Rl", "<cmd>ReviewComments<cr>", "List review comments" },
-		{ "<leader>Ra", "<cmd>ReviewComment<cr>", "Add review comment" },
-		{ "<leader>Rc", "<cmd>ReviewChangeType<cr>", "Change review comment type" },
-		{ "<leader>Rd", "<cmd>ReviewDeleteDraft<cr>", "Delete comment on current line" },
-		{ "<leader>Rt", "<cmd>ReviewThreads<cr>", "Review threads" },
-		{ "<leader>Re", "<cmd>ReviewExport<cr>", "Export review" },
-		{ "<leader>Rr", "<cmd>ReviewRefresh<cr>", "Refresh review" },
-		{ "<leader>Rq", "<cmd>ReviewClose<cr>", "Close review" },
-		{ "]r", "<cmd>ReviewNext<cr>", "Next review comment" },
-		{ "[r", "<cmd>ReviewPrev<cr>", "Previous review comment" },
-	}
-	for _, mapping in ipairs(mappings) do
-		vim.keymap.set("n", mapping[1], mapping[2], { silent = true, desc = mapping[3] })
+---Return the normal-mode review mappings shared by the editor and Diffview help.
+---@return table[]
+function M.mapping_specs()
+	return vim.deepcopy(REVIEW_MAPPINGS)
+end
+
+---Return the effective Diffview group names used only by its help panel.
+---@return table<string, string>
+function M.help_groups()
+	return vim.deepcopy(REVIEW_HELP_GROUPS)
+end
+
+---Build normalized mappings for one review help group.
+---@param group "common"|"diff_line"
+---@return table[]
+function M.help_mappings(group)
+	local mappings = {}
+	for _, mapping in ipairs(REVIEW_MAPPINGS) do
+		if mapping.help == group then
+			mappings[#mappings + 1] = { "n", mapping.lhs, mapping.rhs, { desc = mapping.desc } }
+		end
 	end
+	return mappings
+end
+
+local function setup_mappings()
+	for _, mapping in ipairs(M.mapping_specs()) do
+		vim.keymap.set("n", mapping.lhs, mapping.rhs, { silent = true, desc = mapping.desc })
+	end
+	vim.keymap.set("x", "<leader>Ra", ":<C-U>'<,'>ReviewComment<CR>", {
+		silent = true,
+		desc = "Add review comment for selected lines",
+	})
 end
 
 local function setup_drift_tracking()
