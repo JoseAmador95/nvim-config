@@ -7,22 +7,75 @@ local GIT_ROUTING_ENV = {
 	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
 	"GIT_CEILING_DIRECTORIES",
 	"GIT_COMMON_DIR",
+	"GIT_CONFIG",
+	"GIT_CONFIG_COUNT",
+	"GIT_CONFIG_PARAMETERS",
 	"GIT_DIR",
+	"GIT_GRAFT_FILE",
+	"GIT_IMPLICIT_WORK_TREE",
 	"GIT_INDEX_FILE",
 	"GIT_NAMESPACE",
 	"GIT_OBJECT_DIRECTORY",
 	"GIT_PREFIX",
+	"GIT_REPLACE_REF_BASE",
+	"GIT_SHALLOW_FILE",
 	"GIT_WORK_TREE",
 }
+
+local GIT_SAFETY_ENV = {
+	{ name = "GIT_OPTIONAL_LOCKS", value = "0" },
+	{ name = "GIT_NO_LAZY_FETCH", value = "1" },
+	{ name = "GIT_NO_REPLACE_OBJECTS", value = "1" },
+	{ name = "GIT_GRAFT_FILE", value = "/dev/null/nvim-review-grafts" },
+	{ name = "GIT_SHALLOW_FILE", value = "/dev/null/nvim-review-shallow" },
+}
+
+---Return the Git environment that preserves the stored object graph.
+---@return table<string, string>
+function M.git_safety_environment()
+	local environment = {}
+	for _, item in ipairs(GIT_SAFETY_ENV) do
+		environment[item.name] = item.value
+	end
+	return environment
+end
 
 local function git_environment()
 	local environment = vim.fn.environ()
 	for _, name in ipairs(GIT_ROUTING_ENV) do
 		environment[name] = nil
 	end
-	environment.GIT_OPTIONAL_LOCKS = "0"
-	environment.GIT_NO_LAZY_FETCH = "1"
+	for name, value in pairs(M.git_safety_environment()) do
+		environment[name] = value
+	end
 	return environment
+end
+
+---Prefix a Git command with an environment that cannot redirect repositories.
+---@param command? string[]
+---@return string[]
+function M.clean_git_command(command)
+	local isolated = { "env" }
+	for _, name in ipairs(GIT_ROUTING_ENV) do
+		isolated[#isolated + 1] = "-u"
+		isolated[#isolated + 1] = name
+	end
+	for _, item in ipairs(GIT_SAFETY_ENV) do
+		isolated[#isolated + 1] = item.name .. "=" .. item.value
+	end
+	vim.list_extend(isolated, command or { "git" })
+	return isolated
+end
+
+---Return the first inherited variable that can redirect Git to another repository.
+---@return string?
+function M.git_routing_variable()
+	for _, name in ipairs(GIT_ROUTING_ENV) do
+		if vim.env[name] ~= nil then
+			return name
+		end
+	end
+	return nil
 end
 
 local function default_git(command)

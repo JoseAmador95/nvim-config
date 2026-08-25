@@ -1,4 +1,5 @@
 local M = {}
+local tabs = require("config.tabs")
 
 local MAX_ENTRIES = 200
 
@@ -37,6 +38,9 @@ end
 
 local function window_has_path(win, path)
 	if not win or not vim.api.nvim_win_is_valid(win) then
+		return false
+	end
+	if tabs.is_transient(vim.api.nvim_win_get_tabpage(win)) then
 		return false
 	end
 	local config = vim.api.nvim_win_get_config(win)
@@ -153,6 +157,10 @@ end
 ---Capture the current file-backed editor location.
 ---@return table?
 function M.capture()
+	if tabs.is_transient(vim.api.nvim_get_current_tabpage()) then
+		return nil
+	end
+
 	local win = vim.api.nvim_get_current_win()
 	local buf = vim.api.nvim_win_get_buf(win)
 	if vim.bo[buf].buftype ~= "" then

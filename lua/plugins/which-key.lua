@@ -20,6 +20,7 @@ return {
 			return true
 		end,
 		spec = {
+			{ "<leader>R", group = "review" },
 			{ "<leader>c", group = "code" },
 			{ "<leader>d", group = "debug" },
 			{ "<leader>f", group = "find" },

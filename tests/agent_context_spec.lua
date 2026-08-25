@@ -108,8 +108,8 @@ test("default Git reads clear inherited routing and disable optional locks", fun
 	local fake = bin .. "/git"
 	assert(vim.fn.writefile({
 		"#!/bin/sh",
-		[[[ -z "${GIT_DIR+x}" ] && [ -z "${GIT_WORK_TREE+x}" ] && [ -z "${GIT_INDEX_FILE+x}" ] || exit 71]],
-		[[[ "$GIT_OPTIONAL_LOCKS" = 0 ] && [ "$GIT_NO_LAZY_FETCH" = 1 ] || exit 72]],
+		[[[ -z "${GIT_DIR+x}" ] && [ -z "${GIT_WORK_TREE+x}" ] && [ -z "${GIT_INDEX_FILE+x}" ] && [ -z "${GIT_CONFIG_COUNT+x}" ] || exit 71]],
+		[[[ "$GIT_OPTIONAL_LOCKS" = 0 ] && [ "$GIT_NO_LAZY_FETCH" = 1 ] && [ "$GIT_NO_REPLACE_OBJECTS" = 1 ] && [ "$GIT_GRAFT_FILE" = /dev/null/nvim-review-grafts ] && [ "$GIT_SHALLOW_FILE" = /dev/null/nvim-review-shallow ] || exit 72]],
 		[[printf 'sanitized\n']],
 	}, fake) == 0)
 	assert(vim.fn.setfperm(fake, "rwxr-xr-x") == 1)
@@ -117,15 +117,24 @@ test("default Git reads clear inherited routing and disable optional locks", fun
 	local old_dir = vim.env.GIT_DIR
 	local old_worktree = vim.env.GIT_WORK_TREE
 	local old_index = vim.env.GIT_INDEX_FILE
+	local old_shallow = vim.env.GIT_SHALLOW_FILE
+	local old_graft = vim.env.GIT_GRAFT_FILE
+	local old_config_count = vim.env.GIT_CONFIG_COUNT
 	vim.env.PATH = bin .. ":" .. old_path
 	vim.env.GIT_DIR = "/tmp/hostile-git-dir"
 	vim.env.GIT_WORK_TREE = "/tmp/hostile-worktree"
 	vim.env.GIT_INDEX_FILE = "/tmp/hostile-index"
+	vim.env.GIT_SHALLOW_FILE = "/tmp/hostile-shallow"
+	vim.env.GIT_GRAFT_FILE = "/tmp/hostile-graft"
+	vim.env.GIT_CONFIG_COUNT = "1"
 	local output, err = require("config.repo").git(root, { "status" })
 	vim.env.PATH = old_path
 	vim.env.GIT_DIR = old_dir
 	vim.env.GIT_WORK_TREE = old_worktree
 	vim.env.GIT_INDEX_FILE = old_index
+	vim.env.GIT_SHALLOW_FILE = old_shallow
+	vim.env.GIT_GRAFT_FILE = old_graft
+	vim.env.GIT_CONFIG_COUNT = old_config_count
 	assert(output == "sanitized\n", err)
 end)
 

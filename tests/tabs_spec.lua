@@ -87,6 +87,7 @@ local function reset_editor()
 	pcall(vim.cmd, "silent! only!")
 	vim.cmd("enew!")
 	tabs.unmark_home(vim.api.nvim_get_current_tabpage())
+	tabs.unmark_transient(vim.api.nvim_get_current_tabpage())
 	dashboard_opens = 0
 	menu_dismisses = 0
 	menu_context_options = {}
@@ -117,6 +118,36 @@ test("home requires an explicit marker and exactly one pristine normal window", 
 
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "changed" })
 	assert(not tabs.is_home(home), "modified scratch buffer remained home")
+end)
+
+test("transient tabs expose a stable title without becoming reusable home tabs", function()
+	reset_editor()
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	assert(tabs.mark_home(tabpage), "could not mark transient fixture home")
+	assert(not tabs.mark_transient(tabpage, ""), "empty transient title was accepted")
+	assert(tabs.mark_transient(tabpage, "Review: feature branch"), "could not mark transient tab")
+	equal(true, tabs.is_transient(tabpage), "transient marker is missing")
+	equal("Review: feature branch", tabs.transient_title(tabpage), "transient title changed")
+	assert(not tabs.is_home(tabpage), "transient tab remained reusable as home")
+	equal(nil, tabs.find_home(), "transient tab was discovered as home")
+
+	named_buffer("diffview-local.lua")
+	equal(
+		"Review: feature branch",
+		tabs.name_formatter({ name = "diffview-local.lua", tabnr = tabpage }),
+		"focused source buffer replaced the transient title"
+	)
+	vim.cmd("vnew")
+	named_buffer("diffview-old.lua")
+	equal(
+		"Review: feature branch",
+		tabs.name_formatter({ name = "diffview-old.lua", tabnr = tabpage }),
+		"changing the focused split replaced the transient title"
+	)
+
+	tabs.unmark_transient(tabpage)
+	equal(false, tabs.is_transient(tabpage), "transient marker survived unmark")
+	equal(nil, tabs.transient_title(tabpage), "transient title survived unmark")
 end)
 
 test("dashboard new file reuses the home tab as an unnamed normal buffer", function()
@@ -249,6 +280,28 @@ test("queued close coalesces double clicks and retains a stable non-current hand
 	assert(vim.api.nvim_tabpage_is_valid(first), "first tab was closed")
 	assert(vim.api.nvim_tabpage_is_valid(neighbour), "double click closed the following tab")
 	assert(not tabs.request_close(target), "stale handle was accepted")
+end)
+
+test("all tab close entrypoints route review-owned tabs through the review guard", function()
+	reset_editor()
+	local target = vim.api.nvim_get_current_tabpage()
+	local review_diffview = require("config.review_diffview")
+	local code_review = require("config.code_review")
+	local original_workspace = review_diffview.workspace
+	local original_close_tab = code_review.close_tab
+	local requested
+	review_diffview.workspace = function(tabpage)
+		return tabpage == target and { tabpage = target } or nil
+	end
+	code_review.close_tab = function(tabpage)
+		requested = tabpage
+		return false
+	end
+	assert(not tabs.close(target), "review guard refusal was ignored")
+	equal(target, requested, "review close guard received the wrong stable tab handle")
+	assert(vim.api.nvim_tabpage_is_valid(target), "generic tab close bypassed the review guard")
+	review_diffview.workspace = original_workspace
+	code_review.close_tab = original_close_tab
 end)
 
 test("editor reuses only a valid marked home tab", function()

@@ -26,6 +26,64 @@ local function should_skip_session_save()
 	return count_file_windows() == 0
 end
 
+local exiting = false
+local exit_flag_registered = false
+local manual_save_active = false
+local direct_save
+
+local function notify_review_hook_failure(action, error_message)
+	vim.notify(
+		string.format("Could not %s code review for session: %s", action, tostring(error_message)),
+		vim.log.levels.ERROR,
+		{ title = "Session" }
+	)
+end
+
+local function suspend_code_review_for_session()
+	local loaded, code_review = pcall(require, "config.code_review")
+	if not loaded or type(code_review) ~= "table" or type(code_review.suspend_for_session) ~= "function" then
+		return true
+	end
+
+	local called, suspended, suspend_error = pcall(code_review.suspend_for_session)
+	if not called or suspended ~= true then
+		notify_review_hook_failure("suspend", called and suspend_error or suspended)
+		return false
+	end
+
+	if exiting or type(code_review.restore_after_session) ~= "function" then
+		return true
+	end
+
+	vim.schedule(function()
+		if exiting then
+			return
+		end
+		local restore_called, restored, restore_error = pcall(code_review.restore_after_session)
+		if not restore_called or restored ~= true then
+			notify_review_hook_failure("restore", restore_called and restore_error or restored)
+		end
+	end)
+	return true
+end
+
+local function save_session_manually(session_name, save, save_opts)
+	if not suspend_code_review_for_session() then
+		return false
+	end
+	if should_skip_session_save() then
+		return false
+	end
+	manual_save_active = true
+	local called, saved = pcall(save or direct_save or require("auto-session").save_session, session_name, save_opts)
+	manual_save_active = false
+	if not called or saved ~= true then
+		notify_review_hook_failure("save", called and "auto-session declined to save" or saved)
+		return false
+	end
+	return true
+end
+
 return {
 	"rmagatti/auto-session",
 	lazy = false,
@@ -33,7 +91,13 @@ return {
 		return not vim.g.vscode
 	end,
 	keys = {
-		{ "<leader>Ss", "<cmd>AutoSession save<cr>", desc = "Session save" },
+		{
+			"<leader>Ss",
+			function()
+				return save_session_manually()
+			end,
+			desc = "Session save",
+		},
 		{ "<leader>Sr", "<cmd>AutoSession restore<cr>", desc = "Session restore current project" },
 		{ "<leader>Sp", "<cmd>AutoSession search<cr>", desc = "Session search and restore" },
 		{ "<leader>Sd", "<cmd>AutoSession deletePicker<cr>", desc = "Session delete" },
@@ -45,6 +109,7 @@ return {
 		auto_create = true,
 		auto_restore_last_session = false,
 		show_auto_restore_notif = false,
+		close_unsupported_windows = false,
 		bypass_save_filetypes = { "oil", "snacks_dashboard" },
 		auto_delete_empty_sessions = false,
 		-- Use Snacks for the session picker (`:AutoSession search`) so session
@@ -54,13 +119,34 @@ return {
 		},
 		pre_save_cmds = {
 			function()
+				if not manual_save_active and not suspend_code_review_for_session() then
+					return false
+				end
 				return not should_skip_session_save()
 			end,
 		},
 	},
 	config = function(_, opts)
 		vim.o.sessionoptions = "blank,buffers,curdir,folds,help,tabpages,winsize,winpos,terminal,localoptions"
+		if not exit_flag_registered then
+			local group = vim.api.nvim_create_augroup("NvimConfigAutoSession", { clear = true })
+			vim.api.nvim_create_autocmd("VimLeavePre", {
+				group = group,
+				desc = "Keep suspended transient tabs closed while exiting",
+				callback = function()
+					exiting = true
+				end,
+			})
+			exit_flag_registered = true
+		end
 		local auto_session = require("auto-session")
+		direct_save = auto_session.save_session
+		auto_session.save_session = function(session_name, save_opts)
+			if save_opts and save_opts.is_autosave then
+				return direct_save(session_name, save_opts)
+			end
+			return save_session_manually(session_name, direct_save, save_opts)
+		end
 		auto_session.setup(opts)
 		if vim.env.NVIM_TMUX_REFRESH_RESTORE == "1" then
 			vim.env.NVIM_TMUX_REFRESH_RESTORE = nil

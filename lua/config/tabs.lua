@@ -1,6 +1,7 @@
 local M = {}
 
 local HOME_VARIABLE = "nvim_config_home"
+local TRANSIENT_TITLE_VARIABLE = "nvim_config_transient_title"
 local pending = {}
 local focused_windows = {}
 
@@ -180,14 +181,14 @@ end
 ---@param tabpage integer
 ---@return boolean
 function M.is_home(tabpage)
-	return has_home_marker(tabpage) and has_home_shape(tabpage)
+	return not M.is_transient(tabpage) and has_home_marker(tabpage) and has_home_shape(tabpage)
 end
 
 ---Mark a pristine scratch tab as the home landing page.
 ---@param tabpage integer
 ---@return boolean
 function M.mark_home(tabpage)
-	if not has_home_shape(tabpage) then
+	if M.is_transient(tabpage) or not has_home_shape(tabpage) then
 		return false
 	end
 	vim.api.nvim_tabpage_set_var(tabpage, HOME_VARIABLE, true)
@@ -199,6 +200,46 @@ function M.unmark_home(tabpage)
 	if valid_tab(tabpage) then
 		pcall(vim.api.nvim_tabpage_del_var, tabpage, HOME_VARIABLE)
 	end
+end
+
+---Mark a tab as transient and give it a stable display title.
+---@param tabpage integer
+---@param title string
+---@return boolean
+function M.mark_transient(tabpage, title)
+	if not valid_tab(tabpage) or type(title) ~= "string" or title == "" then
+		return false
+	end
+
+	local ok = pcall(vim.api.nvim_tabpage_set_var, tabpage, TRANSIENT_TITLE_VARIABLE, title)
+	return ok
+end
+
+---Remove a tab's transient marker.
+---@param tabpage integer
+function M.unmark_transient(tabpage)
+	if valid_tab(tabpage) then
+		pcall(vim.api.nvim_tabpage_del_var, tabpage, TRANSIENT_TITLE_VARIABLE)
+	end
+end
+
+---Return the stable title for a transient tab.
+---@param tabpage integer
+---@return string?
+function M.transient_title(tabpage)
+	if not valid_tab(tabpage) then
+		return nil
+	end
+
+	local ok, title = pcall(vim.api.nvim_tabpage_get_var, tabpage, TRANSIENT_TITLE_VARIABLE)
+	return ok and type(title) == "string" and title ~= "" and title or nil
+end
+
+---Whether a tab is explicitly marked as transient.
+---@param tabpage integer
+---@return boolean
+function M.is_transient(tabpage)
+	return M.transient_title(tabpage) ~= nil
 end
 
 ---@return integer?
@@ -217,7 +258,15 @@ end
 ---@return string
 function M.name_formatter(item)
 	local fallback = type(item) == "table" and type(item.name) == "string" and item.name or "[No Name]"
-	if not enabled() or type(item) ~= "table" or not valid_tab(item.tabnr) then
+	if type(item) ~= "table" or not valid_tab(item.tabnr) then
+		return fallback
+	end
+
+	local transient_title = M.transient_title(item.tabnr)
+	if transient_title then
+		return transient_title
+	end
+	if not enabled() then
 		return fallback
 	end
 
@@ -243,6 +292,14 @@ end
 function M.close(tabpage)
 	tabpage = tabpage or vim.api.nvim_get_current_tabpage()
 	if not valid_tab(tabpage) then
+		return false
+	end
+	local review_loaded, review_diffview = pcall(require, "config.review_diffview")
+	if review_loaded and review_diffview.workspace(tabpage) then
+		local controller_loaded, code_review = pcall(require, "config.code_review")
+		if controller_loaded and type(code_review.close_tab) == "function" then
+			return code_review.close_tab(tabpage)
+		end
 		return false
 	end
 

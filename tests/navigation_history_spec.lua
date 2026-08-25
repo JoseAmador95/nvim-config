@@ -27,6 +27,7 @@ end
 
 local history = require("config.navigation_history")
 local editor = require("config.editor")
+local tabs = require("config.tabs")
 local paths = {}
 
 local function make_file(label)
@@ -49,6 +50,7 @@ local function reset_editor()
 	pcall(vim.cmd, "silent! tabonly!")
 	pcall(vim.cmd, "silent! only!")
 	vim.cmd("enew!")
+	tabs.unmark_transient(vim.api.nvim_get_current_tabpage())
 	history.reset()
 end
 
@@ -155,6 +157,24 @@ test("closed tabs are reopened without recording a recursive transition", functi
 	equal(vim.uv.fs_realpath(second), current_path(), "reopened history landed on the wrong file")
 	equal({ 3, 1 }, vim.api.nvim_win_get_cursor(0), "reopened history lost its cursor")
 	equal(3, #history.snapshot().entries, "history restoration recorded itself")
+end)
+
+test("transient tabs are neither captured nor reused by history restoration", function()
+	reset_editor()
+	local first = make_file("transient-first")
+	local second = make_file("transient-second")
+
+	vim.cmd("edit! " .. vim.fn.fnameescape(first))
+	editor.open_file_in_tab(second, { lnum = 2, col = 2 })
+	local transient = vim.api.nvim_get_current_tabpage()
+	assert(tabs.mark_transient(transient, "Review: transient history"), "could not mark history fixture transient")
+	equal(nil, history.capture(), "transient file-backed buffer was captured")
+
+	assert(history.back({ fallback = false }), "could not navigate away from the transient tab")
+	assert(history.forward({ fallback = false }), "could not restore the destination outside the transient tab")
+	assert(vim.api.nvim_get_current_tabpage() ~= transient, "history restoration reused the transient window")
+	assert(not tabs.is_transient(vim.api.nvim_get_current_tabpage()), "history restored into another transient tab")
+	equal(vim.uv.fs_realpath(second), current_path(), "history restored the wrong destination")
 end)
 
 test("setup exposes commands and back-forward mappings", function()

@@ -164,7 +164,21 @@ local commands = {
 	nvim_config_reload = { "NvimConfigReload" },
 	parsers_install = { "NvimConfigParsersInstall" },
 	reload_config = { "ReloadConfig" },
+	review_close = { "ReviewClose" },
+	review_code = { "ReviewCode" },
+	review_comment = { "ReviewComment" },
+	review_commits = { "ReviewCommits" },
+	review_export = { "ReviewExport" },
+	review_files = { "ReviewFiles" },
+	review_link_tuicr = { "ReviewLinkTuicr" },
+	review_next = { "ReviewNext" },
+	review_open = { "ReviewOpen" },
+	review_prev = { "ReviewPrev" },
+	review_refresh = { "ReviewRefresh" },
+	review_scope = { "ReviewScope" },
+	review_sessions = { "ReviewSessions" },
 	review_start = { "ReviewRoundStart" },
+	review_threads = { "ReviewThreads" },
 	scratch = { "Scratch" },
 	theme = { "Theme" },
 	theme_reset = { "ThemeReset" },
@@ -920,11 +934,7 @@ local handlers = {
 		end
 	end,
 	["review.open"] = function(target)
-		vim.ui.input({ prompt = "TUICR round UUID (empty for current): " }, function(round)
-			if round ~= nil then
-				target_command(target, "TuicrReview", round ~= "" and { round } or nil)
-			end
-		end)
+		target_command(target, "TuicrReview")
 	end,
 	["agent.context"] = function(target)
 		local first, last = ordered_selection(target)

@@ -33,6 +33,7 @@ end
 
 function M.open_file_in_tab(filepath, opts)
 	opts = opts or {}
+	local tabs = require("config.tabs")
 	local lnum = tonumber(opts.lnum) or 1
 	local col = tonumber(opts.col) or 1
 	local history
@@ -50,29 +51,31 @@ function M.open_file_in_tab(filepath, opts)
 	local target_path = normalized_path(filepath)
 
 	for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
-		for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
-			local win_config = vim.api.nvim_win_get_config(win)
-			if not win_config.relative or win_config.relative == "" then
-				local buf = vim.api.nvim_win_get_buf(win)
-				if not is_special_buffer(buf) then
-					local name = normalized_path(vim.api.nvim_buf_get_name(buf))
-					if name == target_path then
-						vim.api.nvim_set_current_tabpage(tabpage)
-						vim.api.nvim_set_current_win(win)
-						set_cursor_position(buf, win, lnum, col)
-						record_destination()
-						return
+		if not tabs.is_transient(tabpage) then
+			for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
+				local win_config = vim.api.nvim_win_get_config(win)
+				if not win_config.relative or win_config.relative == "" then
+					local buf = vim.api.nvim_win_get_buf(win)
+					if not is_special_buffer(buf) then
+						local name = normalized_path(vim.api.nvim_buf_get_name(buf))
+						if name == target_path then
+							vim.api.nvim_set_current_tabpage(tabpage)
+							vim.api.nvim_set_current_win(win)
+							set_cursor_position(buf, win, lnum, col)
+							record_destination()
+							return
+						end
 					end
 				end
 			end
 		end
 	end
 
-	local home = require("config.tabs").find_home()
+	local home = tabs.find_home()
 	if home then
 		vim.api.nvim_set_current_tabpage(home)
 		vim.api.nvim_cmd({ cmd = "edit", args = { filepath } }, {})
-		require("config.tabs").unmark_home(home)
+		tabs.unmark_home(home)
 		set_cursor_position(0, 0, lnum, col)
 		record_destination()
 		return

@@ -215,6 +215,7 @@ if is_editor then
 	devpod.setup()
 	require("config.navigation_history").setup()
 	require("config.review").setup()
+	require("config.code_review").setup()
 	require("config.agent_context").setup()
 	require("config.agent_results").setup()
 	-- A container editor is reached through the launcher's registered path
