@@ -241,6 +241,35 @@ local function on_view_closed(view)
 	controller_call("view_closed", workspace)
 end
 
+local function remap_winhighlight(win, replacements)
+	local replacement_by_source = {}
+	for _, replacement in ipairs(replacements) do
+		replacement_by_source[replacement[1]] = replacement[2]
+	end
+
+	local entries = {}
+	local replaced = {}
+	for entry in vim.gsplit(vim.wo[win].winhighlight, ",", { plain = true, trimempty = true }) do
+		local source = entry:match("^([^:]+):")
+		local target = source and replacement_by_source[source]
+		if target ~= nil then
+			if not replaced[source] and target ~= false then
+				entries[#entries + 1] = source .. ":" .. target
+			end
+			replaced[source] = true
+		else
+			entries[#entries + 1] = entry
+		end
+	end
+	for _, replacement in ipairs(replacements) do
+		local source, target = unpack(replacement)
+		if not replaced[source] and target ~= false then
+			entries[#entries + 1] = source .. ":" .. target
+		end
+	end
+	vim.wo[win].winhighlight = table.concat(entries, ",")
+end
+
 local function on_diff_buf_win_enter(buf, win, context)
 	if not vim.api.nvim_win_is_valid(win) then
 		return
@@ -250,6 +279,21 @@ local function on_diff_buf_win_enter(buf, win, context)
 		return
 	end
 	vim.w[win].nvim_review_diff_symbol = context.symbol
+	local side_target = context.layout_name:match("^diff2_")
+		and ({ a = "DiffviewDiffAddAsDelete", b = "DiffviewDiffAdd" })[context.symbol]
+	if side_target then
+		remap_winhighlight(win, {
+			{ "DiffChange", side_target },
+			{ "DiffText", side_target },
+			{ "DiffTextAdd", side_target },
+		})
+	elseif context.layout_name:match("^diff1_") then
+		remap_winhighlight(win, {
+			{ "DiffChange", "DiffviewDiffChange" },
+			{ "DiffText", "DiffviewDiffText" },
+			{ "DiffTextAdd", false },
+		})
+	end
 	protect_view(require("diffview.lib").get_current_view())
 	controller_call("decorate_buffer", workspace, buf, win)
 end

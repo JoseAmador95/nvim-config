@@ -356,6 +356,110 @@ test("layout cycling is review-only and protects inline buffers", function()
 	vim.w[win].nvim_review_diff_symbol = previous.symbol
 end)
 
+test("review side-by-side layouts color old and current modified lines by pane", function()
+	local value = workspace()
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_get_current_buf()
+	local previous_winhighlight = vim.wo[win].winhighlight
+	local view = { tabpage = tabpage, adapter = adapter() }
+	assert(diffview.open(value, "files", nil, {
+		command = function()
+			diffview._on_view_opened(view)
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+	}))
+
+	local original_lib = package.loaded["diffview.lib"]
+	package.loaded["diffview.lib"] = {
+		get_current_view = function()
+			return view
+		end,
+	}
+	vim.wo[win].winhighlight = "DiffAdd:ExistingAdd,DiffDelete:ExistingDelete,CursorLine:ExistingCursor"
+	diffview.hooks().diff_buf_win_enter(buf, win, { symbol = "a", layout_name = "diff2_horizontal" })
+	assert(
+		vim.wo[win].winhighlight
+			== "DiffAdd:ExistingAdd,DiffDelete:ExistingDelete,CursorLine:ExistingCursor,DiffChange:DiffviewDiffAddAsDelete,DiffText:DiffviewDiffAddAsDelete,DiffTextAdd:DiffviewDiffAddAsDelete"
+	)
+
+	diffview.hooks().diff_buf_win_enter(buf, win, { symbol = "b", layout_name = "diff2_vertical_pinned" })
+	assert(
+		vim.wo[win].winhighlight
+			== "DiffAdd:ExistingAdd,DiffDelete:ExistingDelete,CursorLine:ExistingCursor,DiffChange:DiffviewDiffAdd,DiffText:DiffviewDiffAdd,DiffTextAdd:DiffviewDiffAdd"
+	)
+	package.loaded["diffview.lib"] = original_lib
+	diffview._on_view_closed(view)
+	vim.wo[win].winhighlight = previous_winhighlight
+end)
+
+test("review diff colors deduplicate sources, restore inline semantics, and preserve merge layouts", function()
+	local value = workspace()
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_get_current_buf()
+	local previous_winhighlight = vim.wo[win].winhighlight
+	local view = { tabpage = tabpage, adapter = adapter() }
+	assert(diffview.open(value, "files", nil, {
+		command = function()
+			diffview._on_view_opened(view)
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+	}))
+
+	local original_lib = package.loaded["diffview.lib"]
+	package.loaded["diffview.lib"] = {
+		get_current_view = function()
+			return view
+		end,
+	}
+	local merge_winhighlight = "DiffChange:MergeChange,DiffText:MergeText,DiffTextAdd:MergeTextAdd"
+	vim.wo[win].winhighlight = merge_winhighlight
+	diffview.hooks().diff_buf_win_enter(buf, win, { symbol = "a", layout_name = "diff3_horizontal" })
+	assert(vim.wo[win].winhighlight == merge_winhighlight)
+
+	vim.wo[win].winhighlight = table.concat({
+		"DiffChange:FirstChange",
+		"Normal:ReviewNormal",
+		"DiffText:FirstText",
+		"DiffChange:DuplicateChange",
+		"DiffTextAdd:FirstTextAdd",
+		"DiffText:DuplicateText",
+		"DiffAdd:DiffviewDiffAdd",
+		"DiffDelete:DiffviewDiffDelete",
+	}, ",")
+	diffview.hooks().diff_buf_win_enter(buf, win, { symbol = "a", layout_name = "diff2_horizontal_pinned" })
+	assert(
+		vim.wo[win].winhighlight
+			== "DiffChange:DiffviewDiffAddAsDelete,Normal:ReviewNormal,DiffText:DiffviewDiffAddAsDelete,DiffTextAdd:DiffviewDiffAddAsDelete,DiffAdd:DiffviewDiffAdd,DiffDelete:DiffviewDiffDelete"
+	)
+	diffview.hooks().diff_buf_win_enter(buf, win, { symbol = "b", layout_name = "diff1_inline" })
+	assert(
+		vim.wo[win].winhighlight
+			== "DiffChange:DiffviewDiffChange,Normal:ReviewNormal,DiffText:DiffviewDiffText,DiffAdd:DiffviewDiffAdd,DiffDelete:DiffviewDiffDelete"
+	)
+	package.loaded["diffview.lib"] = original_lib
+	diffview._on_view_closed(view)
+	vim.wo[win].winhighlight = previous_winhighlight
+end)
+
+test("review diff colors do not touch ordinary Diffview windows", function()
+	local win = vim.api.nvim_get_current_win()
+	local previous_winhighlight = vim.wo[win].winhighlight
+	local expected = "DiffChange:OrdinaryChange,DiffText:OrdinaryText,DiffAdd:OrdinaryAdd"
+	vim.wo[win].winhighlight = expected
+	diffview.hooks().diff_buf_win_enter(vim.api.nvim_get_current_buf(), win, {
+		symbol = "a",
+		layout_name = "diff2_vertical",
+	})
+	assert(vim.wo[win].winhighlight == expected)
+	vim.wo[win].winhighlight = previous_winhighlight
+end)
+
 test("working file selection distinguishes staged, unstaged, untracked, and renamed entries", function()
 	local value = workspace()
 	local entries = {
