@@ -742,27 +742,31 @@ test("ReviewCode preserves current-repository fallback without explicit lineage"
 	assert(ok, err)
 end)
 
-test("delete without an ID targets only the unique comment on the current review line", function()
+test("overlap deletion uses stable IDs and rejects replacement sessions", function()
 	local diffview = require("config.review_diffview")
 	local scope = require("config.review_scope")
 	local store = require("config.review_store")
 	local root = "/tmp/review-line-delete"
-	local function item(id, status, anchor)
+	local function anchor(values)
+		return vim.tbl_extend("force", {
+			path = "lua/config/example.lua",
+			side = "right",
+			layer = "historical",
+			start_line = 12,
+			end_line = 16,
+			stale = false,
+		}, values or {})
+	end
+	local function item(id, values)
+		values = values or {}
 		return {
 			id = id,
-			sequence = 1,
-			type = "issue",
-			status = status or "draft",
-			body = id,
+			sequence = values.sequence or 1,
+			type = values.type or "issue",
+			status = values.status or "draft",
+			body = values.body or id,
 			reply_to = vim.NIL,
-			anchor = anchor or {
-				path = "lua/config/example.lua",
-				side = "right",
-				layer = "historical",
-				start_line = 12,
-				end_line = 16,
-				stale = false,
-			},
+			anchor = values.anchor or anchor(),
 		}
 	end
 	local workspace = {
@@ -792,6 +796,9 @@ test("delete without an ID targets only the unique comment on the current review
 	local notices = {}
 	local deleted = {}
 	local target_calls = 0
+	local drift_checks = 0
+	local picker_calls = 0
+	local picker
 	diffview.workspace = function()
 		return workspace
 	end
@@ -806,6 +813,7 @@ test("delete without an ID targets only the unique comment on the current review
 	end
 	diffview.update_title = function() end
 	scope.detect_drift = function()
+		drift_checks = drift_checks + 1
 		return { stale = false }
 	end
 	store.delete = function(session, id)
@@ -823,11 +831,12 @@ test("delete without an ID targets only the unique comment on the current review
 		return session
 	end
 	review.refresh_marks = function() end
-	vim.notify = function(message, _, options)
-		notices[#notices + 1] = { message = message, title = options and options.title }
+	vim.notify = function(message, level, options)
+		notices[#notices + 1] = { message = message, level = level, title = options and options.title }
 	end
-	vim.ui.select = function()
-		error("line deletion opened a global picker")
+	vim.ui.select = function(items, options, callback)
+		picker_calls = picker_calls + 1
+		picker = { items = items, options = options, callback = callback }
 	end
 	local buffer_lines = {}
 	for _ = 1, 16 do
@@ -841,26 +850,121 @@ test("delete without an ID targets only the unique comment on the current review
 		assert(#deleted == 0)
 		assert(notices[#notices].message == "No review comment on the current line")
 		assert(notices[#notices].title == "Review")
+		assert(picker_calls == 0)
 
-		workspace.session.items = { item("first"), item("second") }
+		workspace.session.items = {
+			item("stale", { anchor = anchor({ stale = true }) }),
+			item("exported", { status = "exported" }),
+		}
 		review.delete()
-		assert(#deleted == 0 and notices[#notices].message:find("Multiple review comments", 1, true))
+		assert(#deleted == 0)
+		assert(notices[#notices].message == "The review comment on the current line is unavailable for this action")
+		assert(picker_calls == 0)
 
-		local stale = item("stale")
-		stale.anchor.stale = true
-		workspace.session.items = { stale }
-		review.delete()
-		assert(#deleted == 0 and notices[#notices].message:find("unavailable", 1, true))
-
-		workspace.session.items = { item("exported", "exported"), item("local") }
+		workspace.session.items = { item("exported", { status = "exported" }), item("local") }
 		review.delete()
 		assert(vim.deep_equal(deleted, { "local" }))
 		assert(#workspace.session.items == 1 and workspace.session.items[1].id == "exported")
+		assert(picker_calls == 0, "unique current-line deletion opened an overlap picker")
+
+		local first = item("first", {
+			sequence = 8,
+			type = "suggestion",
+			status = "resolved",
+			body = "First body\nMore detail",
+		})
+		local second = item("second", {
+			sequence = 3,
+			type = "question",
+			status = "reply",
+			body = "Second body\nMore detail",
+			anchor = anchor({ start_line = 14, end_line = 14 }),
+		})
+		workspace.session.items = {
+			item("filtered-exported", { status = "exported" }),
+			first,
+			item("filtered-stale", { anchor = anchor({ stale = true }) }),
+			item("filtered-path", { anchor = anchor({ path = "lua/config/other.lua" }) }),
+			item("filtered-side", { anchor = anchor({ side = "left" }) }),
+			item("filtered-layer", { anchor = anchor({ layer = "working" }) }),
+			item("filtered-line", { anchor = anchor({ start_line = 1, end_line = 13 }) }),
+			second,
+		}
+		local notices_before_cancel = #notices
+		review.delete()
+		assert(picker_calls == 1)
+		assert(picker.options.prompt == "Delete review comment on current line")
+		assert(#picker.items == 2 and picker.items[1].id == "first" and picker.items[2].id == "second")
+		local first_label = picker.options.format_item(picker.items[1])
+		local second_label = picker.options.format_item(picker.items[2])
+		assert(first_label:find("08", 1, true) and first_label:find("suggestion", 1, true))
+		assert(first_label:find("resolved", 1, true) and first_label:find("lua/config/example.lua:12-16", 1, true))
+		assert(first_label:find("First body", 1, true) and not first_label:find("More detail", 1, true))
+		assert(second_label:find("03", 1, true) and second_label:find("question", 1, true))
+		assert(second_label:find("reply", 1, true) and second_label:find("lua/config/example.lua:14", 1, true))
+		assert(not second_label:find("lua/config/example.lua:14-14", 1, true))
+		picker.callback(nil)
+		assert(vim.deep_equal(deleted, { "local" }) and #notices == notices_before_cancel)
+
+		review.delete()
+		assert(picker_calls == 2 and picker.items[2].id == "second")
+		workspace.session = vim.deepcopy(workspace.session)
+		workspace.session.items[#workspace.session.items + 1] = item("new-overlap")
+		local target_calls_before_selection = target_calls
+		local drift_checks_before_selection = drift_checks
+		picker.callback(picker.items[2])
+		assert(vim.deep_equal(deleted, { "local", "second" }))
+		assert(target_calls == target_calls_before_selection + 1)
+		assert(drift_checks == drift_checks_before_selection + 1)
+		for _, candidate in ipairs(workspace.session.items) do
+			assert(candidate.id ~= "second", "overlap deletion kept the selected ID")
+		end
+
+		for _, invalidation in ipairs({ "removed", "exported", "stale", "reanchored" }) do
+			workspace.session.items = { item("fallback"), item("selected") }
+			review.delete()
+			assert(#picker.items == 2 and picker.items[2].id == "selected")
+			if invalidation == "removed" then
+				table.remove(workspace.session.items, 2)
+			elseif invalidation == "exported" then
+				workspace.session.items[2].status = "exported"
+			elseif invalidation == "stale" then
+				workspace.session.items[2].anchor.stale = true
+			else
+				workspace.session.items[2].anchor.start_line = 1
+				workspace.session.items[2].anchor.end_line = 2
+			end
+			local deleted_before = #deleted
+			picker.callback(picker.items[2])
+			assert(#deleted == deleted_before, invalidation .. " selection deleted a fallback comment")
+			assert(workspace.session.items[1].id == "fallback")
+			assert(notices[#notices].message == "The review comment on the current line is unavailable for this action")
+		end
+
+		workspace.session.items = { item("first"), item("selected") }
+		review.delete()
+		local stale_picker = picker
+		local selected_workspace = workspace
+		local replacement_workspace = vim.deepcopy(workspace)
+		replacement_workspace.session.id = "replacement-session"
+		replacement_workspace.session.items = { item("replacement") }
+		workspace = replacement_workspace
+		local deleted_before_replacement = #deleted
+		stale_picker.callback(stale_picker.items[2])
+		assert(#deleted == deleted_before_replacement, "stale overlap picker deleted from a captured session")
+		assert(#selected_workspace.session.items == 2 and selected_workspace.session.items[2].id == "selected")
+		assert(#replacement_workspace.session.items == 1 and replacement_workspace.session.items[1].id == "replacement")
+		assert(
+			notices[#notices].message
+				== "Active review changed while choosing a comment to delete; no changes were made"
+		)
+		assert(notices[#notices].level == vim.log.levels.WARN and notices[#notices].title == "Review")
+		workspace = selected_workspace
 
 		workspace.session.items = { item("explicit") }
 		local calls_before = target_calls
 		review.delete("explicit")
-		assert(vim.deep_equal(deleted, { "local", "explicit" }))
+		assert(vim.deep_equal(deleted, { "local", "second", "explicit" }))
 		assert(target_calls == calls_before, "explicit ID deletion inspected the current line")
 	end, debug.traceback)
 	diffview.workspace = originals.workspace
@@ -919,11 +1023,14 @@ test("changing a line comment type uses the ordered picker and latest item state
 		set_type = store.set_type,
 		save = store.save,
 		refresh_marks = review.refresh_marks,
+		notify = vim.notify,
 		select = vim.ui.select,
 	}
 	local picker_callback
 	local drift_checks = 0
 	local mutations = 0
+	local picker_calls = 0
+	local notices = {}
 	diffview.workspace = function()
 		return workspace
 	end
@@ -953,8 +1060,14 @@ test("changing a line comment type uses the ordered picker and latest item state
 		return session
 	end
 	review.refresh_marks = function() end
-	vim.ui.select = function(items, _, callback)
+	vim.notify = function(message)
+		notices[#notices + 1] = message
+	end
+	vim.ui.select = function(items, options, callback)
+		picker_calls = picker_calls + 1
 		assert(vim.deep_equal(items, { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }))
+		assert(options.prompt == "Review comment type")
+		assert(options.format_item("suggestion") == "Suggestion")
 		picker_callback = callback
 	end
 	local buffer_lines = {}
@@ -966,12 +1079,19 @@ test("changing a line comment type uses the ordered picker and latest item state
 
 	local ok, err = xpcall(function()
 		review.change_type()
-		assert(type(picker_callback) == "function" and drift_checks == 1)
+		assert(type(picker_callback) == "function" and drift_checks == 1 and picker_calls == 1)
+		picker_callback(nil)
+		assert(mutations == 0 and #notices == 0 and drift_checks == 1)
+
+		picker_callback = nil
+		review.change_type()
+		assert(type(picker_callback) == "function" and picker_calls == 2)
 		workspace.session.items[1].body = "Latest body"
 		picker_callback("rationale")
-		assert(drift_checks == 2 and mutations == 1)
+		assert(drift_checks == 3 and mutations == 1)
 		assert(workspace.session.items[1].type == "rationale")
 		assert(workspace.session.items[1].status == "resolved")
+		assert(#notices == 0)
 	end, debug.traceback)
 	diffview.workspace = originals.workspace
 	diffview.current_target = originals.current_target
@@ -980,30 +1100,32 @@ test("changing a line comment type uses the ordered picker and latest item state
 	store.set_type = originals.set_type
 	store.save = originals.save
 	review.refresh_marks = originals.refresh_marks
+	vim.notify = originals.notify
 	vim.ui.select = originals.select
 	assert(ok, err)
 end)
 
-test("changing a comment type rechecks the exact current line after the picker", function()
+test("overlapping type changes re-resolve stable IDs and reject replacement sessions", function()
 	local diffview = require("config.review_diffview")
 	local scope = require("config.review_scope")
 	local store = require("config.review_store")
 	local root = "/tmp/review-line-type-recheck"
-	local function item(id)
+	local function item(id, values)
+		values = values or {}
 		return {
 			id = id,
-			sequence = 1,
-			type = "question",
-			status = "draft",
-			body = id,
+			sequence = values.sequence or 1,
+			type = values.type or "question",
+			status = values.status or "draft",
+			body = values.body or id,
 			reply_to = vim.NIL,
 			anchor = {
 				path = "lua/config/example.lua",
 				side = "right",
 				layer = "historical",
-				start_line = 7,
-				end_line = 11,
-				stale = false,
+				start_line = values.start_line or 7,
+				end_line = values.end_line or 11,
+				stale = values.stale or false,
 			},
 		}
 	end
@@ -1023,13 +1145,16 @@ test("changing a comment type rechecks the exact current line after the picker",
 	local originals = {
 		workspace = diffview.workspace,
 		current_target = diffview.current_target,
+		update_title = diffview.update_title,
 		detect_drift = scope.detect_drift,
 		set_type = store.set_type,
+		save = store.save,
+		refresh_marks = review.refresh_marks,
 		notify = vim.notify,
 		select = vim.ui.select,
 	}
-	local picker_callback
-	local mutations = 0
+	local pickers = {}
+	local mutations = {}
 	local notices = {}
 	diffview.workspace = function()
 		return workspace
@@ -1042,17 +1167,30 @@ test("changing a comment type rechecks the exact current line after the picker",
 			winid = vim.api.nvim_get_current_win(),
 		}
 	end
+	diffview.update_title = function() end
 	scope.detect_drift = function()
 		return { stale = false }
 	end
-	store.set_type = function()
-		mutations = mutations + 1
+	store.set_type = function(session, id, item_type)
+		mutations[#mutations + 1] = { id = id, item_type = item_type }
+		local copy = vim.deepcopy(session)
+		for _, candidate in ipairs(copy.items) do
+			if candidate.id == id then
+				candidate.type = item_type
+				return copy
+			end
+		end
+		error("selected type-change ID was not present")
 	end
-	vim.notify = function(message, _, options)
-		notices[#notices + 1] = { message = message, title = options and options.title }
+	store.save = function(_, session)
+		return session
 	end
-	vim.ui.select = function(_, _, callback)
-		picker_callback = callback
+	review.refresh_marks = function() end
+	vim.notify = function(message, level, options)
+		notices[#notices + 1] = { message = message, level = level, title = options and options.title }
+	end
+	vim.ui.select = function(items, options, callback)
+		pickers[#pickers + 1] = { items = items, options = options, callback = callback }
 	end
 	local buffer_lines = {}
 	for _ = 1, 11 do
@@ -1061,28 +1199,119 @@ test("changing a comment type rechecks the exact current line after the picker",
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
 
 	local ok, err = xpcall(function()
+		local ordered_types = { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }
+		local function open_comment_picker()
+			review.change_type()
+			local current = pickers[#pickers]
+			assert(current.options.prompt == "Change type of review comment on current line")
+			assert(#current.items == 2 and current.items[1].id == "first" and current.items[2].id == "selected")
+			return current
+		end
+		local function choose_comment(current)
+			current.callback(current.items[2])
+			local type_picker = pickers[#pickers]
+			assert(vim.deep_equal(type_picker.items, ordered_types))
+			assert(type(type_picker.options.format_item) == "function")
+			assert(type_picker.options.format_item("issue") == "Issue")
+			assert(type_picker.options.prompt == "Review comment type")
+			return type_picker
+		end
+
 		vim.api.nvim_win_set_cursor(0, { 9, 0 })
-		review.change_type()
-		assert(type(picker_callback) == "function")
+		workspace.session.items = { item("first", { sequence = 4 }), item("selected", { sequence = 2 }) }
+		local notices_before_cancel = #notices
+		local comment_picker = open_comment_picker()
+		comment_picker.callback(nil)
+		assert(#pickers == 1 and #mutations == 0 and #notices == notices_before_cancel)
+
+		comment_picker = open_comment_picker()
+		local type_picker = choose_comment(comment_picker)
+		type_picker.callback(nil)
+		assert(#mutations == 0 and #notices == notices_before_cancel)
+
+		comment_picker = open_comment_picker()
+		type_picker = choose_comment(comment_picker)
+		workspace.session = vim.deepcopy(workspace.session)
+		workspace.session.items[#workspace.session.items + 1] = item("new-overlap")
+		type_picker.callback("rationale")
+		assert(#mutations == 1 and mutations[1].id == "selected" and mutations[1].item_type == "rationale")
+		assert(workspace.session.items[1].type == "question")
+		assert(workspace.session.items[2].id == "selected" and workspace.session.items[2].type == "rationale")
+		assert(workspace.session.items[3].id == "new-overlap" and workspace.session.items[3].type == "question")
+
+		workspace.session.items = { item("first"), item("selected") }
+		vim.api.nvim_win_set_cursor(0, { 9, 0 })
+		comment_picker = open_comment_picker()
+		type_picker = choose_comment(comment_picker)
 		vim.api.nvim_win_set_cursor(0, { 6, 0 })
-		picker_callback("rationale")
-		assert(mutations == 0)
+		type_picker.callback("rationale")
+		assert(#mutations == 1)
 		assert(notices[#notices].message == "No review comment on the current line")
 		assert(notices[#notices].title == "Review")
 
+		for _, invalidation in ipairs({ "removed", "exported", "stale", "reanchored" }) do
+			workspace.session.items = { item("first"), item("selected") }
+			vim.api.nvim_win_set_cursor(0, { 9, 0 })
+			comment_picker = open_comment_picker()
+			type_picker = choose_comment(comment_picker)
+			if invalidation == "removed" then
+				table.remove(workspace.session.items, 2)
+			elseif invalidation == "exported" then
+				workspace.session.items[2].status = "exported"
+			elseif invalidation == "stale" then
+				workspace.session.items[2].anchor.stale = true
+			else
+				workspace.session.items[2].anchor.start_line = 1
+				workspace.session.items[2].anchor.end_line = 2
+			end
+			local mutation_count = #mutations
+			type_picker.callback("rationale")
+			assert(#mutations == mutation_count, invalidation .. " type change mutated a fallback comment")
+			assert(workspace.session.items[1].id == "first" and workspace.session.items[1].type == "question")
+			assert(notices[#notices].message == "The review comment on the current line is unavailable for this action")
+		end
+
+		workspace.session.items = { item("first"), item("selected") }
 		vim.api.nvim_win_set_cursor(0, { 9, 0 })
-		picker_callback = nil
-		review.change_type()
-		assert(type(picker_callback) == "function")
-		workspace.session.items[#workspace.session.items + 1] = item("second")
-		picker_callback("rationale")
-		assert(mutations == 0)
-		assert(notices[#notices].message:find("Multiple review comments", 1, true))
+		comment_picker = open_comment_picker()
+		local overlap_workspace = workspace
+		local overlap_replacement = vim.deepcopy(workspace)
+		overlap_replacement.session.id = "replacement-overlap-session"
+		overlap_replacement.session.items = { item("replacement"), item("selected") }
+		workspace = overlap_replacement
+		type_picker = choose_comment(comment_picker)
+		local mutation_count = #mutations
+		type_picker.callback("rationale")
+		assert(#mutations == mutation_count, "stale overlap picker changed a captured session")
+		assert(overlap_workspace.session.items[2].type == "question")
+		assert(overlap_replacement.session.items[2].type == "question")
+		assert(notices[#notices].message == "Active review changed while choosing a comment type; no changes were made")
+		assert(notices[#notices].level == vim.log.levels.WARN and notices[#notices].title == "Review")
+
+		workspace = overlap_workspace
+		workspace.session.items = { item("first"), item("selected") }
+		comment_picker = open_comment_picker()
+		type_picker = choose_comment(comment_picker)
+		local type_picker_workspace = workspace
+		local type_picker_replacement = vim.deepcopy(workspace)
+		type_picker_replacement.session.id = "replacement-type-session"
+		type_picker_replacement.session.items = { item("replacement"), item("selected") }
+		workspace = type_picker_replacement
+		mutation_count = #mutations
+		type_picker.callback("rationale")
+		assert(#mutations == mutation_count, "stale type picker changed a captured session")
+		assert(type_picker_workspace.session.items[2].type == "question")
+		assert(type_picker_replacement.session.items[2].type == "question")
+		assert(notices[#notices].message == "Active review changed while choosing a comment type; no changes were made")
+		assert(notices[#notices].level == vim.log.levels.WARN and notices[#notices].title == "Review")
 	end, debug.traceback)
 	diffview.workspace = originals.workspace
 	diffview.current_target = originals.current_target
+	diffview.update_title = originals.update_title
 	scope.detect_drift = originals.detect_drift
 	store.set_type = originals.set_type
+	store.save = originals.save
+	review.refresh_marks = originals.refresh_marks
 	vim.notify = originals.notify
 	vim.ui.select = originals.select
 	assert(ok, err)

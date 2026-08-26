@@ -119,8 +119,21 @@ local function active_workspace()
 	return workspace
 end
 
-local function publication_key(workspace)
+local function workspace_session_key(workspace)
 	return workspace.root .. "\0" .. workspace.session.id
+end
+
+local function active_workspace_for_session(expected_key, action)
+	local workspace = active_workspace()
+	if not workspace or workspace_session_key(workspace) ~= expected_key then
+		notify("Active review changed while " .. action .. "; no changes were made", vim.log.levels.WARN)
+		return nil
+	end
+	return workspace
+end
+
+local function publication_key(workspace)
+	return workspace_session_key(workspace)
 end
 
 local function publication_active(workspace)
@@ -688,7 +701,7 @@ local function navigable_item(workspace, item)
 		and type(location.line) == "number"
 end
 
-local function current_line_item(workspace, session, predicate)
+local function current_line_candidates(workspace, session, predicate)
 	if workspace.view_mode == "history" then
 		return nil, nil, "Commit history is browse-only; use :ReviewFiles before changing comments"
 	end
@@ -721,10 +734,47 @@ local function current_line_item(workspace, session, predicate)
 	if #eligible == 0 then
 		return nil, nil, "The review comment on the current line is unavailable for this action"
 	end
-	if #eligible > 1 then
-		return nil, nil, "Multiple review comments are anchored on the current line"
+	return eligible, location
+end
+
+local function current_line_item_label(item)
+	local anchor = item.anchor
+	local first = math.min(anchor.start_line, anchor.end_line or anchor.start_line)
+	local last = math.max(anchor.start_line, anchor.end_line or anchor.start_line)
+	local location = string.format("%s:%d", anchor.path, first)
+	if last ~= first then
+		location = location .. "-" .. last
 	end
-	return eligible[1], location
+	local first_line = item.body:match("[^\n]+") or item.body
+	return string.format("%02d  %-10s  %-9s  %s  %s", item.sequence, item.type, item.status, location, first_line)
+end
+
+local function select_current_line_item(items, prompt, callback)
+	if #items == 1 then
+		callback(items[1], false)
+		return
+	end
+	vim.ui.select(items, {
+		prompt = prompt,
+		format_item = current_line_item_label,
+	}, function(item)
+		if item then
+			callback(item, true)
+		end
+	end)
+end
+
+local function resolve_current_line_item(workspace, session, id, predicate)
+	local items, _, item_err = current_line_candidates(workspace, session, predicate)
+	if not items then
+		return nil, item_err
+	end
+	for _, item in ipairs(items) do
+		if item.id == id then
+			return item
+		end
+	end
+	return nil, "The review comment on the current line is unavailable for this action"
 end
 
 local function composer_recovery(workspace, title, body, anchor)
@@ -1017,17 +1067,48 @@ function M.delete(id)
 		if not current then
 			return
 		end
-		local item, _, item_err = current_line_item(workspace, current, function(candidate)
+		local items, _, item_err = current_line_candidates(workspace, current, function(candidate)
 			return candidate.status ~= "exported"
 		end)
-		if not item then
+		if not items then
 			return notify(item_err, vim.log.levels.WARN)
 		end
-		local session, err = review_store.delete(current, item.id)
-		if not session then
-			return notify("Could not delete comment: " .. tostring(err), vim.log.levels.ERROR)
-		end
-		save_session(workspace, session)
+		local expected_key = workspace_session_key(workspace)
+		select_current_line_item(items, "Delete review comment on current line", function(item, asynchronous)
+			local selected_id = item.id
+			local latest = current
+			local mutation_workspace = workspace
+			if asynchronous then
+				mutation_workspace = active_workspace_for_session(expected_key, "choosing a comment to delete")
+				if not mutation_workspace or not allow_mutation(mutation_workspace) then
+					return
+				end
+				latest = composer_session(
+					mutation_workspace,
+					false,
+					"Review is stale; open a new scope before deleting comments"
+				)
+				if not latest then
+					return
+				end
+				local resolved, resolved_err = resolve_current_line_item(
+					mutation_workspace,
+					latest,
+					selected_id,
+					function(candidate)
+						return candidate.status ~= "exported"
+					end
+				)
+				if not resolved then
+					return notify(resolved_err, vim.log.levels.WARN)
+				end
+			end
+			local session, err = review_store.delete(latest, selected_id)
+			if not session then
+				return notify("Could not delete comment: " .. tostring(err), vim.log.levels.ERROR)
+			end
+			save_session(mutation_workspace, session)
+		end)
 		return
 	end
 	with_item(workspace, id, "Delete review draft", function(item)
@@ -1058,35 +1139,48 @@ function M.change_type()
 	if not current then
 		return
 	end
-	local item, _, item_err = current_line_item(workspace, current, function(candidate)
+	local items, _, item_err = current_line_candidates(workspace, current, function(candidate)
 		return candidate.status ~= "exported"
 	end)
-	if not item then
+	if not items then
 		return notify(item_err, vim.log.levels.WARN)
 	end
-	local id = item.id
-	choose_type(function(item_type)
-		if not item_type or not allow_mutation(workspace) then
-			return
-		end
-		local latest = composer_session(workspace, false, "Review is stale; open a new scope before changing comments")
-		if not latest then
-			return
-		end
-		local resolved, _, resolved_err = current_line_item(workspace, latest, function(candidate)
-			return candidate.status ~= "exported"
+	local expected_key = workspace_session_key(workspace)
+	select_current_line_item(items, "Change type of review comment on current line", function(item)
+		local selected_id = item.id
+		choose_type(function(item_type)
+			if not item_type then
+				return
+			end
+			local mutation_workspace = active_workspace_for_session(expected_key, "choosing a comment type")
+			if not mutation_workspace or not allow_mutation(mutation_workspace) then
+				return
+			end
+			local latest = composer_session(
+				mutation_workspace,
+				false,
+				"Review is stale; open a new scope before changing comments"
+			)
+			if not latest then
+				return
+			end
+			local resolved, resolved_err = resolve_current_line_item(
+				mutation_workspace,
+				latest,
+				selected_id,
+				function(candidate)
+					return candidate.status ~= "exported"
+				end
+			)
+			if not resolved then
+				return notify(resolved_err, vim.log.levels.WARN)
+			end
+			local session, err = review_store.set_type(latest, selected_id, item_type)
+			if not session then
+				return notify("Could not change comment type: " .. tostring(err), vim.log.levels.ERROR)
+			end
+			save_session(mutation_workspace, session)
 		end)
-		if not resolved then
-			return notify(resolved_err, vim.log.levels.WARN)
-		end
-		if resolved.id ~= id then
-			return notify("The review comment on the current line is unavailable for this action", vim.log.levels.WARN)
-		end
-		local session, err = review_store.set_type(latest, id, item_type)
-		if not session then
-			return notify("Could not change comment type: " .. tostring(err), vim.log.levels.ERROR)
-		end
-		save_session(workspace, session)
 	end)
 end
 
