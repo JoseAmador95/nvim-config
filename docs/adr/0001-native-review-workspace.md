@@ -25,7 +25,13 @@ Neovim owns a review workspace with an explicit Git identity:
   can switch in place to a unified inline diff. The review-only toggle
   (`:ReviewLayout`, `<leader>Rv`, or `g<C-x>` inside a review buffer) moves
   deterministically between those two layouts without changing ordinary
-  Diffview's layout cycle. Each review-owned Git adapter gets an isolated
+  Diffview's layout cycle. An independent, transient presentation mode starts
+  at `Hunks`; `:ReviewContext` (`<leader>Rw`) switches between diff-folded
+  side-by-side panes or banded inline hunks and the complete `Full` file. Inline
+  bands use persistent extmarks in per-window namespaces because Neovim 0.12.5
+  does not render ephemeral virtual lines; window scoping prevents them from
+  appearing in shared source buffers or ordinary Diffview tabs. Each
+  review-owned Git adapter gets an isolated
   environment that rejects inherited repository routing and ignores local
   shallow/graft metadata, so later Diffview jobs keep the stored object graph.
   `:ReviewCode` (`<leader>Rg`) opens the current real source buffer for LSP use and toggles
@@ -70,8 +76,9 @@ navigation remains the supported LSP path; inherited source tabs return to the
 original exact review target rather than treating the definition destination
 as part of the diff. The integration isolates pinned
 Diffview seams for the selected file, history entries, file-open lifecycle, and
-exact file selection in `config.review_diffview`; plugin upgrades must exercise
-its focused tests and the full offline config check.
+exact file selection in `config.review_diffview`, plus its cached inline hunk
+seam in `config.review_context`; plugin upgrades must exercise their focused
+tests and the full offline config check.
 
 TUICR remains optional. Its TUI workflow and existing `:TuicrReview` command
 continue to work independently of native reviews.

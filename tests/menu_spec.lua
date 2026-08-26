@@ -144,7 +144,7 @@ test("tmux refresh is a namespaced palette-only descriptor", function()
 	assert(not find_item(compact, "tmux.refresh_dev_session"), "tmux refresh leaked into the context menu")
 end)
 
-test("review layout is a namespaced palette command with its mapping hint", function()
+test("review layout and context are palette-only namespaced commands", function()
 	local menu_context = context.new({ filetype = "lua", mode = "n" })
 	local palette = catalog.build(menu_context, function() end, "palette")
 	local compact = catalog.build(menu_context, function() end, "context")
@@ -153,6 +153,11 @@ test("review layout is a namespaced palette command with its mapping hint", func
 	equal("<leader>Rv", item.hint, "review layout mapping hint")
 	equal({ "layout", "interleaved", "inline", "unified" }, item.keywords, "review layout search terms")
 	assert(not find_item(compact, "command.review_layout"), "review layout leaked into the context menu")
+	local context_item = assert(find_item(palette, "command.review_context"), "review context descriptor is missing")
+	equal("Toggle Hunks / Full File Context", context_item.label, "review context label")
+	equal("<leader>Rw", context_item.hint, "review context mapping hint")
+	equal({ "context", "hunks", "full", "whole file", "folds" }, context_item.keywords, "review context search terms")
+	assert(not find_item(compact, "command.review_context"), "review context leaked into the context menu")
 	for id, expected in pairs({
 		["command.review_code"] = { "Toggle Review Code and Diff", "<leader>Rg" },
 		["command.review_comments"] = { "List Review Comments", "<leader>Rl" },

@@ -18,6 +18,7 @@ local function test(name, callback)
 end
 
 local diffview = require("config.review_diffview")
+local review_context = require("config.review_context")
 local tabs = require("config.tabs")
 local root = "/tmp/review-diffview"
 local oid = string.rep("a", 40)
@@ -140,7 +141,7 @@ test("owned views receive a stable transient title and expose layer-sensitive ta
 	assert(vim.env.GIT_GRAFT_FILE == previous_graft and vim.env.GIT_SHALLOW_FILE == previous_shallow)
 	assert(captured.cmd == "DiffviewOpen")
 	assert(diffview.workspace(tabpage) == value)
-	assert(tabs.transient_title(tabpage) == "Review · Fixture scope")
+	assert(tabs.transient_title(tabpage) == "Review · Fixture scope · Hunks")
 	local isolated_command = view.adapter:get_command()
 	assert(isolated_command[1] == "env" and isolated_command[#isolated_command] == "git")
 	assert(vim.tbl_contains(isolated_command, "GIT_OPTIONAL_LOCKS=0"))
@@ -383,6 +384,97 @@ test("layout cycling is review-only and protects inline buffers", function()
 	vim.w[win].nvim_review_diff_symbol = previous.symbol
 end)
 
+test("review context toggles independently, updates titles, and rejects conflict layouts", function()
+	local value = workspace("commit")
+	value.session = { items = { { id = "unchanged" } } }
+	local session_before = vim.deepcopy(value.session)
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local view = {
+		tabpage = tabpage,
+		adapter = adapter(),
+		cur_layout = { name = "diff2_horizontal" },
+	}
+	assert(diffview.open(value, "files", nil, {
+		command = function()
+			diffview._on_view_opened(view)
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+	}))
+	assert(value.context_mode == nil and tabs.transient_title(tabpage):find("· Hunks", 1, true))
+
+	local applied = {}
+	local notifications = {}
+	local original_notify = vim.notify
+	vim.notify = function(message)
+		notifications[#notifications + 1] = message
+	end
+	local ok, err = xpcall(function()
+		local changed, context_err = diffview.context(nil, {
+			view = view,
+			apply = function(workspace_value)
+				applied[#applied + 1] = workspace_value.context_mode
+			end,
+		})
+		assert(changed and context_err == nil and value.context_mode == "full")
+		assert(applied[1] == "full" and notifications[#notifications] == "Review context: Full")
+		assert(tabs.transient_title(tabpage) == "Review · Fixture scope · Full")
+
+		changed, context_err = diffview.context("hunks", {
+			view = view,
+			apply = function(workspace_value)
+				applied[#applied + 1] = workspace_value.context_mode
+			end,
+		})
+		assert(changed and context_err == nil and value.context_mode == "hunks")
+		assert(applied[2] == "hunks" and notifications[#notifications] == "Review context: Hunks")
+		assert(vim.deep_equal(value.session, session_before), "transient context leaked into persisted review state")
+
+		local invalid, invalid_err = diffview.context("wide", { view = view })
+		assert(not invalid and invalid_err == "Usage: ReviewContext [hunks|full]")
+		assert(value.context_mode == "hunks" and #applied == 2)
+
+		view.cur_layout.name = "diff3_horizontal"
+		local conflict, conflict_err = diffview.context("full", {
+			view = view,
+			apply = function()
+				error("unsupported context must not apply")
+			end,
+		})
+		assert(not conflict and conflict_err:find("diff3/diff4 conflict", 1, true))
+		assert(value.context_mode == "hunks", "conflict layout mutated context state")
+		view.cur_layout.name = "diff2_horizontal"
+		assert(diffview.context("full", {
+			view = view,
+			apply = function(workspace_value)
+				applied[#applied + 1] = workspace_value.context_mode
+			end,
+		}))
+		assert(value.context_mode == "full" and applied[3] == "full")
+
+		diffview._on_view_closed(view)
+		local reopened = {
+			tabpage = tabpage,
+			adapter = adapter(),
+			cur_layout = { name = "diff1_inline" },
+		}
+		assert(diffview.open(value, "history", nil, {
+			command = function()
+				diffview._on_view_opened(reopened)
+			end,
+			schedule = function(callback)
+				callback()
+			end,
+		}))
+		assert(value.context_mode == "full" and value.view_mode == "history")
+		assert(tabs.transient_title(tabpage) == "Review · Fixture scope · Full")
+		diffview._on_view_closed(reopened)
+	end, debug.traceback)
+	vim.notify = original_notify
+	assert(ok, err)
+end)
+
 test("review side-by-side layouts color old and current modified lines by pane", function()
 	local value = workspace()
 	local tabpage = vim.api.nvim_get_current_tabpage()
@@ -487,6 +579,270 @@ test("review diff colors do not touch ordinary Diffview windows", function()
 	vim.wo[win].winhighlight = previous_winhighlight
 end)
 
+test("inline hunk bands cover additions, changes, deletions, and adjacent boundaries", function()
+	local bands, malformed = review_context._build_bands({
+		{ 0, 0, 1, 2 },
+		{ 4, 1, 3, 1 },
+		{ 7, 2, 0, 0 },
+		{ 9, 2, 5, 0 },
+	}, 5, 48)
+	assert(not malformed and #bands == 8)
+	local expected_header = "HUNK 1/4 · -0,0 +1,2"
+	assert(bands[1].text:sub(1, #expected_header) == expected_header)
+	assert(vim.fn.strdisplaywidth(bands[1].text) == 48)
+	assert(bands[1].row == 0 and bands[1].above and bands[1].priority == 50 and not bands[1].right_gravity)
+	assert(bands[2].row == 1 and not bands[2].above and bands[2].priority == 200 and bands[2].right_gravity)
+	assert(bands[2].text:find("END HUNK 1/4", 1, true) == 1)
+	assert(
+		bands[3].row == 2 and bands[3].above and not bands[3].right_gravity,
+		"adjacent modification header lost its pre-hunk boundary"
+	)
+	assert(
+		bands[4].row == 2 and not bands[4].above and bands[4].right_gravity,
+		"adjacent modification footer lost its post-hunk boundary"
+	)
+	assert(
+		bands[5].row == 0
+			and bands[5].above
+			and bands[6].row == 0
+			and bands[6].above
+			and not bands[5].right_gravity
+			and bands[6].right_gravity,
+		"BOF deletion bands do not bracket Diffview's existing extmark by gravity"
+	)
+	assert(
+		bands[7].row == 4
+			and not bands[7].above
+			and bands[8].row == 4
+			and not bands[8].above
+			and not bands[7].right_gravity
+			and bands[8].right_gravity,
+		"middle/EOF deletion bands do not bracket Diffview's existing extmark by gravity"
+	)
+	local empty = review_context._build_bands({}, 1, 20)
+	assert(#empty == 0, "an unchanged file received hunk bands")
+	local deletions = review_context._build_bands({ { 1, 1, 3, 0 }, { 8, 2, 5, 0 } }, 5, 30)
+	assert(deletions[1].row == 2 and not deletions[1].above, "middle deletion used the wrong anchor")
+	assert(deletions[3].row == 4 and not deletions[3].above, "EOF deletion used the wrong anchor")
+	local invalid, invalid_flag = review_context._build_bands({ { 1, 2, 3 } }, 3, 20)
+	assert(#invalid == 0 and invalid_flag, "malformed cached hunks were not rejected safely")
+end)
+
+test("context application preserves views, restores diff folds, and scopes inline bands", function()
+	review_context.setup()
+	local original_win = vim.api.nvim_get_current_win()
+	local original_buf = vim.api.nvim_get_current_buf()
+	local original_options = {
+		foldenable = vim.wo[original_win].foldenable,
+		foldlevel = vim.wo[original_win].foldlevel,
+		foldmethod = vim.wo[original_win].foldmethod,
+	}
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(
+		buf,
+		0,
+		-1,
+		false,
+		vim.tbl_map(function(index)
+			return ("line %02d with context"):format(index)
+		end, vim.fn.range(1, 40))
+	)
+	vim.api.nvim_win_set_buf(original_win, buf)
+	vim.wo[original_win].foldmethod = "marker"
+	vim.wo[original_win].foldlevel = 7
+	vim.wo[original_win].foldenable = true
+	vim.api.nvim_win_set_cursor(original_win, { 24, 4 })
+	vim.cmd("normal! zt")
+	local before = vim.fn.winsaveview()
+	local value = { context_mode = "full", tabpage = vim.api.nvim_get_current_tabpage() }
+
+	local ok, err = xpcall(function()
+		review_context.apply_window(value, buf, original_win, "diff2_horizontal")
+		assert(not vim.wo[original_win].foldenable)
+		assert(vim.wo[original_win].foldmethod == "marker" and vim.wo[original_win].foldlevel == 7)
+		assert(vim.deep_equal(vim.fn.winsaveview(), before), "Full context moved the side-by-side viewport")
+
+		value.context_mode = "hunks"
+		review_context.apply_window(value, buf, original_win, "diff2_horizontal")
+		assert(vim.wo[original_win].foldmethod == "diff")
+		assert(vim.wo[original_win].foldlevel == 0 and vim.wo[original_win].foldenable)
+		assert(vim.deep_equal(vim.fn.winsaveview(), before), "Hunks context moved the side-by-side viewport")
+		review_context.apply_window(value, buf, original_win, "diff1_inline", {
+			get_hunks = function()
+				return nil
+			end,
+		})
+		assert(
+			review_context._namespace(original_win) == nil and review_context._decorations[original_win] == nil,
+			"nil/binary cached hunks allocated a band namespace"
+		)
+
+		vim.cmd("vsplit")
+		local inline_win = vim.api.nvim_get_current_win()
+		vim.api.nvim_win_set_buf(inline_win, buf)
+		vim.api.nvim_win_set_width(inline_win, 46)
+		local inline_before = vim.fn.winsaveview()
+		review_context.apply_window(value, buf, inline_win, "diff1_inline", {
+			get_hunks = function()
+				return { { 8, 2, 8, 2 }, { 30, 3, 30, 0 } }
+			end,
+		})
+		local namespace = assert(review_context._namespace(inline_win))
+		local marks = vim.api.nvim_buf_get_extmarks(buf, namespace, 0, -1, { details = true })
+		assert(#marks == 4, "inline hunks did not receive one header and footer each")
+		for _, mark in ipairs(marks) do
+			local text = mark[4].virt_lines[1][1][1]
+			if text:find("HUNK ", 1, true) == 1 then
+				assert(not mark[4].right_gravity, "rendered hunk header lost left gravity")
+			elseif text:find("END HUNK ", 1, true) == 1 then
+				assert(mark[4].right_gravity, "rendered hunk footer lost right gravity")
+			end
+		end
+		assert(vim.deep_equal(vim.fn.winsaveview(), inline_before), "inline bands moved the viewport")
+		assert(review_context._decorations[inline_win].buf == buf)
+		if type(vim.api.nvim__ns_get) == "function" and type(vim.api.nvim_win_add_ns) ~= "function" then
+			local scope = vim.api.nvim__ns_get(namespace)
+			assert(vim.deep_equal(scope.wins, { inline_win }), "band namespace was not scoped to its inline window")
+			assert(not vim.tbl_contains(scope.wins, original_win), "bands leaked into a sibling sharing the buffer")
+		end
+
+		vim.api.nvim_win_set_width(inline_win, 55)
+		vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+		marks = vim.api.nvim_buf_get_extmarks(buf, namespace, 0, -1, { details = true })
+		local chunks = marks[1][4].virt_lines[1]
+		assert(
+			vim.fn.strdisplaywidth(chunks[1][1])
+				== vim.api.nvim_win_get_width(inline_win) - vim.fn.getwininfo(inline_win)[1].textoff,
+			"resize did not rebuild full-width hunk bands"
+		)
+
+		value.context_mode = "full"
+		review_context.apply_window(value, buf, inline_win, "diff1_inline")
+		assert(#vim.api.nvim_buf_get_extmarks(buf, namespace, 0, -1, {}) == 0)
+		assert(review_context._decorations[inline_win] == nil and review_context._namespace(inline_win) == nil)
+		vim.api.nvim_win_close(inline_win, true)
+
+		vim.api.nvim_set_hl(0, "NvimReviewHunkBand", { link = "ErrorMsg" })
+		vim.api.nvim_exec_autocmds("ColorScheme", { modeline = false })
+		local highlight = vim.api.nvim_get_hl(0, { name = "NvimReviewHunkBand", link = true })
+		assert(highlight.link == "StatusLine", "hunk band highlight is not theme-derived and neutral")
+	end, debug.traceback)
+
+	review_context.clear_workspace()
+	if vim.api.nvim_win_is_valid(original_win) then
+		vim.api.nvim_set_current_win(original_win)
+		vim.api.nvim_win_set_buf(original_win, original_buf)
+		vim.wo[original_win].foldmethod = original_options.foldmethod
+		vim.wo[original_win].foldlevel = original_options.foldlevel
+		vim.wo[original_win].foldenable = original_options.foldenable
+	end
+	if vim.api.nvim_buf_is_valid(buf) then
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end
+	assert(ok, err)
+end)
+
+test("inline edge maintenance includes bands without accumulating scroll state", function()
+	review_context.setup()
+	local win = vim.api.nvim_get_current_win()
+	local original_buf = vim.api.nvim_win_get_buf(win)
+	local buf = vim.api.nvim_create_buf(false, true)
+	local lines = {}
+	for index = 1, 40 do
+		lines[index] = ("edge line %02d"):format(index)
+	end
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	vim.api.nvim_win_set_buf(win, buf)
+	local plugin_namespace = vim.api.nvim_create_namespace("nvim_review_edge_plugin_fixture")
+	local hunks
+	local dependencies = {
+		get_hunks = function()
+			return hunks
+		end,
+	}
+	local value = { context_mode = "hunks", tabpage = vim.api.nvim_get_current_tabpage() }
+	local function set_view(topline, topfill)
+		vim.api.nvim_win_call(win, function()
+			local view = vim.fn.winsaveview()
+			view.topline = topline
+			view.topfill = topfill
+			vim.fn.winrestview(view)
+		end)
+	end
+	local function current_view()
+		return vim.api.nvim_win_call(win, vim.fn.winsaveview)
+	end
+
+	local ok, err = xpcall(function()
+		vim.api.nvim_buf_set_extmark(buf, plugin_namespace, 39, 0, {
+			virt_lines = {
+				{ { "deleted eof 1", "DiffDelete" } },
+				{ { "deleted eof 2", "DiffDelete" } },
+				{ { "deleted eof 3", "DiffDelete" } },
+			},
+			priority = 100,
+		})
+		hunks = { { 41, 3, 40, 0 } }
+		vim.api.nvim_win_set_cursor(win, { 40, 0 })
+		local height = vim.api.nvim_win_get_height(win)
+		local plugin_topline = math.min(40, math.max(1, 40 - (height - 1 - math.min(3, height - 1))))
+		set_view(plugin_topline, 0)
+		review_context.apply_window(value, buf, win, "diff1_inline", dependencies)
+		local record = review_context._decorations[win]
+		assert(record.plugin_eof_below == 3 and record.eof_below == 5)
+		local expected_topline = math.min(40, math.max(1, 40 - (height - 1 - math.min(5, height - 1))))
+		assert(current_view().topline >= expected_topline, "EOF header/footer remained clipped below the last line")
+		assert(vim.api.nvim_win_get_cursor(win)[1] == 40, "EOF visibility correction moved the cursor")
+
+		vim.api.nvim_buf_clear_namespace(buf, plugin_namespace, 0, -1)
+		vim.api.nvim_buf_set_extmark(buf, plugin_namespace, 0, 0, {
+			virt_lines = {
+				{ { "deleted bof 1", "DiffDelete" } },
+				{ { "deleted bof 2", "DiffDelete" } },
+			},
+			virt_lines_above = true,
+			priority = 100,
+		})
+		hunks = { { 1, 2, 0, 0 } }
+		vim.api.nvim_win_set_cursor(win, { 1, 0 })
+		set_view(1, 2)
+		review_context.apply_window(value, buf, win, "diff1_inline", dependencies)
+		record = review_context._decorations[win]
+		assert(record.plugin_bof_topfill == 2 and record.bof_topfill == 4)
+		assert(current_view().topfill == 4, "BOF topfill omitted the two review bands")
+
+		review_context._rebuild_bands()
+		vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+		assert(current_view().topfill == 4, "BOF topfill accumulated across rebuild/resize")
+
+		set_view(1, 2)
+		vim.api.nvim_exec_autocmds("CursorMoved", { buffer = buf, modeline = false })
+		assert(
+			vim.wait(100, function()
+				return current_view().topfill == 4
+			end, 10),
+			"scheduled edge correction did not run after Diffview's CursorMoved adjustment"
+		)
+
+		value.context_mode = "full"
+		review_context.apply_window(value, buf, win, "diff1_inline")
+		assert(current_view().topfill == 2, "Full context did not restore plugin-only BOF topfill")
+		assert(review_context._decorations[win] == nil and review_context._namespace(win) == nil)
+	end, debug.traceback)
+
+	review_context.clear_workspace()
+	if vim.api.nvim_buf_is_valid(buf) then
+		vim.api.nvim_buf_clear_namespace(buf, plugin_namespace, 0, -1)
+	end
+	if vim.api.nvim_win_is_valid(win) then
+		vim.api.nvim_win_set_buf(win, original_buf)
+	end
+	if vim.api.nvim_buf_is_valid(buf) then
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end
+	assert(ok, err)
+end)
+
 test("working file selection distinguishes staged, unstaged, untracked, and renamed entries", function()
 	local value = workspace()
 	local entries = {
@@ -524,6 +880,71 @@ test("working file selection distinguishes staged, unstaged, untracked, and rena
 	assert(selected == entries[4])
 	assert(not diffview.select_file("lua/shared.lua", "untracked", nil, { view = view }))
 	diffview._on_view_closed(view)
+end)
+
+test("comment target focus reveals a line hidden inside a review fold", function()
+	local value = workspace("commit")
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local win = vim.api.nvim_get_current_win()
+	local original_buf = vim.api.nvim_win_get_buf(win)
+	local original_options = {
+		foldenable = vim.wo[win].foldenable,
+		foldlevel = vim.wo[win].foldlevel,
+		foldmethod = vim.wo[win].foldmethod,
+		symbol = vim.w[win].nvim_review_diff_symbol,
+	}
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "-- {{{", "one", "target", "three", "-- }}}", "tail" })
+	vim.api.nvim_win_set_buf(win, buf)
+	vim.wo[win].foldmethod = "marker"
+	vim.wo[win].foldlevel = 0
+	vim.wo[win].foldenable = true
+	local entry = { path = "lua/folded.lua", status = "M" }
+	local view = {
+		tabpage = tabpage,
+		adapter = adapter(),
+		files = {
+			iter = function()
+				return ipairs({ entry })
+			end,
+		},
+		set_file = function() end,
+	}
+	local ok, err = xpcall(function()
+		assert(diffview.open(value, "files", nil, {
+			command = function()
+				diffview._on_view_opened(view)
+			end,
+			schedule = function(callback)
+				callback()
+			end,
+		}))
+		vim.w[win].nvim_review_diff_symbol = "b"
+		assert(vim.fn.foldclosed(3) == 1, "fold fixture did not start closed")
+		assert(diffview.select_file("lua/folded.lua", "historical", {
+			side = "right",
+			line = 3,
+			column = 1,
+		}, {
+			view = view,
+			defer = function(callback)
+				callback()
+			end,
+		}))
+		assert(vim.api.nvim_win_get_cursor(win)[1] == 3)
+		assert(vim.fn.foldclosed(3) == -1, "focus_target did not reveal the hidden comment line")
+		diffview._on_view_closed(view)
+	end, debug.traceback)
+	if diffview.workspace(tabpage) then
+		diffview._on_view_closed(view)
+	end
+	vim.api.nvim_win_set_buf(win, original_buf)
+	vim.wo[win].foldmethod = original_options.foldmethod
+	vim.wo[win].foldlevel = original_options.foldlevel
+	vim.wo[win].foldenable = original_options.foldenable
+	vim.w[win].nvim_review_diff_symbol = original_options.symbol
+	vim.api.nvim_buf_delete(buf, { force = true })
+	assert(ok, err)
 end)
 
 test("file-history selection preserves the current commit and can find another path", function()

@@ -437,6 +437,13 @@ function M.definitions(dispatch)
 				nil,
 				{ "layout", "interleaved", "inline", "unified" }
 			),
+			palette_item(
+				"command.review_context",
+				"Toggle Hunks / Full File Context",
+				"<leader>Rw",
+				nil,
+				{ "context", "hunks", "full", "whole file", "folds" }
+			),
 			palette_item("command.review_comments", "List Review Comments", "<leader>Rl"),
 			palette_item("command.review_comment", "Add Review Comment", "<leader>Ra"),
 			palette_item("command.review_change_type", "Change Comment Type at Current Line", "<leader>Rc"),

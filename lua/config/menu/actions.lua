@@ -170,6 +170,7 @@ local commands = {
 	review_comment = { "ReviewComment" },
 	review_comments = { "ReviewComments" },
 	review_commits = { "ReviewCommits" },
+	review_context = { "ReviewContext" },
 	review_delete = { "ReviewDeleteDraft" },
 	review_export = { "ReviewExport" },
 	review_files = { "ReviewFiles" },

@@ -98,6 +98,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				assert(type(require_table("rainbow-delimiters").strategy) == "table")
 				local diffview_actions = require_table("diffview.actions")
+				local inline_diff = require_table("diffview.scene.inline_diff")
+				assert(type(inline_diff.get_hunks) == "function", "the pinned Diffview cached-inline-hunk seam changed")
 				assert(type(diffview_actions.cycle_layout) == "function", "Diffview layout cycle API is missing")
 				assert(type(diffview_actions.focus_entry) == "function", "Diffview focus-entry API is missing")
 				assert(type(diffview_actions.set_layout) == "function", "Diffview layout selection API is missing")
@@ -152,7 +154,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(review_groups.common == "review" and review_groups.diff_line == "review_diff")
 				local common_help = diffview_config.keymaps[review_groups.common]
 				local diff_line_help = diffview_config.keymaps[review_groups.diff_line]
-				assert(type(common_help) == "table" and #common_help == 13, "common review help group is missing")
+				assert(type(common_help) == "table" and #common_help == 14, "common review help group is missing")
 				assert(
 					type(diff_line_help) == "table" and #diff_line_help == 3,
 					"diff-line review help group is missing"
@@ -278,6 +280,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 				assert(plugins["diffview.nvim"] == nil, "retired Diffview source remains in the full profile")
 				assert(plugins["diffview-plus.nvim"].version == "v0.37", "diffview-plus version constraint drifted")
+				local config_root = assert(vim.env.NVIM_CONFIG_ROOT, "NVIM_CONFIG_ROOT is missing")
+				local lock = vim.json.decode(table.concat(vim.fn.readfile(config_root .. "/lazy-lock.json"), "\n"))
+				assert(
+					lock["diffview-plus.nvim"].commit == "460b96c8285fbf0cd411bddfd9322408f37f81a5",
+					"diffview-plus cached-hunk seam is not pinned to the tested commit"
+				)
 				for _, name in ipairs({ "nvim-coverage", "nvim-navic", "venv-selector.nvim" }) do
 					assert(plugins[name] ~= nil, "Phase 2 dependency is missing: " .. name)
 				end

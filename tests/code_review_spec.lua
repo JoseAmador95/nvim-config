@@ -54,7 +54,7 @@ test("review mapping specs build normalized Diffview help groups", function()
 	local common = review.help_mappings("common")
 	local diff_line = review.help_mappings("diff_line")
 	assert(groups.common == "review" and groups.diff_line == "review_diff")
-	assert(#review.mapping_specs() == 16 and #common == 13 and #diff_line == 3)
+	assert(#review.mapping_specs() == 17 and #common == 14 and #diff_line == 3)
 	for _, mapping in ipairs(vim.list_extend(vim.deepcopy(common), diff_line)) do
 		assert(mapping[1] == "n" and type(mapping[2]) == "string" and mapping[2] ~= "")
 		assert(type(mapping[3]) == "string" and mapping[3] ~= "")
@@ -1418,6 +1418,7 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"ReviewCommits",
 		"ReviewCode",
 		"ReviewLayout",
+		"ReviewContext",
 		"ReviewComments",
 		"ReviewComment",
 		"ReviewThreads",
@@ -1443,6 +1444,7 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"<leader>Rh",
 		"<leader>Rg",
 		"<leader>Rv",
+		"<leader>Rw",
 		"<leader>Rl",
 		"<leader>Ra",
 		"<leader>Rc",
@@ -1459,12 +1461,32 @@ test("setup exposes the namespaced command and mapping surface", function()
 	for lhs, rhs in pairs({
 		["<leader>Rg"] = "<Cmd>ReviewCode<CR>",
 		["<leader>Rv"] = "<Cmd>ReviewLayout<CR>",
+		["<leader>Rw"] = "<Cmd>ReviewContext<CR>",
 		["<leader>Rl"] = "<Cmd>ReviewComments<CR>",
 		["<leader>Rc"] = "<Cmd>ReviewChangeType<CR>",
 		["<leader>Rd"] = "<Cmd>ReviewDeleteDraft<CR>",
 	}) do
 		assert(vim.fn.maparg(lhs, "n") == rhs, lhs .. " has unexpected RHS " .. vim.fn.maparg(lhs, "n"))
 	end
+	local original_context = diffview.context
+	local context_calls = {}
+	diffview.context = function(mode)
+		context_calls[#context_calls + 1] = mode == nil and "toggle" or mode
+		return true
+	end
+	vim.cmd("ReviewContext")
+	vim.cmd("ReviewContext full")
+	vim.cmd("ReviewContext hunks")
+	diffview.context = original_context
+	assert(vim.deep_equal(context_calls, { "toggle", "full", "hunks" }))
+	local original_notify = vim.notify
+	local warning
+	vim.notify = function(message)
+		warning = message
+	end
+	vim.cmd("ReviewContext invalid")
+	vim.notify = original_notify
+	assert(warning == "Usage: ReviewContext [hunks|full]", "invalid context argument did not show concise usage")
 	assert(vim.fn.maparg("<leader>Ra", "x") == ":<C-U>'<,'>ReviewComment<CR>")
 	local add_mapping = vim.fn.maparg("<leader>Ra", "n", false, true)
 	assert(add_mapping.desc:find("Visual range", 1, true), "normal review comment help omits Visual ranges")

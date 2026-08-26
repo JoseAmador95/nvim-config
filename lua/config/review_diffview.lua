@@ -4,6 +4,7 @@ local M = {}
 local RESTORE_INTERVAL_MS = 20
 local RESTORE_ATTEMPTS = 500
 local INITIAL_GIT_ENVIRONMENT = require("config.repo").git_safety_environment()
+local review_context = require("config.review_context")
 
 local pending
 local controller
@@ -107,7 +108,10 @@ local function mark_tab(tabpage, workspace)
 		local stale = workspace.session and workspace.session.stale and " [stale]" or ""
 		local unsaved = workspace.unsaved_error and " [unsaved]" or ""
 		local label = workspace.scope.label or workspace.scope.kind
-		tab_config.mark_transient(tabpage, "Review · " .. label .. stale .. unsaved)
+		tab_config.mark_transient(
+			tabpage,
+			"Review · " .. label .. " · " .. review_context.label(workspace) .. stale .. unsaved
+		)
 	end
 end
 
@@ -227,6 +231,7 @@ local function on_view_closed(view)
 	end
 	local tabpage = view.tabpage
 	local owned_buffers = protected_buffers(view)
+	review_context.clear_workspace(workspace)
 	restore_view(view)
 	views[view] = nil
 	view_activity[view] = nil
@@ -279,6 +284,7 @@ local function on_diff_buf_win_enter(buf, win, context)
 		return
 	end
 	vim.w[win].nvim_review_diff_symbol = context.symbol
+	vim.w[win].nvim_review_layout_name = context.layout_name
 	local side_target = context.layout_name:match("^diff2_")
 		and ({ a = "DiffviewDiffAddAsDelete", b = "DiffviewDiffAdd" })[context.symbol]
 	if side_target then
@@ -294,6 +300,7 @@ local function on_diff_buf_win_enter(buf, win, context)
 			{ "DiffTextAdd", false },
 		})
 	end
+	review_context.apply_window(workspace, buf, win, context.layout_name)
 	protect_view(require("diffview.lib").get_current_view())
 	controller_call("decorate_buffer", workspace, buf, win)
 end
@@ -549,6 +556,9 @@ local function focus_target(workspace, target, defer, view, attempts)
 					local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
 					local column = math.max(0, math.min(target.column or 0, #text))
 					vim.api.nvim_win_set_cursor(win, { line, column })
+					vim.api.nvim_win_call(win, function()
+						vim.cmd("normal! zv")
+					end)
 				end
 				return
 			end
@@ -789,6 +799,40 @@ function M.layout(dependencies)
 	if not ok then
 		return nil, tostring(err)
 	end
+	return true
+end
+
+---Set or toggle the hunk/full-file presentation of the current review.
+---@param mode? "hunks"|"full"
+---@param dependencies? table
+---@return boolean? changed
+---@return string? error_message
+function M.context(mode, dependencies)
+	if mode ~= nil and mode ~= "hunks" and mode ~= "full" then
+		return nil, "Usage: ReviewContext [hunks|full]"
+	end
+	local workspace = current_review()
+	if not workspace then
+		return nil, "current tab is not a review workspace"
+	end
+	local deps = dependencies or {}
+	local view = deps.view or require("diffview.lib").get_current_view()
+	local layout_name = deps.layout_name or view and type(view.cur_layout) == "table" and view.cur_layout.name or nil
+	if not review_context.supports(layout_name) then
+		if type(layout_name) == "string" and layout_name:match("^diff[34]_") then
+			return nil, "Review context is unavailable for diff3/diff4 conflict layouts"
+		end
+		return nil, "Review context is unavailable for the current review layout"
+	end
+	local next_mode = mode
+	if not next_mode then
+		next_mode = review_context.mode(workspace) == "hunks" and "full" or "hunks"
+	end
+	workspace.context_mode = next_mode
+	local apply = deps.apply or review_context.apply_workspace
+	apply(workspace, deps.context_dependencies)
+	mark_tab(workspace.tabpage, workspace)
+	notify("Review context: " .. review_context.label(workspace))
 	return true
 end
 

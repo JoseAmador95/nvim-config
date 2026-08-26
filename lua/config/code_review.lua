@@ -31,6 +31,7 @@ local REVIEW_MAPPINGS = {
 	{ lhs = "<leader>Rh", rhs = "<cmd>ReviewCommits<cr>", desc = "Review commits/history", help = "common" },
 	{ lhs = "<leader>Rg", rhs = "<cmd>ReviewCode<cr>", desc = "Toggle review code/diff", help = "common" },
 	{ lhs = "<leader>Rv", rhs = "<cmd>ReviewLayout<cr>", desc = "Toggle review layout", help = "common" },
+	{ lhs = "<leader>Rw", rhs = "<cmd>ReviewContext<cr>", desc = "Toggle review hunk/full context", help = "common" },
 	{ lhs = "<leader>Rl", rhs = "<cmd>ReviewComments<cr>", desc = "List review comments", help = "common" },
 	{
 		lhs = "<leader>Ra",
@@ -411,6 +412,7 @@ local function start_workspace(root, session, mode, origin)
 		session = session,
 		origin = origin,
 		view_mode = mode or "files",
+		context_mode = "hunks",
 	}
 	workspaces[root] = workspace
 	local opened, err = review_diffview.open(workspace, workspace.view_mode)
@@ -2046,6 +2048,19 @@ local function setup_commands()
 			notify(err, vim.log.levels.WARN)
 		end
 	end, { desc = "Toggle side-by-side and unified inline review layouts" })
+	vim.api.nvim_create_user_command("ReviewContext", function(command)
+		local mode = command.args ~= "" and command.args or nil
+		local changed, err = review_diffview.context(mode)
+		if not changed then
+			notify(err, vim.log.levels.WARN)
+		end
+	end, {
+		nargs = "?",
+		complete = function()
+			return { "hunks", "full" }
+		end,
+		desc = "Toggle or set hunk/full-file review context",
+	})
 	vim.api.nvim_create_user_command("ReviewComment", function(command)
 		M.comment(command.line1, command.line2, command.args ~= "" and command.args or nil)
 	end, {
@@ -2173,6 +2188,7 @@ end
 
 ---Register review commands, mappings, and Diffview callbacks.
 function M.setup()
+	require("config.review_context").setup()
 	review_diffview.set_controller({
 		code = M.code,
 		close = close_workspace,
