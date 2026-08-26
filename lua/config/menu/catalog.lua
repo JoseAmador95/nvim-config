@@ -279,7 +279,7 @@ function M.definitions(dispatch)
 			palette_item("lsp.hover", "Hover Documentation", "K"),
 			palette_item("lsp.signature_help", "Signature Help", "<C-k>"),
 			item("command.toggle_inlay_hints", "Toggle Inlay Hints"),
-			item("command.toggle_inline_diagnostics", "Toggle Inline Diagnostics", "<leader>lt"),
+			item("command.toggle_inline_diagnostics", "Toggle Inline Diagnostics", "<leader>xi"),
 			item("lsp.format", "Format"),
 		}),
 		section("git", "Git", {

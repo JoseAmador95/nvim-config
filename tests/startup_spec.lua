@@ -92,10 +92,14 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					type(diagnostics.virtual_lines) == "table" and diagnostics.virtual_lines.current_line == true,
 					"current-line diagnostic virtual lines are not enabled"
 				)
-				local inline_diagnostics_map = vim.fn.maparg("<leader>lt", "n", false, true)
+				local inline_diagnostics_map = vim.fn.maparg("<leader>xi", "n", false, true)
 				assert(
 					inline_diagnostics_map.rhs == "<cmd>ToggleInlineDiagnostics<cr>",
 					"inline-diagnostics mapping drifted"
+				)
+				assert(
+					vim.tbl_isempty(vim.fn.maparg("<leader>lt", "n", false, true)),
+					"old inline-diagnostics mapping is still registered"
 				)
 				vim.cmd("ToggleInlineDiagnostics")
 				local diagnostics_disabled = vim.diagnostic.config()
