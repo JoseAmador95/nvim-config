@@ -446,6 +446,8 @@ function M.definitions(dispatch)
 			),
 			palette_item("command.review_comments", "List Review Comments", "<leader>Rl"),
 			palette_item("command.review_comment", "Add Review Comment", "<leader>Ra"),
+			palette_item("command.review_file_comment", "Add File-level Review Comment", "<leader>RA"),
+			palette_item("command.review_edit", "Edit Review Comment", "<leader>RE"),
 			palette_item("command.review_change_type", "Change Comment Type at Current Line", "<leader>Rc"),
 			palette_item("command.review_delete", "Delete Comment at Current Line", "<leader>Rd"),
 			palette_item("command.review_threads", "Show Review Threads", "<leader>Rt"),

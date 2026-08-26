@@ -23,6 +23,7 @@ local TYPE_SIGNS = {
 local REVIEW_HELP_GROUPS = {
 	common = "review",
 	diff_line = "review_diff",
+	file = "review_file",
 }
 local REVIEW_MAPPINGS = {
 	{ lhs = "<leader>Ro", rhs = "<cmd>ReviewOpen<cr>", desc = "Open default review", help = "common" },
@@ -33,11 +34,18 @@ local REVIEW_MAPPINGS = {
 	{ lhs = "<leader>Rv", rhs = "<cmd>ReviewLayout<cr>", desc = "Toggle review layout", help = "common" },
 	{ lhs = "<leader>Rw", rhs = "<cmd>ReviewContext<cr>", desc = "Toggle review hunk/full context", help = "common" },
 	{ lhs = "<leader>Rl", rhs = "<cmd>ReviewComments<cr>", desc = "List review comments", help = "common" },
+	{ lhs = "<leader>RE", rhs = "<cmd>ReviewEdit<cr>", desc = "Edit review comment", help = "common" },
 	{
 		lhs = "<leader>Ra",
 		rhs = "<cmd>ReviewComment<cr>",
 		desc = "Add review comment (Visual range supported)",
 		help = "diff_line",
+	},
+	{
+		lhs = "<leader>RA",
+		rhs = "<cmd>ReviewFileComment<cr>",
+		desc = "Add file-level review comment",
+		help = "file",
 	},
 	{
 		lhs = "<leader>Rc",
@@ -541,7 +549,13 @@ local function item_label(item)
 	local anchor = item.anchor
 	local location = anchor.path or "General"
 	if anchor.start_line then
+		local last = anchor.end_line or anchor.start_line
 		location = location .. ":" .. anchor.start_line
+		if last ~= anchor.start_line then
+			location = location .. "-" .. last
+		end
+	elseif anchor.path then
+		location = location .. " [file]"
 	end
 	local first_line = item.body:match("[^\n]+") or item.body
 	return string.format("%02d  %-10s  %-9s  %s  %s", item.sequence, item.type, item.status, location, first_line)
@@ -652,6 +666,22 @@ local function current_anchor(workspace, first, last)
 	}
 end
 
+local function current_file_anchor(workspace)
+	if workspace.view_mode == "history" then
+		return nil, "Commit history is browse-only; use :ReviewFiles before commenting"
+	end
+	local target, err = review_diffview.current_target({ allow_panel = true })
+	if not target then
+		return nil, err
+	end
+	return {
+		path = target.path,
+		side = target.side,
+		layer = target.layer,
+		stale = workspace.session.stale,
+	}
+end
+
 local function choose_type(callback)
 	vim.ui.select(REVIEW_TYPES, {
 		prompt = "Review comment type",
@@ -700,7 +730,7 @@ local function navigable_item(workspace, item)
 		and location.path ~= ""
 		and type(location.side) == "string"
 		and type(location.layer) == "string"
-		and type(location.line) == "number"
+		and (location.line == nil or type(location.line) == "number")
 end
 
 local function current_line_candidates(workspace, session, predicate)
@@ -810,12 +840,15 @@ local function composer_recovery(workspace, title, body, anchor)
 	return true
 end
 
-local function compose(workspace, title, body, anchor, callback)
+local function compose(workspace, title, body, anchor, callback, selected_type)
 	require("config.review_editor").compose({
 		title = title,
 		body = body,
-		recover = function(draft)
-			return composer_recovery(workspace, title, draft, anchor)
+		type_cycle = selected_type and REVIEW_TYPES or nil,
+		selected_type = selected_type,
+		recover = function(draft, recovered_type)
+			local recovery_title = title .. (recovered_type and " " .. recovered_type or "")
+			return composer_recovery(workspace, recovery_title, draft, anchor)
 		end,
 	}, callback)
 end
@@ -836,9 +869,11 @@ local function focus_item(workspace, item)
 		current_path = item.anchor.path,
 		layer = item.anchor.layer,
 		side = item.anchor.side,
-		line = item.anchor.start_line,
-		column = (item.anchor.start_column or 1) - 1,
 	}
+	if item.anchor.start_line then
+		target.line = item.anchor.start_line
+		target.column = (item.anchor.start_column or 1) - 1
+	end
 	if workspace.view_mode == "history" then
 		local opened = open_workspace_view(workspace, "files", item.anchor.path, target)
 		return opened == true
@@ -948,72 +983,103 @@ function M.sessions(root)
 	end)
 end
 
+local function valid_requested_type(requested_type, command)
+	if requested_type == nil or vim.tbl_contains(REVIEW_TYPES, requested_type) then
+		return true
+	end
+	notify("Usage: " .. command .. " [" .. table.concat(REVIEW_TYPES, "|") .. "]", vim.log.levels.WARN)
+	return false
+end
+
+local function add_comment(workspace, anchor, requested_type)
+	local initial_type = requested_type or REVIEW_TYPES[1]
+	compose(workspace, "New", nil, anchor, function(body, interrupted, selected_type)
+		if not body then
+			return true
+		end
+		if not allow_composer_mutation(workspace, interrupted) then
+			return false
+		end
+		local current =
+			composer_session(workspace, interrupted, "Review changed while composing; the editor remains open")
+		if not current then
+			return false
+		end
+		if current.stale then
+			anchor = vim.tbl_extend("force", anchor, { stale = true })
+		end
+		local session, err = review_store.add(current, {
+			type = selected_type,
+			body = body,
+			anchor = anchor,
+		})
+		if not session then
+			notify("Could not add review comment: " .. tostring(err), vim.log.levels.ERROR)
+			return false
+		end
+		if not save_session(workspace, session) then
+			return workspace.automatic_recovery ~= nil
+		end
+		notify("Review comment saved")
+		return true
+	end, initial_type)
+end
+
+local function workspace_for_new_comment(command, requested_type)
+	if not valid_requested_type(requested_type, command) then
+		return nil
+	end
+	local workspace = review_diffview.workspace()
+	if not workspace then
+		notify("Open and focus a review diff before adding a comment", vim.log.levels.ERROR)
+		return nil
+	end
+	if not allow_mutation(workspace) then
+		return nil
+	end
+	local checked, drift_err = update_drift(workspace.session)
+	if not checked then
+		notify("Could not check review drift: " .. error_message(drift_err), vim.log.levels.ERROR)
+		return nil
+	end
+	if checked.stale then
+		save_session(workspace, checked)
+		notify("Review is stale; open a new scope before adding comments", vim.log.levels.ERROR)
+		return nil
+	end
+	return workspace
+end
+
 ---Add a typed comment at the current review selection or cursor line.
 ---@param first integer
 ---@param last integer
 ---@param requested_type? string
 function M.comment(first, last, requested_type)
-	local workspace = review_diffview.workspace()
+	local workspace = workspace_for_new_comment("ReviewComment", requested_type)
 	if not workspace then
-		notify("Open and focus a review diff before adding a comment", vim.log.levels.ERROR)
 		return
-	end
-	if not allow_mutation(workspace) then
-		return
-	end
-	local checked, drift_err = update_drift(workspace.session)
-	if not checked then
-		return notify("Could not check review drift: " .. error_message(drift_err), vim.log.levels.ERROR)
-	end
-	if checked.stale then
-		save_session(workspace, checked)
-		return notify("Review is stale; open a new scope before adding comments", vim.log.levels.ERROR)
 	end
 	local anchor, anchor_err = current_anchor(workspace, first, last)
 	if not anchor then
 		notify(anchor_err, vim.log.levels.ERROR)
 		return
 	end
-	local function create(item_type)
-		if not item_type then
-			return
-		end
-		compose(workspace, "New " .. item_type, nil, anchor, function(body, interrupted)
-			if not body then
-				return true
-			end
-			if not allow_composer_mutation(workspace, interrupted) then
-				return false
-			end
-			local current =
-				composer_session(workspace, interrupted, "Review changed while composing; the editor remains open")
-			if not current then
-				return false
-			end
-			if current.stale then
-				anchor = vim.tbl_extend("force", anchor, { stale = true })
-			end
-			local session, err = review_store.add(current, {
-				type = item_type,
-				body = body,
-				anchor = anchor,
-			})
-			if not session then
-				notify("Could not add review comment: " .. tostring(err), vim.log.levels.ERROR)
-				return false
-			end
-			if not save_session(workspace, session) then
-				return workspace.automatic_recovery ~= nil
-			end
-			notify("Review comment saved")
-			return true
-		end)
+	add_comment(workspace, anchor, requested_type)
+end
+
+---Add a file-level comment for the focused review diff.
+---@param requested_type? string
+function M.file_comment(requested_type)
+	local workspace = workspace_for_new_comment("ReviewFileComment", requested_type)
+	if not workspace then
+		return
 	end
-	if requested_type and vim.tbl_contains(REVIEW_TYPES, requested_type) then
-		create(requested_type)
-	else
-		choose_type(create)
+	local anchor, anchor_err = current_file_anchor(workspace)
+	if not anchor then
+		notify(anchor_err, vim.log.levels.ERROR)
+		return
 	end
+	add_comment(workspace, anchor, requested_type)
 end
 
 ---Edit a local, not-yet-exported review comment.
@@ -1029,29 +1095,65 @@ function M.edit(id)
 	if not composer_session(workspace, false, "Review is stale; open a new scope before editing comments") then
 		return
 	end
-	with_item(workspace, id, "Edit review draft", function(item)
-		return item.status ~= "exported"
-	end, function(item)
-		compose(workspace, "Edit " .. item.type, item.body, item.anchor, function(body, interrupted)
+	local expected_key = workspace_session_key(workspace)
+	local function open_editor(item, mutation_workspace)
+		local selected_id = item.id
+		compose(mutation_workspace, "Edit", item.body, item.anchor, function(body, interrupted, selected_type)
 			if not body then
 				return true
 			end
-			if not allow_composer_mutation(workspace, interrupted) then
+			local current_workspace = active_workspace_for_session(expected_key, "editing a comment")
+			if not current_workspace or not allow_composer_mutation(current_workspace, interrupted) then
 				return false
 			end
-			local current =
-				composer_session(workspace, interrupted, "Review changed while composing; the editor remains open")
-			if not current then
+			local current = composer_session(
+				current_workspace,
+				interrupted,
+				"Review changed while composing; the editor remains open"
+			)
+			if not current or current.stale then
 				return false
 			end
-			local session, err = review_store.edit(current, item.id, { body = body })
+			local selected = find_session_item(current, selected_id)
+			if not selected or selected.status == "exported" then
+				notify("Review comment is unavailable for this action", vim.log.levels.WARN)
+				return false
+			end
+			local session, err = review_store.edit(current, selected_id, { body = body, type = selected_type })
 			if not session then
 				notify("Could not edit comment: " .. tostring(err), vim.log.levels.ERROR)
 				return false
 			end
-			return save_session(workspace, session) == true or workspace.automatic_recovery ~= nil
-		end)
-	end)
+			return save_session(current_workspace, session) == true or current_workspace.automatic_recovery ~= nil
+		end, item.type)
+	end
+	local function select_for_edit(item)
+		if not item then
+			return
+		end
+		local mutation_workspace = active_workspace_for_session(expected_key, "choosing a comment to edit")
+		if not mutation_workspace or not allow_mutation(mutation_workspace) then
+			return
+		end
+		local current =
+			composer_session(mutation_workspace, false, "Review is stale; open a new scope before editing comments")
+		local selected = current and find_session_item(current, item.id)
+		if not selected or selected.status == "exported" then
+			return notify("Review comment is unavailable for this action", vim.log.levels.WARN)
+		end
+		open_editor(selected, mutation_workspace)
+	end
+	if id and id ~= "" then
+		local item = find_item(workspace, id)
+		if not item or item.status == "exported" then
+			return notify("Review comment is unavailable for this action", vim.log.levels.ERROR)
+		end
+		open_editor(item, workspace)
+		return
+	end
+	select_item(workspace, "Edit review draft", function(item)
+		return item.status ~= "exported"
+	end, select_for_edit)
 end
 
 ---Delete one local draft by ID or from the range covering the current review line.
@@ -1406,7 +1508,7 @@ local function navigate(direction)
 	end
 	local anchored = {}
 	for _, item in ipairs(workspace.session.items) do
-		if not workspace.session.stale and not item.anchor.stale and item.anchor.path and item.anchor.start_line then
+		if navigable_item(workspace, item) then
 			anchored[#anchored + 1] = item
 		end
 	end
@@ -1699,6 +1801,7 @@ function M.decorate_buffer(workspace, buf)
 	if not target or target.bufnr ~= buf then
 		return
 	end
+	local decorations = {}
 	for _, item in ipairs(workspace.session.items) do
 		local anchor = item.anchor
 		if
@@ -1708,14 +1811,40 @@ function M.decorate_buffer(workspace, buf)
 			and anchor.layer == target.layer
 			and anchor.start_line
 		then
-			local sign = TYPE_SIGNS[item.type]
-			local line = math.max(0, math.min(anchor.start_line - 1, vim.api.nvim_buf_line_count(buf) - 1))
-			vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line, 0, {
-				sign_text = sign.text,
-				sign_hl_group = sign.highlight,
-				priority = 20,
-			})
+			decorations[#decorations + 1] = item
 		end
+	end
+	table.sort(decorations, function(left, right)
+		if left.sequence ~= right.sequence then
+			return left.sequence < right.sequence
+		end
+		return left.id < right.id
+	end)
+	local range_text = {}
+	for _, item in ipairs(decorations) do
+		local anchor = item.anchor
+		local sign = TYPE_SIGNS[item.type]
+		local line = math.max(0, math.min(anchor.start_line - 1, vim.api.nvim_buf_line_count(buf) - 1))
+		vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line, 0, {
+			sign_text = sign.text,
+			sign_hl_group = sign.highlight,
+			priority = 20,
+		})
+		local last = anchor.end_line or anchor.start_line
+		if last ~= anchor.start_line then
+			range_text[line] = range_text[line] or {}
+			range_text[line][#range_text[line] + 1] = {
+				string.format("  ● %d-%d", math.min(anchor.start_line, last), math.max(anchor.start_line, last)),
+				sign.highlight,
+			}
+		end
+	end
+	for line, chunks in pairs(range_text) do
+		vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line, 0, {
+			virt_text = chunks,
+			virt_text_pos = "eol",
+			priority = 20,
+		})
 	end
 end
 
@@ -2071,6 +2200,15 @@ local function setup_commands()
 		end,
 		desc = "Add a typed review comment",
 	})
+	vim.api.nvim_create_user_command("ReviewFileComment", function(command)
+		M.file_comment(command.args ~= "" and command.args or nil)
+	end, {
+		nargs = "?",
+		complete = function()
+			return vim.deepcopy(REVIEW_TYPES)
+		end,
+		desc = "Add a typed file-level review comment",
+	})
 	vim.api.nvim_create_user_command("ReviewThreads", M.threads, { desc = "Toggle review threads in Trouble" })
 	vim.api.nvim_create_user_command("ReviewComments", M.comments, { desc = "Choose and jump to a review comment" })
 	vim.api.nvim_create_user_command("ReviewReply", function(command)
@@ -2118,7 +2256,7 @@ function M.help_groups()
 end
 
 ---Build normalized mappings for one review help group.
----@param group "common"|"diff_line"
+---@param group "common"|"diff_line"|"file"
 ---@return table[]
 function M.help_mappings(group)
 	local mappings = {}

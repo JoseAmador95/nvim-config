@@ -27,7 +27,11 @@ Neovim owns a review workspace with an explicit Git identity:
   deterministically between those two layouts without changing ordinary
   Diffview's layout cycle. An independent, transient presentation mode starts
   at `Hunks`; `:ReviewContext` (`<leader>Rw`) switches between diff-folded
-  side-by-side panes or banded inline hunks and the complete `Full` file. Inline
+  side-by-side panes or context-limited inline sections and the complete `Full`
+  file. Inline `Hunks` expands changed sections by `diffopt`'s context, merges
+  touching sections, conceals only the remaining unchanged lines, and brackets
+  each visible section when any context was omitted. Inline `Full` renders the
+  complete interleaved file without custom hunk boundaries. Conceal marks and
   bands use persistent extmarks in per-window namespaces because Neovim 0.12.5
   does not render ephemeral virtual lines; window scoping prevents them from
   appearing in shared source buffers or ordinary Diffview tabs. Each
@@ -44,8 +48,14 @@ Neovim owns a review workspace with an explicit Git identity:
   `stdpath("state")/nvim-config/reviews/v1`, rendered with their original code
   context, and shown through a dedicated Trouble source and sign namespace.
   Diffview's `g?` help includes the review actions only in review-owned views.
-  Normal-mode `<leader>Ra` comments on the cursor line; Visual-mode
-  `<leader>Ra` comments on every touched line as one inclusive range.
+  Normal-mode `<leader>Ra` opens the comment composer directly for the cursor
+  line; Visual-mode `<leader>Ra` does the same for every touched line as one
+  inclusive range. Normal-mode `<Tab>` cycles the type while that composer is
+  open. `<leader>RA` creates a file-level comment, including from the file tree.
+  `<leader>RE` opens the editable-comment picker; its composer updates the body
+  and cycles the type with Normal-mode `<Tab>`. Multiline signs state the
+  inclusive line range they cover. `<leader>Rc` retains its current-line
+  type-change action.
   `<leader>Rl` lists navigable comments without mutating them, while
   `<leader>Rd` and `<leader>Rc` disambiguate overlapping current-line comments
   with a picker before deleting one or changing its type. `<leader>Rt` remains

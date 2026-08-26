@@ -56,6 +56,7 @@ function M.get(callback)
 		local anchor = review.anchor
 		local stale = snapshot.stale or anchor.stale
 		if anchor.path then
+			local file_level = anchor.start_line == nil
 			items[#items + 1] = Item.new({
 				source = "review",
 				filename = vim.fs.joinpath(snapshot.root, anchor.path),
@@ -63,9 +64,10 @@ function M.get(callback)
 				end_pos = { anchor.end_line or anchor.start_line or 1, math.max(0, (anchor.end_column or 1) - 1) },
 				severity = SEVERITY[review.type],
 				text = string.format(
-					"[%s · %s%s] %s",
+					"[%s · %s%s%s] %s",
 					review.type,
 					review.status,
+					file_level and " · file" or "",
 					stale and " · stale" or "",
 					review.body
 				),

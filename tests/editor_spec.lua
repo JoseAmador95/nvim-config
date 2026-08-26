@@ -224,6 +224,7 @@ test("review composer opens with save and cancel mappings", function()
 	local buf = vim.api.nvim_get_current_buf()
 	assert(require("config.review_editor").has_active())
 	assert(vim.api.nvim_win_get_config(win).relative == "editor")
+	assert(not vim.inspect(vim.api.nvim_win_get_config(win).title):find("<Tab> type", 1, true))
 	for _, mapping in ipairs({ "q", "<Esc>", "<C-s>" }) do
 		assert(vim.fn.maparg(mapping, "n", false, true).buffer == 1, mapping .. " is not buffer-local")
 	end
@@ -283,6 +284,54 @@ test("review composer uses durable fallback when teardown submission is rejected
 	assert(editor.persist_active())
 	assert(recovered == "Rejected exit draft")
 	assert(not editor.has_active())
+end)
+
+test("new comment composer cycles its type in Normal mode and preserves it during recovery", function()
+	reset_editor()
+	local submitted_type
+	local recovered_type
+	local editor = require("config.review_editor")
+	editor.compose({
+		title = "New",
+		body = "Typed draft",
+		type_cycle = { "issue", "suggestion", "rationale" },
+		selected_type = "issue",
+		recover = function(body, selected_type)
+			assert(body == "Typed draft")
+			recovered_type = selected_type
+			return true
+		end,
+	}, function(_, _, selected_type)
+		submitted_type = selected_type
+		return false
+	end)
+	local win = vim.api.nvim_get_current_win()
+	vim.cmd("stopinsert")
+	local tab = vim.fn.maparg("<Tab>", "n", false, true)
+	assert(tab.buffer == 1 and type(tab.callback) == "function")
+	assert(vim.fn.maparg("<Tab>", "i", false, true).buffer ~= 1, "Insert-mode Tab was changed")
+	tab.callback()
+	local title = vim.inspect(vim.api.nvim_win_get_config(win).title)
+	assert(title:find("New suggestion", 1, true) and title:find("<Tab> type", 1, true))
+	assert(editor.persist_active())
+	assert(submitted_type == "suggestion" and recovered_type == "suggestion")
+	assert(not editor.has_active())
+
+	submitted_type = nil
+	editor.compose({
+		title = "New",
+		body = "Normal save",
+		type_cycle = { "issue", "suggestion" },
+		selected_type = "issue",
+	}, function(_, interrupted, selected_type)
+		assert(not interrupted)
+		submitted_type = selected_type
+		return true
+	end)
+	vim.cmd("stopinsert")
+	vim.fn.maparg("<Tab>", "n", false, true).callback()
+	vim.fn.maparg("<C-s>", "n", false, true).callback()
+	assert(submitted_type == "suggestion" and not editor.has_active())
 end)
 
 for _, path in ipairs(paths) do

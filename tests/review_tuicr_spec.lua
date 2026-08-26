@@ -167,6 +167,37 @@ test("add maps all six store types to compatible severities and native comment t
 	end
 end)
 
+test("add preserves file-level anchors without inventing a start line", function()
+	local client, calls = fake_client({
+		status(),
+		success({ ok = true, command = "add", round = round_id, tuicr = { id = "file-level" } }),
+	})
+	local value, err = capture(function(callback)
+		client.add(root, round_id, {
+			type = "rationale",
+			body = "Review the whole file",
+			delivery_key = "native-file-item",
+			author = "Exact Author",
+			anchor = { path = "lua/config/example.lua", side = "right" },
+		}, callback)
+	end)
+	assert(value and value.id == "file-level" and not err)
+	equal({
+		launcher,
+		"add",
+		"--round",
+		round_id,
+		"--author=Exact Author",
+		"--severity=warning",
+		"--comment-type=rationale",
+		"--delivery-key=native-file-item",
+		"--path=lua/config/example.lua",
+		"--side=new",
+		"--",
+		"Review the whole file",
+	}, calls[2], "file-level add argv changed")
+end)
+
 test("respond requires reply_to, maps right to new, and uses the injected default author", function()
 	local client, calls = fake_client({
 		status(),

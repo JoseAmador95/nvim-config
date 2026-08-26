@@ -65,6 +65,24 @@ test("Markdown includes exact scope, context, type, status, and replies", functi
 	assert(vim.deep_equal(ids, { "root", "reply" }))
 end)
 
+test("Markdown renders file-level comments without inventing a line", function()
+	local value = session()
+	value.items = {
+		{
+			id = "file",
+			type = "suggestion",
+			status = "draft",
+			body = "Consider the file-level organization.",
+			reply_to = vim.NIL,
+			anchor = { path = "lua/config/example.lua", side = "right", layer = "historical", stale = false },
+		},
+	}
+	local markdown, ids = assert(exporter.render(value))
+	assert(markdown:find("## SUGGESTION — lua/config/example.lua", 1, true))
+	assert(not markdown:find("lua/config/example.lua:1", 1, true))
+	assert(vim.deep_equal(ids, { "file" }))
+end)
+
 test("normal export refuses stale unresolved anchors while bang labels them", function()
 	local value = session()
 	value.items[1].anchor.stale = true

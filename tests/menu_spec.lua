@@ -161,6 +161,8 @@ test("review layout and context are palette-only namespaced commands", function(
 	for id, expected in pairs({
 		["command.review_code"] = { "Toggle Review Code and Diff", "<leader>Rg" },
 		["command.review_comments"] = { "List Review Comments", "<leader>Rl" },
+		["command.review_file_comment"] = { "Add File-level Review Comment", "<leader>RA" },
+		["command.review_edit"] = { "Edit Review Comment", "<leader>RE" },
 		["command.review_change_type"] = { "Change Comment Type at Current Line", "<leader>Rc" },
 		["command.review_delete"] = { "Delete Comment at Current Line", "<leader>Rd" },
 	}) do

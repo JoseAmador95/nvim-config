@@ -4,11 +4,19 @@ local M = {}
 local HIGHLIGHT = "NvimReviewHunkBand"
 local HEADER_PRIORITY = 50
 local FOOTER_PRIORITY = 200
+local DIFFVIEW_INSERT_REPAINT_DELAY_MS = 150
+local DIFFVIEW_RESIZE_REPAINT_DELAY_MS = 100
+local REBUILD_SETTLE_MARGIN_MS = 25
 
 local decorations = {}
 local namespaces = {}
 local warned = {}
 local setup_done = false
+local rebuild_pending = false
+local rebuild_all = false
+local rebuild_buffers = {}
+local delayed_rebuild_token = 0
+local delayed_rebuild_tokens = {}
 
 local function notify_once(key, message)
 	if warned[key] then
@@ -82,64 +90,110 @@ local function valid_hunk(hunk)
 	return true
 end
 
----Build deterministic extmark descriptions for cached inline hunks.
+local function diff_context()
+	for option in vim.o.diffopt:gmatch("[^,]+") do
+		local value = option:match("^context:(%d+)$")
+		if value then
+			return tonumber(value)
+		end
+	end
+	return 6
+end
+
+---Expand cached hunks into merged, inclusive new-side line sections.
 ---@param hunks table
 ---@param line_count integer
----@param width integer
----@return table[] bands
+---@param context integer
+---@return table[] sections
 ---@return boolean malformed
-local function build_bands(hunks, line_count, width)
+local function visible_sections(hunks, line_count, context)
 	if type(hunks) ~= "table" or line_count < 1 then
 		return {}, type(hunks) ~= "table"
 	end
-	local bands = {}
-	local total = #hunks
-	local malformed = false
-	for index, hunk in ipairs(hunks) do
-		if valid_hunk(hunk) then
-			local old_start, old_count, new_start, new_count = unpack(hunk)
-			local header = ("HUNK %d/%d · -%d,%d +%d,%d"):format(
-				index,
-				total,
-				old_start,
-				old_count,
-				new_start,
-				new_count
-			)
-			local footer = ("END HUNK %d/%d"):format(index, total)
-			local header_row
-			local footer_row
-			local above
-			if new_count > 0 then
-				header_row = new_start - 1
-				footer_row = new_start + new_count - 2
-				above = true
-			else
-				header_row = new_start == 0 and 0 or new_start - 1
-				footer_row = header_row
-				above = new_start == 0
-			end
-			header_row = math.max(0, math.min(header_row, line_count - 1))
-			footer_row = math.max(0, math.min(footer_row, line_count - 1))
-			bands[#bands + 1] = {
-				row = header_row,
-				above = above,
-				priority = HEADER_PRIORITY,
-				right_gravity = false,
-				text = pad_band(header, width),
-			}
-			bands[#bands + 1] = {
-				row = footer_row,
-				above = new_count == 0 and above or false,
-				priority = FOOTER_PRIORITY,
-				right_gravity = true,
-				text = pad_band(footer, width),
-			}
+	context = math.max(0, context)
+	local expanded = {}
+	for _, hunk in ipairs(hunks) do
+		if not valid_hunk(hunk) then
+			return {}, true
+		end
+		local new_start, new_count = hunk[3], hunk[4]
+		local first
+		local last
+		if new_count == 0 then
+			first = new_start == 0 and 1 or math.min(math.max(new_start, 1), line_count)
+			last = first
 		else
-			malformed = true
+			first = math.min(math.max(new_start, 1), line_count)
+			last = math.min(math.max(new_start + new_count - 1, first), line_count)
+		end
+		expanded[#expanded + 1] = {
+			first = math.max(1, first - context),
+			last = math.min(line_count, last + context),
+		}
+	end
+	table.sort(expanded, function(left, right)
+		return left.first < right.first or (left.first == right.first and left.last < right.last)
+	end)
+	local merged = {}
+	for _, section in ipairs(expanded) do
+		local previous = merged[#merged]
+		if previous and section.first <= previous.last + 1 then
+			previous.last = math.max(previous.last, section.last)
+		else
+			merged[#merged + 1] = section
 		end
 	end
-	return bands, malformed
+	return merged, false
+end
+
+local function complement(sections, line_count)
+	local omitted = {}
+	local first = 1
+	for _, section in ipairs(sections) do
+		if first < section.first then
+			omitted[#omitted + 1] = { first = first, last = section.first - 1 }
+		end
+		first = section.last + 1
+	end
+	if first <= line_count then
+		omitted[#omitted + 1] = { first = first, last = line_count }
+	end
+	return omitted
+end
+
+---Build deterministic review marks for cached inline hunks.
+---@param hunks table
+---@param line_count integer
+---@param width integer
+---@param context? integer
+---@return table plan
+---@return boolean malformed
+local function build_plan(hunks, line_count, width, context)
+	local sections, malformed = visible_sections(hunks, line_count, context or diff_context())
+	if malformed or #sections == 0 then
+		return { sections = {}, omitted = {}, bands = {} }, malformed
+	end
+	local omitted = complement(sections, line_count)
+	local bands = {}
+	if #omitted > 0 then
+		for index, section in ipairs(sections) do
+			bands[#bands + 1] = {
+				row = section.first - 1,
+				above = true,
+				priority = HEADER_PRIORITY,
+				right_gravity = false,
+				text = pad_band(("HUNK %d/%d · L%d-%d"):format(index, #sections, section.first, section.last), width),
+			}
+			bands[#bands + 1] = {
+				row = section.last - 1,
+				above = false,
+				priority = FOOTER_PRIORITY,
+				right_gravity = true,
+				text = pad_band(("END HUNK %d/%d"):format(index, #sections), width),
+			}
+		end
+	end
+	return { sections = sections, omitted = omitted, bands = bands }, false
 end
 
 local function edge_counts(hunks, bands, line_count)
@@ -193,6 +247,10 @@ local function clear_window(win, drop_namespace)
 	local namespace = namespaces[win]
 	if record and namespace and valid_buf(record.buf) then
 		pcall(vim.api.nvim_buf_clear_namespace, record.buf, namespace, 0, -1)
+	end
+	if record and valid_win(win) then
+		vim.wo[win].conceallevel = record.conceallevel
+		vim.wo[win].concealcursor = record.concealcursor
 	end
 	if namespace then
 		unscope_namespace(win, namespace)
@@ -250,6 +308,9 @@ local function maintain_edge_visibility(win, record, plugin_only)
 end
 
 local function render_bands(workspace, buf, win, dependencies)
+	local previous = decorations[win]
+	local conceallevel = previous and previous.conceallevel or vim.wo[win].conceallevel
+	local concealcursor = previous and previous.concealcursor or vim.wo[win].concealcursor
 	clear_window(win, true)
 	local get_hunks = dependencies and dependencies.get_hunks or cached_hunks
 	local hunks, seam_err = get_hunks(buf)
@@ -261,12 +322,13 @@ local function render_bands(workspace, buf, win, dependencies)
 		return vim.tbl_extend("force", { buf = buf }, edge_counts({}, {}, vim.api.nvim_buf_line_count(buf)))
 	end
 	local line_count = vim.api.nvim_buf_line_count(buf)
-	local bands, malformed = build_bands(hunks, line_count, text_width(win))
-	local edges = edge_counts(hunks, bands, line_count)
+	local plan, malformed = build_plan(hunks, line_count, text_width(win))
+	local edges = edge_counts(hunks, plan.bands, line_count)
 	if malformed then
 		notify_once("malformed", "Diffview returned malformed cached inline hunks")
+		return vim.tbl_extend("force", { buf = buf }, edge_counts({}, {}, line_count))
 	end
-	if #bands == 0 then
+	if #plan.omitted == 0 then
 		return vim.tbl_extend("force", { buf = buf }, edges)
 	end
 	local namespace = namespaces[win]
@@ -279,7 +341,14 @@ local function render_bands(workspace, buf, win, dependencies)
 		notify_once("window_namespace", "Review hunk bands require Neovim window-scoped namespaces")
 		return
 	end
-	for _, band in ipairs(bands) do
+	for _, range in ipairs(plan.omitted) do
+		vim.api.nvim_buf_set_extmark(buf, namespace, range.first - 1, 0, {
+			conceal_lines = "",
+			end_row = range.last - 1,
+			end_col = 0,
+		})
+	end
+	for _, band in ipairs(plan.bands) do
 		vim.api.nvim_buf_set_extmark(buf, namespace, band.row, 0, {
 			virt_lines = { { { band.text, HIGHLIGHT } } },
 			virt_lines_above = band.above,
@@ -289,11 +358,15 @@ local function render_bands(workspace, buf, win, dependencies)
 	end
 	local record = vim.tbl_extend("force", edges, {
 		buf = buf,
+		concealcursor = concealcursor,
+		conceallevel = conceallevel,
 		dependencies = dependencies,
 		layout_name = "diff1_inline",
 		workspace = workspace,
 	})
 	decorations[win] = record
+	vim.wo[win].conceallevel = math.max(conceallevel, 2)
+	vim.wo[win].concealcursor = ""
 	return record
 end
 
@@ -393,7 +466,7 @@ function M.apply_workspace(workspace, dependencies)
 	end
 end
 
----Clear all bands owned by one workspace during view teardown.
+---Clear all presentation marks owned by one workspace during view teardown.
 ---@param workspace table?
 function M.clear_workspace(workspace)
 	for _, win in ipairs(decorated_windows()) do
@@ -404,22 +477,74 @@ function M.clear_workspace(workspace)
 	end
 end
 
-local function rebuild_bands()
+local function rebuild_bands(filter_buf)
 	for _, win in ipairs(decorated_windows()) do
 		local record = decorations[win]
-		if valid_win(win) and valid_buf(record.buf) and vim.api.nvim_win_get_buf(win) == record.buf then
+		if
+			(not filter_buf or record.buf == filter_buf)
+			and valid_win(win)
+			and valid_buf(record.buf)
+			and vim.api.nvim_win_get_buf(win) == record.buf
+		then
 			M.apply_window(record.workspace, record.buf, win, record.layout_name, record.dependencies)
-		else
+		elseif not valid_win(win) or not valid_buf(record.buf) or vim.api.nvim_win_get_buf(win) ~= record.buf then
 			clear_window(win, true)
 		end
 	end
+end
+
+local function schedule_rebuild(filter_buf)
+	if filter_buf then
+		rebuild_buffers[filter_buf] = true
+	else
+		rebuild_all = true
+	end
+	if rebuild_pending then
+		return
+	end
+	rebuild_pending = true
+	vim.schedule(function()
+		rebuild_pending = false
+		if rebuild_all then
+			rebuild_bands()
+		else
+			for buf in pairs(rebuild_buffers) do
+				rebuild_bands(buf)
+			end
+		end
+		rebuild_all = false
+		rebuild_buffers = {}
+	end)
+end
+
+local function delayed_rebuild_key(filter_buf)
+	return filter_buf or 0
+end
+
+local function cancel_delayed_rebuild(filter_buf)
+	local key = delayed_rebuild_key(filter_buf)
+	delayed_rebuild_tokens[key] = nil
+end
+
+local function schedule_delayed_rebuild(filter_buf, repaint_delay_ms)
+	local key = delayed_rebuild_key(filter_buf)
+	delayed_rebuild_token = delayed_rebuild_token + 1
+	local token = delayed_rebuild_token
+	delayed_rebuild_tokens[key] = token
+	vim.defer_fn(function()
+		if delayed_rebuild_tokens[key] ~= token then
+			return
+		end
+		delayed_rebuild_tokens[key] = nil
+		schedule_rebuild(filter_buf)
+	end, repaint_delay_ms + REBUILD_SETTLE_MARGIN_MS)
 end
 
 local function define_highlight()
 	vim.api.nvim_set_hl(0, HIGHLIGHT, { link = "StatusLine" })
 end
 
----Install theme, resize, and teardown maintenance for persistent bands.
+---Install theme, repaint, resize, and teardown maintenance for review marks.
 function M.setup()
 	if setup_done then
 		return
@@ -435,7 +560,26 @@ function M.setup()
 	vim.api.nvim_create_autocmd({ "VimResized", "WinResized" }, {
 		group = group,
 		desc = "Resize review hunk bands to their inline windows",
-		callback = rebuild_bands,
+		callback = function()
+			schedule_delayed_rebuild(nil, DIFFVIEW_RESIZE_REPAINT_DELAY_MS)
+		end,
+	})
+	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "InsertLeave" }, {
+		group = group,
+		desc = "Rebuild review context after Diffview repaints inline marks",
+		callback = function(event)
+			for _, record in pairs(decorations) do
+				if record.buf == event.buf then
+					if event.event == "TextChangedI" then
+						schedule_delayed_rebuild(event.buf, DIFFVIEW_INSERT_REPAINT_DELAY_MS)
+					else
+						cancel_delayed_rebuild(event.buf)
+						schedule_rebuild(event.buf)
+					end
+					return
+				end
+			end
+		end,
 	})
 	vim.api.nvim_create_autocmd("CursorMoved", {
 		group = group,
@@ -477,7 +621,7 @@ function M.setup()
 	})
 end
 
-M._build_bands = build_bands
+M._build_plan = build_plan
 M._clear_window = clear_window
 M._decorations = decorations
 M._namespace = function(win)

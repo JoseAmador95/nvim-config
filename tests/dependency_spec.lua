@@ -151,15 +151,23 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				local review_commands = require_table("config.code_review")
 				local review_groups = review_commands.help_groups()
-				assert(review_groups.common == "review" and review_groups.diff_line == "review_diff")
+				assert(
+					review_groups.common == "review"
+						and review_groups.diff_line == "review_diff"
+						and review_groups.file == "review_file"
+				)
 				local common_help = diffview_config.keymaps[review_groups.common]
 				local diff_line_help = diffview_config.keymaps[review_groups.diff_line]
-				assert(type(common_help) == "table" and #common_help == 14, "common review help group is missing")
+				local file_help = diffview_config.keymaps[review_groups.file]
+				assert(type(common_help) == "table" and #common_help == 15, "common review help group is missing")
 				assert(
 					type(diff_line_help) == "table" and #diff_line_help == 3,
 					"diff-line review help group is missing"
 				)
-				for _, mapping in ipairs(vim.list_extend(vim.deepcopy(common_help), diff_line_help)) do
+				assert(type(file_help) == "table" and #file_help == 1, "file review help group is missing")
+				local review_help_mappings = vim.list_extend(vim.deepcopy(common_help), diff_line_help)
+				vim.list_extend(review_help_mappings, file_help)
+				for _, mapping in ipairs(review_help_mappings) do
 					assert(mapping[1] == "n", "review help contains a non-normal mapping")
 					assert(type(mapping[2]) == "string" and mapping[2] ~= "", "review help mapping is missing its LHS")
 					assert(type(mapping[3]) == "string" and mapping[3] ~= "", "review help mapping is missing its RHS")
@@ -174,6 +182,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					end, diff_line_help),
 					{ "<leader>Ra", "<leader>Rc", "<leader>Rd" }
 				))
+				assert(file_help[1][2] == "<leader>RA")
 
 				local original_help_groups = {
 					diff1 = { "view", "diff1" },
@@ -201,6 +210,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					expected_review_groups[#expected_review_groups + 1] = review_groups.common
 					if group ~= "file_panel" and group ~= "file_history_panel" then
 						expected_review_groups[#expected_review_groups + 1] = review_groups.diff_line
+					end
+					if group == "diff1" or group == "diff1_inline" or group == "diff2" or group == "file_panel" then
+						expected_review_groups[#expected_review_groups + 1] = review_groups.file
 					end
 					assert(
 						vim.deep_equal(function_upvalue(review_help, "keymap_groups"), expected_review_groups),

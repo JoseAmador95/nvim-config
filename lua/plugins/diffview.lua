@@ -40,7 +40,13 @@ return {
 						"g?",
 						review.help_or(
 							actions.help({ "view", "diff1" }),
-							actions.help({ "view", "diff1", help_groups.common, help_groups.diff_line })
+							actions.help({
+								"view",
+								"diff1",
+								help_groups.common,
+								help_groups.diff_line,
+								help_groups.file,
+							})
 						),
 						{ desc = "Open the help panel" },
 					},
@@ -49,7 +55,10 @@ return {
 					{
 						"n",
 						"g?",
-						review.help_or(actions.help("file_panel"), actions.help({ "file_panel", help_groups.common })),
+						review.help_or(
+							actions.help("file_panel"),
+							actions.help({ "file_panel", help_groups.common, help_groups.file })
+						),
 						{ desc = "Open the help panel" },
 					},
 					["<cr>"] = review.focus_entry_or(actions.select_entry, actions.focus_entry),
@@ -108,6 +117,7 @@ return {
 								"diff1_inline",
 								help_groups.common,
 								help_groups.diff_line,
+								help_groups.file,
 							})
 						),
 						{ desc = "Open the help panel" },
@@ -119,7 +129,13 @@ return {
 						"g?",
 						review.help_or(
 							actions.help({ "view", "diff2" }),
-							actions.help({ "view", "diff2", help_groups.common, help_groups.diff_line })
+							actions.help({
+								"view",
+								"diff2",
+								help_groups.common,
+								help_groups.diff_line,
+								help_groups.file,
+							})
 						),
 						{ desc = "Open the help panel" },
 					},
@@ -183,6 +199,7 @@ return {
 		local effective_keymaps = require("diffview.config").get_config().keymaps
 		effective_keymaps[help_groups.common] = review_commands.help_mappings("common")
 		effective_keymaps[help_groups.diff_line] = review_commands.help_mappings("diff_line")
+		effective_keymaps[help_groups.file] = review_commands.help_mappings("file")
 		vim.api.nvim_del_user_command("DiffviewClose")
 		vim.api.nvim_create_user_command("DiffviewClose", review.close_or(require("diffview").close), {
 			nargs = 0,

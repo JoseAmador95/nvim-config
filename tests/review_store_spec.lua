@@ -173,6 +173,19 @@ test("anchor metadata survives add, edit, reply, save, and load", function()
 	assert(vim.deep_equal(loaded.items[2].anchor, updated_anchor))
 end)
 
+test("file-level anchors survive save and load without invented line metadata", function()
+	local anchor = { path = "src/file.lua", side = "right", layer = "working", stale = false }
+	local session = assert(store.add(fresh(), {
+		type = "rationale",
+		body = "This applies to the whole file",
+		anchor = anchor,
+	}, deps))
+	local saved = assert(store.save(root, session, deps))
+	local loaded = assert(store.load(root, saved.id, deps))
+	assert(vim.deep_equal(loaded.items[1].anchor, anchor))
+	assert(loaded.items[1].anchor.start_line == nil and loaded.items[1].anchor.end_line == nil)
+end)
+
 test("six types, normalized anchors, replies, resolution, and export lifecycle are strict", function()
 	local session = fresh()
 	for _, item_type in ipairs({ "issue", "suggestion", "rationale", "question", "pedantic", "praise" }) do

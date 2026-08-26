@@ -20,8 +20,8 @@ local function trim_body(lines)
 end
 
 ---Open a focused Markdown scratch buffer and return its submitted body.
----@param options? { title?: string, body?: string, recover?: fun(body: string): boolean }
----@param callback fun(body: string?, interrupted?: boolean): boolean?
+---@param options? { title?: string, body?: string, recover?: fun(body: string, selected_type?: string): boolean, type_cycle?: string[], selected_type?: string }
+---@param callback fun(body: string?, interrupted?: boolean, selected_type?: string): boolean?
 function M.compose(options, callback)
 	options = options or {}
 	if M.has_active() then
@@ -43,6 +43,15 @@ function M.compose(options, callback)
 	end
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 
+	local selected_type = options.selected_type
+	local function editor_title()
+		local title = options.title or "Review comment"
+		if selected_type then
+			title = title .. " " .. selected_type
+		end
+		local type_hint = type(options.type_cycle) == "table" and #options.type_cycle > 0 and "  ·  <Tab> type" or ""
+		return " " .. title .. type_hint .. "  ·  <C-s> save "
+	end
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
 		row = math.floor((vim.o.lines - height) / 2) - 1,
@@ -51,7 +60,7 @@ function M.compose(options, callback)
 		height = height,
 		style = "minimal",
 		border = "rounded",
-		title = " " .. (options.title or "Review comment") .. "  ·  <C-s> save ",
+		title = editor_title(),
 		title_pos = "center",
 	})
 	vim.wo[win].wrap = true
@@ -82,9 +91,9 @@ function M.compose(options, callback)
 			vim.notify("Review comment cannot be empty", vim.log.levels.WARN, { title = "Review" })
 			return
 		end
-		local accepted = callback(body, interrupted == true)
+		local accepted = callback(body, interrupted == true, selected_type)
 		if accepted == false and interrupted and type(options.recover) == "function" then
-			accepted = options.recover(body)
+			accepted = options.recover(body, selected_type)
 		end
 		if accepted ~= false then
 			close_editor()
@@ -104,6 +113,15 @@ function M.compose(options, callback)
 			finish(nil)
 		end, { buffer = buf, silent = true, desc = "Cancel review text" })
 	end
+	if type(options.type_cycle) == "table" and #options.type_cycle > 0 then
+		vim.keymap.set("n", "<Tab>", function()
+			local index = vim.fn.index(options.type_cycle, selected_type)
+			selected_type = options.type_cycle[(index + 1) % #options.type_cycle + 1]
+			if vim.api.nvim_win_is_valid(win) then
+				vim.api.nvim_win_set_config(win, { title = editor_title() })
+			end
+		end, { buffer = buf, silent = true, desc = "Cycle review comment type" })
+	end
 	vim.api.nvim_create_autocmd("WinClosed", {
 		once = true,
 		pattern = tostring(win),
@@ -118,9 +136,9 @@ function M.compose(options, callback)
 				end
 				finished = true
 				active = nil
-				local called, accepted = pcall(callback, body, true)
+				local called, accepted = pcall(callback, body, true, selected_type)
 				if (not called or accepted == false) and body and type(options.recover) == "function" then
-					options.recover(body)
+					options.recover(body, selected_type)
 				end
 			end
 		end,

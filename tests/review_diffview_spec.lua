@@ -164,6 +164,36 @@ test("owned views receive a stable transient title and expose layer-sensitive ta
 	pane.is_nulled = function()
 		return false
 	end
+	local nulled_pane = {
+		id = win,
+		is_nulled = function()
+			return true
+		end,
+		is_file_open = function()
+			return true
+		end,
+	}
+	view.infer_cur_file = function()
+		return { path = "lua/deleted.lua", oldpath = "lua/deleted.lua", kind = "unstaged", status = "D" }
+	end
+	view.cur_layout = { a = pane, b = pane }
+	local deleted = assert(diffview.current_target({ view = view, win = win, symbol = "panel", allow_panel = true }))
+	assert(
+		deleted.path == "lua/deleted.lua" and deleted.side == "left" and deleted.symbol == "b" and deleted.from_panel
+	)
+	view.infer_cur_file = function()
+		return { path = "lua/added.lua", kind = "unstaged", status = "A" }
+	end
+	view.cur_layout = { a = pane, b = nulled_pane }
+	local added = assert(diffview.current_target({ view = view, win = win, symbol = "panel", allow_panel = true }))
+	assert(added.path == "lua/added.lua" and added.side == "right" and added.symbol == "a" and added.from_panel)
+	view.infer_cur_file = function()
+		return { path = "lua/new.lua", oldpath = "lua/old.lua", kind = "staged", status = "R" }
+	end
+	view.cur_layout = { a = pane, b = pane }
+	local panel_target =
+		assert(diffview.current_target({ view = view, win = win, symbol = "panel", allow_panel = true }))
+	assert(panel_target.path == "lua/new.lua" and panel_target.side == "right" and panel_target.from_panel)
 	local previous_git_dir = vim.env.GIT_DIR
 	vim.env.GIT_DIR = "/tmp/late-review-redirect.git"
 	local redirected, redirected_err = diffview.current_target({ view = view, win = win })
@@ -579,53 +609,50 @@ test("review diff colors do not touch ordinary Diffview windows", function()
 	vim.wo[win].winhighlight = previous_winhighlight
 end)
 
-test("inline hunk bands cover additions, changes, deletions, and adjacent boundaries", function()
-	local bands, malformed = review_context._build_bands({
-		{ 0, 0, 1, 2 },
-		{ 4, 1, 3, 1 },
-		{ 7, 2, 0, 0 },
-		{ 9, 2, 5, 0 },
-	}, 5, 48)
-	assert(not malformed and #bands == 8)
-	local expected_header = "HUNK 1/4 · -0,0 +1,2"
-	assert(bands[1].text:sub(1, #expected_header) == expected_header)
-	assert(vim.fn.strdisplaywidth(bands[1].text) == 48)
-	assert(bands[1].row == 0 and bands[1].above and bands[1].priority == 50 and not bands[1].right_gravity)
-	assert(bands[2].row == 1 and not bands[2].above and bands[2].priority == 200 and bands[2].right_gravity)
-	assert(bands[2].text:find("END HUNK 1/4", 1, true) == 1)
+test("inline hunk plans expand, merge, and conceal only unchanged complements", function()
+	local plan, malformed = review_context._build_plan({
+		{ 10, 2, 10, 2 },
+		{ 16, 1, 16, 1 },
+		{ 40, 3, 39, 0 },
+	}, 50, 48, 3)
+	assert(not malformed)
+	assert(vim.deep_equal(plan.sections, {
+		{ first = 7, last = 19 },
+		{ first = 36, last = 42 },
+	}))
+	assert(vim.deep_equal(plan.omitted, {
+		{ first = 1, last = 6 },
+		{ first = 20, last = 35 },
+		{ first = 43, last = 50 },
+	}))
+	assert(#plan.bands == 4)
+	assert(plan.bands[1].text:find("HUNK 1/2 · L7-19", 1, true) == 1)
+	assert(vim.fn.strdisplaywidth(plan.bands[1].text) == 48)
+	assert(plan.bands[1].row == 6 and plan.bands[1].above and not plan.bands[1].right_gravity)
+	assert(plan.bands[2].row == 18 and not plan.bands[2].above and plan.bands[2].right_gravity)
+
+	local bof = review_context._build_plan({ { 1, 2, 0, 0 } }, 10, 30, 0)
+	assert(vim.deep_equal(bof.sections, { { first = 1, last = 1 } }), "BOF deletion lost its visible anchor")
+	assert(vim.deep_equal(bof.omitted, { { first = 2, last = 10 } }))
+	local eof = review_context._build_plan({ { 11, 2, 10, 0 } }, 10, 30, 0)
+	assert(vim.deep_equal(eof.sections, { { first = 10, last = 10 } }), "EOF deletion lost its visible anchor")
+	local middle = review_context._build_plan({ { 6, 2, 5, 0 } }, 10, 30, 0)
+	assert(vim.deep_equal(middle.sections, { { first = 5, last = 5 } }), "deletion anchor moved")
+
+	local all_visible = review_context._build_plan({ { 1, 1, 1, 1 } }, 1, 20, 6)
+	assert(#all_visible.omitted == 0 and #all_visible.bands == 0, "an all-visible file received boundary bands")
+	local previous_diffopt = vim.o.diffopt
+	vim.o.diffopt = "internal,filler,closeoff"
+	local default_context = review_context._build_plan({ { 10, 1, 10, 1 } }, 20, 30)
+	vim.o.diffopt = previous_diffopt
 	assert(
-		bands[3].row == 2 and bands[3].above and not bands[3].right_gravity,
-		"adjacent modification header lost its pre-hunk boundary"
+		vim.deep_equal(default_context.sections, { { first = 4, last = 16 } }),
+		"missing diff context did not default to six"
 	)
-	assert(
-		bands[4].row == 2 and not bands[4].above and bands[4].right_gravity,
-		"adjacent modification footer lost its post-hunk boundary"
-	)
-	assert(
-		bands[5].row == 0
-			and bands[5].above
-			and bands[6].row == 0
-			and bands[6].above
-			and not bands[5].right_gravity
-			and bands[6].right_gravity,
-		"BOF deletion bands do not bracket Diffview's existing extmark by gravity"
-	)
-	assert(
-		bands[7].row == 4
-			and not bands[7].above
-			and bands[8].row == 4
-			and not bands[8].above
-			and not bands[7].right_gravity
-			and bands[8].right_gravity,
-		"middle/EOF deletion bands do not bracket Diffview's existing extmark by gravity"
-	)
-	local empty = review_context._build_bands({}, 1, 20)
-	assert(#empty == 0, "an unchanged file received hunk bands")
-	local deletions = review_context._build_bands({ { 1, 1, 3, 0 }, { 8, 2, 5, 0 } }, 5, 30)
-	assert(deletions[1].row == 2 and not deletions[1].above, "middle deletion used the wrong anchor")
-	assert(deletions[3].row == 4 and not deletions[3].above, "EOF deletion used the wrong anchor")
-	local invalid, invalid_flag = review_context._build_bands({ { 1, 2, 3 } }, 3, 20)
-	assert(#invalid == 0 and invalid_flag, "malformed cached hunks were not rejected safely")
+	local empty = review_context._build_plan({}, 1, 20, 6)
+	assert(#empty.sections == 0 and #empty.omitted == 0 and #empty.bands == 0)
+	local invalid, invalid_flag = review_context._build_plan({ { 1, 2, 3 } }, 3, 20, 6)
+	assert(invalid_flag and #invalid.omitted == 0 and #invalid.bands == 0, "malformed hunks did not fail open")
 end)
 
 test("context application preserves views, restores diff folds, and scopes inline bands", function()
@@ -633,6 +660,8 @@ test("context application preserves views, restores diff folds, and scopes inlin
 	local original_win = vim.api.nvim_get_current_win()
 	local original_buf = vim.api.nvim_get_current_buf()
 	local original_options = {
+		concealcursor = vim.wo[original_win].concealcursor,
+		conceallevel = vim.wo[original_win].conceallevel,
 		foldenable = vim.wo[original_win].foldenable,
 		foldlevel = vim.wo[original_win].foldlevel,
 		foldmethod = vim.wo[original_win].foldmethod,
@@ -681,6 +710,8 @@ test("context application preserves views, restores diff folds, and scopes inlin
 		local inline_win = vim.api.nvim_get_current_win()
 		vim.api.nvim_win_set_buf(inline_win, buf)
 		vim.api.nvim_win_set_width(inline_win, 46)
+		vim.wo[inline_win].conceallevel = 1
+		vim.wo[inline_win].concealcursor = "nc"
 		local inline_before = vim.fn.winsaveview()
 		review_context.apply_window(value, buf, inline_win, "diff1_inline", {
 			get_hunks = function()
@@ -689,15 +720,34 @@ test("context application preserves views, restores diff folds, and scopes inlin
 		})
 		local namespace = assert(review_context._namespace(inline_win))
 		local marks = vim.api.nvim_buf_get_extmarks(buf, namespace, 0, -1, { details = true })
-		assert(#marks == 4, "inline hunks did not receive one header and footer each")
+		assert(#marks == 7, "inline hunks did not receive conceal ranges plus merged-section boundaries")
+		local band_count = 0
+		local conceal_count = 0
+		local concealed = {}
 		for _, mark in ipairs(marks) do
-			local text = mark[4].virt_lines[1][1][1]
-			if text:find("HUNK ", 1, true) == 1 then
-				assert(not mark[4].right_gravity, "rendered hunk header lost left gravity")
-			elseif text:find("END HUNK ", 1, true) == 1 then
-				assert(mark[4].right_gravity, "rendered hunk footer lost right gravity")
+			if mark[4].virt_lines then
+				band_count = band_count + 1
+				local text = mark[4].virt_lines[1][1][1]
+				if text:find("HUNK ", 1, true) == 1 then
+					assert(not mark[4].right_gravity, "rendered hunk header lost left gravity")
+				elseif text:find("END HUNK ", 1, true) == 1 then
+					assert(mark[4].right_gravity, "rendered hunk footer lost right gravity")
+				end
+			elseif mark[4].conceal_lines ~= nil then
+				conceal_count = conceal_count + 1
+				concealed[#concealed + 1] = { first = mark[2] + 1, last = mark[4].end_row + 1 }
 			end
 		end
+		assert(band_count == 4 and conceal_count == 3)
+		assert(
+			vim.deep_equal(concealed, {
+				{ first = 1, last = 1 },
+				{ first = 16, last = 23 },
+				{ first = 37, last = 40 },
+			}),
+			"conceal extmarks did not cover the maximal unchanged complements"
+		)
+		assert(vim.wo[inline_win].conceallevel == 2 and vim.wo[inline_win].concealcursor == "")
 		assert(vim.deep_equal(vim.fn.winsaveview(), inline_before), "inline bands moved the viewport")
 		assert(review_context._decorations[inline_win].buf == buf)
 		if type(vim.api.nvim__ns_get) == "function" and type(vim.api.nvim_win_add_ns) ~= "function" then
@@ -708,18 +758,59 @@ test("context application preserves views, restores diff folds, and scopes inlin
 
 		vim.api.nvim_win_set_width(inline_win, 55)
 		vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+		assert(
+			vim.wait(350, function()
+				local current_namespace = review_context._namespace(inline_win)
+				if not current_namespace then
+					return false
+				end
+				for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, current_namespace, 0, -1, { details = true })) do
+					if mark[4].virt_lines then
+						return vim.fn.strdisplaywidth(mark[4].virt_lines[1][1][1]) == 55
+					end
+				end
+				return false
+			end, 10),
+			"resize did not schedule a review-mark rebuild"
+		)
+		namespace = assert(review_context._namespace(inline_win))
 		marks = vim.api.nvim_buf_get_extmarks(buf, namespace, 0, -1, { details = true })
-		local chunks = marks[1][4].virt_lines[1]
+		local band = vim.iter(marks):find(function(mark)
+			return mark[4].virt_lines ~= nil
+		end)
+		local chunks = assert(band)[4].virt_lines[1]
 		assert(
 			vim.fn.strdisplaywidth(chunks[1][1])
 				== vim.api.nvim_win_get_width(inline_win) - vim.fn.getwininfo(inline_win)[1].textoff,
-			"resize did not rebuild full-width hunk bands"
+			("resize did not rebuild full-width hunk bands: got %d, expected %d"):format(
+				vim.fn.strdisplaywidth(chunks[1][1]),
+				vim.api.nvim_win_get_width(inline_win) - vim.fn.getwininfo(inline_win)[1].textoff
+			)
 		)
 
 		value.context_mode = "full"
 		review_context.apply_window(value, buf, inline_win, "diff1_inline")
 		assert(#vim.api.nvim_buf_get_extmarks(buf, namespace, 0, -1, {}) == 0)
 		assert(review_context._decorations[inline_win] == nil and review_context._namespace(inline_win) == nil)
+		assert(vim.wo[inline_win].conceallevel == 1 and vim.wo[inline_win].concealcursor == "nc")
+
+		value.context_mode = "hunks"
+		review_context.apply_window(value, buf, inline_win, "diff1_inline", {
+			get_hunks = function()
+				return { { 8, 2, 8, 2 }, { 30, 3, 30, 0 } }
+			end,
+		})
+		assert(review_context._namespace(inline_win) ~= nil, "Hunks did not rebuild after Full")
+		assert(vim.wo[inline_win].conceallevel == 2 and vim.wo[inline_win].concealcursor == "")
+		review_context._clear_window(inline_win, true)
+		assert(vim.wo[inline_win].conceallevel == 1 and vim.wo[inline_win].concealcursor == "nc")
+		review_context.apply_window(value, buf, inline_win, "diff1_inline", {
+			get_hunks = function()
+				return { { 1, 40, 1, 40 } }
+			end,
+		})
+		assert(review_context._namespace(inline_win) == nil, "an all-visible hunk allocated review marks")
+		assert(vim.wo[inline_win].conceallevel == 1 and vim.wo[inline_win].concealcursor == "nc")
 		vim.api.nvim_win_close(inline_win, true)
 
 		vim.api.nvim_set_hl(0, "NvimReviewHunkBand", { link = "ErrorMsg" })
@@ -735,11 +826,183 @@ test("context application preserves views, restores diff folds, and scopes inlin
 		vim.wo[original_win].foldmethod = original_options.foldmethod
 		vim.wo[original_win].foldlevel = original_options.foldlevel
 		vim.wo[original_win].foldenable = original_options.foldenable
+		vim.wo[original_win].conceallevel = original_options.conceallevel
+		vim.wo[original_win].concealcursor = original_options.concealcursor
 	end
 	if vim.api.nvim_buf_is_valid(buf) then
 		vim.api.nvim_buf_delete(buf, { force = true })
 	end
 	assert(ok, err)
+end)
+
+test("rendered inline Hunks omits context while Full restores the complete file", function()
+	review_context.setup()
+	local win = vim.api.nvim_get_current_win()
+	local original_buf = vim.api.nvim_win_get_buf(win)
+	local original_diffopt = vim.o.diffopt
+	local original_options = {
+		concealcursor = vim.wo[win].concealcursor,
+		conceallevel = vim.wo[win].conceallevel,
+		number = vim.wo[win].number,
+		relativenumber = vim.wo[win].relativenumber,
+		signcolumn = vim.wo[win].signcolumn,
+	}
+	local buf = vim.api.nvim_create_buf(false, true)
+	local lines = vim.tbl_map(function(index)
+		return ("RENDER-LINE-%02d"):format(index)
+	end, vim.fn.range(1, 20))
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	vim.api.nvim_win_set_buf(win, buf)
+	vim.wo[win].number = false
+	vim.wo[win].relativenumber = false
+	vim.wo[win].signcolumn = "no"
+	vim.o.diffopt = "internal,filler,closeoff,context:0"
+	local plugin_namespace = vim.api.nvim_create_namespace("nvim_review_rendered_plugin_fixture")
+	local function render_plugin_deletion()
+		vim.api.nvim_buf_clear_namespace(buf, plugin_namespace, 0, -1)
+		vim.api.nvim_buf_set_extmark(buf, plugin_namespace, 7, 0, {
+			virt_lines = { { { "PLUGIN DELETED LINE", "DiffDelete" } } },
+			virt_lines_above = false,
+			priority = 100,
+		})
+	end
+	render_plugin_deletion()
+	local value = { context_mode = "hunks", tabpage = vim.api.nvim_get_current_tabpage() }
+	local hunk_reads = 0
+	local dependencies = {
+		get_hunks = function()
+			hunk_reads = hunk_reads + 1
+			return { { 9, 1, 8, 0 } }
+		end,
+	}
+	local function screen_rows(count)
+		vim.cmd("redraw!")
+		local rows = {}
+		for row = 1, count do
+			local text = ""
+			for column = 1, vim.api.nvim_win_get_width(win) do
+				text = text .. vim.fn.nr2char(vim.fn.screenchar(row, column))
+			end
+			rows[#rows + 1] = text:gsub("%s+$", "")
+		end
+		return table.concat(rows, "\n")
+	end
+	local function assert_hunk_order(grid)
+		local header = assert(grid:find("HUNK 1/1 · L8%-8"), "Hunks grid omitted its opening boundary")
+		local anchor = assert(grid:find("RENDER-LINE-08", 1, true), "Hunks concealed its anchor line")
+		local deletion = assert(grid:find("PLUGIN DELETED LINE", 1, true), "Hunks concealed the deletion anchor")
+		local footer = assert(grid:find("END HUNK 1/1", 1, true), "Hunks omitted its closing boundary")
+		assert(header < anchor and anchor < deletion and deletion < footer, grid)
+	end
+
+	local ok, err = xpcall(function()
+		vim.api.nvim_win_set_cursor(win, { 8, 0 })
+		vim.api.nvim_win_call(win, function()
+			vim.cmd("normal! gg")
+			vim.api.nvim_win_set_cursor(win, { 8, 0 })
+		end)
+		review_context.apply_window(value, buf, win, "diff1_inline", dependencies)
+		local hunks_grid = screen_rows(6)
+		assert_hunk_order(hunks_grid)
+		assert(not hunks_grid:find("RENDER-LINE-01", 1, true), "Hunks still rendered unchanged leading context")
+		local reads_before_repaint = hunk_reads
+		render_plugin_deletion()
+		vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf, modeline = false })
+		assert(
+			vim.wait(100, function()
+				return hunk_reads > reads_before_repaint
+			end, 10),
+			"review marks were not rebuilt after Diffview repaint"
+		)
+		assert_hunk_order(screen_rows(6))
+
+		local reads_before_insert_repaint = hunk_reads
+		vim.api.nvim_exec_autocmds("TextChangedI", { buffer = buf, modeline = false })
+		vim.defer_fn(render_plugin_deletion, 50)
+		assert(
+			vim.wait(400, function()
+				return hunk_reads > reads_before_insert_repaint
+			end, 10),
+			"review marks were not rebuilt after Diffview's delayed insert repaint"
+		)
+		assert_hunk_order(screen_rows(6))
+
+		local reads_before_resize_repaint = hunk_reads
+		vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+		vim.defer_fn(render_plugin_deletion, 50)
+		assert(
+			vim.wait(350, function()
+				return hunk_reads > reads_before_resize_repaint
+			end, 10),
+			"review marks were not rebuilt after Diffview's delayed resize repaint"
+		)
+		assert_hunk_order(screen_rows(6))
+
+		value.context_mode = "full"
+		review_context.apply_window(value, buf, win, "diff1_inline")
+		vim.api.nvim_win_set_cursor(win, { 1, 0 })
+		vim.cmd("normal! zt")
+		local full_grid = screen_rows(6)
+		assert(full_grid:find("RENDER-LINE-01", 1, true) and full_grid:find("RENDER-LINE-06", 1, true))
+		assert(not full_grid:find("HUNK", 1, true) and not full_grid:find("END HUNK", 1, true))
+		assert(#vim.api.nvim_buf_get_extmarks(buf, plugin_namespace, 0, -1, {}) == 1)
+		assert(
+			vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), lines),
+			"review context changed the buffer"
+		)
+	end, debug.traceback)
+
+	review_context.clear_workspace()
+	vim.o.diffopt = original_diffopt
+	if vim.api.nvim_win_is_valid(win) then
+		vim.api.nvim_win_set_buf(win, original_buf)
+		for option, value_option in pairs(original_options) do
+			vim.wo[win][option] = value_option
+		end
+	end
+	if vim.api.nvim_buf_is_valid(buf) then
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end
+	assert(ok, err)
+end)
+
+test("inline teardown clears stale marks on buffer and window deletion", function()
+	review_context.setup()
+	local win = vim.api.nvim_get_current_win()
+	local original_buf = vim.api.nvim_win_get_buf(win)
+	local original_conceallevel = vim.wo[win].conceallevel
+	local original_concealcursor = vim.wo[win].concealcursor
+	local value = { context_mode = "hunks", tabpage = vim.api.nvim_get_current_tabpage() }
+	local dependencies = {
+		get_hunks = function()
+			return { { 10, 1, 10, 1 } }
+		end,
+	}
+	local function new_buffer()
+		local buf = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.tbl_map(tostring, vim.fn.range(1, 30)))
+		return buf
+	end
+
+	local deleted_buf = new_buffer()
+	vim.api.nvim_win_set_buf(win, deleted_buf)
+	review_context.apply_window(value, deleted_buf, win, "diff1_inline", dependencies)
+	assert(review_context._namespace(win) ~= nil)
+	vim.api.nvim_win_set_buf(win, original_buf)
+	vim.api.nvim_buf_delete(deleted_buf, { force = true })
+	assert(review_context._decorations[win] == nil and review_context._namespace(win) == nil)
+	assert(vim.wo[win].conceallevel == original_conceallevel and vim.wo[win].concealcursor == original_concealcursor)
+
+	local closed_buf = new_buffer()
+	vim.cmd("vsplit")
+	local closed_win = vim.api.nvim_get_current_win()
+	vim.api.nvim_win_set_buf(closed_win, closed_buf)
+	review_context.apply_window(value, closed_buf, closed_win, "diff1_inline", dependencies)
+	local closed_namespace = assert(review_context._namespace(closed_win))
+	vim.api.nvim_win_close(closed_win, true)
+	assert(review_context._decorations[closed_win] == nil and review_context._namespace(closed_win) == nil)
+	assert(#vim.api.nvim_buf_get_extmarks(closed_buf, closed_namespace, 0, -1, {}) == 0)
+	vim.api.nvim_buf_delete(closed_buf, { force = true })
 end)
 
 test("inline edge maintenance includes bands without accumulating scroll state", function()
@@ -789,8 +1052,8 @@ test("inline edge maintenance includes bands without accumulating scroll state",
 		set_view(plugin_topline, 0)
 		review_context.apply_window(value, buf, win, "diff1_inline", dependencies)
 		local record = review_context._decorations[win]
-		assert(record.plugin_eof_below == 3 and record.eof_below == 5)
-		local expected_topline = math.min(40, math.max(1, 40 - (height - 1 - math.min(5, height - 1))))
+		assert(record.plugin_eof_below == 3 and record.eof_below == 4)
+		local expected_topline = math.min(40, math.max(1, 40 - (height - 1 - math.min(4, height - 1))))
 		assert(current_view().topline >= expected_topline, "EOF header/footer remained clipped below the last line")
 		assert(vim.api.nvim_win_get_cursor(win)[1] == 40, "EOF visibility correction moved the cursor")
 
@@ -808,18 +1071,18 @@ test("inline edge maintenance includes bands without accumulating scroll state",
 		set_view(1, 2)
 		review_context.apply_window(value, buf, win, "diff1_inline", dependencies)
 		record = review_context._decorations[win]
-		assert(record.plugin_bof_topfill == 2 and record.bof_topfill == 4)
-		assert(current_view().topfill == 4, "BOF topfill omitted the two review bands")
+		assert(record.plugin_bof_topfill == 2 and record.bof_topfill == 3)
+		assert(current_view().topfill == 3, "BOF topfill omitted the review header")
 
 		review_context._rebuild_bands()
 		vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
-		assert(current_view().topfill == 4, "BOF topfill accumulated across rebuild/resize")
+		assert(current_view().topfill == 3, "BOF topfill accumulated across rebuild/resize")
 
 		set_view(1, 2)
 		vim.api.nvim_exec_autocmds("CursorMoved", { buffer = buf, modeline = false })
 		assert(
 			vim.wait(100, function()
-				return current_view().topfill == 4
+				return current_view().topfill == 3
 			end, 10),
 			"scheduled edge correction did not run after Diffview's CursorMoved adjustment"
 		)

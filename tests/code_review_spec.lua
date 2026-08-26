@@ -53,9 +53,12 @@ test("review mapping specs build normalized Diffview help groups", function()
 	local groups = review.help_groups()
 	local common = review.help_mappings("common")
 	local diff_line = review.help_mappings("diff_line")
-	assert(groups.common == "review" and groups.diff_line == "review_diff")
-	assert(#review.mapping_specs() == 17 and #common == 14 and #diff_line == 3)
-	for _, mapping in ipairs(vim.list_extend(vim.deepcopy(common), diff_line)) do
+	local file = review.help_mappings("file")
+	assert(groups.common == "review" and groups.diff_line == "review_diff" and groups.file == "review_file")
+	assert(#review.mapping_specs() == 19 and #common == 15 and #diff_line == 3 and #file == 1)
+	local help_mappings = vim.list_extend(vim.deepcopy(common), diff_line)
+	vim.list_extend(help_mappings, file)
+	for _, mapping in ipairs(help_mappings) do
 		assert(mapping[1] == "n" and type(mapping[2]) == "string" and mapping[2] ~= "")
 		assert(type(mapping[3]) == "string" and mapping[3] ~= "")
 		assert(type(mapping[4]) == "table" and type(mapping[4].desc) == "string" and mapping[4].desc ~= "")
@@ -66,6 +69,7 @@ test("review mapping specs build normalized Diffview help groups", function()
 		end, diff_line),
 		{ "<leader>Ra", "<leader>Rc", "<leader>Rd" }
 	))
+	assert(file[1][2] == "<leader>RA")
 	assert(diff_line[1][4].desc:find("Visual range", 1, true))
 end)
 
@@ -93,6 +97,7 @@ test("review comments preserve normalized inclusive line ranges and context", fu
 		update_title = diffview.update_title,
 		compose = editor.compose,
 		detect_drift = scope.detect_drift,
+		edit = store.edit,
 		add = store.add,
 		save = store.save,
 		refresh_marks = review.refresh_marks,
@@ -113,8 +118,8 @@ test("review comments preserve normalized inclusive line ranges and context", fu
 	end
 	diffview.update_title = function() end
 	editor.compose = function(options, callback)
-		assert(options.title == "New issue")
-		assert(callback("Range body", false))
+		assert(options.title == "New" and options.selected_type == "issue")
+		assert(callback("Range body", false, "issue"))
 		return true
 	end
 	scope.detect_drift = function()
@@ -148,6 +153,96 @@ test("review comments preserve normalized inclusive line ranges and context", fu
 	store.add = originals.add
 	store.save = originals.save
 	review.refresh_marks = originals.refresh_marks
+	assert(ok, err)
+end)
+
+test("file comments use path-only anchors and comments open directly with a cyclable default type", function()
+	local diffview = require("config.review_diffview")
+	local editor = require("config.review_editor")
+	local scope = require("config.review_scope")
+	local store = require("config.review_store")
+	local workspace = {
+		root = "/tmp/review-file-comment",
+		view_mode = "files",
+		scope = { kind = "commit" },
+		session = {
+			id = "file-comment",
+			repo_root = "/tmp/review-file-comment",
+			scope = { kind = "commit" },
+			stale = false,
+			items = {},
+		},
+	}
+	local originals = {
+		workspace = diffview.workspace,
+		current_target = diffview.current_target,
+		update_title = diffview.update_title,
+		compose = editor.compose,
+		detect_drift = scope.detect_drift,
+		add = store.add,
+		save = store.save,
+		refresh_marks = review.refresh_marks,
+		notify = vim.notify,
+	}
+	local captured
+	local target_options
+	local compose_calls = 0
+	local notices = {}
+	diffview.workspace = function()
+		return workspace
+	end
+	diffview.current_target = function(options)
+		target_options = options
+		return { path = "lua/config/example.lua", side = "right", layer = "working" }
+	end
+	diffview.update_title = function() end
+	scope.detect_drift = function()
+		return { stale = false }
+	end
+	editor.compose = function(options, callback)
+		compose_calls = compose_calls + 1
+		assert(options.title == "New" and options.selected_type == "issue")
+		assert(
+			vim.deep_equal(options.type_cycle, { "issue", "suggestion", "rationale", "question", "pedantic", "praise" })
+		)
+		assert(callback("File body", false, "suggestion"))
+		return true
+	end
+	store.add = function(session, values)
+		captured = vim.deepcopy(values)
+		return vim.deepcopy(session)
+	end
+	store.save = function(_, session)
+		return session
+	end
+	review.refresh_marks = function() end
+	vim.notify = function(message, level, options)
+		notices[#notices + 1] = { message = message, level = level, title = options and options.title }
+	end
+
+	local ok, err = xpcall(function()
+		review.file_comment(nil)
+		assert(compose_calls == 1 and captured.type == "suggestion")
+		assert(target_options.allow_panel, "file-tree focus was not accepted for file comments")
+		assert(vim.deep_equal(captured.anchor, {
+			path = "lua/config/example.lua",
+			side = "right",
+			layer = "working",
+			stale = false,
+		}))
+		review.comment(1, 1, "unknown")
+		assert(compose_calls == 1, "invalid explicit type opened a composer")
+		assert(notices[#notices].message:find("Usage: ReviewComment", 1, true))
+	end, debug.traceback)
+	diffview.workspace = originals.workspace
+	diffview.current_target = originals.current_target
+	diffview.update_title = originals.update_title
+	editor.compose = originals.compose
+	scope.detect_drift = originals.detect_drift
+	store.add = originals.add
+	store.save = originals.save
+	review.refresh_marks = originals.refresh_marks
+	vim.notify = originals.notify
 	assert(ok, err)
 end)
 
@@ -211,7 +306,7 @@ test("edit and reply recheck drift before opening and submitting composers", fun
 		drifted = true
 		assert(callback("Changed", false) == false)
 		assert(workspace.session.stale and mutations == 0)
-		assert(callback("Changed", true) == true and mutations == 1)
+		assert(callback("Changed", true) == false and mutations == 0)
 
 		workspace.session.stale = false
 		drifted = false
@@ -220,8 +315,8 @@ test("edit and reply recheck drift before opening and submitting composers", fun
 		assert(type(callback) == "function")
 		drifted = true
 		assert(callback("Answer", false) == false)
-		assert(workspace.session.stale and mutations == 1)
-		assert(callback("Answer", true) == true and mutations == 2)
+		assert(workspace.session.stale and mutations == 0)
+		assert(callback("Answer", true) == true and mutations == 1)
 
 		workspace.session.stale = false
 		callback = nil
@@ -236,6 +331,125 @@ test("edit and reply recheck drift before opening and submitting composers", fun
 	store.reply = originals.reply
 	store.save = originals.save
 	review.refresh_marks = originals.refresh_marks
+	assert(ok, err)
+end)
+
+test("edit picker revalidates the logical session before opening the composer", function()
+	local diffview = require("config.review_diffview")
+	local editor = require("config.review_editor")
+	local scope = require("config.review_scope")
+	local store = require("config.review_store")
+	local workspace = {
+		root = "/tmp/review-edit-picker",
+		scope = { kind = "commit" },
+		session = {
+			id = "original-session",
+			repo_root = "/tmp/review-edit-picker",
+			scope = { kind = "commit" },
+			stale = false,
+			items = {
+				{
+					id = "file-comment",
+					sequence = 1,
+					type = "issue",
+					status = "draft",
+					body = "File",
+					anchor = { path = "a.lua", side = "right", layer = "working", stale = false },
+				},
+			},
+		},
+	}
+	local current_workspace = workspace
+	local originals = {
+		workspace = diffview.workspace,
+		update_title = diffview.update_title,
+		compose = editor.compose,
+		detect_drift = scope.detect_drift,
+		edit = store.edit,
+		save = store.save,
+		refresh_marks = review.refresh_marks,
+		select = vim.ui.select,
+		notify = vim.notify,
+	}
+	local picker_callback
+	local compose_calls = 0
+	local submit
+	local mutations = 0
+	local notices = {}
+	diffview.workspace = function()
+		return current_workspace
+	end
+	diffview.update_title = function() end
+	local editor_options
+	editor.compose = function(options, callback)
+		compose_calls = compose_calls + 1
+		editor_options = options
+		submit = callback
+	end
+	scope.detect_drift = function()
+		return { stale = false }
+	end
+	vim.ui.select = function(items, options, callback)
+		assert(#items == 1 and items[1].id == "file-comment")
+		assert(options.format_item(items[1]):find("a.lua [file]", 1, true))
+		picker_callback = callback
+	end
+	vim.notify = function(message, level, options)
+		notices[#notices + 1] = { message = message, level = level, title = options and options.title }
+	end
+	local edited_values
+	store.edit = function(session, id, values)
+		mutations = mutations + 1
+		edited_values = values
+		return vim.deepcopy(session)
+	end
+	store.save = function(_, session)
+		return session
+	end
+	review.refresh_marks = function() end
+
+	local ok, err = xpcall(function()
+		review.edit()
+		assert(type(picker_callback) == "function")
+		current_workspace = vim.deepcopy(workspace)
+		current_workspace.session.id = "replacement-session"
+		picker_callback(workspace.session.items[1])
+		assert(compose_calls == 0, "replacement review opened the captured edit")
+		assert(
+			notices[#notices].message == "Active review changed while choosing a comment to edit; no changes were made"
+		)
+
+		current_workspace = workspace
+		review.edit("file-comment")
+		assert(compose_calls == 1 and type(submit) == "function")
+		assert(editor_options.title == "Edit" and editor_options.selected_type == "issue")
+		assert(
+			vim.deep_equal(
+				editor_options.type_cycle,
+				{ "issue", "suggestion", "rationale", "question", "pedantic", "praise" }
+			)
+		)
+		current_workspace = vim.deepcopy(workspace)
+		current_workspace.session.id = "replacement-after-compose"
+		assert(submit("Changed again", false, "question") == false)
+		assert(mutations == 0, "replacement review received the captured edit")
+		assert(notices[#notices].message == "Active review changed while editing a comment; no changes were made")
+
+		current_workspace = workspace
+		review.edit("file-comment")
+		assert(compose_calls == 2)
+		assert(submit("Changed", false, "rationale"))
+		assert(mutations == 1 and vim.deep_equal(edited_values, { body = "Changed", type = "rationale" }))
+	end, debug.traceback)
+	diffview.workspace = originals.workspace
+	diffview.update_title = originals.update_title
+	editor.compose = originals.compose
+	scope.detect_drift = originals.detect_drift
+	store.edit = originals.edit
+	store.save = originals.save
+	review.refresh_marks = originals.refresh_marks
+	vim.ui.select = originals.select
+	vim.notify = originals.notify
 	assert(ok, err)
 end)
 
@@ -1317,6 +1531,77 @@ test("overlapping type changes re-resolve stable IDs and reject replacement sess
 	assert(ok, err)
 end)
 
+test("multiline comments render deterministic range text without marking file comments", function()
+	local diffview = require("config.review_diffview")
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three", "four", "five" })
+	local workspace = {
+		view_mode = "files",
+		session = {
+			stale = false,
+			items = {
+				{
+					id = "second",
+					sequence = 2,
+					type = "suggestion",
+					anchor = {
+						path = "a.lua",
+						side = "right",
+						layer = "working",
+						start_line = 2,
+						end_line = 5,
+						stale = false,
+					},
+				},
+				{
+					id = "first",
+					sequence = 1,
+					type = "issue",
+					anchor = {
+						path = "a.lua",
+						side = "right",
+						layer = "working",
+						start_line = 2,
+						end_line = 4,
+						stale = false,
+					},
+				},
+				{
+					id = "file",
+					sequence = 3,
+					type = "question",
+					anchor = { path = "a.lua", side = "right", layer = "working", stale = false },
+				},
+			},
+		},
+	}
+	local original_target = diffview.current_target
+	diffview.current_target = function()
+		return { bufnr = buf, path = "a.lua", side = "right", layer = "working" }
+	end
+
+	local ok, err = xpcall(function()
+		review.decorate_buffer(workspace, buf)
+		local marks = vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })
+		local signs = 0
+		local range_chunks
+		for _, mark in ipairs(marks) do
+			local details = mark[4]
+			if details.sign_text then
+				signs = signs + 1
+			end
+			if details.virt_text then
+				range_chunks = details.virt_text
+			end
+		end
+		assert(signs == 2, "file-level comment drew a line sign")
+		assert(range_chunks and range_chunks[1][1] == "  ● 2-4" and range_chunks[2][1] == "  ● 2-5")
+	end, debug.traceback)
+	diffview.current_target = original_target
+	vim.api.nvim_buf_delete(buf, { force = true })
+	assert(ok, err)
+end)
+
 test("comment list picker jumps without mutating review state", function()
 	local diffview = require("config.review_diffview")
 	local workspace = {
@@ -1342,8 +1627,21 @@ test("comment list picker jumps without mutating review state", function()
 					},
 				},
 				{
-					id = "stale",
+					id = "file-level",
 					sequence = 2,
+					type = "issue",
+					status = "draft",
+					body = "Whole file",
+					anchor = {
+						path = "lua/config/file.lua",
+						side = "right",
+						layer = "historical",
+						stale = false,
+					},
+				},
+				{
+					id = "stale",
+					sequence = 3,
 					type = "issue",
 					status = "draft",
 					body = "Old location",
@@ -1376,23 +1674,28 @@ test("comment list picker jumps without mutating review state", function()
 	end
 	vim.ui.select = function(items, options, callback)
 		assert(options.prompt == "Review comments")
-		assert(#items == 1 and items[1].id == "navigable")
-		callback(items[1])
+		assert(#items == 2 and items[2].id == "file-level")
+		assert(options.format_item(items[1]):find("lua/config/example.lua:22", 1, true))
+		assert(options.format_item(items[2]):find("lua/config/file.lua [file]", 1, true))
+		callback(items[2])
 	end
 
 	local ok, err = xpcall(function()
 		review.comments()
 		assert(selection_calls == 1)
-		assert(selected.path == "lua/config/example.lua" and selected.layer == "historical")
-		assert(selected.target.side == "right" and selected.target.line == 22 and selected.target.column == 3)
+		assert(selected.path == "lua/config/file.lua" and selected.layer == "historical")
+		assert(selected.target.side == "right" and selected.target.line == nil and selected.target.column == nil)
 		assert(vim.deep_equal(workspace.session, before), "comment navigation mutated the review")
 
 		vim.ui.select = function(items, _, callback)
-			assert(#items == 1)
+			assert(#items == 2)
 			callback(nil)
 		end
 		review.comments()
 		assert(selection_calls == 1, "picker cancellation changed the selected review location")
+		review.next()
+		review.next()
+		assert(selection_calls == 3 and selected.path == "lua/config/file.lua")
 	end, debug.traceback)
 	diffview.workspace = originals.workspace
 	diffview.select_file = originals.select_file
@@ -1421,6 +1724,7 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"ReviewContext",
 		"ReviewComments",
 		"ReviewComment",
+		"ReviewFileComment",
 		"ReviewThreads",
 		"ReviewReply",
 		"ReviewEdit",
@@ -1447,6 +1751,8 @@ test("setup exposes the namespaced command and mapping surface", function()
 		"<leader>Rw",
 		"<leader>Rl",
 		"<leader>Ra",
+		"<leader>RA",
+		"<leader>RE",
 		"<leader>Rc",
 		"<leader>Rd",
 		"<leader>Rt",
@@ -1463,6 +1769,8 @@ test("setup exposes the namespaced command and mapping surface", function()
 		["<leader>Rv"] = "<Cmd>ReviewLayout<CR>",
 		["<leader>Rw"] = "<Cmd>ReviewContext<CR>",
 		["<leader>Rl"] = "<Cmd>ReviewComments<CR>",
+		["<leader>RA"] = "<Cmd>ReviewFileComment<CR>",
+		["<leader>RE"] = "<Cmd>ReviewEdit<CR>",
 		["<leader>Rc"] = "<Cmd>ReviewChangeType<CR>",
 		["<leader>Rd"] = "<Cmd>ReviewDeleteDraft<CR>",
 	}) do

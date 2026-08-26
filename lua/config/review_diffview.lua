@@ -469,6 +469,21 @@ local function active_diff_pane(view, symbol, win)
 	return pane
 end
 
+local function panel_diff_pane(view)
+	local layout = type(view.cur_layout) == "table" and view.cur_layout or nil
+	local last_err
+	for _, symbol in ipairs({ "b", "a" }) do
+		local pane = layout and layout[symbol]
+		local win = type(pane) == "table" and pane.id or nil
+		local active, err = active_diff_pane(view, symbol, win)
+		if active then
+			return symbol, win
+		end
+		last_err = err
+	end
+	return nil, nil, last_err
+end
+
 ---Read the current Diffview target through one isolated, pinned private seam.
 ---@param dependencies? table
 ---@return table? target
@@ -493,20 +508,23 @@ function M.current_target(dependencies)
 	end
 	local symbol = deps.symbol or vim.w[win].nvim_review_diff_symbol
 	local from_panel = false
+	local side
 	if symbol ~= "a" and symbol ~= "b" and symbol ~= "c" and symbol ~= "d" then
 		if not deps.allow_panel then
 			return nil, "focus a review diff pane before choosing a code location"
 		end
-		symbol = "b"
 		from_panel = true
-		local layout = type(view.cur_layout) == "table" and view.cur_layout or nil
-		win = layout and type(layout.b) == "table" and layout.b.id or nil
+		side = entry.status == "D" and "left" or "right"
+		symbol, win, entry_err = panel_diff_pane(view)
+		if not symbol then
+			return nil, entry_err
+		end
 	end
 	local _, pane_err = active_diff_pane(view, symbol, win)
 	if pane_err then
 		return nil, pane_err
 	end
-	local side = symbol == "a" and "left" or "right"
+	side = side or (symbol == "a" and "left" or "right")
 	local oldpath = type(entry.oldpath) == "string" and entry.oldpath ~= "" and entry.oldpath or nil
 	local path = side == "left" and oldpath or entry.path
 	return {
