@@ -248,6 +248,28 @@ local function apply_commit(state)
 	invoke(state, "apply_commit", first, second)
 end
 
+local function apply_visual_commits(state)
+	local pane = state.panes.commits
+	local anchor_line = vim.fn.getpos("v")[2]
+	local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+	local first_line = math.min(anchor_line, cursor_line)
+	local last_line = math.max(anchor_line, cursor_line)
+	local oids = {}
+	for line = first_line, last_line do
+		local oid = row_value(pane.rows[line])
+		if type(oid) ~= "string" or oid == "" then
+			vim.notify(
+				"Visual commit selection must contain only commit rows",
+				vim.log.levels.WARN,
+				{ title = "Review" }
+			)
+			return
+		end
+		oids[#oids + 1] = oid
+	end
+	invoke(state, "apply_commit", oids[1], #oids > 1 and oids[#oids] or nil)
+end
+
 local function install_common_maps(state, buf)
 	for index, name in ipairs(PANEL_ORDER) do
 		vim.keymap.set("n", tostring(index), function()
@@ -310,6 +332,9 @@ local function install_pane_maps(state, name, buf)
 		vim.keymap.set("n", "<CR>", function()
 			apply_commit(state)
 		end, { buffer = buf, silent = true, desc = "Open selected commit span" })
+		vim.keymap.set("x", "<CR>", function()
+			apply_visual_commits(state)
+		end, { buffer = buf, silent = true, desc = "Open visually selected commit span" })
 	else
 		local actions = {
 			["<CR>"] = "jump_comment",
@@ -677,7 +702,7 @@ local function commit_date(commit)
 end
 
 local function commit_lines(state)
-	local lines = { "Space endpoints · Enter apply · c clear · b back", "" }
+	local lines = { "Space mark · Enter apply · c clear · b back", "Visual Enter applies selected span" }
 	local rows = {}
 	for _, commit in ipairs(state.workspace.model.commits or {}) do
 		local marker = " "

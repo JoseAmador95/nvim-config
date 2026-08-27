@@ -125,8 +125,11 @@ and focuses the reviewed current/new side. Its colored, fully expanded tree
 groups only non-empty change layers, supports collapsible directories, and
 shows status, line totals, rename origins, and comment counts. The Commits pane
 can select one commit or two endpoints from one linear, single-parent span;
-`c` clears only those endpoints and `b` returns to the exact frozen parent
-scope. Merge commits are reviewed individually. The Comments pane supports jumping,
+visual-selecting contiguous commit rows and pressing `Enter` reviews the whole
+selected span without changing manually marked endpoints, while normal `Enter`
+keeps using the current row or marked endpoints. `c` clears only those endpoints
+and `b` returns to the exact frozen parent scope. Merge commits are reviewed
+individually. The Comments pane supports jumping,
 editing, deleting, replying, resolving/reopening, and reanchoring without a
 separate review tab.
 

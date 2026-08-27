@@ -43,8 +43,10 @@ Neovim owns a repository/session review controller in `config.code_review`:
 - `review_panel` is one dismissible three-pane float composed only of core
   Neovim windows. Files is a colored, collapsible tree with change groups,
   status, line totals, rename origins, and comment counts. Commits selects one
-  commit or two endpoints from one linear, single-parent span; nested commit
-  scopes keep an in-memory stack of exact parent workspaces and UI snapshots,
+  commit or two endpoints from one linear, single-parent span. `Enter` over a
+  visual selection of contiguous commit rows applies a transient span without
+  changing manually marked endpoints. Nested commit scopes keep an in-memory
+  stack of exact parent workspaces and UI snapshots,
   so returning never resolves refs or rebuilds the frozen model. Merge commits
   are reviewed individually. Comments lists every file, range,
   and general comment and exposes jump/edit/delete/type/reply/resolve and

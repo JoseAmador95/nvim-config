@@ -95,6 +95,19 @@ local function line_containing(buf, text)
 	return nil
 end
 
+local function visual_enter(pane, anchor_line, cursor_line, visual_mode)
+	vim.api.nvim_set_current_win(pane.win)
+	vim.api.nvim_win_set_cursor(pane.win, { anchor_line, 3 })
+	vim.cmd("normal! " .. visual_mode)
+	vim.api.nvim_win_set_cursor(pane.win, { cursor_line, 1 })
+	assert(vim.fn.mode(1) == visual_mode, "test did not enter the requested Visual mode")
+	assert(vim.fn.getpos("v")[2] == anchor_line, "Visual anchor was not active")
+	local mapping = vim.fn.maparg("<CR>", "x", false, true)
+	assert(type(mapping.callback) == "function", "Visual Enter mapping is missing")
+	mapping.callback()
+	vim.cmd("normal! \27")
+end
+
 test("three core floats preserve the ordinary tab and expose all panel roles", function()
 	vim.cmd("only")
 	vim.cmd("enew!")
@@ -180,6 +193,103 @@ test("three core floats preserve the ordinary tab and expose all panel roles", f
 	panel.reflow(state)
 	panel.close(state)
 	assert(vim.api.nvim_get_current_win() == source and #vim.api.nvim_list_tabpages() == tabs)
+end)
+
+test("visual commit Enter applies every covered row without changing endpoints", function()
+	vim.cmd("only")
+	vim.cmd("enew!")
+	local visual_workspace = vim.deepcopy(workspace)
+	visual_workspace.model.commits = {
+		{ oid = string.rep("a", 40), subject = "First" },
+		{ oid = string.rep("b", 40), subject = "Second" },
+		{ oid = string.rep("c", 40), subject = "Third" },
+		{ oid = string.rep("d", 40), subject = "Fourth" },
+	}
+	local calls = {}
+	local state
+	state = panel.new(visual_workspace, {
+		apply_commit = function(first, second)
+			calls[#calls + 1] = {
+				first = first,
+				second = second,
+				commit_first = state.commit_first,
+				commit_second = state.commit_second,
+			}
+		end,
+	})
+	assert(panel.open(state, "commits"))
+	for _, name in ipairs({ "files", "comments" }) do
+		panel.focus(state, name)
+		assert(
+			type(vim.fn.maparg("<CR>", "x", false, true).callback) ~= "function",
+			"Visual Enter escaped the Commits pane"
+		)
+	end
+	panel.focus(state, "commits")
+	state.commit_first = visual_workspace.model.commits[4].oid
+	state.commit_second = visual_workspace.model.commits[2].oid
+	panel.refresh(state)
+	local commit_lines = {}
+	for index, commit in ipairs(visual_workspace.model.commits) do
+		commit_lines[index] = assert(find_row(state.panes.commits, function(row)
+			return row == commit.oid
+		end))
+	end
+
+	visual_enter(state.panes.commits, commit_lines[1], commit_lines[3], "v")
+	assert(calls[1].first == visual_workspace.model.commits[1].oid)
+	assert(calls[1].second == visual_workspace.model.commits[3].oid)
+	visual_enter(state.panes.commits, commit_lines[3], commit_lines[1], "V")
+	assert(calls[2].first == visual_workspace.model.commits[1].oid)
+	assert(calls[2].second == visual_workspace.model.commits[3].oid)
+	visual_enter(state.panes.commits, commit_lines[4], commit_lines[4], "\22")
+	assert(calls[3].first == visual_workspace.model.commits[4].oid and calls[3].second == nil)
+	for _, call in ipairs(calls) do
+		assert(call.commit_first == visual_workspace.model.commits[4].oid)
+		assert(call.commit_second == visual_workspace.model.commits[2].oid)
+	end
+	assert(state.commit_first == visual_workspace.model.commits[4].oid)
+	assert(state.commit_second == visual_workspace.model.commits[2].oid)
+
+	vim.api.nvim_win_set_cursor(state.panes.commits.win, { commit_lines[2], 0 })
+	vim.fn.maparg("<CR>", "n", false, true).callback()
+	assert(calls[4].first == state.commit_first and calls[4].second == state.commit_second)
+	panel.close(state)
+end)
+
+test("visual commit Enter rejects selections containing a non-commit row", function()
+	vim.cmd("only")
+	vim.cmd("enew!")
+	local notifications = {}
+	local calls = 0
+	local original_notify = vim.notify
+	vim.notify = function(message, level, options)
+		notifications[#notifications + 1] = { message = message, level = level, options = options }
+	end
+	local state = panel.new(workspace, {
+		apply_commit = function()
+			calls = calls + 1
+		end,
+	})
+	local ok, err = xpcall(function()
+		assert(panel.open(state, "commits"))
+		state.commit_first = workspace.model.commits[1].oid
+		state.commit_second = workspace.model.commits[2].oid
+		local commit_line = assert(find_row(state.panes.commits, function(row)
+			return row == workspace.model.commits[1].oid
+		end))
+		assert(state.panes.commits.rows[commit_line - 1] == nil)
+		visual_enter(state.panes.commits, commit_line - 1, commit_line, "v")
+		assert(calls == 0, "mixed header selection invoked the commit callback")
+		assert(state.commit_first == workspace.model.commits[1].oid)
+		assert(state.commit_second == workspace.model.commits[2].oid)
+		local notification = assert(notifications[#notifications])
+		assert(notification.message == "Visual commit selection must contain only commit rows")
+		assert(notification.level == vim.log.levels.WARN and notification.options.title == "Review")
+		panel.close(state)
+	end, debug.traceback)
+	vim.notify = original_notify
+	assert(ok, err)
 end)
 
 test("files render a colored stable tree and retain hidden selection state", function()
