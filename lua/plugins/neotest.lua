@@ -6,14 +6,14 @@ return {
 	cmd = { "Neotest" },
 	keys = {
 		{
-			"<leader>rr",
+			"<leader>Tn",
 			function()
 				require("neotest").run.run()
 			end,
 			desc = "Run nearest test",
 		},
 		{
-			"<leader>rd",
+			"<leader>Td",
 			function()
 				require("neotest").run.run({ strategy = "dap" })
 			end,

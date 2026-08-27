@@ -23,6 +23,7 @@ local function test(name, callback)
 end
 
 local config_fs = require("config.fs")
+local exporter = require("config.review_export")
 local scope_module = require("config.review_scope")
 local store = require("config.review_store")
 local root = "/tmp/review-store-repository"
@@ -96,9 +97,40 @@ local function add_root(session, item_type)
 	}, deps))
 end
 
+local function legacy_value(session, statuses, export_ids)
+	local legacy = vim.deepcopy(session)
+	legacy.version = 1
+	for index, item in ipairs(legacy.items) do
+		item.anchor.kind = nil
+		item.status = statuses[index]
+		item.resolution = nil
+		item.deliveries = nil
+		local export_id = export_ids and export_ids[index]
+		if export_id then
+			item.exported_at = "2026-08-25T11:00:00Z"
+			item.export_id = export_id
+		else
+			item.exported_at = vim.NIL
+			item.export_id = vim.NIL
+		end
+	end
+	return legacy
+end
+
+local function write_legacy(session)
+	local directory = vim.fs.joinpath(state, "nvim-config", "reviews", "v1", vim.fn.sha256(root))
+	assert(vim.fn.mkdir(directory, "p", 448) == 1)
+	local path = vim.fs.joinpath(directory, session.id .. ".json")
+	local encoded = vim.json.encode(session) .. "\n"
+	assert(config_fs.write_binary_atomic(path, encoded))
+	assert(vim.uv.fs_chmod(path, 384))
+	return path, encoded
+end
+
 test("session and scope identities are deterministic and include the working fingerprint", function()
 	local first = fresh()
 	local second = fresh()
+	assert(first.version == 2 and first.scope.version == 1)
 	assert(first.id == second.id and first.repo_hash == second.repo_hash)
 	local changed_scope = working_scope(vim.fn.sha256("changed"))
 	assert(changed_scope.id ~= first.id)
@@ -127,16 +159,18 @@ test("TUICR bridge is strictly linked to the current session and survives JSON r
 	assert(not invalid_backend and backend_err:find("backend must be tuicr", 1, true))
 end)
 
-test("TUICR linking rejects late or conflicting publication backends", function()
+test("clipboard history does not block TUICR linking and conflicting rounds are rejected", function()
 	local round = "123e4567-e89b-12d3-a456-426614174000"
 	local session = add_root(fresh())
-	session = assert(store.mark_exported(session, session.items[1].id, "clipboard:first", deps))
-	local linked, late_err = store.link_tuicr(session, round, deps)
-	assert(not linked and late_err:find("before exporting", 1, true))
+	local copied, copy_err = store.mark_exported(session, session.items[1].id, "clipboard:first", deps)
+	assert(not copied and copy_err:find("only tuicr", 1, true))
+	local linked = assert(store.link_tuicr(session, round, deps))
+	assert(linked.bridge.round == round and store.item_status(linked.items[1]) == "draft")
 
 	session = add_root(fresh())
 	session = assert(store.link_tuicr(session, round, deps))
 	local other = "22222222-2222-2222-2222-222222222222"
+	local late_err
 	linked, late_err = store.link_tuicr(session, other, deps)
 	assert(not linked and late_err:find("different TUICR round", 1, true))
 end)
@@ -151,6 +185,7 @@ test("anchor metadata survives add, edit, reply, save, and load", function()
 
 	local context = "updated context"
 	local updated_anchor = {
+		kind = "range",
 		path = "src/main.lua",
 		side = "right",
 		layer = "unstaged",
@@ -174,7 +209,7 @@ test("anchor metadata survives add, edit, reply, save, and load", function()
 end)
 
 test("file-level anchors survive save and load without invented line metadata", function()
-	local anchor = { path = "src/file.lua", side = "right", layer = "working", stale = false }
+	local anchor = { kind = "file", path = "src/file.lua", side = "right", layer = "working", stale = false }
 	local session = assert(store.add(fresh(), {
 		type = "rationale",
 		body = "This applies to the whole file",
@@ -204,13 +239,16 @@ test("six types, normalized anchors, replies, resolution, and export lifecycle a
 	local root_item = session.items[1]
 	session = assert(store.reply(session, root_item.id, { body = "A direct answer" }, deps))
 	local reply = session.items[#session.items]
-	assert(reply.status == "reply" and reply.reply_to == root_item.id)
+	assert(store.item_status(reply) == "reply" and reply.reply_to == root_item.id)
 	session = assert(store.set_status(session, root_item.id, "resolved", deps))
-	assert(session.items[1].status == "resolved")
+	assert(session.items[1].resolution == "resolved")
 	session = assert(store.edit(session, root_item.id, { body = "Updated finding" }, deps))
-	assert(session.items[1].status == "draft" and session.items[1].body == "Updated finding")
-	session = assert(store.mark_exported(session, reply.id, "tuicr-comment-7", deps))
-	assert(session.items[#session.items].status == "exported")
+	assert(session.items[1].resolution == "resolved" and session.items[1].body == "Updated finding")
+	session = assert(store.set_status(session, root_item.id, "draft", deps))
+	assert(session.items[1].resolution == "open")
+	session = assert(store.mark_exported(session, reply.id, "tuicr:comment-7", deps))
+	assert(store.item_status(session.items[#session.items]) == "exported · open")
+	assert(store.tuicr_receipt(session.items[#session.items]) == "comment-7")
 	local edited, edit_err = store.edit(session, reply.id, { body = "changed" }, deps)
 	assert(not edited and edit_err:find("immutable", 1, true))
 	local deleted, delete_err = store.delete(session, root_item.id, deps)
@@ -228,28 +266,55 @@ test("type changes preserve resolved lifecycle metadata", function()
 	expected.type = "rationale"
 	expected.updated_at = changed.updated_at
 	assert(vim.deep_equal(changed, expected), "type mutation changed review lifecycle metadata")
-	assert(changed.status == "resolved" and changed.updated_at ~= before.updated_at)
+	assert(changed.resolution == "resolved" and changed.updated_at ~= before.updated_at)
 
 	local invalid, invalid_err = store.set_type(session, id, "note", deps)
 	assert(not invalid and invalid_err:find("six supported", 1, true))
-	session = assert(store.mark_exported(session, id, "clipboard:resolved", deps))
-	local exported, exported_err = store.set_type(session, id, "question", deps)
-	assert(not exported and exported_err:find("immutable", 1, true))
+	local copied, copied_err = store.mark_exported(session, id, "clipboard:resolved", deps)
+	assert(not copied and copied_err:find("only tuicr", 1, true))
+	session = assert(store.set_type(session, id, "question", deps))
+	assert(session.items[1].type == "question" and session.items[1].resolution == "resolved")
 end)
 
-test("exported findings remain replyable without unlocking the parent", function()
+test("TUICR-delivered findings remain replyable without unlocking the parent", function()
 	local session = add_root(fresh())
 	local parent = session.items[1]
-	session = assert(store.mark_exported(session, parent.id, "tuicr-parent", deps))
+	session = assert(store.mark_exported(session, parent.id, "tuicr:parent", deps))
 	session = assert(store.reply(session, parent.id, { body = "Follow-up after export" }, deps))
-	assert(session.items[1].status == "exported")
-	assert(session.items[2].status == "reply" and session.items[2].reply_to == parent.id)
+	assert(store.item_status(session.items[1]) == "exported · open")
+	assert(store.item_status(session.items[2]) == "reply" and session.items[2].reply_to == parent.id)
+end)
+
+test("TUICR delivery remains immutable while resolution can change independently", function()
+	local session = add_root(fresh())
+	local id = session.items[1].id
+	session = assert(store.mark_tuicr_delivered(session, id, "remote-comment", deps))
+	local delivery = vim.deepcopy(session.items[1].deliveries)
+
+	session = assert(store.set_resolution(session, id, "resolved", deps))
+	assert(session.items[1].resolution == "resolved")
+	assert(store.item_status(session.items[1]) == "exported · resolved")
+	assert(vim.deep_equal(session.items[1].deliveries, delivery))
+	assert(store.tuicr_receipt(session.items[1]) == "remote-comment")
+	assert(not store.delivery_eligible(session.items[1]))
+
+	session = assert(store.set_status(session, id, "draft", deps))
+	assert(session.items[1].resolution == "open")
+	assert(store.item_status(session.items[1]) == "exported · open")
+	assert(vim.deep_equal(session.items[1].deliveries, delivery))
+	assert(not store.delivery_eligible(session.items[1]))
+
+	local duplicate, duplicate_err = store.mark_tuicr_delivered(session, id, "other-comment", deps)
+	assert(not duplicate and duplicate_err:find("already has a TUICR delivery", 1, true))
+	assert(vim.deep_equal(session.items[1].deliveries, delivery))
 end)
 
 test("anchor metadata is strictly typed and bounded", function()
+	local invalid_utf8 = string.char(0xF0, 0x9F, 0x99)
 	for _, anchor in ipairs({
 		{ layer = string.rep("x", 129) },
 		{ context = string.rep("x", 16 * 1024 + 1) },
+		{ context = invalid_utf8, context_hash = vim.fn.sha256(invalid_utf8) },
 		{ context = "captured without a digest" },
 		{ context_hash = vim.fn.sha256("digest without context") },
 		{ context = "captured", context_hash = vim.fn.sha256("different") },
@@ -261,20 +326,50 @@ test("anchor metadata is strictly typed and bounded", function()
 	end
 end)
 
+test("UTF-8 context bounds retain only complete code points", function()
+	local emoji = "🙂"
+	local context = "x" .. string.rep(emoji, 5000)
+	local truncated = assert(store.truncate_utf8(context, store.max_anchor_context))
+	assert(truncated == "x" .. string.rep(emoji, 4095))
+	assert(#truncated == 16381 and #truncated <= store.max_anchor_context)
+
+	local malformed, malformed_err = store.truncate_utf8(string.char(0xF0, 0x9F, 0x99), store.max_anchor_context)
+	assert(malformed == nil and malformed_err:find("not valid UTF%-8"))
+
+	local session = assert(store.add(fresh(), {
+		type = "issue",
+		body = "Unicode context",
+		anchor = {
+			kind = "range",
+			path = "src/unicode.lua",
+			side = "right",
+			layer = "working",
+			start_line = 1,
+			end_line = 1,
+			context = truncated,
+			context_hash = vim.fn.sha256(truncated),
+			stale = false,
+		},
+	}, deps))
+	local saved = assert(store.save(root, session, deps))
+	local loaded = assert(store.load(root, saved.id, deps))
+	assert(loaded.items[1].anchor.context == truncated)
+end)
+
 test("atomic save uses exact versioned path and owner-only permissions", function()
 	local session = add_root(fresh())
 	session.stale = true
 	local saved, path = assert(store.save(root, session, deps))
 	assert(writes > 0 and saved.stale and saved.revision == 1)
-	local expected = vim.fs.joinpath(state, "nvim-config", "reviews", "v1", vim.fn.sha256(root), session.id .. ".json")
+	local expected = vim.fs.joinpath(state, "nvim-config", "reviews", "v2", vim.fn.sha256(root), session.id .. ".json")
 	assert(path == expected)
 	assert(assert(vim.uv.fs_lstat(path)).mode % 512 == 384, "session file is not 0600")
 	for _, directory in ipairs({
 		state,
 		state .. "/nvim-config",
 		state .. "/nvim-config/reviews",
-		state .. "/nvim-config/reviews/v1",
-		state .. "/nvim-config/reviews/v1/" .. vim.fn.sha256(root),
+		state .. "/nvim-config/reviews/v2",
+		state .. "/nvim-config/reviews/v2/" .. vim.fn.sha256(root),
 	}) do
 		assert(assert(vim.uv.fs_lstat(directory)).mode % 512 == 448, directory .. " is not 0700")
 	end
@@ -282,6 +377,82 @@ test("atomic save uses exact versioned path and owner-only permissions", functio
 	assert(loaded.stale and loaded.items[1].body == session.items[1].body)
 	local listed = assert(store.list(root, deps))
 	assert(#listed >= 1 and listed[1].id == session.id)
+end)
+
+test("v1 migration preserves identity and safely separates resolution from deliveries", function()
+	local source = add_root(fresh())
+	source = assert(store.reply(source, source.items[1].id, { body = "Legacy reply" }, deps))
+	source = add_root(source, "rationale")
+	source = add_root(source, "question")
+	source = add_root(source, "praise")
+	source = assert(store.link_tuicr(source, "123e4567-e89b-12d3-a456-426614174000", deps))
+	source.revision = 7
+	local legacy = legacy_value(source, { "draft", "reply", "resolved", "exported", "exported" }, {
+		[4] = "clipboard:old-copy",
+		[5] = "tuicr:remote-5",
+	})
+	local legacy_path, encoded = write_legacy(legacy)
+
+	local migrated, path = assert(store.load(root, legacy.id, deps))
+	assert(migrated.version == 2 and migrated.scope.version == 1 and migrated.revision == 7)
+	assert(migrated.id == legacy.id and migrated.repo_hash == legacy.repo_hash)
+	assert(migrated.created_at == legacy.created_at and migrated.updated_at == legacy.updated_at)
+	assert(vim.deep_equal(migrated.bridge, legacy.bridge) and migrated.next_sequence == legacy.next_sequence)
+	assert(migrated.items[1].resolution == "open" and migrated.items[2].resolution == "open")
+	assert(migrated.items[2].reply_to == legacy.items[2].reply_to)
+	assert(migrated.items[3].resolution == "resolved")
+	assert(migrated.items[4].resolution == "legacy_unknown" and #migrated.items[4].deliveries == 0)
+	assert(migrated.items[5].resolution == "legacy_unknown" and store.tuicr_receipt(migrated.items[5]) == "remote-5")
+	for index, item in ipairs(migrated.items) do
+		assert(item.id == legacy.items[index].id and item.sequence == legacy.items[index].sequence)
+		assert(item.created_at == legacy.items[index].created_at and item.updated_at == legacy.items[index].updated_at)
+		assert(item.status == nil and item.anchor.kind ~= nil)
+	end
+	assert(path:find("/reviews/v2/", 1, true))
+	local backup = legacy_path:sub(1, -6) .. ".v1-backup"
+	assert(not backup:match("%.json$") and config_fs.read_binary(backup) == encoded)
+	assert(assert(vim.uv.fs_lstat(backup)).mode % 512 == 384)
+	assert(assert(vim.uv.fs_lstat(path)).mode % 512 == 384)
+
+	local editable =
+		assert(store.edit(migrated, migrated.items[4].id, { body = "Edited after clipboard migration" }, deps))
+	assert(editable.items[4].body == "Edited after clipboard migration")
+	local immutable, immutable_err = store.delete(migrated, migrated.items[5].id, deps)
+	assert(not immutable and immutable_err:find("TUICR%-delivered"))
+	assert(not store.delivery_eligible(migrated.items[3]))
+	assert(not store.delivery_eligible(migrated.items[4]))
+	local reopened = assert(store.set_resolution(migrated, migrated.items[4].id, "open", deps))
+	assert(store.delivery_eligible(reopened.items[4]))
+
+	local again = assert(store.load(root, legacy.id, deps))
+	assert(vim.deep_equal(again, migrated), "repeat load changed the migrated session")
+	local listed = assert(store.list(root, deps))
+	assert(#listed == 1 and listed[1].id == legacy.id, "v1 and v2 were listed twice")
+end)
+
+test("failed v1 migration rolls back v2 and its new backup without exposing bodies", function()
+	local source = add_root(fresh())
+	source.items[1].body = "secret migration body"
+	local legacy = legacy_value(source, { "draft" })
+	local legacy_path = write_legacy(legacy)
+	local target = vim.fs.joinpath(state, "nvim-config", "reviews", "v2", vim.fn.sha256(root), legacy.id .. ".json")
+	local failing = vim.tbl_extend("force", deps, {
+		fs = {
+			read_binary = config_fs.read_binary,
+			write_binary_atomic = function(path, data)
+				if path == target then
+					return nil, "injected atomic failure"
+				end
+				return config_fs.write_binary_atomic(path, data)
+			end,
+		},
+	})
+	local migrated, migration_err = store.load(root, legacy.id, failing)
+	assert(not migrated and migration_err:find("injected atomic failure", 1, true))
+	assert(not migration_err:find(source.items[1].body, 1, true))
+	assert(vim.uv.fs_lstat(target) == nil)
+	assert(vim.uv.fs_lstat(legacy_path:sub(1, -6) .. ".v1-backup") == nil)
+	assert(vim.uv.fs_lstat(legacy_path).type == "file")
 end)
 
 test("complete recovery Markdown is owner-only and verified before discard", function()
@@ -298,6 +469,43 @@ test("complete recovery Markdown is owner-only and verified before discard", fun
 	assert(config_fs.write_binary_atomic(receipt.path, markdown .. "changed"))
 	local verified, verify_err = store.verify_recovery(root, receipt, deps)
 	assert(not verified and verify_err:find("changed", 1, true))
+end)
+
+test("near-limit v2 sessions produce complete owner-only verified recovery", function()
+	local session = fresh()
+	local context = string.rep("\n", store.max_anchor_context)
+	local item_count = 30
+	for index = 1, item_count do
+		session = assert(store.add(session, {
+			type = "issue",
+			body = ("near-limit item %02d"):format(index),
+			anchor = {
+				kind = "range",
+				path = "src/main.lua",
+				side = "right",
+				layer = "working",
+				context = context,
+				context_hash = vim.fn.sha256(context),
+				stale = false,
+				start_line = index,
+				end_line = index,
+			},
+		}, deps))
+	end
+
+	local saved, path = assert(store.save(root, session, deps))
+	local state_bytes = assert(vim.uv.fs_lstat(path)).size
+	assert(state_bytes > store.max_bytes * 0.95 and state_bytes <= store.max_bytes, "fixture is not near the cap")
+	local markdown, ids = assert(exporter.render_recovery(saved))
+	local _, heading_count = markdown:gsub("## ISSUE", "")
+	assert(#ids == item_count and heading_count == item_count, "recovery omitted review items")
+	assert(#markdown > 2 * store.max_bytes, "fixture does not exercise JSON-to-Markdown expansion")
+	assert(#markdown <= store.max_recovery_bytes, "valid recovery exceeded its derived bound")
+
+	local receipt = assert(store.save_recovery(root, saved, markdown, deps))
+	assert(assert(vim.uv.fs_lstat(receipt.path)).mode % 512 == 384, "near-limit recovery is not 0600")
+	assert(config_fs.read_binary(receipt.path) == markdown, "near-limit recovery was truncated")
+	assert(store.verify_recovery(root, receipt, deps))
 end)
 
 test("cross-process saves reject stale writers without losing comments", function()

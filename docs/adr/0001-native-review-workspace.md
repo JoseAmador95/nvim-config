@@ -1,94 +1,86 @@
-# ADR 0001: Native code-review workspaces
+# ADR 0001: Native code-review mode in ordinary tabs
 
 - Status: Accepted
-- Date: 2026-08-25
+- Date: 2026-08-26
 
 ## Context
 
-TUICR is useful for human review rounds, but its TUI cannot provide Neovim's
-LSP diagnostics and source navigation. Ordinary Diffview tabs show exact Git
-content, but they do not persist review comments, distinguish review-owned
-views from normal Diffview use, or provide a safe route to the current source.
+TUICR is useful for human review rounds, but its TUI cannot expose Neovim LSP
+diagnostics and source navigation. Diffview is a good standalone Git viewer,
+but a dedicated Diffview tab interrupts the normal editing workspace and makes
+review state, current source, and historical content difficult to distinguish.
+
+The reviewer must support working trees, commits, contiguous commit spans, and
+whole branches; file/range/general comments; repeatable export; optional TUICR
+publication; inline and side-by-side views; and both hunk-only and complete-file
+context without taking ownership of a tab.
 
 ## Decision
 
-Neovim owns a review workspace with an explicit Git identity:
+Neovim owns a repository/session review controller in `config.code_review`:
 
-- `working` shows Diffview's live staged, unstaged, and untracked aggregate and
-  stores HEAD plus a separate hash for every layer. Any drift invalidates the
-  review before another comment or normal export can be accepted.
-- `commit`, `range`, and `branch` store full object IDs; branch review uses the
-  frozen merge base.
-- Diffview renders historical scopes exactly and the working scope as an
-  explicitly live, fingerprint-guarded view in a transient, read-only tab. Raw
-  Diffview remains independent. Review tabs start with a side-by-side diff and
-  can switch in place to a unified inline diff. The review-only toggle
-  (`:ReviewLayout`, `<leader>Rv`, or `g<C-x>` inside a review buffer) moves
-  deterministically between those two layouts without changing ordinary
-  Diffview's layout cycle. An independent, transient presentation mode starts
-  at `Hunks`; `:ReviewContext` (`<leader>Rw`) switches between diff-folded
-  side-by-side panes or context-limited inline sections and the complete `Full`
-  file. Inline `Hunks` expands changed sections by `diffopt`'s context, merges
-  touching sections, conceals only the remaining unchanged lines, and brackets
-  each visible section when any context was omitted. Inline `Full` renders the
-  complete interleaved file without custom hunk boundaries. Conceal marks and
-  bands use persistent extmarks in per-window namespaces because Neovim 0.12.5
-  does not render ephemeral virtual lines; window scoping prevents them from
-  appearing in shared source buffers or ordinary Diffview tabs. Each
-  review-owned Git adapter gets an isolated
-  environment that rejects inherited repository routing and ignores local
-  shallow/graft metadata, so later Diffview jobs keep the stored object graph.
-  `:ReviewCode` (`<leader>Rg`) opens the current real source buffer for LSP use and toggles
-  back to the same file, layer, side, line, and history entry. That exact return
-  target follows normal tab-based editor navigation, including LSP and picker
-  destinations outside the reviewed diff or repository, until the review is
-  replaced or closed.
-- Comments use six explicit types: issue, suggestion, rationale, question,
-  pedantic, and praise. They are persisted under
-  `stdpath("state")/nvim-config/reviews/v1`, rendered with their original code
-  context, and shown through a dedicated Trouble source and sign namespace.
-  Diffview's `g?` help includes the review actions only in review-owned views.
-  Normal-mode `<leader>Ra` opens the comment composer directly for the cursor
-  line; Visual-mode `<leader>Ra` does the same for every touched line as one
-  inclusive range. Normal-mode `<Tab>` cycles the type while that composer is
-  open. `<leader>RA` creates a file-level comment, including from the file tree.
-  `<leader>RE` opens the editable-comment picker; its composer updates the body
-  and cycles the type with Normal-mode `<Tab>`. Multiline signs state the
-  inclusive line range they cover. `<leader>Rc` retains its current-line
-  type-change action.
-  `<leader>Rl` lists navigable comments without mutating them, while
-  `<leader>Rd` and `<leader>Rc` disambiguate overlapping current-line comments
-  with a picker before deleting one or changing its type. `<leader>Rt` remains
-  the persistent Trouble thread panel.
-- Clipboard export locks only comments that were copied successfully. A linked
-  TUICR round is accessed only through `tuicr-round`; successful remote writes
-  use stable delivery keys and are persisted one at a time. Review state uses
-  an owner lock and revision check so a second Neovim cannot overwrite it.
-- Auto-session temporarily closes transient review tabs while serializing the
-  normal editing session, then restores them on the next event-loop tick. It
-  delegates transient teardown to the review hook instead of closing unknown
-  windows before that hook can preserve them.
-- A comment editor stays open when validation or persistence rejects its
-  submission. Direct tab closes save its current text, and `VimLeavePre`
-  synchronously saves open composers plus owner-only Markdown recovery for
-  any unresolved write conflict before a global exit.
+- `review_scope` freezes full Git object IDs, the branch merge base, or a
+  per-layer working-tree fingerprint. `review_changes` reads exact blobs and
+  working layers without checkout, staging, ref mutation, or repository writes.
+  Its immutable model includes paths, modes, bytes, hunks, and ordered commit
+  date/author/subject metadata.
+- Review mode runs in the current ordinary tab. `review_mode` rejects modified
+  affected buffers, makes enrolled current buffers read-only, installs only its
+  local hunk navigation, and restores every prior buffer mapping and window
+  option when disabled.
+- `review_presenter` has independent `inline|split` and `hunks|full` axes. Inline
+  hunk mode uses strong start/end bands; inline full mode shows the complete
+  file without artificial hunk boundaries. Split mode uses Neovim's native diff
+  and synchronized scrolling so insertions and deletions align. Full split mode
+  opens folds; hunk split mode uses native diff folds.
+- The preferred right/new side is a real current buffer only when its exact
+  bytes, including line-ending format and final newline, match the frozen model.
+  Otherwise it is an isolated read-only snapshot. Historical old, snapshot, and
+  panel buffers cannot attach LSP. A historical-new `gd` may bridge to the real
+  current file only through an unchanged line mapping and preserves the source
+  column; old content never bridges.
+- `review_panel` is one dismissible three-pane float composed only of core
+  Neovim windows. Files selects and focuses the current/new source; Commits
+  selects one commit or two endpoints from one linear, single-parent span;
+  merge commits are reviewed individually. Comments lists every file, range,
+  and general comment and exposes jump/edit/delete/type/reply/resolve and
+  reanchor operations. It never creates a tab and is suspended during normal
+  session serialization.
+- Store version 2 represents `general`, `file`, and `range` anchors explicitly.
+  Resolution and delivery are independent. Version-1 state migrates under the
+  existing owner lock with a backup and rollback. Multiline comments render a
+  rail beside line numbers; overlapping comments collapse into a visible count
+  while remaining separate items in the panel.
+- `ReviewExport` renders all comments every time and copies complete Markdown or
+  uses a temporary float. It does not mark comments delivered. Normal export
+  refuses working-tree drift, session drift, and stale anchors;
+  `ReviewExport!` exports only after writing and verifying owner-only recovery
+  Markdown. Global drift labels the saved snapshot stale, while anchor drift is
+  recorded on the affected comment.
+  `ReviewPublish[!]` is a separate explicit TUICR operation and sends only open,
+  undelivered items through `tuicr-round`, persisting each receipt.
+- The public key namespace is lower-case `<leader>r`. The main entries are `rr`
+  panel, `ro` open, `rm` mode, `rs` scope, `rf/rh/rl` panes, `rv` layout, `rw`
+  context, `rg` code, `ra/rA` add, `re` edit, `rc` type, `rd` delete, `rp` reply,
+  `rt` resolve, `rE` export, `ru` refresh, and `rq` close. `[r` and `]r` navigate.
 
-The workflow never checks out, fetches, stages, restores, resets, updates a Git
-ref, or writes an object. Working-tree drift marks a saved review stale instead
-of remapping its anchors.
+Raw Diffview is intentionally independent. Its plugin specification contains no
+review imports, hooks, guarded actions, custom help groups, or tab-close
+interception. Ordinary tab closure likewise has no review-owned-tab path.
+
+If persisting a live mutation fails, refresh and scope changes stop instead of
+discarding the in-memory review. The reviewer remains available for recovery
+export and can be abandoned only through the verified `ReviewClose!` path.
 
 ## Consequences
 
-Historical diff buffers intentionally do not run LSP in either presentation
-layout, and commit history is browse-only because a persisted comment anchor
-does not encode a log entry. `:ReviewCode` followed by ordinary source
-navigation remains the supported LSP path; inherited source tabs return to the
-original exact review target rather than treating the definition destination
-as part of the diff. The integration isolates pinned
-Diffview seams for the selected file, history entries, file-open lifecycle, and
-exact file selection in `config.review_diffview`, plus its cached inline hunk
-seam in `config.review_context`; plugin upgrades must exercise their focused
-tests and the full offline config check.
+Reviewing no longer leaves the user's normal tab or changes its bufferline
+identity. Current exact source retains LSP diagnostics and navigation; historical
+content remains safe and deterministic. The panel can be opened only when
+needed, and exported text is always available in chat-oriented workflows without
+requiring a TUICR UUID.
 
-TUICR remains optional. Its TUI workflow and existing `:TuicrReview` command
-continue to work independently of native reviews.
+Working scopes become stale instead of silently remapping anchors. A changed
+historical line cannot use the LSP bridge, and a current buffer whose bytes differ
+from the frozen side cannot receive a review anchor. These refusals are
+intentional evidence-preservation boundaries.

@@ -334,6 +334,48 @@ test("new comment composer cycles its type in Normal mode and preserves it durin
 	assert(submitted_type == "suggestion" and not editor.has_active())
 end)
 
+test("review composer avoids a visible inclusive anchor and resizes within the editor", function()
+	reset_editor()
+	local source_win = vim.api.nvim_get_current_win()
+	local lines = {}
+	for index = 1, 40 do
+		lines[index] = "anchor fixture " .. index
+	end
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
+	vim.api.nvim_win_set_cursor(source_win, { 1, 0 })
+	vim.cmd("redraw")
+	local editor = require("config.review_editor")
+	assert(editor.compose({
+		title = "Anchored",
+		body = "Draft",
+		source_win = source_win,
+		anchor_range = { first = 1, last = 2 },
+	}, function()
+		return true
+	end))
+	local float = vim.api.nvim_get_current_win()
+	local float_position = vim.fn.win_screenpos(float)
+	local anchor_first = vim.fn.screenpos(source_win, 1, 1)
+	local anchor_last = vim.fn.screenpos(source_win, 2, 1)
+	local float_top = float_position[1]
+	local float_bottom = float_top + vim.api.nvim_win_get_height(float) - 1
+	assert(
+		float_bottom < anchor_first.row or float_top > anchor_last.row,
+		"composer intersected the visible anchor despite available vertical space"
+	)
+	local previous_columns, previous_lines = vim.o.columns, vim.o.lines
+	vim.o.columns = 60
+	vim.o.lines = 18
+	vim.api.nvim_exec_autocmds("VimResized", { modeline = false })
+	local config = vim.api.nvim_win_get_config(float)
+	assert(config.width <= 56 and config.height <= 14 and config.row >= 0 and config.col >= 0)
+	vim.o.columns = previous_columns
+	vim.o.lines = previous_lines
+	vim.cmd("stopinsert")
+	vim.fn.maparg("<Esc>", "n", false, true).callback()
+	assert(not editor.has_active())
+end)
+
 for _, path in ipairs(paths) do
 	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 		if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then

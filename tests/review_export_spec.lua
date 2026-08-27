@@ -22,6 +22,8 @@ local oid = string.rep("a", 40)
 
 local function session()
 	return {
+		version = 2,
+		revision = 9,
 		repo_root = "/tmp/review-export",
 		stale = false,
 		scope = { kind = "commit", label = "HEAD", commit_oid = oid },
@@ -29,10 +31,12 @@ local function session()
 			{
 				id = "root",
 				type = "rationale",
-				status = "draft",
+				resolution = "open",
+				deliveries = {},
 				body = "Why use a tuple instead of the enum directly?",
 				reply_to = vim.NIL,
 				anchor = {
+					kind = "range",
 					path = "lua/config/example.lua",
 					side = "right",
 					layer = "historical",
@@ -46,10 +50,11 @@ local function session()
 			{
 				id = "reply",
 				type = "rationale",
-				status = "reply",
+				resolution = "open",
+				deliveries = {},
 				body = "The enum can remain the source of truth.",
 				reply_to = "root",
-				anchor = { path = "lua/config/example.lua", side = "right", start_line = 8 },
+				anchor = { kind = "range", path = "lua/config/example.lua", side = "right", start_line = 8 },
 			},
 		},
 	}
@@ -71,10 +76,17 @@ test("Markdown renders file-level comments without inventing a line", function()
 		{
 			id = "file",
 			type = "suggestion",
-			status = "draft",
+			resolution = "resolved",
+			deliveries = {},
 			body = "Consider the file-level organization.",
 			reply_to = vim.NIL,
-			anchor = { path = "lua/config/example.lua", side = "right", layer = "historical", stale = false },
+			anchor = {
+				kind = "file",
+				path = "lua/config/example.lua",
+				side = "right",
+				layer = "historical",
+				stale = false,
+			},
 		},
 	}
 	local markdown, ids = assert(exporter.render(value))
@@ -83,7 +95,18 @@ test("Markdown renders file-level comments without inventing a line", function()
 	assert(vim.deep_equal(ids, { "file" }))
 end)
 
-test("normal export refuses stale unresolved anchors while bang labels them", function()
+test("recovery records an intentionally empty live review without changing normal export", function()
+	local value = session()
+	value.items = {}
+	local markdown, export_err = exporter.render(value, true)
+	assert(markdown == nil and export_err == "review has no comments to export")
+	local recovery, ids = assert(exporter.render_recovery(value))
+	assert(recovery:find("Empty live review state", 1, true))
+	assert(recovery:find("removed every comment", 1, true))
+	assert(vim.deep_equal(ids, {}))
+end)
+
+test("normal export refuses stale anchors while bang labels them", function()
 	local value = session()
 	value.items[1].anchor.stale = true
 	local markdown, err = exporter.render(value)
@@ -113,7 +136,7 @@ test("clipboard failure previews without returning ids to lock", function()
 			copied = { register, markdown }
 		end,
 	}))
-	assert(not result.previewed and copied[1] == "+" and #result.ids == 2)
+	assert(not result.previewed and copied[1] == "+" and #result.ids == 0)
 
 	result = assert(exporter.deliver(session(), false, {
 		has_clipboard = true,
@@ -127,47 +150,128 @@ test("clipboard failure previews without returning ids to lock", function()
 	assert(result.previewed and #result.ids == 0 and previewed == result.markdown)
 end)
 
-test("repeated clipboard previews reuse the existing tab", function()
+test("repeated clipboard previews stay in one ordinary tab and replace only their float", function()
 	local original_tab = vim.api.nvim_get_current_tabpage()
-	local first = assert(exporter.deliver(session(), false, { has_clipboard = false }))
-	local preview_tab = vim.api.nvim_get_current_tabpage()
+	local original_win = vim.api.nvim_get_current_win()
+	local original_buf = vim.api.nvim_get_current_buf()
+	local source_lines = {}
+	for index = 1, 60 do
+		source_lines[index] = "source line " .. index
+	end
+	vim.bo[original_buf].modifiable = true
+	vim.api.nvim_buf_set_lines(original_buf, 0, -1, false, source_lines)
+	vim.api.nvim_win_set_cursor(original_win, { 24, 3 })
+	vim.api.nvim_win_call(original_win, function()
+		vim.cmd("normal! zt")
+	end)
+	local source_view = vim.api.nvim_win_call(original_win, vim.fn.winsaveview)
 	local tab_count = #vim.api.nvim_list_tabpages()
+	local first = assert(exporter.deliver(session(), false, { has_clipboard = false }))
+	local first_preview = vim.api.nvim_get_current_win()
 	local second = assert(exporter.deliver(session(), false, { has_clipboard = false }))
+	local second_preview = vim.api.nvim_get_current_win()
+	local preview_buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_win_set_cursor(second_preview, { 12, 0 })
+	vim.api.nvim_win_call(second_preview, function()
+		vim.cmd("normal! zt")
+	end)
+	local preview_view = vim.api.nvim_win_call(second_preview, vim.fn.winsaveview)
+	local preview_lines = vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false)
 	assert(first.previewed and second.previewed)
-	assert(vim.api.nvim_get_current_tabpage() == preview_tab)
+	assert(vim.api.nvim_get_current_tabpage() == original_tab)
 	assert(#vim.api.nvim_list_tabpages() == tab_count)
-	assert(require("config.tabs").is_transient(preview_tab))
+	assert(not vim.api.nvim_win_is_valid(first_preview) and vim.api.nvim_win_is_valid(second_preview))
+	assert(vim.api.nvim_buf_get_name(0) == "review-export://markdown")
 	assert(vim.bo.readonly and not vim.bo.modifiable)
 	local suspended = assert(exporter.suspend_preview())
-	assert(suspended.focused and not vim.api.nvim_tabpage_is_valid(preview_tab))
+	assert(suspended.focused and not vim.api.nvim_win_is_valid(second_preview))
+	assert(vim.api.nvim_buf_is_valid(preview_buf), "preview buffer was wiped during session serialization")
+	assert(not vim.bo[preview_buf].buflisted, "suspended preview could leak into the serialized buffer list")
+	assert(#vim.fn.win_findbuf(preview_buf) == 0 and vim.bo[preview_buf].bufhidden == "hide")
+	assert(vim.api.nvim_get_current_win() == original_win)
 	assert(exporter.restore_preview(suspended))
-	assert(vim.api.nvim_buf_get_name(0) == "review-export://markdown")
-	assert(exporter.suspend_preview())
-	vim.api.nvim_set_current_tabpage(original_tab)
+	local restored_preview = vim.api.nvim_get_current_win()
+	assert(restored_preview ~= second_preview and vim.api.nvim_get_current_buf() == preview_buf)
+	assert(vim.api.nvim_buf_get_name(0) == "review-export://markdown" and vim.bo[preview_buf].bufhidden == "wipe")
+	assert(vim.deep_equal(vim.api.nvim_buf_get_lines(preview_buf, 0, -1, false), preview_lines))
+	local restored_view = vim.api.nvim_win_call(restored_preview, vim.fn.winsaveview)
+	for _, key in ipairs({ "lnum", "col", "topline", "leftcol", "skipcol", "curswant" }) do
+		assert(restored_view[key] == preview_view[key], "preview view changed at " .. key)
+	end
+
+	vim.api.nvim_set_current_win(original_win)
+	local unfocused = assert(exporter.suspend_preview())
+	assert(not unfocused.focused)
+	assert(exporter.restore_preview(unfocused))
+	assert(vim.api.nvim_get_current_win() == original_win, "unfocused preview stole focus")
+	local preview_windows = vim.fn.win_findbuf(preview_buf)
+	assert(#preview_windows == 1 and vim.api.nvim_win_is_valid(preview_windows[1]))
+	vim.api.nvim_set_current_win(preview_windows[1])
+	vim.api.nvim_feedkeys("q", "xt", false)
+	assert(vim.api.nvim_get_current_win() == original_win and vim.api.nvim_get_current_buf() == original_buf)
+	local restored_source_view = vim.api.nvim_win_call(original_win, vim.fn.winsaveview)
+	for _, key in ipairs({ "lnum", "col", "topline", "leftcol", "skipcol", "curswant" }) do
+		assert(restored_source_view[key] == source_view[key], "preview source view changed at " .. key)
+	end
 end)
 
-test("forced clipboard export includes exported comments without relocking them", function()
+test("session restoration gives a rebuilt review target to a focused preview", function()
+	vim.cmd("only")
+	local fallback_win = vim.api.nvim_get_current_win()
+	vim.cmd("vnew")
+	local old_source_win = vim.api.nvim_get_current_win()
+	local result = assert(exporter.deliver(session(), false, { has_clipboard = false }))
+	assert(result.previewed)
+	local suspended = assert(exporter.suspend_preview())
+	assert(suspended.focused and vim.api.nvim_get_current_win() == old_source_win)
+	vim.api.nvim_win_close(old_source_win, true)
+	assert(exporter.restore_preview(suspended, fallback_win))
+	local restored_buf = vim.api.nvim_get_current_buf()
+	assert(vim.api.nvim_buf_get_name(restored_buf) == "review-export://markdown")
+	vim.api.nvim_feedkeys("q", "xt", false)
+	assert(vim.api.nvim_get_current_win() == fallback_win, "preview did not return to the rebuilt review target")
+end)
+
+test("clipboard export is complete across resolution and delivery history", function()
 	local value = session()
-	value.items[1].status = "exported"
-	value.items[1].export_id = "clipboard:earlier"
-	value.items[1].exported_at = "2026-08-25T10:00:00Z"
-	local result = assert(exporter.deliver(value, true, {
+	value.items[1].resolution = "resolved"
+	value.items[2].resolution = "legacy_unknown"
+	value.items[2].deliveries = {
+		{ backend = "tuicr", receipt = "remote-reply", delivered_at = "2026-08-25T10:00:00Z" },
+	}
+	local result = assert(exporter.deliver(value, false, {
 		has_clipboard = true,
 		setreg = function() end,
 	}))
 	assert(result.markdown:find(value.items[1].body, 1, true))
-	assert(vim.deep_equal(result.ids, { "reply" }))
+	assert(result.markdown:find(value.items[2].body, 1, true))
+	assert(result.markdown:find("resolved", 1, true))
+	assert(result.markdown:find("exported", 1, true))
+	assert(vim.deep_equal(result.ids, {}))
 end)
 
-test("incremental export keeps an exported parent as reply context", function()
+test("repeated renders and clipboard deliveries are byte-identical and non-mutating", function()
 	local value = session()
-	value.items[1].status = "exported"
-	value.items[1].export_id = "tuicr:parent"
-	value.items[1].exported_at = "2026-08-25T10:00:00Z"
-	local markdown, ids = assert(exporter.render(value))
-	assert(markdown:find(value.items[1].body, 1, true))
-	assert(markdown:find("### Reply: RATIONALE", 1, true))
-	assert(vim.deep_equal(ids, { "reply" }))
+	local before = vim.deepcopy(value)
+	local first_markdown, first_ids = assert(exporter.render(value))
+	local second_markdown, second_ids = assert(exporter.render(value))
+	assert(first_markdown == second_markdown and vim.deep_equal(first_ids, second_ids))
+	local copied = {}
+	local first = assert(exporter.deliver(value, false, {
+		has_clipboard = true,
+		setreg = function(_, markdown)
+			copied[#copied + 1] = markdown
+		end,
+	}))
+	local second = assert(exporter.deliver(value, false, {
+		has_clipboard = true,
+		setreg = function(_, markdown)
+			copied[#copied + 1] = markdown
+		end,
+	}))
+	assert(first.markdown == second.markdown and copied[1] == copied[2])
+	assert(vim.deep_equal(first.ids, {}) and vim.deep_equal(second.ids, {}))
+	assert(vim.deep_equal(value, before) and value.revision == 9)
 end)
 
 if #failures > 0 then

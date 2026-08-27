@@ -34,6 +34,7 @@ local VALUE_KEYS = {
 	reply_to = true,
 	delivery_key = true,
 }
+local WRITE_OPTION_KEYS = { preflight = true }
 local ANCHOR_KEYS = {
 	path = true,
 	side = true,
@@ -413,6 +414,43 @@ local function check_callback(callback)
 	return callback
 end
 
+local function validate_write_options(options)
+	if options == nil then
+		return nil, failure("invalid_preflight", "TUICR writes require an authoritative preflight function")
+	end
+	if not is_object(options) then
+		return nil, failure("invalid_options", "write options must be an object")
+	end
+	local keys_ok, keys_err = exact_keys(options, WRITE_OPTION_KEYS, "options")
+	if not keys_ok then
+		return nil, keys_err
+	end
+	if type(options.preflight) ~= "function" then
+		return nil, failure("invalid_preflight", "TUICR writes require an authoritative preflight function")
+	end
+	return { preflight = options.preflight }
+end
+
+local function run_preflight(preflight)
+	if not preflight then
+		return true
+	end
+	local ok, allowed, reason = pcall(preflight)
+	if ok and allowed == true then
+		return true
+	end
+	if not ok then
+		reason = allowed
+	end
+	if type(reason) == "table" then
+		reason = reason.message or reason.code or vim.inspect(reason)
+	end
+	return nil,
+		failure("preflight_failed", "TUICR write preflight rejected the operation", {
+			reason = tostring(reason or "authoritative review changed"),
+		})
+end
+
 function M.new(options)
 	local deps = make_dependencies(options)
 	local client = {}
@@ -459,8 +497,17 @@ function M.new(options)
 		end)
 	end
 
-	local function write(action, root, round_id, values, callback)
+	local function write(action, root, round_id, values, options, callback)
+		if type(options) == "function" and callback == nil then
+			callback = options
+			options = nil
+		end
 		check_callback(callback)
+		local normalized_options, options_err = validate_write_options(options)
+		if not normalized_options then
+			deliver(deps, callback, nil, options_err)
+			return
+		end
 		local normalized, values_err = validate_values(values, action == "respond", deps)
 		if not normalized then
 			deliver(deps, callback, nil, values_err)
@@ -476,6 +523,11 @@ function M.new(options)
 				callback(nil, round_err)
 				return
 			end
+			local allowed, preflight_err = run_preflight(normalized_options.preflight)
+			if not allowed then
+				callback(nil, preflight_err)
+				return
+			end
 			run(deps, comment_command(action, round_id, normalized), function(payload, result_err)
 				if not payload then
 					callback(nil, result_err)
@@ -486,12 +538,12 @@ function M.new(options)
 		end)
 	end
 
-	function client.add(root, round_id, values, callback)
-		write("add", root, round_id, values, callback)
+	function client.add(root, round_id, values, options, callback)
+		write("add", root, round_id, values, options, callback)
 	end
 
-	function client.respond(root, round_id, values, callback)
-		write("respond", root, round_id, values, callback)
+	function client.respond(root, round_id, values, options, callback)
+		write("respond", root, round_id, values, options, callback)
 	end
 
 	return client
@@ -507,12 +559,12 @@ function M.comments(root, round_id, callback)
 	return default.comments(root, round_id, callback)
 end
 
-function M.add(root, round_id, values, callback)
-	return default.add(root, round_id, values, callback)
+function M.add(root, round_id, values, options, callback)
+	return default.add(root, round_id, values, options, callback)
 end
 
-function M.respond(root, round_id, values, callback)
-	return default.respond(root, round_id, values, callback)
+function M.respond(root, round_id, values, options, callback)
+	return default.respond(root, round_id, values, options, callback)
 end
 
 return M

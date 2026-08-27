@@ -81,6 +81,14 @@ local function capture(invoke)
 	return value, err
 end
 
+local function authorized(callback)
+	return {
+		preflight = function()
+			return true
+		end,
+	}, callback
+end
+
 test("list_rounds uses only the public all-round launcher contract and returns picker metadata", function()
 	local metadata = {
 		{ ok = true, command = "status", round = round_id, repo_root = root, session = "fixture/worktree" },
@@ -145,7 +153,7 @@ test("add maps all six store types to compatible severities and native comment t
 				delivery_key = "native-item",
 				author = "Exact Author",
 				anchor = { path = "lua//config/example.lua", side = "left", start_line = 3, end_line = 5 },
-			}, callback)
+			}, authorized(callback))
 		end)
 		assert(value and value.id == "created" and not err)
 		equal({
@@ -179,7 +187,7 @@ test("add preserves file-level anchors without inventing a start line", function
 			delivery_key = "native-file-item",
 			author = "Exact Author",
 			anchor = { path = "lua/config/example.lua", side = "right" },
-		}, callback)
+		}, authorized(callback))
 	end)
 	assert(value and value.id == "file-level" and not err)
 	equal({
@@ -215,7 +223,7 @@ test("respond requires reply_to, maps right to new, and uses the injected defaul
 			delivery_key = "native-reply",
 			reply_to = "native-comment-1",
 			anchor = { path = "README.md", side = "right", start_line = 7 },
-		}, callback)
+		}, authorized(callback))
 	end)
 	assert(value and value.id == "reply" and not err)
 	equal({
@@ -236,6 +244,94 @@ test("respond requires reply_to, maps right to new, and uses the injected defaul
 	}, calls[2], "respond argv changed")
 end)
 
+test("write preflight runs after status and prevents a stale cross-process add", function()
+	local authoritative_revision = 7
+	local remote_writes = 0
+	local calls = {}
+	local client = adapter.new({
+		system = function(command, system_options, callback)
+			calls[#calls + 1] = vim.deepcopy(command)
+			equal({ text = true }, system_options, "vim.system options changed")
+			if command[2] == "status" then
+				-- Reproduce another Neovim saving while the async status command is in flight.
+				authoritative_revision = authoritative_revision + 1
+				callback(status())
+			else
+				remote_writes = remote_writes + 1
+				callback(success({ ok = true, command = "add", round = round_id, tuicr = { id = "stale" } }))
+			end
+			return { fake = true }
+		end,
+		schedule = function(callback)
+			callback()
+		end,
+		canonical_root = function()
+			return root
+		end,
+		author = "Configured Reviewer",
+	})
+	local value, err = capture(function(callback)
+		client.add(root, round_id, {
+			type = "issue",
+			body = "Old authoritative body",
+			delivery_key = "content-bound-key",
+			anchor = {},
+		}, {
+			preflight = function()
+				if authoritative_revision ~= 7 then
+					return nil, "persisted revision changed during status"
+				end
+				return true
+			end,
+		}, callback)
+	end)
+	assert(value == nil and err.code == "preflight_failed")
+	assert(err.details.reason == "persisted revision changed during status")
+	assert(#calls == 1 and calls[1][2] == "status", "rejected preflight reached add")
+	assert(remote_writes == 0, "rejected preflight caused a remote effect")
+end)
+
+test("write preflight is fail-closed for invalid options and thrown guards", function()
+	local missing_client, missing_calls = fake_client({})
+	local _, missing_err = capture(function(callback)
+		missing_client.add(root, round_id, {
+			type = "issue",
+			body = "Finding",
+			delivery_key = "missing-preflight",
+			anchor = {},
+		}, callback)
+	end)
+	assert(missing_err.code == "invalid_preflight" and #missing_calls == 0)
+
+	local invalid_client, invalid_calls = fake_client({})
+	local _, invalid_err = capture(function(callback)
+		invalid_client.add(root, round_id, {
+			type = "issue",
+			body = "Finding",
+			delivery_key = "invalid-options",
+			anchor = {},
+		}, { preflight = true }, callback)
+	end)
+	assert(invalid_err.code == "invalid_preflight" and #invalid_calls == 0)
+
+	local throwing_client, throwing_calls = fake_client({ status() })
+	local _, thrown_err = capture(function(callback)
+		throwing_client.respond(root, round_id, {
+			type = "question",
+			body = "Reply",
+			delivery_key = "throwing-preflight",
+			reply_to = "parent",
+			anchor = {},
+		}, {
+			preflight = function()
+				error("guard exploded")
+			end,
+		}, callback)
+	end)
+	assert(thrown_err.code == "preflight_failed" and thrown_err.details.reason:find("guard exploded", 1, true))
+	assert(#throwing_calls == 1 and throwing_calls[1][2] == "status", "thrown preflight reached respond")
+end)
+
 test("option-like author, path, reply id, and body remain literal argv values", function()
 	local client, calls = fake_client({
 		status(),
@@ -254,7 +350,7 @@ test("option-like author, path, reply id, and body remain literal argv values", 
 			author = "--author",
 			reply_to = "--parent",
 			anchor = { path = "--file.py", side = "right", start_line = 1 },
-		}, callback)
+		}, authorized(callback))
 	end)
 	assert(value and value.id == "literal" and not err)
 	equal({
@@ -278,7 +374,12 @@ end)
 test("invalid values fail before status or write commands", function()
 	local client, calls = fake_client({})
 	local _, type_err = capture(function(callback)
-		client.add(root, round_id, { type = "note", body = "No", delivery_key = "invalid", anchor = {} }, callback)
+		client.add(
+			root,
+			round_id,
+			{ type = "note", body = "No", delivery_key = "invalid", anchor = {} },
+			authorized(callback)
+		)
 	end)
 	assert(type_err.code == "invalid_type")
 	local _, reply_err = capture(function(callback)
@@ -287,7 +388,7 @@ test("invalid values fail before status or write commands", function()
 			body = "No reply",
 			delivery_key = "missing-reply",
 			anchor = {},
-		}, callback)
+		}, authorized(callback))
 	end)
 	assert(reply_err.code == "invalid_reply_to")
 	local _, anchor_err = capture(function(callback)
@@ -296,7 +397,7 @@ test("invalid values fail before status or write commands", function()
 			body = "Unsafe",
 			delivery_key = "unsafe",
 			anchor = { path = "../outside.lua" },
-		}, callback)
+		}, authorized(callback))
 	end)
 	assert(anchor_err.code == "invalid_anchor")
 	assert(#calls == 0, "invalid values reached vim.system")
@@ -316,7 +417,7 @@ test("invalid UUIDs and rounds outside the canonical root fail before target ope
 			body = "Finding",
 			delivery_key = "missing-round",
 			anchor = {},
-		}, callback)
+		}, authorized(callback))
 	end)
 	assert(missing_err.code == "round_not_found")
 	assert(#missing_calls == 1 and missing_calls[1][2] == "status", "missing round reached add")
@@ -359,7 +460,7 @@ test("malformed JSON, root mismatches, and launcher errors are rejected", functi
 			type = "issue",
 			body = "Missing remote id",
 			delivery_key = "missing-receipt",
-		}, callback)
+		}, authorized(callback))
 	end)
 	assert(receipt_err.code == "invalid_response")
 end)

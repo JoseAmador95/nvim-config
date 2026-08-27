@@ -1,16 +1,74 @@
 local M = {}
 
+local review_lsp = require("config.review_lsp")
+
+local NATIVE_DEFAULT_KEYMAPS = {
+	{ "n", "K", "vim.lsp.buf.hover()" },
+	{ "n", "gO", "vim.lsp.buf.document_symbol()" },
+	{ "n", "gri", "vim.lsp.buf.implementation()" },
+	{ "n", "grn", "vim.lsp.buf.rename()" },
+	{ "n", "grr", "vim.lsp.buf.references()" },
+	{ "n", "grt", "vim.lsp.buf.type_definition()" },
+	{ "n", "grx", "vim.lsp.codelens.run()" },
+	{ "n", "gra", "vim.lsp.buf.code_action()" },
+	{ "x", "gra", "vim.lsp.buf.code_action()" },
+}
+
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "LSP" })
 end
 
-local function has_client(method, title)
-	local clients = vim.lsp.get_clients({ bufnr = 0, method = method })
+local open_location_list
+
+local function has_client(method, title, bufnr)
+	local target = bufnr or vim.api.nvim_get_current_buf()
+	if review_lsp.blocked(target) then
+		notify((title or "LSP") .. ": disabled for historical review content")
+		return nil
+	end
+	local clients = vim.lsp.get_clients({ bufnr = target, method = method })
 	if clients and #clients > 0 then
 		return clients
 	end
 	notify((title or "LSP") .. ": no active client for method")
 	return nil
+end
+
+local function request_location_at(action, bufnr, line, column)
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return false
+	end
+	local clients = has_client(action.method, action.title, bufnr)
+	if not clients then
+		return false
+	end
+	local row = math.max(0, math.min(line - 1, vim.api.nvim_buf_line_count(bufnr) - 1))
+	local text = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
+	local byte_column = math.max(0, math.min(column - 1, #text))
+	vim.lsp.buf_request_all(bufnr, action.method, function(client)
+		return {
+			textDocument = vim.lsp.util.make_text_document_params(bufnr),
+			position = {
+				line = row,
+				character = vim.lsp.util.character_offset(bufnr, row, byte_column, client.offset_encoding),
+			},
+		}
+	end, function(results)
+		local items = {}
+		for client_id, response in pairs(results) do
+			local client = vim.lsp.get_client_by_id(client_id)
+			if client and response and response.result then
+				local locations = vim.islist(response.result) and response.result or { response.result }
+				vim.list_extend(items, vim.lsp.util.locations_to_items(locations, client.offset_encoding))
+			end
+		end
+		if #items == 0 then
+			notify(action.title .. ": no locations found")
+			return
+		end
+		open_location_list(action, { items = items })
+	end)
+	return true
 end
 
 local function snacks_lsp_picker(method, title, picker_fn)
@@ -27,7 +85,7 @@ local function snacks_lsp_picker(method, title, picker_fn)
 	end
 end
 
-local function open_location_list(action, options)
+open_location_list = function(action, options)
 	local items = options.items or {}
 	if #items == 1 then
 		local item = items[1]
@@ -115,13 +173,31 @@ function M.definition()
 	return goto_location("definition")
 end
 
+---Request a definition for an explicit buffer position without using current-window state.
+---@param bufnr integer
+---@param line integer One-based line.
+---@param column integer One-based byte column.
+---@return boolean
+function M.definition_at(bufnr, line, column)
+	return request_location_at(location_actions.definition, bufnr, line, column)
+end
+
+local function global_keymap(mode, lhs)
+	for _, mapping in ipairs(vim.api.nvim_get_keymap(mode)) do
+		if mapping.lhs == lhs then
+			return mapping
+		end
+	end
+end
+
 local function delete_default_keymaps(bufnr)
 	local options = bufnr and { buffer = bufnr } or nil
-	for _, lhs in ipairs({ "K", "gO", "gri", "grn", "grr", "grt", "grx" }) do
-		pcall(vim.keymap.del, "n", lhs, options)
-	end
-	for _, mode in ipairs({ "n", "x" }) do
-		pcall(vim.keymap.del, mode, "gra", options)
+	for _, default in ipairs(NATIVE_DEFAULT_KEYMAPS) do
+		local mode, lhs, description = unpack(default)
+		local mapping = not bufnr and global_keymap(mode, lhs) or nil
+		if bufnr or (mapping and mapping.desc == description) then
+			pcall(vim.keymap.del, mode, lhs, options)
+		end
 	end
 end
 
@@ -132,6 +208,9 @@ function M.setup()
 	vim.api.nvim_create_autocmd("FileType", {
 		group = group,
 		callback = function(event)
+			if review_lsp.enforce_blocked(event.buf) then
+				return
+			end
 			delete_default_keymaps(event.buf)
 		end,
 		desc = "Remove conflicting Neovim 0.12 navigation defaults",
@@ -139,6 +218,9 @@ function M.setup()
 	vim.api.nvim_create_autocmd("LspAttach", {
 		group = group,
 		callback = function(event)
+			if review_lsp.enforce_blocked(event.buf, event.data and event.data.client_id or nil) then
+				return
+			end
 			delete_default_keymaps(event.buf)
 			vim.keymap.set("n", "gd", M.definition, { buffer = event.buf, silent = true, desc = "Go to definition" })
 			vim.keymap.set("n", "gD", M.declaration, { buffer = event.buf, silent = true, desc = "Go to declaration" })
@@ -166,7 +248,7 @@ function M.setup()
 				silent = true,
 				desc = "Signature help",
 			})
-			vim.keymap.set("n", "<leader>rn", vim.lsp.buf.rename, {
+			vim.keymap.set("n", "<leader>lr", vim.lsp.buf.rename, {
 				buffer = event.buf,
 				silent = true,
 				desc = "Rename",

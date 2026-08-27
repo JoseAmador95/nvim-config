@@ -1,15 +1,15 @@
 local M = {}
 
+local review_lsp = require("config.review_lsp")
+
 local function register(name, config)
 	vim.lsp.config(name, config)
 	local resolved = vim.lsp.config[name]
 	local bridge = require("config.lsp_neoconf")
 	vim.lsp.config(name, {
 		before_init = bridge.wrap_before_init(name, resolved and resolved.before_init or nil),
-		root_dir = bridge.wrap_root_dir(
-			name,
-			resolved and resolved.root_dir or nil,
-			resolved and resolved.root_markers or nil
+		root_dir = review_lsp.wrap_root_dir(
+			bridge.wrap_root_dir(name, resolved and resolved.root_dir or nil, resolved and resolved.root_markers or nil)
 		),
 		on_new_config = bridge.wrap_on_new_config(name, resolved and resolved.on_new_config or nil),
 	})
@@ -22,6 +22,7 @@ end
 
 function M.setup(context)
 	context = context or {}
+	review_lsp.setup()
 	local client_capabilities = capabilities()
 	local has_schemastore, schemastore = pcall(require, "schemastore")
 

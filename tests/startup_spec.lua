@@ -79,11 +79,11 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 				assert(not vim.tbl_isempty(vim.fn.maparg("<leader>t", "n", false, true)), "terminal toggle is missing")
 				assert(
-					not vim.tbl_isempty(vim.fn.maparg("<leader>rr", "n", false, true)),
+					not vim.tbl_isempty(vim.fn.maparg("<leader>Tn", "n", false, true)),
 					"nearest-test mapping is missing"
 				)
 				assert(
-					not vim.tbl_isempty(vim.fn.maparg("<leader>rd", "n", false, true)),
+					not vim.tbl_isempty(vim.fn.maparg("<leader>Td", "n", false, true)),
 					"debug-test mapping is missing"
 				)
 				local diagnostics = vim.diagnostic.config()

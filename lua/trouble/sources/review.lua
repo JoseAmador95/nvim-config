@@ -56,12 +56,16 @@ function M.get(callback)
 		local anchor = review.anchor
 		local stale = snapshot.stale or anchor.stale
 		if anchor.path then
-			local file_level = anchor.start_line == nil
+			local file_level = anchor.kind == "file"
+			local range = anchor.kind == "range"
 			items[#items + 1] = Item.new({
 				source = "review",
 				filename = vim.fs.joinpath(snapshot.root, anchor.path),
-				pos = { anchor.start_line or 1, math.max(0, (anchor.start_column or 1) - 1) },
-				end_pos = { anchor.end_line or anchor.start_line or 1, math.max(0, (anchor.end_column or 1) - 1) },
+				pos = { range and anchor.start_line or 1, math.max(0, (anchor.start_column or 1) - 1) },
+				end_pos = {
+					range and (anchor.end_line or anchor.start_line) or 1,
+					math.max(0, (anchor.end_column or 1) - 1),
+				},
 				severity = SEVERITY[review.type],
 				text = string.format(
 					"[%s · %s%s%s] %s",

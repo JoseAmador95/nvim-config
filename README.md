@@ -117,8 +117,46 @@ user buffers, creates a pristine home tab, and opens the Snacks dashboard;
 
 ## Review rounds and agent interchange
 
-The full terminal-editor profile exposes four explicit review commands. They
-are intentionally absent from VSCode and `nvimpager`:
+The full terminal editor has a native, repository-scoped review mode that stays
+in the current ordinary tab. `:ReviewOpen` (or `<leader>ro`) freezes a working,
+commit, range, or default-branch scope; `<leader>rr` opens and closes its
+three-pane Files / Commits / Comments float. Selecting a file closes the float
+and focuses the reviewed current/new side. The Commits pane can select one
+commit or two endpoints from one linear, single-parent span; merge commits are
+reviewed individually. The Comments pane supports jumping,
+editing, deleting, replying, resolving/reopening, and reanchoring without a
+separate review tab.
+
+Review mode makes affected source buffers read-only and preserves their normal
+tab identity. `<leader>rv` switches inline and native synchronized side-by-side
+diffs; `<leader>rw` switches hunk-only and full-file context; `<leader>rg`
+focuses the current/new code. Current source keeps normal LSP. Historical old
+content never starts LSP, while `gd` from a historical-new snapshot bridges to
+the real current file only when the line is unchanged and preserves the cursor
+column. `<leader>ra` comments the current line or visual range, `<leader>rA`
+comments the file, and overlapping multiline comments use an aggregate rail
+while remaining individually editable from the Comments pane.
+
+`:ReviewExport[!]` always renders the complete saved review and may be repeated;
+it copies Markdown or opens a closable float when no clipboard is available.
+Normal export refuses working-tree drift, session drift, or stale anchors. The
+bang form first writes and verifies an owner-only recovery; global drift labels
+the saved snapshot stale, while anchor drift remains attached to the affected
+comment.
+`:ReviewLinkTuicr` and `:ReviewPublish[!]` are separate, explicit operations;
+only open, undelivered comments are published through `tuicr-round`. Ordinary
+`:DiffviewOpen` and `:DiffviewFileHistory` remain independent raw Diffview
+workflows.
+
+The review mappings use the lower-case `<leader>r` namespace: `rr` panel, `ro`
+open, `rm` mode, `rs` scope, `rf/rh/rl` panel panes, `rv` layout, `rw` context,
+`rg` code, `ra/rA` comments, `re` edit, `rc` type, `rd` delete, `rp` reply,
+`rt` resolve, `rE` export, `ru` refresh, and `rq` close. `]r` and `[r` navigate
+comments. Tests use `<leader>Tn` / `<leader>Td`, Python uses `<leader>pr` /
+`<leader>ps`, and LSP rename uses `<leader>lr`.
+
+The terminal-only TUICR and agent interchange commands are intentionally absent
+from VSCode and `nvimpager`:
 
 - `:ReviewRoundStart` resolves the current canonical Git root, starts
   `~/.config/tuicr/tuicr-round` asynchronously, caches the returned
@@ -219,8 +257,8 @@ is shared by Pyright, Neotest, DAP, the REPL and statusline. An attached Pyright
 root or the nearest Python project marker takes precedence over an enclosing Git
 root, so nested Python projects stay independent. Opening a PEP 723 script never
 runs venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
-`<leader>rr` runs the nearest test, `<leader>rd` debugs it, `<leader>rp` toggles
-the project REPL and `<leader>rs` opens or focuses that REPL before sending the
+`<leader>Tn` runs the nearest test, `<leader>Td` debugs it, `<leader>pr` toggles
+the project REPL and `<leader>ps` opens or focuses that REPL before sending the
 current line or visual selection.
 Pytest is preferred when installed in that interpreter, with unittest as the
 fallback; a live REPL asks before changing interpreter.

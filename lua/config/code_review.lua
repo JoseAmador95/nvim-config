@@ -1,16 +1,19 @@
--- Native, LSP-friendly code-review workspaces built on exact Diffview scopes.
+-- Repository/session-scoped native reviews in ordinary Neovim tabs.
 local M = {}
 
-local review_diffview = require("config.review_diffview")
+local repo = require("config.repo")
+local review_changes = require("config.review_changes")
+local review_editor = require("config.review_editor")
 local review_export = require("config.review_export")
+local review_lsp = require("config.review_lsp")
+local review_mode = require("config.review_mode")
+local review_panel = require("config.review_panel")
+local review_presenter = require("config.review_presenter")
 local review_scope = require("config.review_scope")
-local review_source = require("config.review_source")
 local review_store = require("config.review_store")
-local tab_config = require("config.tabs")
+local review_tuicr = require("config.review_tuicr")
 
-local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review")
-local THREAD_RESTORE_ATTEMPTS = 500
-local THREAD_RESTORE_INTERVAL_MS = 20
+local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comments")
 local REVIEW_TYPES = { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }
 local TYPE_SIGNS = {
 	issue = { text = "●", highlight = "DiagnosticSignError" },
@@ -20,2078 +23,2268 @@ local TYPE_SIGNS = {
 	pedantic = { text = "·", highlight = "DiagnosticSignHint" },
 	praise = { text = "♥", highlight = "DiagnosticSignHint" },
 }
-local REVIEW_HELP_GROUPS = {
-	common = "review",
-	diff_line = "review_diff",
-	file = "review_file",
-}
-local REVIEW_MAPPINGS = {
-	{ lhs = "<leader>Ro", rhs = "<cmd>ReviewOpen<cr>", desc = "Open default review", help = "common" },
-	{ lhs = "<leader>Rs", rhs = "<cmd>ReviewScope<cr>", desc = "Review scope/session", help = "common" },
-	{ lhs = "<leader>Rf", rhs = "<cmd>ReviewFiles<cr>", desc = "Review files", help = "common" },
-	{ lhs = "<leader>Rh", rhs = "<cmd>ReviewCommits<cr>", desc = "Review commits/history", help = "common" },
-	{ lhs = "<leader>Rg", rhs = "<cmd>ReviewCode<cr>", desc = "Toggle review code/diff", help = "common" },
-	{ lhs = "<leader>Rv", rhs = "<cmd>ReviewLayout<cr>", desc = "Toggle review layout", help = "common" },
-	{ lhs = "<leader>Rw", rhs = "<cmd>ReviewContext<cr>", desc = "Toggle review hunk/full context", help = "common" },
-	{ lhs = "<leader>Rl", rhs = "<cmd>ReviewComments<cr>", desc = "List review comments", help = "common" },
-	{ lhs = "<leader>RE", rhs = "<cmd>ReviewEdit<cr>", desc = "Edit review comment", help = "common" },
-	{
-		lhs = "<leader>Ra",
-		rhs = "<cmd>ReviewComment<cr>",
-		desc = "Add review comment (Visual range supported)",
-		help = "diff_line",
-	},
-	{
-		lhs = "<leader>RA",
-		rhs = "<cmd>ReviewFileComment<cr>",
-		desc = "Add file-level review comment",
-		help = "file",
-	},
-	{
-		lhs = "<leader>Rc",
-		rhs = "<cmd>ReviewChangeType<cr>",
-		desc = "Change review comment type",
-		help = "diff_line",
-	},
-	{
-		lhs = "<leader>Rd",
-		rhs = "<cmd>ReviewDeleteDraft<cr>",
-		desc = "Delete comment on current line",
-		help = "diff_line",
-	},
-	{ lhs = "<leader>Rt", rhs = "<cmd>ReviewThreads<cr>", desc = "Review threads", help = "common" },
-	{ lhs = "<leader>Re", rhs = "<cmd>ReviewExport<cr>", desc = "Export review", help = "common" },
-	{ lhs = "<leader>Rr", rhs = "<cmd>ReviewRefresh<cr>", desc = "Refresh review", help = "common" },
-	{ lhs = "<leader>Rq", rhs = "<cmd>ReviewClose<cr>", desc = "Close review", help = "common" },
+local HELP_GROUPS = { common = "review", diff_line = "review_diff", file = "review_file" }
+local MAPPINGS = {
+	{ lhs = "<leader>rr", rhs = "<cmd>ReviewPanel<cr>", desc = "Toggle review panel", help = "common" },
+	{ lhs = "<leader>ro", rhs = "<cmd>ReviewOpen<cr>", desc = "Open default review", help = "common" },
+	{ lhs = "<leader>rm", rhs = "<cmd>ReviewMode<cr>", desc = "Toggle review mode", help = "common" },
+	{ lhs = "<leader>rs", rhs = "<cmd>ReviewScope<cr>", desc = "Review scope/session", help = "common" },
+	{ lhs = "<leader>rf", rhs = "<cmd>ReviewFiles<cr>", desc = "Focus review files", help = "common" },
+	{ lhs = "<leader>rh", rhs = "<cmd>ReviewCommits<cr>", desc = "Focus review commits", help = "common" },
+	{ lhs = "<leader>rl", rhs = "<cmd>ReviewComments<cr>", desc = "Focus review comments", help = "common" },
+	{ lhs = "<leader>rv", rhs = "<cmd>ReviewLayout<cr>", desc = "Toggle review layout", help = "common" },
+	{ lhs = "<leader>rw", rhs = "<cmd>ReviewContext<cr>", desc = "Toggle review context", help = "common" },
+	{ lhs = "<leader>rg", rhs = "<cmd>ReviewCode<cr>", desc = "Focus reviewed code", help = "common" },
+	{ lhs = "<leader>ra", rhs = "<cmd>ReviewComment<cr>", desc = "Add line/range comment", help = "diff_line" },
+	{ lhs = "<leader>rA", rhs = "<cmd>ReviewFileComment<cr>", desc = "Add file comment", help = "file" },
+	{ lhs = "<leader>re", rhs = "<cmd>ReviewEdit<cr>", desc = "Edit review comment", help = "common" },
+	{ lhs = "<leader>rc", rhs = "<cmd>ReviewChangeType<cr>", desc = "Change comment type", help = "diff_line" },
+	{ lhs = "<leader>rd", rhs = "<cmd>ReviewDeleteDraft<cr>", desc = "Delete review comment", help = "diff_line" },
+	{ lhs = "<leader>rp", rhs = "<cmd>ReviewReply<cr>", desc = "Reply to review comment", help = "common" },
+	{ lhs = "<leader>rt", rhs = "<cmd>ReviewToggleResolve<cr>", desc = "Resolve or reopen comment", help = "common" },
+	{ lhs = "<leader>rE", rhs = "<cmd>ReviewExport<cr>", desc = "Export review", help = "common" },
+	{ lhs = "<leader>ru", rhs = "<cmd>ReviewRefresh<cr>", desc = "Refresh review", help = "common" },
+	{ lhs = "<leader>rq", rhs = "<cmd>ReviewClose<cr>", desc = "Close review", help = "common" },
 	{ lhs = "]r", rhs = "<cmd>ReviewNext<cr>", desc = "Next review comment", help = "common" },
 	{ lhs = "[r", rhs = "<cmd>ReviewPrev<cr>", desc = "Previous review comment", help = "common" },
 }
 
 local workspaces = {}
+local active
 local suspended
-local publishing_sessions = {}
-local export_workspace
-local review_threads
+local publishing = {}
+local setup_done = false
 
 local function notify(message, level)
-	vim.notify(message, level or vim.log.levels.INFO, { title = "Review" })
+	vim.notify(tostring(message), level or vim.log.levels.INFO, { title = "Review" })
 end
 
-local function error_message(err)
-	return type(err) == "table" and (err.message or err.code) or tostring(err)
+local function message(err)
+	return type(err) == "table" and (err.message or err.code or vim.inspect(err)) or tostring(err)
 end
 
-local function valid_tab(tabpage)
-	return type(tabpage) == "number" and vim.api.nvim_tabpage_is_valid(tabpage)
+local function valid_buf(buf)
+	return type(buf) == "number" and vim.api.nvim_buf_is_valid(buf)
 end
 
-local function buffer_in_root(root, buf)
-	if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].buftype ~= "" then
-		return false
+local function valid_win(win)
+	return type(win) == "number" and vim.api.nvim_win_is_valid(win)
+end
+
+local function valid_tab(tab)
+	return type(tab) == "number" and vim.api.nvim_tabpage_is_valid(tab)
+end
+
+local function buffer_text(buf)
+	local separator = ({ dos = "\r\n", mac = "\r" })[vim.bo[buf].fileformat] or "\n"
+	local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), separator)
+	return vim.bo[buf].endofline and text .. separator or text
+end
+
+local function null(value)
+	return value == nil or value == vim.NIL
+end
+
+local function key(root, id)
+	return root .. "\0" .. id
+end
+
+local function workspace_key(workspace)
+	return key(workspace.root, workspace.session.id)
+end
+
+local function registered(workspace)
+	return workspace and workspaces[workspace_key(workspace)] == workspace
+end
+
+local function current_workspace()
+	if registered(active) then
+		return active
 	end
-	local path = vim.api.nvim_buf_get_name(buf)
-	if path == "" then
-		return false
-	end
-	local repo = require("config.repo")
-	if repo.contains(root, path) then
-		return true
-	end
-	local canonical_root = vim.fs.normalize(vim.uv.fs_realpath(root) or root)
-	local lexical = vim.fs.normalize(vim.fn.fnamemodify(path, ":p"))
-	return lexical:sub(1, #canonical_root + 1) == canonical_root .. "/"
+	active = nil
+	return nil
 end
 
-local function modified_buffer(root)
-	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.bo[buf].modified and buffer_in_root(root, buf) then
-			return vim.api.nvim_buf_get_name(buf)
-		end
+local function unsaved_transition_error(action)
+	local workspace = current_workspace()
+	if not workspace or not workspace.unsaved_error then
+		return nil
+	end
+	return "active review has unsaved in-memory changes; cannot "
+		.. action
+		.. ". Export it if needed, or use :ReviewClose! to discard it only after verified recovery"
+end
+
+local function publishing_transition_error(action)
+	if next(publishing) then
+		return "TUICR publication is still in progress; cannot " .. action
 	end
 	return nil
 end
 
-local function active_workspace()
-	local workspace = review_diffview.workspace()
-	if workspace then
-		return workspace
-	end
-	local tabpage = vim.api.nvim_get_current_tabpage()
-	local link = review_source.get(tabpage)
-	workspace = link and link.workspace
-	if not workspace or workspaces[workspace.root] ~= workspace then
-		if link then
-			review_source.clear(tabpage)
-		end
-		return nil
-	end
-	return workspace
+local function workspace_for_key(expected)
+	local workspace = workspaces[expected]
+	return registered(workspace) and workspace or nil
 end
 
-local function workspace_session_key(workspace)
-	return workspace.root .. "\0" .. workspace.session.id
-end
-
-local function active_workspace_for_session(expected_key, action)
-	local workspace = active_workspace()
-	if not workspace or workspace_session_key(workspace) ~= expected_key then
+local function active_for_key(expected, action)
+	local workspace = current_workspace()
+	if not workspace or workspace_key(workspace) ~= expected then
 		notify("Active review changed while " .. action .. "; no changes were made", vim.log.levels.WARN)
 		return nil
 	end
 	return workspace
 end
 
-local function publication_key(workspace)
-	return workspace_session_key(workspace)
-end
-
-local function publication_active(workspace)
-	return publishing_sessions[publication_key(workspace)] ~= nil
-end
-
-local function root_publication_active(root)
-	for _, workspace in pairs(publishing_sessions) do
-		if workspace.root == root then
-			return true
+local function find_item(session, id)
+	for _, item in ipairs(session and session.items or {}) do
+		if item.id == id then
+			return item
 		end
 	end
-	return false
+	return nil
 end
 
-local function allow_mutation(workspace)
-	if publication_active(workspace) then
-		notify("Wait for the current TUICR publication to finish", vim.log.levels.WARN)
-		return false
-	end
-	if workspace.unsaved_error then
-		notify("This review has an unsaved conflict; export it before reopening the saved session", vim.log.levels.WARN)
-		return false
-	end
-	return true
-end
-
-local function allow_composer_mutation(workspace, interrupted)
-	if interrupted then
-		workspace.automatic_recovery = nil
-		workspace.recovery_exported = nil
-		return true
-	end
-	return allow_mutation(workspace)
-end
-
-local function composer_active()
-	return require("config.review_editor").has_active()
-end
-
-local function suspend_review_threads()
-	local loaded, trouble = pcall(require, "trouble")
-	if not loaded or type(trouble.is_open) ~= "function" then
-		review_threads = nil
-		return nil
-	end
-	local owner = review_threads
-	if not owner then
-		return nil
-	end
-	if not valid_tab(owner.tabpage) then
-		review_threads = nil
-		return nil
-	end
-	local original_tab = vim.api.nvim_get_current_tabpage()
-	local original_win = vim.api.nvim_get_current_win()
-	local state = {
-		owner = owner,
-		focused = vim.bo.filetype == "trouble" and vim.api.nvim_get_current_tabpage() == owner.tabpage,
-	}
-	vim.api.nvim_set_current_tabpage(owner.tabpage)
-	if not trouble.is_open({ mode = "review" }) then
-		review_threads = nil
-		if valid_tab(original_tab) then
-			vim.api.nvim_set_current_tabpage(original_tab)
+local function find_entry(workspace, identity)
+	for _, entry in ipairs(workspace.model.entries or {}) do
+		if entry.identity == identity then
+			return entry
 		end
-		return nil
-	end
-	local closed, close_err = pcall(trouble.close, { mode = "review" })
-	local remained_open = trouble.is_open({ mode = "review" })
-	if valid_tab(original_tab) then
-		vim.api.nvim_set_current_tabpage(original_tab)
-		if vim.api.nvim_win_is_valid(original_win) then
-			vim.api.nvim_set_current_win(original_win)
-		end
-	end
-	if not closed then
-		return nil, tostring(close_err)
-	end
-	if remained_open then
-		return nil, "Trouble review view remained open"
-	end
-	review_threads = nil
-	return state
-end
-
-local function restore_review_threads(state, attempts)
-	if not state then
-		return true
-	end
-	attempts = attempts or THREAD_RESTORE_ATTEMPTS
-	local owner = state.owner
-	local target = owner.review_host and owner.workspace.tabpage or owner.tabpage
-	if not valid_tab(target) then
-		if attempts > 1 then
-			vim.defer_fn(function()
-				restore_review_threads(state, attempts - 1)
-			end, THREAD_RESTORE_INTERVAL_MS)
-			return true
-		end
-		return false
-	end
-	local current_tab = vim.api.nvim_get_current_tabpage()
-	local current_win = vim.api.nvim_get_current_win()
-	vim.api.nvim_set_current_tabpage(target)
-	local loaded, trouble = pcall(require, "trouble")
-	owner.tabpage = target
-	review_threads = owner
-	local called = loaded and pcall(trouble.open, { mode = "review", focus = state.focused })
-	local opened = called and trouble.is_open({ mode = "review" })
-	if not state.focused and valid_tab(current_tab) then
-		vim.api.nvim_set_current_tabpage(current_tab)
-		if vim.api.nvim_win_is_valid(current_win) then
-			vim.api.nvim_set_current_win(current_win)
-		end
-	end
-	if not opened then
-		review_threads = nil
-	end
-	return opened
-end
-
-local function close_review_threads(workspace)
-	if not review_threads or review_threads.workspace ~= workspace then
-		return
-	end
-	if review_threads.review_host and not valid_tab(review_threads.tabpage) then
-		review_threads = nil
-		return
-	end
-	local _, err = suspend_review_threads()
-	if err then
-		notify("Could not close review threads: " .. err, vim.log.levels.ERROR)
-	end
-end
-
-local function thread_workspace()
-	local workspace = review_threads and review_threads.workspace
-	if workspace and workspaces[workspace.root] == workspace then
-		return workspace
 	end
 	return nil
 end
 
 local function root_for_command()
-	local workspace = active_workspace()
-	if workspace then
-		return workspace.root
-	end
-	return require("config.repo").current_root(0)
+	local root = repo.current_root(0)
+	local workspace = current_workspace()
+	return root or (workspace and workspace.root)
 end
 
-local function persist_unsaved_recovery(workspace)
-	if not workspace.unsaved_error or #workspace.session.items == 0 then
+local function buffer_in_root(root, buf)
+	if not valid_buf(buf) or vim.bo[buf].buftype ~= "" then
+		return false
+	end
+	local path = vim.api.nvim_buf_get_name(buf)
+	return path ~= "" and repo.contains(root, path)
+end
+
+local function update_panel(workspace)
+	if workspace.panel then
+		review_panel.refresh(workspace.panel, workspace)
+	end
+end
+
+local function refresh_trouble()
+	local ok, trouble = pcall(require, "trouble")
+	if ok and type(trouble.refresh) == "function" then
+		pcall(trouble.refresh, "review")
+	end
+end
+
+local function save_verified_recovery(root, session, markdown)
+	local receipt, save_err = review_store.save_recovery(root, session, markdown)
+	if not receipt then
+		return nil, save_err
+	end
+	local verified, verify_err = review_store.verify_recovery(root, receipt)
+	if not verified then
+		return nil, "recovery verification failed: " .. tostring(verify_err)
+	end
+	return receipt
+end
+
+local function recovery(workspace)
+	if not workspace.unsaved_error then
 		return true
 	end
-	if type(workspace.automatic_recovery) == "table" then
-		local verified = review_store.verify_recovery(workspace.root, workspace.automatic_recovery)
-		if verified then
-			return workspace.automatic_recovery
-		end
-	end
-	local markdown, render_err = review_export.render(workspace.session, true)
+	local markdown, render_err = review_export.render_recovery(workspace.session)
 	if not markdown then
 		return nil, render_err
 	end
-	local recovery, recovery_err = review_store.save_recovery(workspace.root, workspace.session, markdown)
-	if not recovery then
-		return nil, recovery_err
-	end
-	workspace.automatic_recovery = recovery
-	return recovery
+	local receipt, err = save_verified_recovery(workspace.root, workspace.session, markdown)
+	workspace.recovery = receipt
+	return receipt, err
 end
 
-local function save_session(workspace, session)
-	local saved, err = review_store.save(workspace.root, session)
+local function persistence_error(workspace, action, err)
+	local detail = message(err)
+	notify("Could not " .. action .. ": " .. detail .. "; live review was kept unchanged", vim.log.levels.ERROR)
+	return nil, detail
+end
+
+local function matching_persisted_snapshot(workspace)
+	local saved, load_err = review_store.load(workspace.root, workspace.session.id)
 	if not saved then
-		workspace.session = session
-		workspace.scope = session.scope
+		return nil, "could not load the persisted review: " .. tostring(load_err)
+	end
+	local live = workspace.session
+	local saved_scope_id = type(saved) == "table" and type(saved.scope) == "table" and saved.scope.id or nil
+	local live_scope_id = type(live.scope) == "table" and live.scope.id or nil
+	if
+		type(saved) ~= "table"
+		or saved.id ~= live.id
+		or saved.repo_root ~= workspace.root
+		or saved_scope_id ~= live_scope_id
+	then
+		return nil, "persisted review identity does not match the live workspace"
+	end
+	if saved.revision ~= live.revision then
+		return nil,
+			("review changed in another Neovim (live revision %s, persisted revision %s)"):format(
+				tostring(live.revision),
+				tostring(saved.revision)
+			)
+	end
+	if not vim.deep_equal(saved.bridge, live.bridge) then
+		return nil, "persisted TUICR link does not match the live review"
+	end
+	if not vim.deep_equal(saved, live) then
+		return nil, "persisted review content does not match the live revision"
+	end
+	return vim.deepcopy(saved)
+end
+
+local function verified_persisted_snapshot(workspace, action)
+	local saved, err = matching_persisted_snapshot(workspace)
+	if not saved then
+		return persistence_error(workspace, action, err)
+	end
+	return saved
+end
+
+local function save_mutation(workspace, changed)
+	local saved, err = review_store.save(workspace.root, changed)
+	if not saved then
+		workspace.session = changed
+		workspace.scope = changed.scope
 		workspace.unsaved_error = err
-		local recovery, recovery_err = persist_unsaved_recovery(workspace)
-		review_diffview.update_title(workspace)
+		local receipt, recovery_err = recovery(workspace)
+		local suffix = type(receipt) == "table" and "; recovery saved to " .. receipt.path
+			or "; recovery failed: " .. tostring(recovery_err)
+		notify("Could not save review: " .. tostring(err) .. suffix, vim.log.levels.ERROR)
+		update_panel(workspace)
 		M.refresh_marks(workspace)
-		local message = "Could not save review: " .. tostring(err)
-		if type(recovery) == "table" then
-			message = message .. "; complete recovery saved to " .. recovery.path
-		elseif #session.items > 0 then
-			message = message .. "; recovery failed: " .. tostring(recovery_err)
-		end
-		notify(message, vim.log.levels.ERROR)
+		refresh_trouble()
 		return nil, err
 	end
 	workspace.session = saved
 	workspace.scope = saved.scope
 	workspace.unsaved_error = nil
-	workspace.recovery_exported = nil
-	workspace.automatic_recovery = nil
-	review_diffview.update_title(workspace)
+	workspace.recovery = nil
+	update_panel(workspace)
 	M.refresh_marks(workspace)
-	local ok, trouble = pcall(require, "trouble")
-	if ok then
-		pcall(trouble.refresh, "review")
+	refresh_trouble()
+	return true
+end
+
+local function stale_now(workspace)
+	if workspace.scope.kind ~= "working" then
+		return false
+	end
+	local drift, err = review_scope.detect_drift(workspace.scope)
+	if not drift then
+		return nil, message(err)
+	end
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if valid_buf(buf) and vim.bo[buf].modified and buffer_in_root(workspace.root, buf) then
+			return true
+		end
+	end
+	return drift.stale
+end
+
+local function session_has_stale_location(session)
+	if session.stale then
+		return true
+	end
+	for _, item in ipairs(session.items or {}) do
+		if item.anchor and item.anchor.stale then
+			return true
+		end
+	end
+	return false
+end
+
+local function mark_stale(workspace)
+	if next(publishing) then
+		return nil, "TUICR publication is still in progress"
+	end
+	if workspace.session.stale then
+		return true
+	end
+	local changed = vim.deepcopy(workspace.session)
+	changed.stale = true
+	return save_mutation(workspace, changed)
+end
+
+local function allow_mutation(workspace)
+	if not registered(workspace) then
+		notify("No active review", vim.log.levels.ERROR)
+		return false
+	end
+	if next(publishing) then
+		notify("Wait for TUICR publication to finish", vim.log.levels.WARN)
+		return false
+	end
+	if workspace.unsaved_error then
+		notify("Review has an unsaved conflict; reopen the exact session", vim.log.levels.ERROR)
+		return false
+	end
+	local stale, err = stale_now(workspace)
+	if stale == nil then
+		notify("Could not check review drift: " .. err, vim.log.levels.ERROR)
+		return false
+	end
+	if stale or workspace.session.stale then
+		if stale then
+			mark_stale(workspace)
+		end
+		notify("Working review is stale; open a new exact scope before changing comments", vim.log.levels.ERROR)
+		return false
 	end
 	return true
 end
 
-local function load_or_create(root, scope)
-	local session, err = review_store.load(root, scope.id)
-	if session then
-		return session
-	end
-	if err and not tostring(err):find("missing", 1, true) then
-		return nil, err
-	end
-	return review_store.new(root, scope)
-end
-
-local function update_drift(session)
-	local drift, err = review_scope.detect_drift(session.scope)
-	if not drift then
-		return nil, err.message or err
-	end
-	local updated = vim.deepcopy(session)
-	updated.stale = drift.stale or (session.scope.kind == "working" and modified_buffer(session.repo_root) ~= nil)
-	return updated
-end
-
-local function composer_session(workspace, interrupted, stale_message)
-	local current, drift_err = update_drift(workspace.session)
-	if not current then
-		if not interrupted then
-			notify("Could not check review drift: " .. error_message(drift_err), vim.log.levels.ERROR)
-			return nil
-		end
-		current = vim.deepcopy(workspace.session)
-		current.stale = true
-	end
-	if current.stale and not interrupted then
-		if not workspace.session.stale then
-			save_session(workspace, current)
-		end
-		notify(stale_message, vim.log.levels.ERROR)
-		return nil
-	end
-	return current
-end
-
-local function open_workspace_view(workspace, mode, path, target)
-	local thread_state
-	if
-		valid_tab(workspace.tabpage)
-		and workspace.view_mode ~= mode
-		and review_threads
-		and review_threads.workspace == workspace
-	then
-		local close_err
-		thread_state, close_err = suspend_review_threads()
-		if close_err then
-			return nil, "could not suspend review threads: " .. close_err
-		end
-		workspace.pending_threads = thread_state
-	end
-	local opened, err = review_diffview.open(workspace, mode, path, nil, target)
-	if not opened and thread_state then
-		workspace.pending_threads = nil
-		restore_review_threads(thread_state)
-	end
-	return opened, err
-end
-
-local function start_workspace(root, session, mode, origin)
-	local workspace = {
-		root = root,
-		scope = session.scope,
-		session = session,
-		origin = origin,
-		view_mode = mode or "files",
-		context_mode = "hunks",
-	}
-	workspaces[root] = workspace
-	local opened, err = review_diffview.open(workspace, workspace.view_mode)
-	if not opened then
-		workspaces[root] = nil
-		if origin and valid_tab(origin.tabpage) then
-			vim.api.nvim_set_current_tabpage(origin.tabpage)
-			if vim.api.nvim_win_is_valid(origin.winid) then
-				vim.api.nvim_set_current_win(origin.winid)
+local function first_identity(model, preferred)
+	if preferred then
+		for _, entry in ipairs(model.entries or {}) do
+			if entry.identity == preferred then
+				return preferred
 			end
 		end
+	end
+	return model.entries[1] and model.entries[1].identity or nil
+end
+
+local function panel_callbacks(expected)
+	local function present(identity)
+		local workspace = workspace_for_key(expected)
+		local shown, err = M.present(identity, expected)
+		if not shown then
+			notify(err, vim.log.levels.ERROR)
+			return nil
+		end
+		local target = review_presenter.current_target(workspace.mode_state)
+		review_panel.hide(workspace.panel)
+		if target and valid_win(target.win) then
+			vim.api.nvim_set_current_win(target.win)
+		end
+		return workspace
+	end
+	return {
+		select_entry = function(identity)
+			present(identity)
+		end,
+		file_comment = function(identity)
+			if present(identity) then
+				M.file_comment()
+			end
+		end,
+		apply_commit = function(first, second)
+			local workspace = workspace_for_key(expected)
+			if not workspace then
+				return
+			end
+			local request, err = review_changes.selection_request(workspace.model, first, second)
+			if request then
+				M.open(request, workspace.root)
+			else
+				notify(message(err), vim.log.levels.ERROR)
+			end
+		end,
+		jump_comment = M.jump,
+		edit_comment = M.edit,
+		delete_comment = M.delete,
+		change_type = M.change_type,
+		reply_comment = M.reply,
+		toggle_resolution = M.toggle_resolution,
+		reanchor_comment = function(id, source_win)
+			return M.reanchor(id, source_win)
+		end,
+	}
+end
+
+local function disable_ui(workspace)
+	if workspace.panel then
+		review_panel.hide(workspace.panel)
+	end
+	if workspace.mode_state then
+		review_mode.disable(workspace.mode_state)
+	end
+	workspace.mode_on = false
+end
+
+local function focus_snapshot(workspace)
+	local win = vim.api.nvim_get_current_win()
+	local value = {
+		kind = "window",
+		tab = vim.api.nvim_get_current_tabpage(),
+		win = win,
+		buf = vim.api.nvim_get_current_buf(),
+	}
+	vim.api.nvim_win_call(win, function()
+		value.view = vim.fn.winsaveview()
+	end)
+	for name, pane in pairs(workspace and workspace.panel and workspace.panel.panes or {}) do
+		if pane.win == win then
+			value.kind = "panel"
+			value.pane = name
+			return value
+		end
+	end
+	local presentation = workspace and workspace.mode_state and workspace.mode_state.presentation
+	for _, name in ipairs({ "inline", "left", "right" }) do
+		local side = presentation and presentation[name]
+		if side and side.win == win then
+			value.kind = "presentation"
+			value.side = side.side
+			return value
+		end
+	end
+	return value
+end
+
+local function set_focus(win, snapshot, require_same_buffer)
+	if not valid_win(win) then
+		return false
+	end
+	local tab = vim.api.nvim_win_get_tabpage(win)
+	if valid_tab(tab) then
+		vim.api.nvim_set_current_tabpage(tab)
+	end
+	vim.api.nvim_set_current_win(win)
+	if snapshot.view and (not require_same_buffer or vim.api.nvim_win_get_buf(win) == snapshot.buf) then
+		vim.api.nvim_win_call(win, function()
+			vim.fn.winrestview(snapshot.view)
+		end)
+	end
+	return true
+end
+
+local function restore_focus(workspace, snapshot)
+	if not snapshot then
+		return false
+	end
+	if snapshot.kind == "panel" and workspace and review_panel.is_open(workspace.panel) then
+		return review_panel.focus(workspace.panel, snapshot.pane)
+	elseif snapshot.kind == "presentation" and workspace then
+		local presentation = workspace.mode_state.presentation
+		for _, name in ipairs({ "inline", "left", "right" }) do
+			local side = presentation and presentation[name]
+			if side and side.side == snapshot.side and set_focus(side.win, snapshot, false) then
+				return true
+			end
+		end
+	elseif snapshot.kind == "window" and set_focus(snapshot.win, snapshot, true) then
+		return true
+	end
+	local target = workspace and review_presenter.current_target(workspace.mode_state) or nil
+	return target and set_focus(target.win, snapshot, false) or false
+end
+
+local function restore_activation_origin(workspace, snapshot)
+	if snapshot.kind == "window" and set_focus(snapshot.win, snapshot, true) then
+		return
+	end
+	if
+		snapshot.kind == "panel"
+		and workspace
+		and workspace.panel
+		and set_focus(workspace.panel.source_win, snapshot, true)
+	then
+		return
+	end
+	if workspace and workspace.mode_state then
+		set_focus(workspace.mode_state.origin.win, snapshot, true)
+	end
+end
+
+local function ui_snapshot(workspace)
+	return {
+		mode_on = workspace.mode_on == true,
+		panel_visible = workspace.panel and review_panel.is_open(workspace.panel) or false,
+		panel_focus = workspace.panel and workspace.panel.focused or "files",
+		focus = focus_snapshot(workspace),
+	}
+end
+
+local function restore_ui(workspace, snapshot)
+	active = workspace
+	if snapshot.mode_on then
+		local enabled, enable_err = review_mode.enable(workspace.mode_state)
+		if not enabled then
+			return nil, enable_err
+		end
+		workspace.mode_on = true
+		if workspace.entry_identity then
+			local shown, show_err = M.present(workspace.entry_identity, workspace_key(workspace))
+			if not shown then
+				review_mode.disable(workspace.mode_state)
+				workspace.mode_on = false
+				return nil, show_err
+			end
+		end
+	else
+		workspace.mode_on = false
+	end
+	if snapshot.panel_visible and not review_panel.open(workspace.panel, snapshot.panel_focus) then
+		return nil, "could not restore the review panel"
+	end
+	restore_focus(workspace, snapshot.focus)
+	M.refresh_marks(workspace)
+	return true
+end
+
+local function activate(root, session, model)
+	local blocked = publishing_transition_error("replace the active review") or unsaved_transition_error("replace it")
+	if blocked then
+		return nil, blocked
+	end
+	local expected = key(root, session.id)
+	local existing = workspaces[expected]
+	local previous = current_workspace()
+	local opening_focus = focus_snapshot(previous)
+	local previous_ui = previous and ui_snapshot(previous) or nil
+	if previous then
+		disable_ui(previous)
+	end
+	restore_activation_origin(previous, opening_focus)
+	local workspace = {
+		root = root,
+		layout = existing and existing.layout or "inline",
+		context = existing and existing.context or "hunks",
+		scope = session.scope,
+		session = session,
+		model = model,
+		entry_identity = first_identity(model, existing and existing.entry_identity),
+	}
+	workspace.mode_state = review_mode.new(workspace)
+	workspace.mode_on = true
+	workspace.panel = review_panel.new(workspace, panel_callbacks(expected))
+	workspaces[expected] = workspace
+	active = workspace
+
+	local function rollback(err)
+		review_panel.close(workspace.panel)
+		review_mode.disable(workspace.mode_state)
+		workspaces[expected] = existing
+		active = previous
+		if previous then
+			local restored, restore_err = restore_ui(previous, previous_ui)
+			if not restored then
+				disable_ui(previous)
+				return nil, tostring(err) .. "; previous review could not be restored: " .. tostring(restore_err)
+			end
+		else
+			M.refresh_marks(nil)
+		end
 		return nil, err
 	end
+
+	local enabled, enable_err = review_mode.enable(workspace.mode_state)
+	if not enabled then
+		return rollback(enable_err)
+	end
+	if workspace.entry_identity then
+		local shown, show_err = M.present(workspace.entry_identity, expected)
+		if not shown then
+			return rollback(show_err)
+		end
+	end
+	if not review_panel.open(workspace.panel, "files") then
+		return rollback("could not open the review panel")
+	end
+	M.refresh_marks(workspace)
 	return workspace
 end
 
-local function replace_workspace(root, session, mode)
-	if root_publication_active(root) then
-		return nil, "TUICR publication is still in progress for this repository"
+local function open_resolved(root, scope, supplied)
+	local blocked = publishing_transition_error("open another review")
+		or unsaved_transition_error("open another review")
+	if blocked then
+		return nil, blocked
 	end
-	if composer_active() then
-		return nil, "review composer has unsent text; save or cancel it first"
-	end
-	local existing = workspaces[root]
-	if existing and existing.unsaved_error then
-		return nil, "current review has unsaved comments; export them before replacing it"
-	end
-	if existing and existing.session.id == session.id and valid_tab(existing.tabpage) then
-		vim.api.nvim_set_current_tabpage(existing.tabpage)
-		local opened, err = open_workspace_view(existing, mode or existing.view_mode)
-		if not opened then
-			return nil, err
-		end
-		return existing
-	end
-	local origin = {
-		tabpage = vim.api.nvim_get_current_tabpage(),
-		winid = vim.api.nvim_get_current_win(),
-	}
-	local thread_state
-	if existing and review_threads and review_threads.workspace == existing then
-		local thread_err
-		thread_state, thread_err = suspend_review_threads()
-		if thread_err then
-			return nil, "could not suspend review threads: " .. thread_err
-		end
-	end
-	if existing and valid_tab(existing.tabpage) then
-		existing.replacing = true
-		vim.api.nvim_set_current_tabpage(existing.tabpage)
-		local closed, err = review_diffview.close()
-		if not closed then
-			existing.replacing = nil
-			if thread_state then
-				restore_review_threads(thread_state)
-			end
-			if valid_tab(origin.tabpage) then
-				vim.api.nvim_set_current_tabpage(origin.tabpage)
-				if vim.api.nvim_win_is_valid(origin.winid) then
-					vim.api.nvim_set_current_win(origin.winid)
-				end
-			end
-			return nil, err
-		end
-	end
-	local replacement, start_err = start_workspace(root, session, mode, origin)
-	if not replacement then
-		if existing then
-			review_source.clear_workspace(existing)
-		end
-		return nil, start_err
-	end
-	if existing then
-		review_source.migrate(existing, replacement)
-	end
-	if thread_state then
-		thread_state.owner.workspace = replacement
-		if not restore_review_threads(thread_state) then
-			notify("Could not restore review threads after changing scope", vim.log.levels.ERROR)
-		end
-	end
-	return replacement
-end
-
-local function open_session(root, session, mode)
-	if publishing_sessions[root .. "\0" .. session.id] then
-		return nil, "TUICR publication is still in progress for this review"
-	end
-	local checked, drift_err = update_drift(session)
-	if not checked then
-		return nil, drift_err
-	end
-	if checked.scope.kind == "working" and checked.stale then
-		return nil,
-			"working-tree review is stale or has unsaved buffers; save changes and open a new working scope",
-			checked
-	end
-	local saved, save_err = review_store.save(root, checked)
-	if not saved then
-		return nil, save_err
-	end
-	return replace_workspace(root, saved, mode)
-end
-
-local function open_request(root, request, mode)
-	local scope, scope_err = review_scope.resolve(root, request)
-	if not scope then
-		return nil, scope_err.message or scope_err
-	end
-	local session, session_err = load_or_create(root, scope)
+	local session = supplied
+	local created = false
 	if not session then
-		return nil, session_err
+		local load_err
+		session, load_err = review_store.load(root, scope.id)
+		if not session and load_err and not tostring(load_err):find("missing", 1, true) then
+			return nil, load_err
+		end
+		if not session then
+			session, load_err = review_store.new(root, scope)
+			created = true
+		end
+		if not session then
+			return nil, load_err
+		end
 	end
-	return open_session(root, session, mode)
+	if session.scope.kind == "working" and session.stale then
+		return nil, "saved working review is stale; use :ReviewOpen working for a new exact scope"
+	end
+	local model, model_err = review_changes.build(root, scope)
+	if not model then
+		return nil, message(model_err)
+	end
+	if created then
+		local saved, save_err = review_store.save(root, session)
+		if not saved then
+			return nil, save_err
+		end
+		session = saved
+	end
+	return activate(root, session, model)
 end
 
-local function report_open(root, request, mode)
-	local workspace, err = open_request(root, request, mode)
+function M.open(request, root)
+	local blocked = publishing_transition_error("open another review")
+		or unsaved_transition_error("open another review")
+	if blocked then
+		notify("Could not open review: " .. blocked, vim.log.levels.ERROR)
+		return nil, blocked
+	end
+	root = root or root_for_command()
+	if not root then
+		notify("Current buffer is not inside a Git repository", vim.log.levels.ERROR)
+		return nil
+	end
+	local scope, scope_err = review_scope.resolve(root, request or { kind = "branch" })
+	if not scope then
+		notify("Could not resolve review scope: " .. message(scope_err), vim.log.levels.ERROR)
+		return nil
+	end
+	local workspace, err = open_resolved(root, scope)
 	if not workspace then
 		notify("Could not open review: " .. tostring(err), vim.log.levels.ERROR)
 	end
-	return workspace
+	return workspace, err
 end
 
-local function item_label(item)
-	local anchor = item.anchor
-	local location = anchor.path or "General"
-	if anchor.start_line then
-		local last = anchor.end_line or anchor.start_line
-		location = location .. ":" .. anchor.start_line
-		if last ~= anchor.start_line then
-			location = location .. "-" .. last
-		end
-	elseif anchor.path then
-		location = location .. " [file]"
+function M.present(identity, expected)
+	local workspace = expected and workspace_for_key(expected) or current_workspace()
+	if not workspace or workspace ~= current_workspace() then
+		return nil, "review session is no longer active"
 	end
-	local first_line = item.body:match("[^\n]+") or item.body
-	return string.format("%02d  %-10s  %-9s  %s  %s", item.sequence, item.type, item.status, location, first_line)
+	local entry = find_entry(workspace, identity)
+	if not entry then
+		return nil, "review entry is no longer part of the exact model"
+	end
+	if not workspace.mode_on then
+		local enabled, err = review_mode.enable(workspace.mode_state)
+		if not enabled then
+			return nil, err
+		end
+		workspace.mode_on = true
+	end
+	local shown, err = review_presenter.show(workspace.mode_state, entry, {
+		layout = workspace.layout,
+		context = workspace.context,
+	})
+	if not shown then
+		return nil, err
+	end
+	local target = review_presenter.current_target(workspace.mode_state)
+	review_panel.update_source(workspace.panel, target and target.win or nil)
+	workspace.entry_identity = identity
+	update_panel(workspace)
+	M.refresh_marks(workspace)
+	return true
 end
 
-local function select_item(workspace, prompt, predicate, callback)
-	local items = {}
-	for _, item in ipairs(workspace.session.items) do
-		if not predicate or predicate(item) then
-			items[#items + 1] = item
+function M.mode(value)
+	local workspace = current_workspace()
+	if not workspace then
+		notify("No active review", vim.log.levels.ERROR)
+		return nil
+	end
+	value = value or "toggle"
+	if value == "toggle" then
+		value = workspace.mode_on and "off" or "on"
+	end
+	if value == "off" then
+		if workspace.mode_on then
+			review_mode.disable(workspace.mode_state)
+			workspace.mode_on = false
+		end
+		return true
+	elseif value ~= "on" then
+		notify("Usage: ReviewMode [on|off|toggle]", vim.log.levels.ERROR)
+		return nil
+	end
+	if not workspace.mode_on then
+		local enabled, err = review_mode.enable(workspace.mode_state)
+		if not enabled then
+			notify(err, vim.log.levels.ERROR)
+			return nil
+		end
+		workspace.mode_on = true
+	end
+	if workspace.entry_identity then
+		local shown, err = M.present(workspace.entry_identity)
+		if not shown then
+			notify(err, vim.log.levels.ERROR)
+			return nil
 		end
 	end
-	if #items == 0 then
-		notify("No matching review comments", vim.log.levels.INFO)
+	return true
+end
+
+function M.panel(action)
+	local workspace = current_workspace()
+	if not workspace then
+		notify("No active review", vim.log.levels.ERROR)
+		return false
+	end
+	action = action or "toggle"
+	if action == "toggle" then
+		return review_panel.toggle(workspace.panel)
+	elseif action == "open" then
+		return review_panel.open(workspace.panel)
+	elseif action == "close" then
+		return review_panel.hide(workspace.panel)
+	elseif action == "files" or action == "commits" or action == "comments" then
+		return review_panel.focus(workspace.panel, action)
+	end
+	notify("Usage: ReviewPanel [toggle|open|close|files|commits|comments]", vim.log.levels.ERROR)
+	return false
+end
+
+function M.files()
+	return M.panel("files")
+end
+
+function M.commits()
+	return M.panel("commits")
+end
+
+function M.comments()
+	return M.panel("comments")
+end
+
+M.threads = M.comments
+
+local function presentation_option(name, value, allowed)
+	local workspace = current_workspace()
+	if not workspace then
+		return nil, "No active review"
+	end
+	if not value or value == "" then
+		value = workspace[name] == allowed[1] and allowed[2] or allowed[1]
+	end
+	if value ~= allowed[1] and value ~= allowed[2] then
+		return nil, name .. " must be " .. allowed[1] .. " or " .. allowed[2]
+	end
+	workspace[name] = value
+	if workspace.mode_on and workspace.entry_identity then
+		local shown, err = M.present(workspace.entry_identity)
+		if not shown then
+			return nil, err
+		end
+	end
+	update_panel(workspace)
+	return true
+end
+
+function M.layout(value)
+	local ok, err = presentation_option("layout", value, { "inline", "split" })
+	if not ok then
+		notify(err, vim.log.levels.ERROR)
+	end
+	return ok, err
+end
+
+function M.context(value)
+	local ok, err = presentation_option("context", value, { "hunks", "full" })
+	if not ok then
+		notify(err, vim.log.levels.ERROR)
+	end
+	return ok, err
+end
+
+function M.code()
+	local workspace = current_workspace()
+	if not workspace then
+		notify("No active review", vim.log.levels.ERROR)
 		return
 	end
-	vim.ui.select(items, {
-		prompt = prompt,
-		format_item = item_label,
-	}, callback)
+	local target = review_presenter.current_target(workspace.mode_state)
+	if target and valid_win(target.win) then
+		vim.api.nvim_set_current_win(target.win)
+	elseif workspace.entry_identity then
+		local shown, err = M.present(workspace.entry_identity)
+		if not shown then
+			notify(err, vim.log.levels.ERROR)
+		end
+	end
 end
 
-local function find_session_item(session, id)
-	for _, item in ipairs(session.items) do
-		if item.id == id then
-			return item
+local function presentation_target(workspace, win)
+	local presentation = workspace.mode_state and workspace.mode_state.presentation
+	if not presentation then
+		return nil
+	end
+	win = win or vim.api.nvim_get_current_win()
+	for _, name in ipairs({ "left", "right", "inline" }) do
+		local side = presentation[name]
+		if side and side.win == win then
+			local old = side.side == "old"
+			return {
+				entry = presentation.entry,
+				buf = side.buf,
+				win = side.win,
+				path = old and presentation.entry.old_path or presentation.entry.new_path,
+				side = old and "left" or "right",
+				layer = presentation.entry.layer or "history",
+			}
 		end
 	end
 	return nil
 end
 
-local function find_item(workspace, id)
-	return find_session_item(workspace.session, id)
+local function relative_path(workspace, buf)
+	if not valid_buf(buf) or vim.bo[buf].buftype ~= "" then
+		return nil
+	end
+	local name = vim.api.nvim_buf_get_name(buf)
+	return name ~= "" and repo.relative_existing(workspace.root, name) or nil
 end
 
-local function with_item(workspace, id, prompt, predicate, callback)
-	if id and id ~= "" then
-		local item = find_item(workspace, id)
-		if not item or (predicate and not predicate(item)) then
-			notify("Review comment is unavailable for this action", vim.log.levels.ERROR)
-			return
+local function normal_targets(workspace, buf, win)
+	local path = relative_path(workspace, buf)
+	local targets = {}
+	if not path then
+		return targets
+	end
+	if vim.bo[buf].modified then
+		return targets
+	end
+	local contents = buffer_text(buf)
+	for _, entry in ipairs(workspace.model.entries or {}) do
+		if
+			entry.new_path == path
+			and not entry.deleted
+			and type(entry.new_text) == "string"
+			and contents == entry.new_text
+		then
+			targets[#targets + 1] = {
+				entry = entry,
+				buf = buf,
+				win = win,
+				path = path,
+				side = "right",
+				layer = entry.layer or "history",
+			}
+		elseif
+			entry.old_path == path
+			and entry.deleted
+			and type(entry.old_text) == "string"
+			and contents == entry.old_text
+		then
+			targets[#targets + 1] = {
+				entry = entry,
+				buf = buf,
+				win = win,
+				path = path,
+				side = "left",
+				layer = entry.layer or "history",
+			}
 		end
-		callback(item)
+	end
+	return targets
+end
+
+local function choose_target(workspace, captured, callback)
+	if
+		not valid_win(captured.win)
+		or not valid_buf(captured.buf)
+		or vim.api.nvim_win_get_buf(captured.win) ~= captured.buf
+	then
+		callback(nil, "review target changed before it could be captured")
 		return
 	end
-	select_item(workspace, prompt, predicate, function(item)
-		if item then
-			callback(item)
-		end
-	end)
+	local target = presentation_target(workspace, captured.win)
+	if target and target.buf == captured.buf then
+		callback(target)
+		return
+	end
+	local targets = normal_targets(workspace, captured.buf, captured.win)
+	if #targets == 0 then
+		callback(nil, "current buffer is not represented in the active review")
+	elseif #targets == 1 then
+		callback(targets[1])
+	else
+		vim.ui.select(targets, {
+			prompt = "Review layer",
+			format_item = function(value)
+				return string.format("[%s] %s", value.layer, value.path)
+			end,
+		}, function(selected)
+			callback(selected, selected and nil or "review layer selection was cancelled")
+		end)
+	end
 end
 
 local function context_for_buffer(buf, first, last)
-	local line_count = vim.api.nvim_buf_line_count(buf)
+	local count = vim.api.nvim_buf_line_count(buf)
 	local context_first = math.max(1, first - 3)
-	local context_last = math.min(line_count, last + 3)
-	local lines = vim.api.nvim_buf_get_lines(buf, context_first - 1, context_last, false)
-	local context = table.concat(lines, "\n")
+	local context_last = math.min(count, last + 3)
+	local context = table.concat(vim.api.nvim_buf_get_lines(buf, context_first - 1, context_last, false), "\n")
 	if context == "" then
-		return "\n"
+		context = "\n"
 	end
-	local limit = review_store.max_anchor_context
-	if #context <= limit then
-		return context
-	end
-	local selected = {}
-	for index = first - context_first + 1, last - context_first + 1 do
-		selected[#selected + 1] = lines[index]
-	end
-	context = table.concat(selected, "\n")
-	if context == "" then
-		return "\n"
-	end
-	local boundary = math.min(#context, limit)
-	while boundary > 0 do
-		local byte = context:byte(boundary + 1)
-		if not byte or byte < 128 or byte > 191 then
-			break
+	if #context > review_store.max_anchor_context then
+		context = table.concat(vim.api.nvim_buf_get_lines(buf, first - 1, last, false), "\n")
+		local truncated, truncate_err = review_store.truncate_utf8(context, review_store.max_anchor_context)
+		if not truncated then
+			return nil, "could not capture valid UTF-8 review context: " .. tostring(truncate_err)
 		end
-		boundary = boundary - 1
+		context = truncated ~= "" and truncated or "\n"
 	end
-	return context:sub(1, boundary)
+	return context
 end
 
-local function current_anchor(workspace, first, last)
-	if workspace.view_mode == "history" then
-		return nil, "Commit history is browse-only; use :ReviewFiles before commenting"
-	end
-	local target, err = review_diffview.current_target()
-	if not target then
-		return nil, err
-	end
-	local line_count = vim.api.nvim_buf_line_count(target.bufnr)
-	local range_first = math.min(first, last)
-	local range_last = math.max(first, last)
-	first = math.max(1, math.min(range_first, line_count))
-	last = math.max(first, math.min(range_last, line_count))
-	local context = context_for_buffer(target.bufnr, first, last)
-	return {
-		path = target.path,
-		side = target.side,
-		layer = target.layer,
-		start_line = first,
-		end_line = last,
-		context = context,
-		context_hash = vim.fn.sha256(context):lower(),
-		stale = workspace.session.stale,
-	}
-end
-
-local function current_file_anchor(workspace)
-	if workspace.view_mode == "history" then
-		return nil, "Commit history is browse-only; use :ReviewFiles before commenting"
-	end
-	local target, err = review_diffview.current_target({ allow_panel = true })
-	if not target then
-		return nil, err
-	end
-	return {
+local function make_anchor(workspace, target, kind, first, last)
+	local anchor = {
+		kind = kind,
 		path = target.path,
 		side = target.side,
 		layer = target.layer,
 		stale = workspace.session.stale,
 	}
-end
-
-local function choose_type(callback)
-	vim.ui.select(REVIEW_TYPES, {
-		prompt = "Review comment type",
-		format_item = function(value)
-			return value:sub(1, 1):upper() .. value:sub(2)
-		end,
-	}, callback)
-end
-
-local function anchor_location(item)
-	local anchor = item.anchor
-	if type(anchor) ~= "table" then
-		return nil
-	end
-	return {
-		path = anchor.path,
-		side = anchor.side,
-		layer = anchor.layer,
-		line = anchor.start_line,
-	}
-end
-
-local function contains_location(anchor, location)
-	if not anchor or not location then
-		return false
-	end
-	local first = anchor.start_line
-	local last = anchor.end_line or first
-	if type(first) ~= "number" or type(last) ~= "number" then
-		return false
-	end
-	first, last = math.min(first, last), math.max(first, last)
-	return anchor.path == location.path
-		and anchor.side == location.side
-		and anchor.layer == location.layer
-		and first <= location.line
-		and location.line <= last
-end
-
-local function navigable_item(workspace, item)
-	local location = anchor_location(item)
-	return location ~= nil
-		and not workspace.session.stale
-		and not item.anchor.stale
-		and type(location.path) == "string"
-		and location.path ~= ""
-		and type(location.side) == "string"
-		and type(location.layer) == "string"
-		and (location.line == nil or type(location.line) == "number")
-end
-
-local function current_line_candidates(workspace, session, predicate)
-	if workspace.view_mode == "history" then
-		return nil, nil, "Commit history is browse-only; use :ReviewFiles before changing comments"
-	end
-	if session.stale then
-		return nil, nil, "Review is stale; open a new scope before changing comments"
-	end
-	local target, target_err = review_diffview.current_target()
-	if not target then
-		return nil, nil, target_err
-	end
-	local location = {
-		path = target.path,
-		side = target.side,
-		layer = target.layer,
-		line = vim.api.nvim_win_get_cursor(target.winid)[1],
-	}
-	local matches = {}
-	local eligible = {}
-	for _, item in ipairs(session.items) do
-		if contains_location(item.anchor, location) then
-			matches[#matches + 1] = item
-			if not item.anchor.stale and (not predicate or predicate(item)) then
-				eligible[#eligible + 1] = item
-			end
+	if kind == "range" then
+		local count = vim.api.nvim_buf_line_count(target.buf)
+		first, last = math.min(first, last), math.max(first, last)
+		anchor.start_line = math.max(1, math.min(first, count))
+		anchor.end_line = math.max(anchor.start_line, math.min(last, count))
+		local context, context_err = context_for_buffer(target.buf, anchor.start_line, anchor.end_line)
+		if not context then
+			return nil, context_err
 		end
+		anchor.context = context
+		anchor.context_hash = vim.fn.sha256(anchor.context):lower()
 	end
-	if #matches == 0 then
-		return nil, nil, "No review comment on the current line"
-	end
-	if #eligible == 0 then
-		return nil, nil, "The review comment on the current line is unavailable for this action"
-	end
-	return eligible, location
+	return anchor
 end
 
-local function current_line_item_label(item)
-	local anchor = item.anchor
-	local first = math.min(anchor.start_line, anchor.end_line or anchor.start_line)
-	local last = math.max(anchor.start_line, anchor.end_line or anchor.start_line)
-	local location = string.format("%s:%d", anchor.path, first)
-	if last ~= first then
-		location = location .. "-" .. last
-	end
-	local first_line = item.body:match("[^\n]+") or item.body
-	return string.format("%02d  %-10s  %-9s  %s  %s", item.sequence, item.type, item.status, location, first_line)
+local function capture(first, last)
+	return {
+		win = vim.api.nvim_get_current_win(),
+		buf = vim.api.nvim_get_current_buf(),
+		first = first,
+		last = last,
+	}
 end
 
-local function select_current_line_item(items, prompt, callback)
-	if #items == 1 then
-		callback(items[1], false)
+local function composer_recovery(workspace, title, body, anchor)
+	local markdown = review_export.render(workspace.session, true) or "# Code review recovery"
+	local text = table.concat({ markdown, "", "## Interrupted composer", "", title, "", body }, "\n")
+	local receipt, err = save_verified_recovery(workspace.root, workspace.session, text)
+	if not receipt then
+		notify("Could not save interrupted review comment: " .. tostring(err), vim.log.levels.ERROR)
+		return false
+	end
+	workspace.recovery = receipt
+	return true
+end
+
+local function compose(workspace, options, callback)
+	options.recover = function(body, selected_type)
+		return composer_recovery(workspace, options.title .. " " .. tostring(selected_type or ""), body, options.anchor)
+	end
+	return review_editor.compose(options, callback)
+end
+
+local function valid_type(value)
+	return value == nil or vim.tbl_contains(REVIEW_TYPES, value)
+end
+
+local function add_from_capture(workspace, captured, requested_type, kind)
+	if not allow_mutation(workspace) then
 		return
 	end
-	vim.ui.select(items, {
-		prompt = prompt,
-		format_item = current_line_item_label,
-	}, function(item)
-		if item then
-			callback(item, true)
+	local expected = workspace_key(workspace)
+	choose_target(workspace, captured, function(target, target_err)
+		workspace = active_for_key(expected, "selecting a review target")
+		if not workspace then
+			return
+		end
+		if not target then
+			notify(target_err, vim.log.levels.ERROR)
+			return
+		end
+		local target_visible = valid_win(target.win) and vim.api.nvim_win_get_buf(target.win) == target.buf
+		if not target_visible or review_panel.is_open(workspace.panel) then
+			local shown, show_err = M.present(target.entry.identity, expected)
+			if not shown then
+				notify(show_err, vim.log.levels.ERROR)
+				return
+			end
+			local presented = presentation_target(workspace)
+			review_panel.hide(workspace.panel)
+			target = presented
+			if not target then
+				notify("Could not focus the selected review side", vim.log.levels.ERROR)
+				return
+			end
+			local line = math.max(1, math.min(captured.first, vim.api.nvim_buf_line_count(target.buf)))
+			vim.api.nvim_set_current_win(target.win)
+			vim.api.nvim_win_set_cursor(target.win, { line, 0 })
+		end
+		local anchor, anchor_err = make_anchor(workspace, target, kind, captured.first, captured.last)
+		if not anchor then
+			notify(anchor_err, vim.log.levels.ERROR)
+			return
+		end
+		compose(workspace, {
+			title = "New",
+			type_cycle = REVIEW_TYPES,
+			selected_type = requested_type or REVIEW_TYPES[1],
+			source_win = target.win,
+			anchor_range = { first = anchor.start_line, last = anchor.end_line },
+			anchor = anchor,
+		}, function(body, interrupted, selected_type)
+			if not body then
+				return true
+			end
+			local current = active_for_key(expected, "composing a review comment")
+			if not current or (not interrupted and not allow_mutation(current)) then
+				return false
+			end
+			local changed, err = review_store.add(current.session, {
+				type = selected_type or requested_type or REVIEW_TYPES[1],
+				body = body,
+				anchor = anchor,
+			})
+			if not changed then
+				notify(err, vim.log.levels.ERROR)
+				return false
+			end
+			return save_mutation(current, changed) == true
+		end)
+	end)
+end
+
+local function choose_saved(root, callback)
+	local sessions, err = review_store.list(root)
+	if not sessions then
+		notify("Could not list review sessions: " .. tostring(err), vim.log.levels.ERROR)
+		return
+	end
+	vim.ui.select(sessions, {
+		prompt = "Saved review session",
+		format_item = function(session)
+			return string.format("%s · %d comments", session.scope.label, #session.items)
+		end,
+	}, function(session)
+		if not session then
+			return
+		end
+		local workspace, open_err = open_resolved(root, session.scope, session)
+		if not workspace then
+			notify("Could not open saved review: " .. tostring(open_err), vim.log.levels.ERROR)
+		elseif callback then
+			callback(workspace)
 		end
 	end)
 end
 
-local function resolve_current_line_item(workspace, session, id, predicate)
-	local items, _, item_err = current_line_candidates(workspace, session, predicate)
-	if not items then
-		return nil, item_err
-	end
-	for _, item in ipairs(items) do
-		if item.id == id then
-			return item
+local function user_input(prompt, callback)
+	vim.ui.input({ prompt = prompt }, function(value)
+		if value and vim.trim(value) ~= "" then
+			callback(vim.trim(value))
 		end
-	end
-	return nil, "The review comment on the current line is unavailable for this action"
+	end)
 end
 
-local function composer_recovery(workspace, title, body, anchor)
-	local rendered = review_export.render(workspace.session, true)
-	local lines = rendered and { rendered }
-		or {
-			"# Code review recovery",
-			"",
-			"- Repository: `" .. workspace.root .. "`",
-			"- Scope: " .. workspace.scope.label,
-		}
-	vim.list_extend(lines, { "", "## Interrupted composer", "", "- Action: " .. title })
-	if anchor and anchor.path then
-		local location = anchor.path .. (anchor.start_line and ":" .. anchor.start_line or "")
-		lines[#lines + 1] = "- Location: `" .. location .. "`"
-	end
-	vim.list_extend(lines, { "", body })
-	if anchor and anchor.context and anchor.context ~= "" then
-		vim.list_extend(lines, { "", "Context:", "" })
-		for _, line in ipairs(vim.split(anchor.context, "\n", { plain = true })) do
-			lines[#lines + 1] = "    " .. line
-		end
-	end
-	local recovery, err = review_store.save_recovery(workspace.root, workspace.session, table.concat(lines, "\n"))
-	if not recovery then
-		notify("Could not save interrupted review comment: " .. tostring(err), vim.log.levels.ERROR)
-		return false
-	end
-	workspace.automatic_recovery = recovery
-	notify("Interrupted review comment saved to " .. recovery.path, vim.log.levels.WARN)
-	return true
-end
-
-local function compose(workspace, title, body, anchor, callback, selected_type)
-	require("config.review_editor").compose({
-		title = title,
-		body = body,
-		type_cycle = selected_type and REVIEW_TYPES or nil,
-		selected_type = selected_type,
-		recover = function(draft, recovered_type)
-			local recovery_title = title .. (recovered_type and " " .. recovered_type or "")
-			return composer_recovery(workspace, recovery_title, draft, anchor)
-		end,
-	}, callback)
-end
-
-local function refresh_current_diff()
-	local ok, actions = pcall(require, "diffview.actions")
-	if ok and type(actions.refresh_files) == "function" then
-		actions.refresh_files()
-	end
-end
-
-local function focus_item(workspace, item)
-	if workspace.session.stale or item.anchor.stale or not valid_tab(workspace.tabpage) or not item.anchor.path then
-		return false
-	end
-	vim.api.nvim_set_current_tabpage(workspace.tabpage)
-	local target = {
-		current_path = item.anchor.path,
-		layer = item.anchor.layer,
-		side = item.anchor.side,
-	}
-	if item.anchor.start_line then
-		target.line = item.anchor.start_line
-		target.column = (item.anchor.start_column or 1) - 1
-	end
-	if workspace.view_mode == "history" then
-		local opened = open_workspace_view(workspace, "files", item.anchor.path, target)
-		return opened == true
-	end
-	return review_diffview.select_file(item.anchor.path, item.anchor.layer, target)
-end
-
-local function source_workspace()
-	local existing = active_workspace()
-	if existing then
-		return existing
-	end
-	local root = require("config.repo").current_root(0)
-	return root and workspaces[root] or nil
-end
-
-local function open_scope_picker(root)
+local function scope_picker(root, callback)
 	local choices = {
 		{ label = "Branch · default branch…HEAD", action = "branch" },
 		{ label = "Working tree · staged / unstaged / untracked", action = "working" },
 		{ label = "Commit…", action = "commit" },
 		{ label = "Range…", action = "range" },
-		{ label = "Saved review session…", action = "sessions" },
-		{ label = "TUICR round…", action = "tuicr" },
+		{ label = "Saved review session…", action = "saved" },
 	}
+	local function opened(request)
+		local workspace = M.open(request, root)
+		if workspace and callback then
+			callback(workspace)
+		end
+	end
 	vim.ui.select(choices, {
 		prompt = "Review scope",
-		format_item = function(choice)
-			return choice.label
+		format_item = function(value)
+			return value.label
 		end,
 	}, function(choice)
 		if not choice then
 			return
 		elseif choice.action == "branch" or choice.action == "working" then
-			report_open(root, { kind = choice.action })
-		elseif choice.action == "sessions" then
-			M.sessions(root)
-		elseif choice.action == "tuicr" then
-			M.link_tuicr(nil, root)
+			opened({ kind = choice.action })
 		elseif choice.action == "commit" then
-			vim.ui.input({ prompt = "Commit revision: ", default = "HEAD" }, function(revision)
-				if revision and revision ~= "" then
-					report_open(root, { kind = "commit", rev = revision })
-				end
+			user_input("Commit: ", function(revision)
+				opened({ kind = "commit", rev = revision })
+			end)
+		elseif choice.action == "range" then
+			user_input("Range from: ", function(from)
+				user_input("Range to: ", function(to)
+					opened({ kind = "range", from = from, to = to })
+				end)
 			end)
 		else
-			vim.ui.input({ prompt = "Range start: " }, function(from)
-				if not from or from == "" then
-					return
-				end
-				vim.ui.input({ prompt = "Range end: ", default = "HEAD" }, function(to)
-					if to and to ~= "" then
-						report_open(root, { kind = "range", from = from, to = to })
-					end
-				end)
-			end)
+			choose_saved(root, callback)
 		end
 	end)
 end
 
----Open a saved session picker for one repository.
----@param root? string
-function M.sessions(root)
-	root = root or root_for_command()
+function M.comment(first, last, requested_type)
+	if not valid_type(requested_type) then
+		notify("Usage: ReviewComment [" .. table.concat(REVIEW_TYPES, "|") .. "]", vim.log.levels.ERROR)
+		return
+	end
+	first = first or vim.fn.line(".")
+	local captured = capture(first, last or first)
+	local workspace = current_workspace()
+	if workspace then
+		add_from_capture(workspace, captured, requested_type, "range")
+		return
+	end
+	local root = repo.current_root(captured.buf)
 	if not root then
-		notify("Current buffer is not inside a Git repository", vim.log.levels.ERROR)
+		notify("No active review and current buffer is not in a Git repository", vim.log.levels.ERROR)
 		return
 	end
-	local sessions, err = review_store.list(root)
-	if not sessions then
-		notify("Could not list reviews: " .. tostring(err), vim.log.levels.ERROR)
-		return
-	end
-	if #sessions == 0 then
-		notify("No saved review sessions for this repository")
-		return
-	end
-	vim.ui.select(sessions, {
-		prompt = "Saved review sessions",
-		format_item = function(session)
-			local stale = session.stale and " [stale]" or ""
-			return session.scope.label .. stale .. " · " .. #session.items .. " comments"
-		end,
-	}, function(session)
-		if session then
-			local workspace, open_err, checked = open_session(root, session)
-			if workspace then
-				return
-			end
-			checked = checked or update_drift(session)
-			if checked and checked.scope.kind == "working" and checked.stale then
-				local stale_workspace = { root = root, scope = checked.scope, session = checked }
-				if not save_session(stale_workspace, checked) then
-					return
-				end
-				vim.ui.select({ "Export stale review with saved context" }, {
-					prompt = "The exact working diff is no longer available",
-				}, function(choice)
-					if choice then
-						export_workspace(stale_workspace, true)
-					end
-				end)
-				return
-			end
-			notify("Could not open saved review: " .. tostring(open_err), vim.log.levels.ERROR)
-		end
+	-- Location is captured before the asynchronous scope/session picker opens.
+	scope_picker(root, function(opened)
+		add_from_capture(opened, captured, requested_type, "range")
 	end)
 end
 
-local function valid_requested_type(requested_type, command)
-	if requested_type == nil or vim.tbl_contains(REVIEW_TYPES, requested_type) then
-		return true
+function M.file_comment(requested_type)
+	if not valid_type(requested_type) then
+		notify("Usage: ReviewFileComment [" .. table.concat(REVIEW_TYPES, "|") .. "]", vim.log.levels.ERROR)
+		return
 	end
-	notify("Usage: " .. command .. " [" .. table.concat(REVIEW_TYPES, "|") .. "]", vim.log.levels.WARN)
-	return false
+	local line = vim.fn.line(".")
+	local captured = capture(line, line)
+	local workspace = current_workspace()
+	if workspace then
+		add_from_capture(workspace, captured, requested_type, "file")
+		return
+	end
+	local root = repo.current_root(captured.buf)
+	if root then
+		scope_picker(root, function(opened)
+			add_from_capture(opened, captured, requested_type, "file")
+		end)
+	else
+		notify("No active review and current buffer is not in a Git repository", vim.log.levels.ERROR)
+	end
 end
 
-local function add_comment(workspace, anchor, requested_type)
-	local initial_type = requested_type or REVIEW_TYPES[1]
-	compose(workspace, "New", nil, anchor, function(body, interrupted, selected_type)
+function M.general_comment(requested_type)
+	local workspace = current_workspace()
+	if not workspace or not allow_mutation(workspace) then
+		return
+	end
+	local expected = workspace_key(workspace)
+	local anchor = { kind = "general", stale = workspace.session.stale }
+	compose(workspace, {
+		title = "New general comment",
+		type_cycle = REVIEW_TYPES,
+		selected_type = requested_type or REVIEW_TYPES[1],
+		anchor = anchor,
+	}, function(body, interrupted, selected_type)
 		if not body then
 			return true
 		end
-		if not allow_composer_mutation(workspace, interrupted) then
+		local current = active_for_key(expected, "composing a general comment")
+		if not current or (not interrupted and not allow_mutation(current)) then
 			return false
 		end
-		local current =
-			composer_session(workspace, interrupted, "Review changed while composing; the editor remains open")
-		if not current then
-			return false
-		end
-		if current.stale then
-			anchor = vim.tbl_extend("force", anchor, { stale = true })
-		end
-		local session, err = review_store.add(current, {
-			type = selected_type,
+		local changed, err = review_store.add(current.session, {
+			type = selected_type or REVIEW_TYPES[1],
 			body = body,
 			anchor = anchor,
 		})
-		if not session then
-			notify("Could not add review comment: " .. tostring(err), vim.log.levels.ERROR)
+		if not changed then
+			notify(err, vim.log.levels.ERROR)
 			return false
 		end
-		if not save_session(workspace, session) then
-			return workspace.automatic_recovery ~= nil
-		end
-		notify("Review comment saved")
-		return true
-	end, initial_type)
+		return save_mutation(current, changed) == true
+	end)
 end
 
-local function workspace_for_new_comment(command, requested_type)
-	if not valid_requested_type(requested_type, command) then
+local function current_location(workspace)
+	local target = presentation_target(workspace)
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_get_current_buf()
+	if not target or target.buf ~= buf then
+		local targets = normal_targets(workspace, buf, win)
+		target = #targets == 1 and targets[1] or nil
+	end
+	if not target then
 		return nil
 	end
-	local workspace = review_diffview.workspace()
-	if not workspace then
-		notify("Open and focus a review diff before adding a comment", vim.log.levels.ERROR)
-		return nil
-	end
-	if not allow_mutation(workspace) then
-		return nil
-	end
-	local checked, drift_err = update_drift(workspace.session)
-	if not checked then
-		notify("Could not check review drift: " .. error_message(drift_err), vim.log.levels.ERROR)
-		return nil
-	end
-	if checked.stale then
-		save_session(workspace, checked)
-		notify("Review is stale; open a new scope before adding comments", vim.log.levels.ERROR)
-		return nil
-	end
-	return workspace
+	return {
+		path = target.path,
+		side = target.side,
+		layer = target.layer,
+		line = vim.api.nvim_win_get_cursor(target.win)[1],
+		win = target.win,
+		buf = target.buf,
+	}
 end
 
----Add a typed comment at the current review selection or cursor line.
----@param first integer
----@param last integer
----@param requested_type? string
-function M.comment(first, last, requested_type)
-	local workspace = workspace_for_new_comment("ReviewComment", requested_type)
-	if not workspace then
-		return
+local function contains_line(anchor, location)
+	if not anchor or anchor.kind ~= "range" or not location then
+		return false
 	end
-	local anchor, anchor_err = current_anchor(workspace, first, last)
-	if not anchor then
-		notify(anchor_err, vim.log.levels.ERROR)
-		return
-	end
-	add_comment(workspace, anchor, requested_type)
+	local last = anchor.end_line or anchor.start_line
+	return anchor.path == location.path
+		and anchor.side == location.side
+		and anchor.layer == location.layer
+		and anchor.start_line <= location.line
+		and location.line <= last
 end
 
----Add a file-level comment for the focused review diff.
----@param requested_type? string
-function M.file_comment(requested_type)
-	local workspace = workspace_for_new_comment("ReviewFileComment", requested_type)
-	if not workspace then
-		return
+local function item_label(item)
+	local anchor = item.anchor
+	local location = anchor.kind == "general" and "general" or anchor.path
+	if anchor.kind == "range" then
+		location = location .. ":" .. anchor.start_line .. "-" .. (anchor.end_line or anchor.start_line)
+	elseif anchor.kind == "file" then
+		location = location .. " [file]"
 	end
-	local anchor, anchor_err = current_file_anchor(workspace)
-	if not anchor then
-		notify(anchor_err, vim.log.levels.ERROR)
-		return
-	end
-	add_comment(workspace, anchor, requested_type)
+	local preview = (item.body:match("[^\n]+") or item.body):gsub("%s+", " ")
+	return string.format(
+		"%02d %-10s %-14s %s %s",
+		item.sequence,
+		item.type,
+		review_store.item_status(item),
+		location,
+		preview
+	)
 end
 
----Edit a local, not-yet-exported review comment.
----@param id? string
-function M.edit(id)
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	if not allow_mutation(workspace) then
-		return
-	end
-	if not composer_session(workspace, false, "Review is stale; open a new scope before editing comments") then
-		return
-	end
-	local expected_key = workspace_session_key(workspace)
-	local function open_editor(item, mutation_workspace)
-		local selected_id = item.id
-		compose(mutation_workspace, "Edit", item.body, item.anchor, function(body, interrupted, selected_type)
-			if not body then
-				return true
-			end
-			local current_workspace = active_workspace_for_session(expected_key, "editing a comment")
-			if not current_workspace or not allow_composer_mutation(current_workspace, interrupted) then
-				return false
-			end
-			local current = composer_session(
-				current_workspace,
-				interrupted,
-				"Review changed while composing; the editor remains open"
-			)
-			if not current or current.stale then
-				return false
-			end
-			local selected = find_session_item(current, selected_id)
-			if not selected or selected.status == "exported" then
-				notify("Review comment is unavailable for this action", vim.log.levels.WARN)
-				return false
-			end
-			local session, err = review_store.edit(current, selected_id, { body = body, type = selected_type })
-			if not session then
-				notify("Could not edit comment: " .. tostring(err), vim.log.levels.ERROR)
-				return false
-			end
-			return save_session(current_workspace, session) == true or current_workspace.automatic_recovery ~= nil
-		end, item.type)
-	end
-	local function select_for_edit(item)
-		if not item then
-			return
-		end
-		local mutation_workspace = active_workspace_for_session(expected_key, "choosing a comment to edit")
-		if not mutation_workspace or not allow_mutation(mutation_workspace) then
-			return
-		end
-		local current =
-			composer_session(mutation_workspace, false, "Review is stale; open a new scope before editing comments")
-		local selected = current and find_session_item(current, item.id)
-		if not selected or selected.status == "exported" then
-			return notify("Review comment is unavailable for this action", vim.log.levels.WARN)
-		end
-		open_editor(selected, mutation_workspace)
-	end
+local function choose_item(workspace, id, prompt, callback)
 	if id and id ~= "" then
-		local item = find_item(workspace, id)
-		if not item or item.status == "exported" then
-			return notify("Review comment is unavailable for this action", vim.log.levels.ERROR)
+		local item = find_item(workspace.session, id)
+		if item then
+			callback(item)
+		else
+			notify("Review comment does not exist", vim.log.levels.ERROR)
 		end
-		open_editor(item, workspace)
 		return
 	end
-	select_item(workspace, "Edit review draft", function(item)
-		return item.status ~= "exported"
-	end, select_for_edit)
+	local candidates = {}
+	local location = current_location(workspace)
+	if location then
+		for _, item in ipairs(workspace.session.items) do
+			if contains_line(item.anchor, location) then
+				candidates[#candidates + 1] = item
+			end
+		end
+	end
+	if #candidates == 0 then
+		candidates = vim.deepcopy(workspace.session.items)
+	end
+	if #candidates == 0 then
+		notify("No matching review comments", vim.log.levels.INFO)
+	elseif #candidates == 1 then
+		callback(candidates[1])
+	else
+		vim.ui.select(candidates, { prompt = prompt, format_item = item_label }, callback)
+	end
 end
 
----Delete one local draft by ID or from the range covering the current review line.
----@param id? string
-function M.delete(id)
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	if not allow_mutation(workspace) then
-		return
-	end
-	if not id or id == "" then
-		local current = composer_session(workspace, false, "Review is stale; open a new scope before deleting comments")
-		if not current then
-			return
+local function compose_item(workspace, item, action)
+	local expected = workspace_key(workspace)
+	local edit = action == "edit"
+	local location = current_location(workspace)
+	compose(workspace, {
+		title = edit and "Edit" or "Reply",
+		body = edit and item.body or "",
+		type_cycle = edit and REVIEW_TYPES or nil,
+		selected_type = edit and item.type or nil,
+		source_win = location and location.win or nil,
+		anchor_range = item.anchor.kind == "range" and { first = item.anchor.start_line, last = item.anchor.end_line }
+			or nil,
+		anchor = item.anchor,
+	}, function(body, interrupted, selected_type)
+		if not body then
+			return true
 		end
-		local items, _, item_err = current_line_candidates(workspace, current, function(candidate)
-			return candidate.status ~= "exported"
-		end)
-		if not items then
-			return notify(item_err, vim.log.levels.WARN)
+		local current = active_for_key(expected, "composing a review comment")
+		if not current or (not interrupted and not allow_mutation(current)) then
+			return false
 		end
-		local expected_key = workspace_session_key(workspace)
-		select_current_line_item(items, "Delete review comment on current line", function(item, asynchronous)
-			local selected_id = item.id
-			local latest = current
-			local mutation_workspace = workspace
-			if asynchronous then
-				mutation_workspace = active_workspace_for_session(expected_key, "choosing a comment to delete")
-				if not mutation_workspace or not allow_mutation(mutation_workspace) then
-					return
-				end
-				latest = composer_session(
-					mutation_workspace,
-					false,
-					"Review is stale; open a new scope before deleting comments"
-				)
-				if not latest then
-					return
-				end
-				local resolved, resolved_err = resolve_current_line_item(
-					mutation_workspace,
-					latest,
-					selected_id,
-					function(candidate)
-						return candidate.status ~= "exported"
-					end
-				)
-				if not resolved then
-					return notify(resolved_err, vim.log.levels.WARN)
-				end
-			end
-			local session, err = review_store.delete(latest, selected_id)
-			if not session then
-				return notify("Could not delete comment: " .. tostring(err), vim.log.levels.ERROR)
-			end
-			save_session(mutation_workspace, session)
-		end)
-		return
-	end
-	with_item(workspace, id, "Delete review draft", function(item)
-		return item.status ~= "exported"
-	end, function(item)
-		if not allow_mutation(workspace) then
-			return
+		local stable = find_item(current.session, item.id)
+		if not stable then
+			notify("Review comment changed while the composer was open", vim.log.levels.ERROR)
+			return false
 		end
-		local session, err = review_store.delete(workspace.session, item.id)
-		if not session then
-			notify("Could not delete comment: " .. tostring(err), vim.log.levels.ERROR)
-			return
+		local values = { type = selected_type or stable.type, body = body, anchor = stable.anchor }
+		local changed, err = edit and review_store.edit(current.session, stable.id, values)
+			or review_store.reply(current.session, stable.id, values)
+		if not changed then
+			notify(err, vim.log.levels.ERROR)
+			return false
 		end
-		save_session(workspace, session)
+		return save_mutation(current, changed) == true
 	end)
 end
 
----Change the type of the comment covering the current review line.
-function M.change_type()
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	if not allow_mutation(workspace) then
+function M.edit(id)
+	local workspace = current_workspace()
+	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	local current = composer_session(workspace, false, "Review is stale; open a new scope before changing comments")
-	if not current then
-		return
-	end
-	local items, _, item_err = current_line_candidates(workspace, current, function(candidate)
-		return candidate.status ~= "exported"
-	end)
-	if not items then
-		return notify(item_err, vim.log.levels.WARN)
-	end
-	local expected_key = workspace_session_key(workspace)
-	select_current_line_item(items, "Change type of review comment on current line", function(item)
-		local selected_id = item.id
-		choose_type(function(item_type)
-			if not item_type then
-				return
-			end
-			local mutation_workspace = active_workspace_for_session(expected_key, "choosing a comment type")
-			if not mutation_workspace or not allow_mutation(mutation_workspace) then
-				return
-			end
-			local latest = composer_session(
-				mutation_workspace,
-				false,
-				"Review is stale; open a new scope before changing comments"
-			)
-			if not latest then
-				return
-			end
-			local resolved, resolved_err = resolve_current_line_item(
-				mutation_workspace,
-				latest,
-				selected_id,
-				function(candidate)
-					return candidate.status ~= "exported"
-				end
-			)
-			if not resolved then
-				return notify(resolved_err, vim.log.levels.WARN)
-			end
-			local session, err = review_store.set_type(latest, selected_id, item_type)
-			if not session then
-				return notify("Could not change comment type: " .. tostring(err), vim.log.levels.ERROR)
-			end
-			save_session(mutation_workspace, session)
-		end)
+	local expected = workspace_key(workspace)
+	choose_item(workspace, id, "Edit review comment", function(selected)
+		local current = active_for_key(expected, "selecting a review comment")
+		local stable = current and find_item(current.session, selected.id)
+		if stable then
+			compose_item(current, stable, "edit")
+		end
 	end)
 end
 
----Reply to an existing local or exported comment.
----@param id? string
 function M.reply(id)
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	if not allow_mutation(workspace) then
+	local workspace = current_workspace()
+	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	if not composer_session(workspace, false, "Review is stale; open a new scope before replying") then
+	local expected = workspace_key(workspace)
+	choose_item(workspace, id, "Reply to review comment", function(selected)
+		local current = active_for_key(expected, "selecting a reply target")
+		local stable = current and find_item(current.session, selected.id)
+		if stable then
+			compose_item(current, stable, "reply")
+		end
+	end)
+end
+
+local function direct_mutation(id, prompt, mutator)
+	local workspace = current_workspace()
+	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	with_item(workspace, id, "Reply to review comment", nil, function(item)
-		compose(workspace, "Reply to " .. item.type, nil, item.anchor, function(body, interrupted)
-			if not body then
-				return true
+	local expected = workspace_key(workspace)
+	choose_item(workspace, id, prompt, function(selected)
+		local current = active_for_key(expected, "selecting a review comment")
+		local stable = current and find_item(current.session, selected.id)
+		if not stable or not allow_mutation(current) then
+			return
+		end
+		local changed, err = mutator(current, stable)
+		if changed then
+			save_mutation(current, changed)
+		else
+			notify(err, vim.log.levels.ERROR)
+		end
+	end)
+end
+
+function M.delete(id)
+	direct_mutation(id, "Delete review comment", function(workspace, item)
+		return review_store.delete(workspace.session, item.id)
+	end)
+end
+
+function M.change_type(id)
+	local workspace = current_workspace()
+	if not workspace or not allow_mutation(workspace) then
+		return
+	end
+	local expected = workspace_key(workspace)
+	choose_item(workspace, id, "Change review comment type", function(selected)
+		vim.ui.select(REVIEW_TYPES, { prompt = "Review comment type" }, function(item_type)
+			local current = item_type and active_for_key(expected, "changing a review comment type") or nil
+			local stable = current and find_item(current.session, selected.id)
+			if not stable or not allow_mutation(current) then
+				return
 			end
-			if not allow_composer_mutation(workspace, interrupted) then
-				return false
+			local changed, err = review_store.set_type(current.session, stable.id, item_type)
+			if changed then
+				save_mutation(current, changed)
+			else
+				notify(err, vim.log.levels.ERROR)
 			end
-			local current =
-				composer_session(workspace, interrupted, "Review changed while composing; the editor remains open")
-			if not current then
-				return false
-			end
-			local session, err = review_store.reply(current, item.id, { body = body })
-			if not session then
-				notify("Could not save reply: " .. tostring(err), vim.log.levels.ERROR)
-				return false
-			end
-			return save_session(workspace, session) == true or workspace.automatic_recovery ~= nil
 		end)
 	end)
 end
 
-local function set_item_status(id, status)
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	if not allow_mutation(workspace) then
-		return
-	end
-	with_item(
-		workspace,
+local function set_resolution(id, resolution)
+	direct_mutation(
 		id,
-		status == "resolved" and "Resolve review comment" or "Reopen review comment",
-		function(item)
-			return item.status ~= "exported"
-		end,
-		function(item)
-			if not allow_mutation(workspace) then
-				return
-			end
-			local target = status
-			if status ~= "resolved" then
-				target = (item.reply_to == vim.NIL or item.reply_to == nil) and "draft" or "reply"
-			end
-			local session, err = review_store.set_status(workspace.session, item.id, target)
-			if not session then
-				notify("Could not update comment: " .. tostring(err), vim.log.levels.ERROR)
-				return
-			end
-			save_session(workspace, session)
+		resolution == "resolved" and "Resolve review comment" or "Reopen review comment",
+		function(workspace, item)
+			return review_store.set_resolution(workspace.session, item.id, resolution)
 		end
 	)
 end
 
----Toggle between the exact historical diff and the current source buffer.
-function M.code()
-	local workspace = review_diffview.workspace()
-	if workspace then
-		local target, err = review_diffview.current_target({ allow_panel = true })
-		if not target then
-			return notify(err, vim.log.levels.ERROR)
-		end
-		local relative = target.current_path
-		local lexical, path_err = require("config.repo").resolve_relative(workspace.root, relative)
-		if not lexical then
-			return notify("Current source is unavailable: " .. tostring(path_err), vim.log.levels.ERROR)
-		end
-		local cursor = target.from_panel and { 1, 0 } or vim.api.nvim_win_get_cursor(target.winid)
-		local saved_target = {
-			current_path = target.current_path,
-			layer = target.layer,
-			revision = target.revision,
-			side = target.side,
-			line = cursor[1],
-			column = cursor[2],
-		}
-		require("config.editor").open_file_in_tab(lexical, { lnum = cursor[1], col = cursor[2] + 1 })
-		review_source.set(vim.api.nvim_get_current_tabpage(), workspace, saved_target)
+function M.resolve(id)
+	set_resolution(id, "resolved")
+end
+
+function M.reopen(id)
+	set_resolution(id, "open")
+end
+
+function M.toggle_resolution(id)
+	local workspace = current_workspace()
+	if not workspace then
+		notify("No active review", vim.log.levels.ERROR)
 		return
 	end
-
-	local source_tab = vim.api.nvim_get_current_tabpage()
-	local link = review_source.get(source_tab)
-	workspace = source_workspace()
-	if not workspace or not valid_tab(workspace.tabpage) then
-		return notify("No review workspace is linked to this source tab", vim.log.levels.ERROR)
-	end
-	if link and link.workspace ~= workspace then
-		link = nil
-	end
-	local target = link and link.target or nil
-	local relative = target and target.current_path or nil
-	if not relative then
-		local relative_err
-		relative, relative_err = require("config.repo").relative_existing(workspace.root, vim.api.nvim_buf_get_name(0))
-		if not relative then
-			return notify("Could not return to review location: " .. tostring(relative_err), vim.log.levels.ERROR)
-		end
-	end
-	vim.api.nvim_set_current_tabpage(workspace.tabpage)
-	local layer = target and target.layer or nil
-	if not review_diffview.select_file(relative, layer, target) then
-		notify("The exact review file and layer are no longer available", vim.log.levels.ERROR)
-	end
-end
-
----Open the dedicated Trouble panel for review threads.
-function M.threads()
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	local previous = thread_workspace()
-	if review_threads then
-		local closed, close_err = suspend_review_threads()
-		if close_err then
-			return notify("Could not close review threads: " .. close_err, vim.log.levels.ERROR)
-		end
-		if closed and previous == workspace then
-			return
-		end
-	end
-	local tabpage = vim.api.nvim_get_current_tabpage()
-	local trouble = require("trouble")
-	review_threads = {
-		workspace = workspace,
-		tabpage = tabpage,
-		review_host = review_diffview.workspace(tabpage) == workspace,
-	}
-	local opened, open_err = pcall(trouble.open, { mode = "review" })
-	if not opened or not trouble.is_open({ mode = "review" }) then
-		review_threads = nil
-		notify("Could not open review threads: " .. tostring(open_err or "no review comments"), vim.log.levels.WARN)
-	end
-end
-
----Return anchored items for the custom Trouble source.
----@return table[]
-function M.items()
-	local workspace = active_workspace()
-	return workspace and vim.deepcopy(workspace.session.items) or {}
-end
-
----Return the active repository and comments for external read-only views.
----@param owned_threads? boolean
----@return table?
-function M.snapshot(owned_threads)
-	local workspace
-	if owned_threads then
-		workspace = thread_workspace()
-	else
-		workspace = active_workspace()
-	end
-	if not workspace then
-		return nil
-	end
-	return {
-		root = workspace.root,
-		stale = workspace.session.stale,
-		items = vim.deepcopy(workspace.session.items),
-	}
-end
-
----Jump from a Trouble review item back into the exact diff.
----@param id string
----@param owned_threads? boolean
-function M.jump(id, owned_threads)
-	local workspace
-	if owned_threads then
-		workspace = thread_workspace()
-	else
-		workspace = active_workspace()
-	end
-	local item = workspace and find_item(workspace, id)
-	if not item or not focus_item(workspace, item) then
-		notify("Review location is unavailable", vim.log.levels.ERROR)
-	end
-end
-
----Choose an anchored review comment and jump to its exact diff location.
-function M.comments()
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	select_item(workspace, "Review comments", function(item)
-		return navigable_item(workspace, item)
-	end, function(selected)
-		if not selected then
-			return
-		end
-		local item = find_item(workspace, selected.id)
-		if not item or not navigable_item(workspace, item) or not focus_item(workspace, item) then
-			notify("Review location is unavailable", vim.log.levels.ERROR)
-		end
+	choose_item(workspace, id, "Resolve or reopen review comment", function(item)
+		set_resolution(item.id, item.resolution == "resolved" and "open" or "resolved")
 	end)
 end
 
-local function navigate(direction)
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	local anchored = {}
-	for _, item in ipairs(workspace.session.items) do
-		if navigable_item(workspace, item) then
-			anchored[#anchored + 1] = item
-		end
-	end
-	if #anchored == 0 then
-		return notify("Review has no anchored comments")
-	end
-	local index = workspace.navigation_index or (direction > 0 and 0 or 1)
-	index = ((index - 1 + direction) % #anchored) + 1
-	workspace.navigation_index = index
-	focus_item(workspace, anchored[index])
-end
-
-local function remote_comment_id(item)
-	if type(item.export_id) ~= "string" then
-		return nil
-	end
-	return item.export_id:match("^tuicr:(.+)$")
-end
-
-local function publish_tuicr(workspace, force)
-	if publication_active(workspace) then
-		notify("TUICR publication is already in progress", vim.log.levels.WARN)
+function M.reanchor(id, source_win)
+	local workspace = current_workspace()
+	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	local _, ids_or_error = review_export.render(workspace.session, force)
-	if type(ids_or_error) ~= "table" then
-		notify(ids_or_error, vim.log.levels.ERROR)
-		return
-	end
-	local wanted = {}
-	for _, id in ipairs(ids_or_error) do
-		wanted[id] = true
-	end
-	local function include_ancestors(item)
-		if not item or item.status == "exported" then
+	local captured
+	if source_win ~= nil then
+		if not valid_win(source_win) then
+			notify("Reviewed code window is no longer available", vim.log.levels.ERROR)
 			return
 		end
-		wanted[item.id] = true
-		if item.reply_to ~= vim.NIL and item.reply_to ~= nil then
-			include_ancestors(find_item(workspace, item.reply_to))
-		end
+		local line = vim.api.nvim_win_get_cursor(source_win)[1]
+		captured = { win = source_win, buf = vim.api.nvim_win_get_buf(source_win), first = line, last = line }
+	else
+		captured = capture(vim.fn.line("."), vim.fn.line("."))
 	end
-	for _, id in ipairs(ids_or_error) do
-		local item = find_item(workspace, id)
-		if item and item.reply_to ~= vim.NIL and item.reply_to ~= nil then
-			include_ancestors(find_item(workspace, item.reply_to))
-		end
-	end
-	local queue = {}
-	for _, item in ipairs(workspace.session.items) do
-		if wanted[item.id] and item.status ~= "exported" then
-			queue[#queue + 1] = item.id
-		end
-	end
-	if #queue == 0 then
-		local all_received = #workspace.session.items > 0
-		for _, item in ipairs(workspace.session.items) do
-			if item.status ~= "exported" or type(item.export_id) ~= "string" or not item.export_id:match("^tuicr:") then
-				all_received = false
-				break
-			end
-		end
-		if force and workspace.unsaved_error and all_received then
-			workspace.recovery_exported = true
-			notify("All review comments have TUICR receipts; :ReviewClose! is now available")
+	local expected = workspace_key(workspace)
+	choose_item(workspace, id, "Reanchor review comment", function(selected)
+		local current = active_for_key(expected, "selecting a review comment")
+		if not current or not allow_mutation(current) then
 			return
 		end
-		notify("All eligible comments were already published")
-		return
-	end
-
-	local adapter = require("config.review_tuicr")
-	local round = workspace.session.bridge.round
-	local key = publication_key(workspace)
-	publishing_sessions[key] = workspace
-	local recovery_mode = false
-	local recovery_error
-	local function finish(message, level)
-		if publishing_sessions[key] == workspace then
-			publishing_sessions[key] = nil
+		if selected.anchor.kind == "general" then
+			notify("General review comments do not have a location to reanchor", vim.log.levels.INFO)
+			return
 		end
-		if message then
-			notify(message, level)
-		end
-	end
-	local index = 0
-	local function publish_next()
-		index = index + 1
-		local id = queue[index]
-		if not id then
-			if recovery_mode then
-				if force then
-					workspace.recovery_exported = true
-				end
-				local next_step = force and ":ReviewClose! is now available"
-					or "run :ReviewExport! before forcing close"
-				finish(
-					string.format(
-						"Published %d review comments, but receipts remain unsaved (%s); %s",
-						#queue,
-						error_message(recovery_error),
-						next_step
-					),
-					vim.log.levels.WARN
-				)
+		choose_target(current, captured, function(target, target_err)
+			current = active_for_key(expected, "reanchoring a review comment")
+			local item = current and find_item(current.session, selected.id)
+			if not current or not item or not allow_mutation(current) then
 				return
 			end
-			finish(string.format("Published %d review comments to TUICR", #queue))
-			return
-		end
-		local item = find_item(workspace, id)
-		if not item then
-			return finish("Review changed while publishing; stopped before duplicate delivery", vim.log.levels.ERROR)
-		end
-		local values = {
-			type = item.type,
-			body = item.body,
-			delivery_key = item.id,
-			anchor = {
-				path = item.anchor.path,
-				side = item.anchor.side,
-				start_line = item.anchor.start_line,
-				end_line = item.anchor.end_line,
-			},
-		}
-		local operation = adapter.add
-		if item.reply_to ~= vim.NIL and item.reply_to ~= nil then
-			local parent = find_item(workspace, item.reply_to)
-			local reply_to = parent and remote_comment_id(parent)
-			if not reply_to then
-				return finish("Reply parent has not been published to TUICR", vim.log.levels.ERROR)
+			if not target then
+				notify(target_err, vim.log.levels.ERROR)
+				return
 			end
-			values.reply_to = reply_to
-			operation = adapter.respond
-		end
-		local ok, operation_err = pcall(operation, workspace.root, round, values, function(result, err)
-			if not result or type(result.id) ~= "string" or result.id == "" then
-				return finish(
-					"TUICR publish stopped: " .. error_message(err or "missing comment id"),
-					vim.log.levels.ERROR
-				)
-			end
-			local updated, mark_err = review_store.mark_exported(workspace.session, id, "tuicr:" .. result.id)
-			if not updated then
-				return finish(
-					"TUICR accepted a comment, but its receipt could not be retained: " .. error_message(mark_err),
-					vim.log.levels.ERROR
-				)
-			end
-			if recovery_mode then
-				workspace.session = updated
-				workspace.scope = updated.scope
-				review_diffview.update_title(workspace)
-				M.refresh_marks(workspace)
+			local anchor, anchor_err
+			if item.anchor.kind == "general" then
+				anchor = { kind = "general", stale = false }
+			elseif item.anchor.kind == "file" then
+				anchor, anchor_err = make_anchor(current, target, "file", 1, 1)
 			else
-				local saved, save_err = save_session(workspace, updated)
-				if not saved then
-					recovery_mode = true
-					recovery_error = save_err
-				end
+				local length = (item.anchor.end_line or item.anchor.start_line) - item.anchor.start_line
+				local first = vim.api.nvim_win_get_cursor(target.win)[1]
+				anchor, anchor_err = make_anchor(current, target, "range", first, first + length)
 			end
-			publish_next()
+			if not anchor then
+				notify(anchor_err, vim.log.levels.ERROR)
+				return
+			end
+			anchor.stale = false
+			local changed, err = review_store.edit(current.session, item.id, {
+				type = item.type,
+				body = item.body,
+				anchor = anchor,
+			})
+			if changed then
+				save_mutation(current, changed)
+			else
+				notify(err, vim.log.levels.ERROR)
+			end
 		end)
-		if not ok then
-			finish("Could not start TUICR publication: " .. tostring(operation_err), vim.log.levels.ERROR)
-		end
-	end
-	publish_next()
-end
-
----Move to the next review comment.
-function M.next()
-	navigate(1)
-end
-
----Move to the previous review comment.
-function M.prev()
-	navigate(-1)
-end
-
-export_workspace = function(workspace, force)
-	if composer_active() then
-		return notify("Save or cancel the open review comment before exporting", vim.log.levels.WARN)
-	end
-	if publication_active(workspace) then
-		return notify("TUICR publication is already in progress", vim.log.levels.WARN)
-	end
-	local checked, drift_err = update_drift(workspace.session)
-	if not checked then
-		return notify("Could not check review drift: " .. error_message(drift_err), vim.log.levels.ERROR)
-	end
-	if checked.stale ~= workspace.session.stale then
-		if workspace.unsaved_error then
-			workspace.session = checked
-			review_diffview.update_title(workspace)
-		elseif not save_session(workspace, checked) then
-			return
-		end
-	end
-	if workspace.session.bridge then
-		publish_tuicr(workspace, force)
-		return
-	end
-	local result, err = review_export.deliver(workspace.session, force)
-	if not result then
-		return notify(err, vim.log.levels.ERROR)
-	end
-	local recovery
-	if force then
-		local recovery_err
-		recovery, recovery_err = review_store.save_recovery(workspace.root, workspace.session, result.markdown)
-		if not recovery then
-			return notify(
-				"Could not persist complete review recovery: " .. tostring(recovery_err),
-				vim.log.levels.ERROR
-			)
-		end
-		workspace.recovery_exported = recovery
-	end
-	if result.previewed then
-		if force then
-			notify(
-				"Clipboard unavailable; opened a preview and saved complete recovery to " .. recovery.path,
-				vim.log.levels.WARN
-			)
-		else
-			notify("Clipboard unavailable; opened a preview and kept drafts editable", vim.log.levels.WARN)
-		end
-		return
-	end
-	local session = workspace.session
-	local export_id = "clipboard:" .. os.date("!%Y%m%dT%H%M%SZ")
-	for _, id in ipairs(result.ids) do
-		local updated, mark_err = review_store.mark_exported(session, id, export_id)
-		if not updated then
-			return notify("Copied review, but could not lock drafts: " .. tostring(mark_err), vim.log.levels.ERROR)
-		end
-		session = updated
-	end
-	if save_session(workspace, session) then
-		notify("Review copied to the clipboard")
-	end
-end
-
----Render and deliver unresolved comments, locking only successful clipboard exports.
----@param force? boolean
-function M.export(force)
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	return export_workspace(workspace, force)
-end
-
----Recompute working-tree drift and refresh the current exact view.
-function M.refresh()
-	local workspace = active_workspace()
-	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
-	end
-	local environment_safe, environment_err = review_diffview.environment_safe()
-	if not environment_safe then
-		return notify(environment_err, vim.log.levels.ERROR)
-	end
-	local session, err = update_drift(workspace.session)
-	if not session then
-		return notify("Could not refresh review: " .. tostring(err), vim.log.levels.ERROR)
-	end
-	if save_session(workspace, session) then
-		if session.stale then
-			notify("Review is stale; open a new scope to review current changes", vim.log.levels.WARN)
-		else
-			refresh_current_diff()
-		end
-	end
-end
-
----Place review signs in a Diffview buffer without touching diagnostics.
----@param workspace table
----@param buf integer
-function M.decorate_buffer(workspace, buf)
-	if not vim.api.nvim_buf_is_valid(buf) then
-		return
-	end
-	vim.api.nvim_buf_clear_namespace(buf, NAMESPACE, 0, -1)
-	if workspace.session.stale or workspace.view_mode == "history" then
-		return
-	end
-	local target = review_diffview.current_target()
-	if not target or target.bufnr ~= buf then
-		return
-	end
-	local decorations = {}
-	for _, item in ipairs(workspace.session.items) do
-		local anchor = item.anchor
-		if
-			not anchor.stale
-			and anchor.path == target.path
-			and anchor.side == target.side
-			and anchor.layer == target.layer
-			and anchor.start_line
-		then
-			decorations[#decorations + 1] = item
-		end
-	end
-	table.sort(decorations, function(left, right)
-		if left.sequence ~= right.sequence then
-			return left.sequence < right.sequence
-		end
-		return left.id < right.id
-	end)
-	local range_text = {}
-	for _, item in ipairs(decorations) do
-		local anchor = item.anchor
-		local sign = TYPE_SIGNS[item.type]
-		local line = math.max(0, math.min(anchor.start_line - 1, vim.api.nvim_buf_line_count(buf) - 1))
-		vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line, 0, {
-			sign_text = sign.text,
-			sign_hl_group = sign.highlight,
-			priority = 20,
-		})
-		local last = anchor.end_line or anchor.start_line
-		if last ~= anchor.start_line then
-			range_text[line] = range_text[line] or {}
-			range_text[line][#range_text[line] + 1] = {
-				string.format("  ● %d-%d", math.min(anchor.start_line, last), math.max(anchor.start_line, last)),
-				sign.highlight,
-			}
-		end
-	end
-	for line, chunks in pairs(range_text) do
-		vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line, 0, {
-			virt_text = chunks,
-			virt_text_pos = "eol",
-			priority = 20,
-		})
-	end
-end
-
----Refresh signs in every visible pane of one review workspace.
----@param workspace? table
-function M.refresh_marks(workspace)
-	workspace = workspace or active_workspace()
-	if not workspace or not valid_tab(workspace.tabpage) then
-		return
-	end
-	local current_tab = vim.api.nvim_get_current_tabpage()
-	local current_win = vim.api.nvim_get_current_win()
-	vim.api.nvim_set_current_tabpage(workspace.tabpage)
-	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(workspace.tabpage)) do
-		if vim.api.nvim_win_is_valid(win) and vim.w[win].nvim_review_diff_symbol then
-			vim.api.nvim_set_current_win(win)
-			M.decorate_buffer(workspace, vim.api.nvim_win_get_buf(win))
-		end
-	end
-	if valid_tab(current_tab) then
-		vim.api.nvim_set_current_tabpage(current_tab)
-		if vim.api.nvim_win_is_valid(current_win) and vim.api.nvim_win_get_tabpage(current_win) == current_tab then
-			vim.api.nvim_set_current_win(current_win)
-		end
-	end
-end
-
-local function round_id(value)
-	return type(value) == "string" and value or type(value) == "table" and (value.round or value.id) or nil
-end
-
-local function persist_round(workspace, round)
-	if not allow_mutation(workspace) then
-		return
-	end
-	local linked, err = review_store.link_tuicr(workspace.session, round)
-	if not linked then
-		notify("Could not link TUICR round: " .. tostring(err), vim.log.levels.ERROR)
-		return
-	end
-	if not save_session(workspace, linked) then
-		return
-	end
-	notify("Linked TUICR round " .. round)
-end
-
----Link the current exact scope to a selected TUICR round without opening its TUI.
----@param requested_round? string
----@param requested_root? string
-function M.link_tuicr(requested_round, requested_root)
-	local root = requested_root or root_for_command()
-	if not root then
-		return notify("Current buffer is not inside a Git repository", vim.log.levels.ERROR)
-	end
-	local function link(value)
-		local round = round_id(value)
-		if not round then
-			return
-		end
-		local workspace = workspaces[root] or report_open(root, { kind = "branch" })
-		if workspace then
-			persist_round(workspace, round)
-		end
-	end
-	require("config.review_tuicr").list_rounds(root, function(rounds, err)
-		if not rounds then
-			return notify("Could not list TUICR rounds: " .. tostring(err), vim.log.levels.ERROR)
-		end
-		if requested_round and requested_round ~= "" then
-			for _, value in ipairs(rounds) do
-				if round_id(value) == requested_round then
-					link(value)
-					return
-				end
-			end
-			return notify("TUICR round is not open for this repository", vim.log.levels.ERROR)
-		end
-		if #rounds == 0 then
-			return notify("No open TUICR rounds for this repository")
-		end
-		vim.ui.select(rounds, {
-			prompt = "TUICR round",
-			format_item = function(value)
-				return round_id(value) or "Invalid round"
-			end,
-		}, link)
 	end)
 end
 
----Close all transient review tabs while auto-session serializes normal tabs.
-function M.suspend_for_session()
-	if suspended then
-		return nil, "review tabs are already suspended"
+local function entry_for_anchor(workspace, anchor)
+	local layer = anchor.layer ~= "history" and anchor.layer or nil
+	local entry = review_changes.find(workspace.model, anchor.path, layer)
+	if entry then
+		return entry
 	end
-	if next(publishing_sessions) ~= nil then
-		return nil, "TUICR publication is still in progress"
-	end
-	if composer_active() then
-		return nil, "review composer has unsent text; save or cancel it first"
-	end
-	for _, workspace in pairs(workspaces) do
-		if workspace.unsaved_error then
-			return nil, "review comments are still unsaved after a concurrent edit"
+	for _, candidate in ipairs(workspace.model.entries or {}) do
+		if candidate.old_path == anchor.path or candidate.new_path == anchor.path then
+			return candidate
 		end
 	end
-	local original = vim.api.nvim_get_current_tabpage()
-	local original_win = vim.api.nvim_get_current_win()
-	local focus = {
-		tabpage = original,
-		winid = original_win,
-		workspace = review_diffview.workspace(original),
-	}
-	local threads, threads_err = suspend_review_threads()
-	if threads_err then
-		return nil, "could not close review threads: " .. threads_err
+	return nil
+end
+
+function M.jump(id)
+	local workspace = current_workspace()
+	local item = workspace and find_item(workspace.session, id)
+	if not item then
+		notify("Review comment does not exist", vim.log.levels.ERROR)
+		return false
 	end
-	local preview, preview_err = review_export.suspend_preview()
-	if preview_err then
-		restore_review_threads(threads)
-		return nil, "could not close review export preview: " .. preview_err
+	local anchor = item.anchor
+	if anchor.kind == "general" then
+		return review_panel.focus(workspace.panel, "comments")
 	end
-	local entries = {}
-	for _, workspace in pairs(workspaces) do
-		if valid_tab(workspace.tabpage) then
-			vim.api.nvim_set_current_tabpage(workspace.tabpage)
-			local target = review_diffview.current_target({ allow_panel = true })
-			if target then
-				local cursor = target.from_panel and { 1, 0 } or vim.api.nvim_win_get_cursor(target.winid)
-				target.line = cursor[1]
-				target.column = cursor[2]
-				target.focus = focus.workspace == workspace
-			end
-			local entry = { workspace = workspace, mode = workspace.view_mode, target = target }
-			workspace.suspending = true
-			local closed, err = review_diffview.close()
-			if not closed then
-				workspace.suspending = nil
-				suspended = { entries = entries, focus = focus, preview = preview, threads = threads }
-				local _, restore_err = M.restore_after_session()
-				return nil, "could not close review tab: " .. tostring(err or restore_err)
-			end
-			entries[#entries + 1] = entry
-		end
+	if workspace.session.stale or anchor.stale then
+		notify("Stale review locations cannot be opened", vim.log.levels.WARN)
+		return false
 	end
-	suspended = { entries = entries, focus = focus, preview = preview, threads = threads }
-	if valid_tab(original) then
-		vim.api.nvim_set_current_tabpage(original)
-		if vim.api.nvim_win_is_valid(original_win) then
-			vim.api.nvim_set_current_win(original_win)
-		end
+	local entry = entry_for_anchor(workspace, anchor)
+	if not entry then
+		notify("Comment path is not represented in the exact review model", vim.log.levels.ERROR)
+		return false
+	end
+	if anchor.side == "left" and workspace.layout == "inline" and not entry.deleted then
+		workspace.layout = "split"
+	end
+	local shown, err = M.present(entry.identity)
+	if not shown then
+		notify(err, vim.log.levels.ERROR)
+		return false
+	end
+	local presentation = workspace.mode_state.presentation
+	local target = anchor.side == "left" and presentation.left or presentation.right or presentation.inline
+	if not target or not valid_win(target.win) then
+		notify("Comment side is unavailable", vim.log.levels.ERROR)
+		return false
+	end
+	vim.api.nvim_set_current_win(target.win)
+	if anchor.start_line then
+		local line = math.max(1, math.min(anchor.start_line, vim.api.nvim_buf_line_count(target.buf)))
+		vim.api.nvim_win_set_cursor(target.win, { line, math.max(0, (anchor.start_column or 1) - 1) })
 	end
 	return true
 end
 
----Restore review tabs after synchronous session serialization has finished.
+local function navigate(direction)
+	local workspace = current_workspace()
+	if not workspace or #workspace.session.items == 0 then
+		notify("No review comments", vim.log.levels.INFO)
+		return
+	end
+	local items = vim.deepcopy(workspace.session.items)
+	table.sort(items, function(left, right)
+		local lp, rp = left.anchor.path or "", right.anchor.path or ""
+		local ll, rl = left.anchor.start_line or 0, right.anchor.start_line or 0
+		return lp == rp and (ll == rl and left.sequence < right.sequence or ll < rl) or lp < rp
+	end)
+	local location = current_location(workspace)
+	local current_index
+	for index, item in ipairs(items) do
+		if contains_line(item.anchor, location) then
+			current_index = index
+			break
+		end
+	end
+	local index = current_index and ((current_index - 1 + direction) % #items + 1) or (direction > 0 and 1 or #items)
+	M.jump(items[index].id)
+end
+
+function M.next()
+	navigate(1)
+end
+
+function M.prev()
+	navigate(-1)
+end
+
+function M.refresh()
+	local workspace = current_workspace()
+	if not workspace then
+		notify("No active review", vim.log.levels.ERROR)
+		return nil
+	end
+	local blocked = publishing_transition_error("refresh the review") or unsaved_transition_error("refresh it")
+	if blocked then
+		notify("Could not refresh review: " .. blocked, vim.log.levels.ERROR)
+		return nil, blocked
+	end
+	local stale, stale_err = stale_now(workspace)
+	if stale == nil then
+		notify("Could not refresh review: " .. stale_err, vim.log.levels.ERROR)
+		return nil
+	end
+	if stale then
+		mark_stale(workspace)
+		notify("Working review became stale; open a new exact working scope", vim.log.levels.ERROR)
+		return nil
+	end
+	local loaded, load_err = review_store.load(workspace.root, workspace.session.id)
+	if not loaded then
+		notify("Could not reload review: " .. tostring(load_err), vim.log.levels.ERROR)
+		return nil
+	end
+	local model, model_err = review_changes.build(workspace.root, loaded.scope)
+	if not model then
+		notify("Could not rebuild exact review: " .. message(model_err), vim.log.levels.ERROR)
+		return nil
+	end
+	local identity = first_identity(model, workspace.entry_identity)
+	-- Nothing becomes visible until both persistence and exact model construction succeed.
+	workspace.session = loaded
+	workspace.scope = loaded.scope
+	workspace.model = model
+	workspace.entry_identity = identity
+	if workspace.mode_on and identity then
+		local shown, show_err = M.present(identity)
+		if not shown then
+			notify("Model refreshed but presentation failed: " .. tostring(show_err), vim.log.levels.ERROR)
+			return nil
+		end
+	end
+	update_panel(workspace)
+	M.refresh_marks(workspace)
+	return true
+end
+
+function M.export(force)
+	local workspace = current_workspace()
+	if not workspace then
+		notify("No active review", vim.log.levels.ERROR)
+		return nil
+	end
+	local snapshot
+	local recovery_receipt
+	if workspace.unsaved_error then
+		local recovery_err
+		recovery_receipt, recovery_err = recovery(workspace)
+		if not recovery_receipt then
+			notify("Could not verify live review recovery: " .. tostring(recovery_err), vim.log.levels.ERROR)
+			return nil
+		end
+		snapshot = vim.deepcopy(workspace.session)
+	else
+		snapshot = verified_persisted_snapshot(workspace, "export review")
+		if not snapshot then
+			return nil
+		end
+	end
+	local stale, stale_err = stale_now(workspace)
+	if stale == nil then
+		notify("Could not check review drift: " .. stale_err, vim.log.levels.ERROR)
+		return nil
+	end
+	local is_stale = stale or session_has_stale_location(snapshot)
+	if is_stale and not force then
+		notify("Review is stale; use :ReviewExport! to export the saved exact snapshot", vim.log.levels.ERROR)
+		return nil
+	end
+	if stale then
+		snapshot.stale = true
+	end
+	if is_stale then
+		local markdown, render_err = review_export.render(snapshot, true)
+		if not markdown then
+			notify(render_err, vim.log.levels.ERROR)
+			return nil
+		end
+		local recovery_err
+		recovery_receipt, recovery_err = save_verified_recovery(workspace.root, snapshot, markdown)
+		if not recovery_receipt then
+			notify("Could not save exact review recovery: " .. tostring(recovery_err), vim.log.levels.ERROR)
+			return nil
+		end
+	end
+	local result, err = review_export.deliver(snapshot, force == true)
+	if not result then
+		notify(err, vim.log.levels.ERROR)
+		return nil
+	end
+	result.recovery = recovery_receipt
+	notify(result.previewed and "Review opened in Markdown preview" or "Complete review copied to clipboard")
+	return result
+end
+
+local function publish_queue(session)
+	local queue, eligible = {}, {}
+	for _, item in ipairs(session.items) do
+		if review_store.delivery_eligible(item) then
+			queue[#queue + 1] = item.id
+			eligible[item.id] = true
+		end
+	end
+	for _, id in ipairs(queue) do
+		local item = find_item(session, id)
+		if not null(item.reply_to) then
+			local parent = find_item(session, item.reply_to)
+			if not parent or (not review_store.tuicr_receipt(parent) and not eligible[parent.id]) then
+				return nil, "open reply " .. id .. " has no publishable or delivered parent"
+			end
+		end
+	end
+	return queue
+end
+
+local function tuicr_anchor(anchor)
+	local value = {}
+	for _, name in ipairs({ "path", "side", "start_line", "end_line" }) do
+		if not null(anchor[name]) then
+			value[name] = anchor[name]
+		end
+	end
+	return value
+end
+
+local function tuicr_author()
+	if type(vim.g.review_author) == "string" and vim.g.review_author:find("%S") then
+		return vim.trim(vim.g.review_author)
+	end
+	if type(vim.env.USER) == "string" and vim.env.USER:find("%S") then
+		return vim.trim(vim.env.USER)
+	end
+	return "Reviewer"
+end
+
+local function tuicr_delivery_key(action, round, item, values)
+	local payload = {
+		"nvim-review-tuicr-v1",
+		action,
+		round,
+		item.id,
+		values.author,
+		values.type,
+		values.body,
+		values.anchor.path or vim.NIL,
+		values.anchor.side or vim.NIL,
+		values.anchor.start_line or vim.NIL,
+		values.anchor.end_line or vim.NIL,
+		values.reply_to or vim.NIL,
+	}
+	return item.id .. ":" .. vim.fn.sha256(vim.json.encode(payload))
+end
+
+local function publication_snapshot(session, id)
+	local item = find_item(session, id)
+	if not item then
+		return nil
+	end
+	return {
+		id = id,
+		revision = session.revision,
+		bridge = vim.deepcopy(session.bridge),
+		item = vim.deepcopy(item),
+		session = vim.deepcopy(session),
+	}
+end
+
+local function publication_snapshot_matches(session, snapshot)
+	return type(session) == "table"
+		and type(snapshot) == "table"
+		and session.revision == snapshot.revision
+		and vim.deep_equal(session.bridge, snapshot.bridge)
+		and vim.deep_equal(find_item(session, snapshot.id), snapshot.item)
+end
+
+local function save_publication_recovery(root, snapshot, receipt)
+	local delivered, mark_err = review_store.mark_tuicr_delivered(snapshot.session, snapshot.id, receipt)
+	if not delivered then
+		return nil, mark_err
+	end
+	local markdown, render_err = review_export.render_recovery(delivered)
+	if not markdown then
+		return nil, render_err
+	end
+	return save_verified_recovery(root, delivered, markdown)
+end
+
+local function finish_publication(expected, publication, text, level)
+	if publishing[expected] ~= publication then
+		return false
+	end
+	publishing[expected] = nil
+	if text then
+		notify(text, level)
+	end
+	return true
+end
+
+function M.publish(force)
+	local workspace = current_workspace()
+	if not workspace then
+		notify("No active review", vim.log.levels.ERROR)
+		return nil
+	end
+	local expected = workspace_key(workspace)
+	if next(publishing) then
+		notify("TUICR publication is already in progress", vim.log.levels.WARN)
+		return nil
+	end
+	if workspace.unsaved_error then
+		notify("Review has an unsaved conflict; resolve it before publishing", vim.log.levels.ERROR)
+		return nil
+	end
+	local snapshot = verified_persisted_snapshot(workspace, "publish review")
+	if not snapshot then
+		return nil
+	end
+	if null(snapshot.bridge) or snapshot.bridge.backend ~= "tuicr" then
+		notify("Review is not linked to a TUICR round", vim.log.levels.ERROR)
+		return nil
+	end
+	local stale, stale_err = stale_now(workspace)
+	if stale == nil then
+		notify("Could not check review drift: " .. stale_err, vim.log.levels.ERROR)
+		return nil
+	end
+	local is_stale = stale or session_has_stale_location(snapshot)
+	if is_stale and not force then
+		notify("Review is stale; use :ReviewPublish! only after verifying the exact snapshot", vim.log.levels.ERROR)
+		return nil
+	end
+	if is_stale then
+		if stale then
+			snapshot.stale = true
+		end
+		local markdown, render_err = review_export.render(snapshot, true)
+		if not markdown then
+			notify(render_err, vim.log.levels.ERROR)
+			return nil
+		end
+		local receipt, recovery_err = save_verified_recovery(workspace.root, snapshot, markdown)
+		if not receipt then
+			notify("Could not save exact review recovery: " .. tostring(recovery_err), vim.log.levels.ERROR)
+			return nil
+		end
+	end
+	local queue, queue_err = publish_queue(snapshot)
+	if not queue then
+		notify(queue_err, vim.log.levels.ERROR)
+		return nil
+	elseif #queue == 0 then
+		notify("No open undelivered TUICR comments")
+		return true
+	end
+	local publication = {}
+	publishing[expected] = publication
+	local index, receipts = 1, {}
+	local function step()
+		local current = workspace_for_key(expected)
+		local id = queue[index]
+		if publishing[expected] ~= publication then
+			return
+		elseif not current then
+			finish_publication(
+				expected,
+				publication,
+				"Review session closed during TUICR publication",
+				vim.log.levels.ERROR
+			)
+			return
+		elseif not id then
+			finish_publication(expected, publication, "Published " .. #queue .. " review comments to TUICR")
+			update_panel(current)
+			return
+		end
+		local authoritative = verified_persisted_snapshot(current, "continue TUICR publication")
+		if not authoritative then
+			finish_publication(expected, publication)
+			return
+		end
+		local item = find_item(authoritative, id)
+		if not item or not review_store.delivery_eligible(item) then
+			finish_publication(
+				expected,
+				publication,
+				"Review comment changed during TUICR publication",
+				vim.log.levels.ERROR
+			)
+			return
+		end
+		local values = {
+			author = tuicr_author(),
+			type = item.type,
+			body = item.body,
+			anchor = tuicr_anchor(item.anchor),
+		}
+		local action = "add"
+		local operation = review_tuicr.add
+		if not null(item.reply_to) then
+			local parent = find_item(authoritative, item.reply_to)
+			values.reply_to = receipts[item.reply_to] or review_store.tuicr_receipt(parent)
+			action = "respond"
+			operation = review_tuicr.respond
+		end
+		values.delivery_key = tuicr_delivery_key(action, authoritative.bridge.round, item, values)
+		local operation_snapshot = publication_snapshot(authoritative, id)
+		local function preflight()
+			local latest = workspace_for_key(expected)
+			if publishing[expected] ~= publication or not latest then
+				return nil, "review publication is no longer active"
+			end
+			if not publication_snapshot_matches(latest.session, operation_snapshot) then
+				return nil, "live review revision, TUICR link, or item payload changed during round status"
+			end
+			local persisted, persisted_err = matching_persisted_snapshot(latest)
+			if not persisted then
+				return nil, persisted_err
+			end
+			if not publication_snapshot_matches(persisted, operation_snapshot) then
+				return nil, "persisted review revision, TUICR link, or item payload changed during round status"
+			end
+			return true
+		end
+		operation(
+			current.root,
+			authoritative.bridge.round,
+			values,
+			{ preflight = preflight },
+			function(receipt, publish_err)
+				if not receipt then
+					finish_publication(
+						expected,
+						publication,
+						"TUICR publication failed: " .. message(publish_err),
+						vim.log.levels.ERROR
+					)
+					return
+				end
+				local latest = workspace_for_key(expected)
+				local receipt_conflict
+				if publishing[expected] ~= publication then
+					receipt_conflict = "the publication generation changed"
+				elseif not latest then
+					receipt_conflict = "the review session closed"
+				elseif not publication_snapshot_matches(latest.session, operation_snapshot) then
+					receipt_conflict = "the live review revision, TUICR link, or item payload changed"
+				else
+					local persisted, persisted_err = matching_persisted_snapshot(latest)
+					if not persisted then
+						receipt_conflict = persisted_err
+					elseif not publication_snapshot_matches(persisted, operation_snapshot) then
+						receipt_conflict = "the persisted review revision, TUICR link, or item payload changed"
+					end
+				end
+				if receipt_conflict then
+					local recovery_receipt, recovery_err =
+						save_publication_recovery(current.root, operation_snapshot, receipt.id)
+					local recovery_detail = recovery_receipt and ("recovery saved to " .. recovery_receipt.path)
+						or ("recovery failed: " .. tostring(recovery_err))
+					finish_publication(
+						expected,
+						publication,
+						"TUICR accepted receipt "
+							.. receipt.id
+							.. " for the exact comment, but "
+							.. receipt_conflict
+							.. "; its receipt was not attached to different content; "
+							.. recovery_detail,
+						vim.log.levels.ERROR
+					)
+					return
+				end
+				local changed, mark_err = review_store.mark_tuicr_delivered(latest.session, id, receipt.id)
+				if not changed then
+					finish_publication(
+						expected,
+						publication,
+						"Could not persist TUICR receipt " .. receipt.id .. ": " .. tostring(mark_err or "save failed"),
+						vim.log.levels.ERROR
+					)
+					return
+				end
+				local saved, save_err = save_mutation(latest, changed)
+				if not saved then
+					finish_publication(
+						expected,
+						publication,
+						"TUICR accepted receipt "
+							.. receipt.id
+							.. " for the exact comment, but it could not be persisted: "
+							.. tostring(save_err or "save failed"),
+						vim.log.levels.ERROR
+					)
+					return
+				end
+				receipts[id] = receipt.id
+				index = index + 1
+				step()
+			end
+		)
+	end
+	step()
+	return true
+end
+
+local function round_id(round)
+	return type(round) == "table" and (round.round or round.id) or nil
+end
+
+function M.link_tuicr(requested)
+	local workspace = current_workspace()
+	if not workspace or not allow_mutation(workspace) then
+		return
+	end
+	local expected = workspace_key(workspace)
+	local function link(round)
+		local current = active_for_key(expected, "linking a TUICR round")
+		if not current or not allow_mutation(current) then
+			return
+		end
+		local changed, err = review_store.link_tuicr(current.session, round_id(round) or round)
+		if changed then
+			save_mutation(current, changed)
+		else
+			notify(err, vim.log.levels.ERROR)
+		end
+	end
+	review_tuicr.list_rounds(workspace.root, function(rounds, err)
+		if not rounds then
+			notify("Could not list TUICR rounds: " .. message(err), vim.log.levels.ERROR)
+			return
+		end
+		if requested and requested ~= "" then
+			for _, round in ipairs(rounds) do
+				if round_id(round) == requested then
+					link(round)
+					return
+				end
+			end
+			notify("TUICR round is not open for this repository", vim.log.levels.ERROR)
+			return
+		end
+		vim.ui.select(rounds, { prompt = "TUICR round", format_item = round_id }, function(round)
+			if round then
+				link(round)
+			end
+		end)
+	end)
+end
+
+local function anchor_targets_buffer(workspace, anchor, buf)
+	if anchor.kind == "general" then
+		return false
+	end
+	if vim.b[buf].nvim_review_path == anchor.path then
+		return vim.b[buf].nvim_review_side == anchor.side and vim.b[buf].nvim_review_layer == anchor.layer
+	end
+	for _, target in ipairs(normal_targets(workspace, buf, 0)) do
+		if target.path == anchor.path and target.side == anchor.side and target.layer == anchor.layer then
+			return true
+		end
+	end
+	return false
+end
+
+function M.decorate_buffer(workspace, buf)
+	workspace = workspace or current_workspace()
+	if not workspace or not valid_buf(buf) or vim.b[buf].nvim_review_role == "panel" then
+		return
+	end
+	vim.api.nvim_buf_clear_namespace(buf, NAMESPACE, 0, -1)
+	local count = vim.api.nvim_buf_line_count(buf)
+	local marks = {}
+	for _, item in ipairs(workspace.session.items or {}) do
+		local anchor = item.anchor
+		if anchor.kind == "range" and anchor_targets_buffer(workspace, anchor, buf) then
+			local first = math.max(1, math.min(anchor.start_line, count))
+			local last = math.max(first, math.min(anchor.end_line or first, count))
+			local sign = TYPE_SIGNS[item.type] or TYPE_SIGNS.question
+			for line = first, last do
+				local text = sign.text
+				if last > first then
+					text = line == first and "╭" or line == last and "╰" or "│"
+				end
+				marks[line] = marks[line] or {}
+				marks[line][#marks[line] + 1] = { text = text, highlight = sign.highlight }
+			end
+		end
+	end
+	for line, entries in pairs(marks) do
+		local options = { priority = 80 }
+		if #entries == 1 then
+			options.sign_text = entries[1].text
+			options.sign_hl_group = entries[1].highlight
+		else
+			options.sign_text = #entries < 10 and tostring(#entries) or "9+"
+			options.sign_hl_group = "DiagnosticSignInfo"
+			options.virt_text = { { string.format("  %d review comments", #entries), "Comment" } }
+			options.virt_text_pos = "eol"
+		end
+		vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line - 1, 0, options)
+	end
+end
+
+function M.refresh_marks(workspace)
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if valid_buf(buf) then
+			vim.api.nvim_buf_clear_namespace(buf, NAMESPACE, 0, -1)
+		end
+	end
+	workspace = workspace or current_workspace()
+	if not workspace then
+		return
+	end
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if valid_buf(buf) and (buffer_in_root(workspace.root, buf) or vim.b[buf].nvim_review_path) then
+			M.decorate_buffer(workspace, buf)
+		end
+	end
+end
+
+function M.snapshot()
+	local workspace = current_workspace()
+	if not workspace then
+		return nil
+	end
+	local items = {}
+	for _, item in ipairs(workspace.session.items) do
+		items[#items + 1] = {
+			id = item.id,
+			sequence = item.sequence,
+			type = item.type,
+			status = review_store.item_status(item),
+			resolution = item.resolution,
+			body = item.body,
+			anchor = vim.deepcopy(item.anchor),
+			reply_to = item.reply_to,
+		}
+	end
+	return {
+		root = workspace.root,
+		scope = vim.deepcopy(workspace.scope),
+		stale = workspace.session.stale,
+		items = items,
+	}
+end
+
+function M.items()
+	local value = M.snapshot()
+	return value and value.items or {}
+end
+
+function M.suspend_for_session()
+	if suspended then
+		return nil, "review UI is already suspended"
+	elseif next(publishing) then
+		return nil, "TUICR publication is still in progress"
+	elseif review_editor.has_active() then
+		return nil, "review composer has unsent text; save or cancel it first"
+	end
+	local workspace = current_workspace()
+	local state = {
+		focus = focus_snapshot(workspace),
+		key = workspace and workspace_key(workspace) or nil,
+	}
+	local preview, preview_err = review_export.suspend_preview()
+	if preview_err then
+		return nil, "could not suspend review export preview: " .. tostring(preview_err)
+	end
+	state.preview = preview
+	if workspace then
+		state.mode_on = workspace.mode_on
+		state.entry = workspace.entry_identity
+		state.layout = workspace.layout
+		state.context = workspace.context
+		state.panel = review_panel.suspend(workspace.panel)
+		if workspace.mode_state.presentation then
+			review_presenter.clear(workspace.mode_state)
+		end
+		state.mode = review_mode.suspend(workspace.mode_state)
+		workspace.mode_on = false
+	end
+	suspended = state
+	return true
+end
+
 function M.restore_after_session()
 	local state = suspended
 	if not state then
 		return true
 	end
 	suspended = nil
-	local errors = {}
-	for _, value in ipairs(state.entries) do
-		local workspace = value.workspace
-		workspace.suspending = nil
-		local target = value.target
-		local opened, err = review_diffview.open(
-			workspace,
-			value.mode,
-			value.mode ~= "history" and target and target.current_path or nil,
-			nil,
-			target
-		)
-		if not opened then
-			errors[#errors + 1] = tostring(err)
+	local workspace = state.key and workspace_for_key(state.key) or nil
+	local function finish(ok, err, preview_restored)
+		if not (preview_restored and state.preview and state.preview.focused) then
+			pcall(restore_focus, workspace, state.focus)
+		end
+		return ok, err
+	end
+	if state.key and not workspace then
+		return finish(nil, "review session disappeared while UI was suspended", false)
+	end
+	if workspace then
+		workspace.layout = state.layout
+		workspace.context = state.context
+		workspace.entry_identity = first_identity(workspace.model, state.entry)
+		local restored, restore_err = review_mode.restore(workspace.mode_state, state.mode)
+		if not restored then
+			review_mode.disable(workspace.mode_state)
+			review_panel.hide(workspace.panel)
+			return finish(nil, "could not restore review mode: " .. tostring(restore_err), false)
+		end
+		workspace.mode_on = state.mode_on == true
+		if workspace.mode_on and workspace.entry_identity then
+			local shown, show_err = M.present(workspace.entry_identity, state.key)
+			if not shown then
+				review_mode.disable(workspace.mode_state)
+				workspace.mode_on = false
+				review_panel.hide(workspace.panel)
+				return finish(nil, "could not restore review presentation: " .. tostring(show_err), false)
+			end
+		end
+		if not review_panel.restore(workspace.panel, state.panel) then
+			review_mode.disable(workspace.mode_state)
+			workspace.mode_on = false
+			return finish(nil, "could not restore review panel", false)
 		end
 	end
-	local focus = state.focus
-	local target = focus.workspace and focus.workspace.tabpage or focus.tabpage
-	if valid_tab(target) then
-		vim.api.nvim_set_current_tabpage(target)
-		if not focus.workspace and vim.api.nvim_win_is_valid(focus.winid) then
-			vim.api.nvim_set_current_win(focus.winid)
+	local preview_target = workspace and review_presenter.current_target(workspace.mode_state) or nil
+	if not review_export.restore_preview(state.preview, preview_target and preview_target.win) then
+		if workspace then
+			review_mode.disable(workspace.mode_state)
+			workspace.mode_on = false
+			review_panel.hide(workspace.panel)
 		end
+		return finish(nil, "could not restore review export preview", false)
 	end
-	if not review_export.restore_preview(state.preview) then
-		errors[#errors + 1] = "could not restore review export preview"
-	end
-	if not restore_review_threads(state.threads) then
-		errors[#errors + 1] = "could not restore review threads"
-	end
-	if #errors > 0 then
-		return nil, "could not restore review tab: " .. table.concat(errors, "; ")
-	end
-	return true
+	return finish(true, nil, true)
 end
 
-local function close_workspace(force, requested_tab)
-	local workspace = requested_tab and review_diffview.workspace(requested_tab) or active_workspace()
+function M.close(force)
+	local workspace = current_workspace()
 	if not workspace then
-		return notify("No active review", vim.log.levels.ERROR)
+		notify("No active review", vim.log.levels.ERROR)
+		return false
 	end
-	if publication_active(workspace) then
-		return notify("Wait for the current TUICR publication to finish", vim.log.levels.WARN)
-	end
-	if composer_active() then
-		return notify("Save or cancel the open review comment before closing", vim.log.levels.WARN)
+	local expected = workspace_key(workspace)
+	if next(publishing) then
+		notify("Wait for TUICR publication to finish", vim.log.levels.WARN)
+		return false
+	elseif review_editor.has_active() then
+		notify("Save or cancel the review composer before closing", vim.log.levels.WARN)
+		return false
 	end
 	if workspace.unsaved_error then
-		if not force then
-			return notify(
-				"Use :ReviewExport! and then :ReviewClose! to discard the recovered local copy",
-				vim.log.levels.WARN
-			)
-		end
-		if type(workspace.recovery_exported) == "table" then
-			local verified, verify_err = review_store.verify_recovery(workspace.root, workspace.recovery_exported)
-			if not verified then
-				return notify("Recovery export is unavailable: " .. tostring(verify_err), vim.log.levels.ERROR)
-			end
-		elseif not workspace.recovery_exported and #workspace.session.items > 0 then
-			return notify("Export the unsaved review before forcing it closed", vim.log.levels.ERROR)
-		end
-	end
-	if valid_tab(workspace.tabpage) then
-		local original_tab = vim.api.nvim_get_current_tabpage()
-		vim.api.nvim_set_current_tabpage(workspace.tabpage)
-		local closed, err = review_diffview.close()
-		if not closed then
-			notify("Could not close review: " .. tostring(err), vim.log.levels.ERROR)
-			if valid_tab(original_tab) then
-				vim.api.nvim_set_current_tabpage(original_tab)
-			end
+		local receipt, recovery_err = recovery(workspace)
+		if not receipt then
+			notify("Could not close review because recovery failed: " .. tostring(recovery_err), vim.log.levels.ERROR)
 			return false
 		end
-		if valid_tab(original_tab) then
-			vim.api.nvim_set_current_tabpage(original_tab)
+		if not force then
+			local suffix = type(receipt) == "table" and "; recovery saved to " .. receipt.path or ""
+			notify(
+				"Review has unsaved changes" .. suffix .. "; use :ReviewClose! to discard the live state",
+				vim.log.levels.ERROR
+			)
+			return false
 		end
 	end
+	review_panel.close(workspace.panel)
+	review_mode.disable(workspace.mode_state)
+	workspaces[expected] = nil
+	active = nil
+	M.refresh_marks(nil)
+	refresh_trouble()
 	return true
-end
-
----Close a review-owned tab through the same recovery and composer guards.
----@param tabpage integer
----@return boolean
-function M.close_tab(tabpage)
-	return close_workspace(false, tabpage) == true
 end
 
 local function parse_open(arguments)
@@ -2104,288 +2297,235 @@ local function parse_open(arguments)
 		return { kind = kind, from = arguments[2], to = arguments[3] }
 	elseif kind == "branch" and #arguments <= 3 then
 		return { kind = kind, base = arguments[2], head = arguments[3] }
-	elseif kind == "tuicr" and #arguments <= 2 then
-		return { kind = kind, round = arguments[2] }
 	end
 	return nil
 end
 
+local function command(name, callback, options)
+	if vim.fn.exists(":" .. name) == 2 then
+		vim.api.nvim_del_user_command(name)
+	end
+	vim.api.nvim_create_user_command(name, callback, options or {})
+end
+
 local function setup_commands()
-	vim.api.nvim_create_user_command("ReviewOpen", function(command)
-		local root = root_for_command()
-		if not root then
-			return notify("Current buffer is not inside a Git repository", vim.log.levels.ERROR)
+	command("ReviewOpen", function(value)
+		local request = parse_open(vim.split(value.args, "%s+", { trimempty = true }))
+		if request then
+			M.open(request)
+		else
+			notify("Usage: ReviewOpen [working|commit [REV]|range FROM TO|branch [BASE [HEAD]]]", vim.log.levels.ERROR)
 		end
-		local arguments = vim.split(command.args, "%s+", { trimempty = true })
-		local request = parse_open(arguments)
-		if not request then
-			return notify(
-				"Usage: ReviewOpen [working|commit [REV]|range FROM TO|branch [BASE [HEAD]]|tuicr [UUID]]",
-				vim.log.levels.ERROR
-			)
-		end
-		if request.kind == "tuicr" then
-			M.link_tuicr(request.round, root)
-			return
-		end
-		report_open(root, request)
 	end, {
 		nargs = "*",
 		complete = function()
-			return { "working", "commit", "range", "branch", "tuicr" }
+			return { "working", "commit", "range", "branch" }
 		end,
-		desc = "Open an exact native code-review workspace",
 	})
-	vim.api.nvim_create_user_command("ReviewScope", function()
+	command("ReviewScope", function()
 		local root = root_for_command()
 		if root then
-			open_scope_picker(root)
+			scope_picker(root)
 		else
 			notify("Current buffer is not inside a Git repository", vim.log.levels.ERROR)
 		end
-	end, { desc = "Choose a review scope or saved session" })
-	vim.api.nvim_create_user_command("ReviewSessions", function()
-		M.sessions()
-	end, { desc = "Open a saved review session" })
-	vim.api.nvim_create_user_command("ReviewFiles", function()
-		local workspace = active_workspace()
-		if workspace and not composer_active() then
-			open_workspace_view(workspace, "files")
-		elseif workspace then
-			notify("Save or cancel the open review comment before changing review views", vim.log.levels.WARN)
+	end)
+	command("ReviewSessions", function()
+		local root = root_for_command()
+		if root then
+			choose_saved(root)
 		end
-	end, { desc = "Show the review file aggregate" })
-	vim.api.nvim_create_user_command("ReviewCommits", function()
-		local workspace = active_workspace()
-		if workspace then
-			if composer_active() then
-				return notify(
-					"Save or cancel the open review comment before changing review views",
-					vim.log.levels.WARN
-				)
-			end
-			local opened, err = open_workspace_view(workspace, "history")
-			if not opened then
-				notify(err, vim.log.levels.WARN)
-			end
-		end
-	end, { desc = "Show commits in the review scope" })
-	vim.api.nvim_create_user_command("ReviewCode", M.code, { desc = "Toggle current source and exact review diff" })
-	vim.api.nvim_create_user_command("ReviewLayout", function()
-		local changed, err = review_diffview.layout()
-		if not changed then
-			notify(err, vim.log.levels.WARN)
-		end
-	end, { desc = "Toggle side-by-side and unified inline review layouts" })
-	vim.api.nvim_create_user_command("ReviewContext", function(command)
-		local mode = command.args ~= "" and command.args or nil
-		local changed, err = review_diffview.context(mode)
-		if not changed then
-			notify(err, vim.log.levels.WARN)
-		end
+	end)
+	command("ReviewMode", function(value)
+		M.mode(value.args ~= "" and value.args or "toggle")
+	end, {
+		nargs = "?",
+		complete = function()
+			return { "on", "off", "toggle" }
+		end,
+	})
+	command("ReviewPanel", function(value)
+		M.panel(value.args ~= "" and value.args or "toggle")
+	end, {
+		nargs = "?",
+		complete = function()
+			return { "toggle", "open", "close", "files", "commits", "comments" }
+		end,
+	})
+	command("ReviewFiles", M.files)
+	command("ReviewCommits", M.commits)
+	command("ReviewComments", M.comments)
+	command("ReviewThreads", M.comments)
+	command("ReviewCode", M.code)
+	command("ReviewLayout", function(value)
+		M.layout(value.args ~= "" and value.args or nil)
+	end, {
+		nargs = "?",
+		complete = function()
+			return { "inline", "split" }
+		end,
+	})
+	command("ReviewContext", function(value)
+		M.context(value.args ~= "" and value.args or nil)
 	end, {
 		nargs = "?",
 		complete = function()
 			return { "hunks", "full" }
 		end,
-		desc = "Toggle or set hunk/full-file review context",
 	})
-	vim.api.nvim_create_user_command("ReviewComment", function(command)
-		M.comment(command.line1, command.line2, command.args ~= "" and command.args or nil)
+	command("ReviewComment", function(value)
+		M.comment(value.line1, value.line2, value.args ~= "" and value.args or nil)
 	end, {
 		nargs = "?",
 		range = true,
 		complete = function()
 			return vim.deepcopy(REVIEW_TYPES)
 		end,
-		desc = "Add a typed review comment",
 	})
-	vim.api.nvim_create_user_command("ReviewFileComment", function(command)
-		M.file_comment(command.args ~= "" and command.args or nil)
+	command("ReviewFileComment", function(value)
+		M.file_comment(value.args ~= "" and value.args or nil)
 	end, {
 		nargs = "?",
 		complete = function()
 			return vim.deepcopy(REVIEW_TYPES)
 		end,
-		desc = "Add a typed file-level review comment",
 	})
-	vim.api.nvim_create_user_command("ReviewThreads", M.threads, { desc = "Toggle review threads in Trouble" })
-	vim.api.nvim_create_user_command("ReviewComments", M.comments, { desc = "Choose and jump to a review comment" })
-	vim.api.nvim_create_user_command("ReviewReply", function(command)
-		M.reply(command.args)
-	end, { nargs = "?", desc = "Reply to a review comment" })
-	vim.api.nvim_create_user_command("ReviewEdit", function(command)
-		M.edit(command.args)
-	end, { nargs = "?", desc = "Edit a review draft" })
-	vim.api.nvim_create_user_command("ReviewDeleteDraft", function(command)
-		M.delete(command.args)
-	end, { nargs = "?", desc = "Delete a review comment at the current line or by ID" })
-	vim.api.nvim_create_user_command("ReviewChangeType", M.change_type, {
-		desc = "Change the review comment type at the current line",
+	command("ReviewGeneralComment", function(value)
+		M.general_comment(value.args ~= "" and value.args or nil)
+	end, {
+		nargs = "?",
+		complete = function()
+			return vim.deepcopy(REVIEW_TYPES)
+		end,
 	})
-	vim.api.nvim_create_user_command("ReviewResolve", function(command)
-		set_item_status(command.args, "resolved")
-	end, { nargs = "?", desc = "Resolve a review comment" })
-	vim.api.nvim_create_user_command("ReviewReopen", function(command)
-		set_item_status(command.args, "open")
-	end, { nargs = "?", desc = "Reopen a resolved review comment" })
-	vim.api.nvim_create_user_command("ReviewNext", M.next, { desc = "Go to next review comment" })
-	vim.api.nvim_create_user_command("ReviewPrev", M.prev, { desc = "Go to previous review comment" })
-	vim.api.nvim_create_user_command("ReviewRefresh", M.refresh, { desc = "Refresh review drift and files" })
-	vim.api.nvim_create_user_command("ReviewExport", function(command)
-		M.export(command.bang)
-	end, { bang = true, desc = "Export review to clipboard" })
-	vim.api.nvim_create_user_command("ReviewLinkTuicr", function(command)
-		M.link_tuicr(command.args ~= "" and command.args or nil)
-	end, { nargs = "?", desc = "Link current review to a TUICR round" })
-	vim.api.nvim_create_user_command("ReviewClose", function(command)
-		close_workspace(command.bang)
-	end, { bang = true, desc = "Close the current review workspace" })
+	command("ReviewEdit", function(value)
+		M.edit(value.args)
+	end, { nargs = "?" })
+	command("ReviewDeleteDraft", function(value)
+		M.delete(value.args)
+	end, { nargs = "?" })
+	command("ReviewChangeType", function(value)
+		M.change_type(value.args)
+	end, { nargs = "?" })
+	command("ReviewReply", function(value)
+		M.reply(value.args)
+	end, { nargs = "?" })
+	command("ReviewResolve", function(value)
+		M.resolve(value.args)
+	end, { nargs = "?" })
+	command("ReviewReopen", function(value)
+		M.reopen(value.args)
+	end, { nargs = "?" })
+	command("ReviewToggleResolve", function(value)
+		M.toggle_resolution(value.args)
+	end, { nargs = "?" })
+	command("ReviewReanchor", function(value)
+		M.reanchor(value.args)
+	end, { nargs = "?" })
+	command("ReviewNext", M.next)
+	command("ReviewPrev", M.prev)
+	command("ReviewRefresh", M.refresh)
+	command("ReviewExport", function(value)
+		M.export(value.bang)
+	end, { bang = true })
+	command("ReviewPublish", function(value)
+		M.publish(value.bang)
+	end, { bang = true })
+	command("ReviewLinkTuicr", function(value)
+		M.link_tuicr(value.args ~= "" and value.args or nil)
+	end, { nargs = "?" })
+	command("ReviewClose", function(value)
+		M.close(value.bang)
+	end, { bang = true })
 end
 
----Return the normal-mode review mappings shared by the editor and Diffview help.
----@return table[]
 function M.mapping_specs()
-	return vim.deepcopy(REVIEW_MAPPINGS)
+	return vim.deepcopy(MAPPINGS)
 end
 
----Return the effective Diffview group names used only by its help panel.
----@return table<string, string>
 function M.help_groups()
-	return vim.deepcopy(REVIEW_HELP_GROUPS)
+	return vim.deepcopy(HELP_GROUPS)
 end
 
----Build normalized mappings for one review help group.
----@param group "common"|"diff_line"|"file"
----@return table[]
 function M.help_mappings(group)
-	local mappings = {}
-	for _, mapping in ipairs(REVIEW_MAPPINGS) do
+	local values = {}
+	for _, mapping in ipairs(MAPPINGS) do
 		if mapping.help == group then
-			mappings[#mappings + 1] = { "n", mapping.lhs, mapping.rhs, { desc = mapping.desc } }
+			values[#values + 1] = { "n", mapping.lhs, mapping.rhs, { desc = mapping.desc } }
 		end
 	end
-	return mappings
+	return values
 end
 
 local function setup_mappings()
-	for _, mapping in ipairs(M.mapping_specs()) do
+	for _, mapping in ipairs(MAPPINGS) do
 		vim.keymap.set("n", mapping.lhs, mapping.rhs, { silent = true, desc = mapping.desc })
 	end
-	vim.keymap.set("x", "<leader>Ra", ":<C-U>'<,'>ReviewComment<CR>", {
+	vim.keymap.set("x", "<leader>ra", ":<C-U>'<,'>ReviewComment<CR>", {
 		silent = true,
 		desc = "Add review comment for selected lines",
 	})
 end
 
-local function setup_drift_tracking()
+local function setup_autocmds()
 	local group = vim.api.nvim_create_augroup("NvimConfigCodeReview", { clear = true })
+	vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter" }, {
+		group = group,
+		callback = function(event)
+			local workspace = current_workspace()
+			if workspace then
+				if workspace.mode_on then
+					local enrolled, enroll_err = review_mode.enroll_affected_buffer(workspace.mode_state, event.buf)
+					if enrolled == nil then
+						notify("Could not enroll review buffer: " .. tostring(enroll_err), vim.log.levels.ERROR)
+					end
+				end
+				M.decorate_buffer(workspace, event.buf)
+			end
+		end,
+	})
 	vim.api.nvim_create_autocmd("BufModifiedSet", {
 		group = group,
-		desc = "Mark working reviews stale when an in-memory source diverges",
 		callback = function(event)
-			if not vim.bo[event.buf].modified then
-				return
-			end
-			for root, workspace in pairs(workspaces) do
-				if
-					workspace.scope.kind == "working"
-					and not workspace.session.stale
-					and buffer_in_root(root, event.buf)
-				then
-					local session = vim.deepcopy(workspace.session)
-					session.stale = true
-					save_session(workspace, session)
-				end
+			local workspace = current_workspace()
+			if
+				workspace
+				and workspace.scope.kind == "working"
+				and vim.bo[event.buf].modified
+				and buffer_in_root(workspace.root, event.buf)
+			then
+				mark_stale(workspace)
 			end
 		end,
 	})
 	vim.api.nvim_create_autocmd("VimLeavePre", {
 		group = group,
-		desc = "Persist review state before global Neovim teardown",
 		callback = function()
-			local editor = require("config.review_editor")
-			local saved, composer_err = pcall(editor.persist_active)
-			if not saved or composer_err ~= true then
+			if review_editor.persist_active() ~= true then
 				notify("Could not persist the open review comment before exit", vim.log.levels.ERROR)
 			end
 			for _, workspace in pairs(workspaces) do
-				if workspace.unsaved_error then
-					local recovery, recovery_err = persist_unsaved_recovery(workspace)
-					if not recovery and #workspace.session.items > 0 then
-						notify(
-							"Could not persist review recovery before exit: " .. tostring(recovery_err),
-							vim.log.levels.ERROR
-						)
-					end
-				end
+				recovery(workspace)
 			end
 		end,
 	})
 end
 
----Register review commands, mappings, and Diffview callbacks.
 function M.setup()
-	require("config.review_context").setup()
-	review_diffview.set_controller({
-		code = M.code,
-		close = close_workspace,
-		refresh = M.refresh,
-		decorate_buffer = M.decorate_buffer,
-		clear_buffers = function(_, buffers)
-			for _, buf in ipairs(buffers or {}) do
-				if vim.api.nvim_buf_is_valid(buf) then
-					vim.api.nvim_buf_clear_namespace(buf, NAMESPACE, 0, -1)
-				end
-			end
-		end,
-		view_opened = function(workspace)
-			M.refresh_marks(workspace)
-			local threads = workspace.pending_threads
-			workspace.pending_threads = nil
-			if threads and not restore_review_threads(threads) then
-				notify("Could not restore review threads after changing views", vim.log.levels.ERROR)
-			end
-		end,
-		view_enter = function(workspace)
-			local checked, err = update_drift(workspace.session)
-			if not checked then
-				notify("Could not check review drift: " .. error_message(err), vim.log.levels.ERROR)
-			elseif checked.stale ~= workspace.session.stale then
-				save_session(workspace, checked)
-			else
-				M.refresh_marks(workspace)
-			end
-		end,
-		view_closed = function(workspace)
-			if workspace.suspending or workspace.replacing or workspace.reopening then
-				workspace.replacing = nil
-				return
-			end
-			if workspaces[workspace.root] == workspace then
-				workspaces[workspace.root] = nil
-			end
-			if workspace.unsaved_error then
-				local recovery, err = persist_unsaved_recovery(workspace)
-				if type(recovery) == "table" then
-					notify("Review tab closed; complete recovery remains at " .. recovery.path, vim.log.levels.WARN)
-				elseif #workspace.session.items > 0 then
-					notify("Review tab closed and recovery failed: " .. tostring(err), vim.log.levels.ERROR)
-				end
-			end
-			review_source.clear_workspace(workspace)
-			close_review_threads(workspace)
-			if next(workspaces) == nil then
-				tab_config.ensure_home()
-			end
-		end,
-	})
+	if setup_done then
+		return
+	end
+	setup_done = true
+	review_lsp.setup()
 	setup_commands()
 	setup_mappings()
-	setup_drift_tracking()
+	setup_autocmds()
 end
 
 M._parse_open = parse_open
 M._workspaces = workspaces
+M._active_workspace = current_workspace
+M._open_scope_picker = scope_picker
+M._contains_line = contains_line
 
 return M

@@ -510,6 +510,18 @@ test("attached Pyright root scopes manual selection and shared consumers", funct
 	assert(ok, err)
 end)
 
+test("Python mappings stay outside the review namespace", function()
+	python.setup()
+	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>pr", "n", false, true)))
+	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>ps", "n", false, true)))
+	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>ps", "x", false, true)))
+	assert(vim.tbl_isempty(vim.fn.maparg("<leader>rp", "n", false, true)))
+	assert(vim.tbl_isempty(vim.fn.maparg("<leader>rs", "x", false, true)))
+	vim.keymap.del("n", "<leader>pr")
+	vim.keymap.del("n", "<leader>ps")
+	vim.keymap.del("x", "<leader>ps")
+end)
+
 package.loaded["venv-selector"] = original_selector
 package.loaded["config.terminal"] = original_terminal
 vim.lsp.get_clients = original_clients

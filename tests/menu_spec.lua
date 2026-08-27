@@ -150,27 +150,37 @@ test("review layout and context are palette-only namespaced commands", function(
 	local compact = catalog.build(menu_context, function() end, "context")
 	local item = assert(find_item(palette, "command.review_layout"), "review layout descriptor is missing")
 	equal("Toggle Side-by-side / Unified Inline Diff", item.label, "review layout label")
-	equal("<leader>Rv", item.hint, "review layout mapping hint")
+	equal("<leader>rv", item.hint, "review layout mapping hint")
 	equal({ "layout", "interleaved", "inline", "unified" }, item.keywords, "review layout search terms")
 	assert(not find_item(compact, "command.review_layout"), "review layout leaked into the context menu")
 	local context_item = assert(find_item(palette, "command.review_context"), "review context descriptor is missing")
 	equal("Toggle Hunks / Full File Context", context_item.label, "review context label")
-	equal("<leader>Rw", context_item.hint, "review context mapping hint")
+	equal("<leader>rw", context_item.hint, "review context mapping hint")
 	equal({ "context", "hunks", "full", "whole file", "folds" }, context_item.keywords, "review context search terms")
 	assert(not find_item(compact, "command.review_context"), "review context leaked into the context menu")
 	for id, expected in pairs({
-		["command.review_code"] = { "Toggle Review Code and Diff", "<leader>Rg" },
-		["command.review_comments"] = { "List Review Comments", "<leader>Rl" },
-		["command.review_file_comment"] = { "Add File-level Review Comment", "<leader>RA" },
-		["command.review_edit"] = { "Edit Review Comment", "<leader>RE" },
-		["command.review_change_type"] = { "Change Comment Type at Current Line", "<leader>Rc" },
-		["command.review_delete"] = { "Delete Comment at Current Line", "<leader>Rd" },
+		["command.review_panel"] = { "Toggle Review Panel", "<leader>rr" },
+		["command.review_mode"] = { "Toggle Read-only Review Mode", "<leader>rm" },
+		["command.review_code"] = { "Focus Reviewed Code", "<leader>rg" },
+		["command.review_comments"] = { "Focus Review Comments", "<leader>rl" },
+		["command.review_file_comment"] = { "Add File-level Review Comment", "<leader>rA" },
+		["command.review_edit"] = { "Edit Review Comment", "<leader>re" },
+		["command.review_change_type"] = { "Change Comment Type at Current Line", "<leader>rc" },
+		["command.review_delete"] = { "Delete Comment at Current Line", "<leader>rd" },
+		["command.review_reply"] = { "Reply to Review Comment", "<leader>rp" },
+		["command.review_toggle_resolve"] = { "Resolve or Reopen Review Comment", "<leader>rt" },
+		["command.review_export"] = { "Export Complete Review", "<leader>rE" },
 	}) do
 		local descriptor = assert(find_item(palette, id), id .. " descriptor is missing")
 		equal(expected[1], descriptor.label, id .. " label")
 		equal(expected[2], descriptor.hint, id .. " mapping hint")
 		assert(not find_item(compact, id), id .. " leaked into the context menu")
 	end
+	for _, id in ipairs({ "command.review_reanchor", "command.review_publish" }) do
+		assert(find_item(palette, id), id .. " descriptor is missing")
+		assert(not find_item(compact, id), id .. " leaked into the context menu")
+	end
+	assert(not find_item(palette, "command.review_threads"), "duplicate ReviewThreads action survived")
 end)
 
 test("catalog filters visual, filetype, and CMake descriptors from context", function()

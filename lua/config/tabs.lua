@@ -347,14 +347,6 @@ function M.close(tabpage)
 	if not valid_tab(tabpage) then
 		return false
 	end
-	local review_loaded, review_diffview = pcall(require, "config.review_diffview")
-	if review_loaded and review_diffview.workspace(tabpage) then
-		local controller_loaded, code_review = pcall(require, "config.code_review")
-		if controller_loaded and type(code_review.close_tab) == "function" then
-			return code_review.close_tab(tabpage)
-		end
-		return false
-	end
 
 	if M.is_home(tabpage) and #vim.api.nvim_list_tabpages() == 1 then
 		M.ensure_home()

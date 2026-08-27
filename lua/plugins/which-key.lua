@@ -20,7 +20,7 @@ return {
 			return true
 		end,
 		spec = {
-			{ "<leader>R", group = "review" },
+			{ "<leader>T", group = "tests" },
 			{ "<leader>c", group = "code" },
 			{ "<leader>d", group = "debug" },
 			{ "<leader>f", group = "find" },
@@ -28,6 +28,8 @@ return {
 			{ "<leader>h", group = "git hunks" },
 			{ "<leader>l", group = "lsp/diagnostics" },
 			{ "<leader>m", group = "markdown" },
+			{ "<leader>p", group = "python" },
+			{ "<leader>r", group = "review" },
 			{ "<leader>s", group = "swap/split/spell" },
 			{ "<leader>x", group = "trouble" },
 		},

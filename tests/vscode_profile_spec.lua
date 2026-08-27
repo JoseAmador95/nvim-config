@@ -97,6 +97,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				definition.callback()
 				local call = vscode_stub.calls[#vscode_stub.calls]
 				assert(call and call.action == "editor.action.revealDefinition", "VSCode definition action drifted")
+				local rename = vim.fn.maparg("<leader>lr", "n", false, true)
+				assert(type(rename.callback) == "function", "VSCode rename mapping is missing")
+				rename.callback()
+				call = vscode_stub.calls[#vscode_stub.calls]
+				assert(call and call.action == "editor.action.rename", "VSCode rename action drifted")
+				assert(vim.tbl_isempty(vim.fn.maparg("<leader>rn", "n", false, true)), "old rename mapping survived")
 			end, debug.traceback)
 
 			if not ok then

@@ -141,7 +141,7 @@ vim.keymap.set("n", "<C-k>", call("editor.action.triggerParameterHints"), {
 	desc = "Signature help",
 })
 
-vim.keymap.set("n", "<leader>rn", call("editor.action.rename"), {
+vim.keymap.set("n", "<leader>lr", call("editor.action.rename"), {
 	noremap = true,
 	silent = true,
 	desc = "Rename",

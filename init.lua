@@ -168,7 +168,7 @@ vim.keymap.set("n", "gf", require("config.editor_actions").open_file_under_curso
 })
 
 -- Neovim 0.11+ ships gr-prefixed LSP maps (grr/grn/gri/gra/grt). This config
--- defines its own equivalents (gr, gi, <leader>rn, <leader>ca in lsp.lua);
+-- defines its own equivalents (gr, gi, <leader>lr, <leader>ca in lsp.lua);
 -- the built-ins only add a timeoutlen delay to `gr`. Remove them.
 for _, lhs in ipairs({ "grr", "grn", "gri", "grt" }) do
 	pcall(vim.keymap.del, "n", lhs)

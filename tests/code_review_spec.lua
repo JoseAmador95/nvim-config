@@ -1,10 +1,11 @@
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
+vim.o.hidden = true
 vim.g.mapleader = " "
 
-local repo = vim.fn.getcwd()
-vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+local root = vim.fn.getcwd()
+vim.opt.runtimepath:prepend(root)
+package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 
 local failures = {}
 local count = 0
@@ -19,9 +20,8 @@ local function test(name, callback)
 end
 
 local review = require("config.code_review")
-local installed_controller
 
-test("ReviewOpen parser keeps explicit scope vocabulary", function()
+test("ReviewOpen parser keeps the exact native scope vocabulary", function()
 	assert(vim.deep_equal(review._parse_open({}), { kind = "branch" }))
 	assert(vim.deep_equal(review._parse_open({ "working" }), { kind = "working" }))
 	assert(vim.deep_equal(review._parse_open({ "commit", "topic" }), { kind = "commit", rev = "topic" }))
@@ -36,1890 +36,975 @@ test("ReviewOpen parser keeps explicit scope vocabulary", function()
 		base = "origin/main",
 		head = "HEAD",
 	}))
-	assert(vim.deep_equal(review._parse_open({ "tuicr", "round-id" }), { kind = "tuicr", round = "round-id" }))
-	assert(review._parse_open({ "range", "missing-end" }) == nil)
-	for _, arguments in ipairs({
-		{ "working", "extra" },
-		{ "commit", "HEAD", "extra" },
-		{ "range", "base", "head", "extra" },
-		{ "branch", "base", "head", "extra" },
-		{ "tuicr", "round-id", "extra" },
-	}) do
-		assert(review._parse_open(arguments) == nil)
-	end
+	assert(review._parse_open({ "range", "missing" }) == nil)
+	assert(review._parse_open({ "tuicr", "round" }) == nil)
 end)
 
-test("review mapping specs build normalized Diffview help groups", function()
-	local groups = review.help_groups()
-	local common = review.help_mappings("common")
-	local diff_line = review.help_mappings("diff_line")
-	local file = review.help_mappings("file")
-	assert(groups.common == "review" and groups.diff_line == "review_diff" and groups.file == "review_file")
-	assert(#review.mapping_specs() == 19 and #common == 15 and #diff_line == 3 and #file == 1)
-	local help_mappings = vim.list_extend(vim.deepcopy(common), diff_line)
-	vim.list_extend(help_mappings, file)
-	for _, mapping in ipairs(help_mappings) do
-		assert(mapping[1] == "n" and type(mapping[2]) == "string" and mapping[2] ~= "")
-		assert(type(mapping[3]) == "string" and mapping[3] ~= "")
-		assert(type(mapping[4]) == "table" and type(mapping[4].desc) == "string" and mapping[4].desc ~= "")
-	end
-	assert(vim.deep_equal(
-		vim.tbl_map(function(mapping)
-			return mapping[2]
-		end, diff_line),
-		{ "<leader>Ra", "<leader>Rc", "<leader>Rd" }
-	))
-	assert(file[1][2] == "<leader>RA")
-	assert(diff_line[1][4].desc:find("Visual range", 1, true))
+test("mapping table uses only the approved lowercase review vocabulary", function()
+	local expected = {
+		"<leader>rr",
+		"<leader>ro",
+		"<leader>rm",
+		"<leader>rs",
+		"<leader>rf",
+		"<leader>rh",
+		"<leader>rl",
+		"<leader>rv",
+		"<leader>rw",
+		"<leader>rg",
+		"<leader>ra",
+		"<leader>rA",
+		"<leader>re",
+		"<leader>rc",
+		"<leader>rd",
+		"<leader>rp",
+		"<leader>rt",
+		"<leader>rE",
+		"<leader>ru",
+		"<leader>rq",
+		"]r",
+		"[r",
+	}
+	local actual = vim.tbl_map(function(mapping)
+		assert(not mapping.lhs:find("<leader>R", 1, true), "uppercase review-prefix alias survived")
+		return mapping.lhs
+	end, review.mapping_specs())
+	assert(vim.deep_equal(actual, expected))
+	assert(review.help_groups().common == "review")
 end)
 
-test("review comments preserve normalized inclusive line ranges and context", function()
-	local diffview = require("config.review_diffview")
-	local editor = require("config.review_editor")
-	local scope = require("config.review_scope")
-	local store = require("config.review_store")
-	local root = "/tmp/review-multiline-comment"
+test("inclusive cursor matching covers multiline overlaps", function()
+	local location = { path = "lua/example.lua", side = "right", layer = "history", line = 5 }
+	assert(review._contains_line({
+		kind = "range",
+		path = location.path,
+		side = location.side,
+		layer = location.layer,
+		start_line = 3,
+		end_line = 5,
+	}, location))
+	assert(not review._contains_line({
+		kind = "file",
+		path = location.path,
+		side = location.side,
+		layer = location.layer,
+	}, location))
+end)
+
+test("overlapping comment rails render one visible aggregate marker", function()
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three" })
+	vim.b[buf].nvim_review_path = "lua/example.lua"
+	vim.b[buf].nvim_review_side = "right"
+	vim.b[buf].nvim_review_layer = "history"
 	local workspace = {
-		root = root,
-		view_mode = "files",
-		scope = { kind = "commit" },
+		root = "/tmp/review-aggregate",
 		session = {
-			id = "multiline",
-			repo_root = root,
-			scope = { kind = "commit" },
-			stale = false,
-			items = {},
-		},
-	}
-	local originals = {
-		workspace = diffview.workspace,
-		current_target = diffview.current_target,
-		update_title = diffview.update_title,
-		compose = editor.compose,
-		detect_drift = scope.detect_drift,
-		edit = store.edit,
-		add = store.add,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-	}
-	local captured
-	local lines = { "one", "two", "three", "four", "five", "six" }
-	vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.current_target = function()
-		return {
-			path = "lua/config/example.lua",
-			side = "left",
-			layer = "historical",
-			bufnr = vim.api.nvim_get_current_buf(),
-		}
-	end
-	diffview.update_title = function() end
-	editor.compose = function(options, callback)
-		assert(options.title == "New" and options.selected_type == "issue")
-		assert(callback("Range body", false, "issue"))
-		return true
-	end
-	scope.detect_drift = function()
-		return { stale = false }
-	end
-	store.add = function(session, values)
-		captured = vim.deepcopy(values.anchor)
-		local copy = vim.deepcopy(session)
-		copy.items[#copy.items + 1] = values
-		return copy
-	end
-	store.save = function(_, session)
-		return session
-	end
-	review.refresh_marks = function() end
-
-	local ok, err = xpcall(function()
-		review.comment(5, 2, "issue")
-		assert(captured.path == "lua/config/example.lua")
-		assert(captured.side == "left" and captured.layer == "historical")
-		assert(captured.start_line == 2 and captured.end_line == 5)
-		assert(captured.start_column == nil and captured.end_column == nil)
-		assert(captured.context == table.concat(lines, "\n"))
-		assert(captured.context_hash == vim.fn.sha256(captured.context):lower())
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.current_target = originals.current_target
-	diffview.update_title = originals.update_title
-	editor.compose = originals.compose
-	scope.detect_drift = originals.detect_drift
-	store.add = originals.add
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	assert(ok, err)
-end)
-
-test("file comments use path-only anchors and comments open directly with a cyclable default type", function()
-	local diffview = require("config.review_diffview")
-	local editor = require("config.review_editor")
-	local scope = require("config.review_scope")
-	local store = require("config.review_store")
-	local workspace = {
-		root = "/tmp/review-file-comment",
-		view_mode = "files",
-		scope = { kind = "commit" },
-		session = {
-			id = "file-comment",
-			repo_root = "/tmp/review-file-comment",
-			scope = { kind = "commit" },
-			stale = false,
-			items = {},
-		},
-	}
-	local originals = {
-		workspace = diffview.workspace,
-		current_target = diffview.current_target,
-		update_title = diffview.update_title,
-		compose = editor.compose,
-		detect_drift = scope.detect_drift,
-		add = store.add,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-		notify = vim.notify,
-	}
-	local captured
-	local target_options
-	local compose_calls = 0
-	local notices = {}
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.current_target = function(options)
-		target_options = options
-		return { path = "lua/config/example.lua", side = "right", layer = "working" }
-	end
-	diffview.update_title = function() end
-	scope.detect_drift = function()
-		return { stale = false }
-	end
-	editor.compose = function(options, callback)
-		compose_calls = compose_calls + 1
-		assert(options.title == "New" and options.selected_type == "issue")
-		assert(
-			vim.deep_equal(options.type_cycle, { "issue", "suggestion", "rationale", "question", "pedantic", "praise" })
-		)
-		assert(callback("File body", false, "suggestion"))
-		return true
-	end
-	store.add = function(session, values)
-		captured = vim.deepcopy(values)
-		return vim.deepcopy(session)
-	end
-	store.save = function(_, session)
-		return session
-	end
-	review.refresh_marks = function() end
-	vim.notify = function(message, level, options)
-		notices[#notices + 1] = { message = message, level = level, title = options and options.title }
-	end
-
-	local ok, err = xpcall(function()
-		review.file_comment(nil)
-		assert(compose_calls == 1 and captured.type == "suggestion")
-		assert(target_options.allow_panel, "file-tree focus was not accepted for file comments")
-		assert(vim.deep_equal(captured.anchor, {
-			path = "lua/config/example.lua",
-			side = "right",
-			layer = "working",
-			stale = false,
-		}))
-		review.comment(1, 1, "unknown")
-		assert(compose_calls == 1, "invalid explicit type opened a composer")
-		assert(notices[#notices].message:find("Usage: ReviewComment", 1, true))
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.current_target = originals.current_target
-	diffview.update_title = originals.update_title
-	editor.compose = originals.compose
-	scope.detect_drift = originals.detect_drift
-	store.add = originals.add
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	vim.notify = originals.notify
-	assert(ok, err)
-end)
-
-test("edit and reply recheck drift before opening and submitting composers", function()
-	local diffview = require("config.review_diffview")
-	local editor = require("config.review_editor")
-	local scope = require("config.review_scope")
-	local store = require("config.review_store")
-	local root = "/tmp/review-composer-drift"
-	local workspace = {
-		root = root,
-		scope = { kind = "commit" },
-		session = {
-			id = "session",
-			repo_root = root,
-			scope = { kind = "commit" },
-			stale = false,
-			items = {
-				{ id = "parent", type = "question", status = "draft", body = "Why?", anchor = {} },
-			},
-		},
-	}
-	local originals = {
-		workspace = diffview.workspace,
-		update_title = diffview.update_title,
-		compose = editor.compose,
-		detect_drift = scope.detect_drift,
-		edit = store.edit,
-		reply = store.reply,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-	}
-	local drifted = false
-	local callback
-	local mutations = 0
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.update_title = function() end
-	review.refresh_marks = function() end
-	editor.compose = function(_, submitted)
-		callback = submitted
-		return true
-	end
-	scope.detect_drift = function()
-		return { stale = drifted }
-	end
-	store.save = function(_, session)
-		return session
-	end
-	store.edit = function(session)
-		assert(session.stale)
-		mutations = mutations + 1
-		return vim.deepcopy(session)
-	end
-	store.reply = store.edit
-
-	local ok, err = xpcall(function()
-		review.edit("parent")
-		assert(type(callback) == "function")
-		drifted = true
-		assert(callback("Changed", false) == false)
-		assert(workspace.session.stale and mutations == 0)
-		assert(callback("Changed", true) == false and mutations == 0)
-
-		workspace.session.stale = false
-		drifted = false
-		callback = nil
-		review.reply("parent")
-		assert(type(callback) == "function")
-		drifted = true
-		assert(callback("Answer", false) == false)
-		assert(workspace.session.stale and mutations == 0)
-		assert(callback("Answer", true) == true and mutations == 1)
-
-		workspace.session.stale = false
-		callback = nil
-		review.reply("parent")
-		assert(callback == nil, "stale reply opened a composer")
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.update_title = originals.update_title
-	editor.compose = originals.compose
-	scope.detect_drift = originals.detect_drift
-	store.edit = originals.edit
-	store.reply = originals.reply
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	assert(ok, err)
-end)
-
-test("edit picker revalidates the logical session before opening the composer", function()
-	local diffview = require("config.review_diffview")
-	local editor = require("config.review_editor")
-	local scope = require("config.review_scope")
-	local store = require("config.review_store")
-	local workspace = {
-		root = "/tmp/review-edit-picker",
-		scope = { kind = "commit" },
-		session = {
-			id = "original-session",
-			repo_root = "/tmp/review-edit-picker",
-			scope = { kind = "commit" },
-			stale = false,
 			items = {
 				{
-					id = "file-comment",
 					sequence = 1,
 					type = "issue",
-					status = "draft",
-					body = "File",
-					anchor = { path = "a.lua", side = "right", layer = "working", stale = false },
-				},
-			},
-		},
-	}
-	local current_workspace = workspace
-	local originals = {
-		workspace = diffview.workspace,
-		update_title = diffview.update_title,
-		compose = editor.compose,
-		detect_drift = scope.detect_drift,
-		edit = store.edit,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-		select = vim.ui.select,
-		notify = vim.notify,
-	}
-	local picker_callback
-	local compose_calls = 0
-	local submit
-	local mutations = 0
-	local notices = {}
-	diffview.workspace = function()
-		return current_workspace
-	end
-	diffview.update_title = function() end
-	local editor_options
-	editor.compose = function(options, callback)
-		compose_calls = compose_calls + 1
-		editor_options = options
-		submit = callback
-	end
-	scope.detect_drift = function()
-		return { stale = false }
-	end
-	vim.ui.select = function(items, options, callback)
-		assert(#items == 1 and items[1].id == "file-comment")
-		assert(options.format_item(items[1]):find("a.lua [file]", 1, true))
-		picker_callback = callback
-	end
-	vim.notify = function(message, level, options)
-		notices[#notices + 1] = { message = message, level = level, title = options and options.title }
-	end
-	local edited_values
-	store.edit = function(session, id, values)
-		mutations = mutations + 1
-		edited_values = values
-		return vim.deepcopy(session)
-	end
-	store.save = function(_, session)
-		return session
-	end
-	review.refresh_marks = function() end
-
-	local ok, err = xpcall(function()
-		review.edit()
-		assert(type(picker_callback) == "function")
-		current_workspace = vim.deepcopy(workspace)
-		current_workspace.session.id = "replacement-session"
-		picker_callback(workspace.session.items[1])
-		assert(compose_calls == 0, "replacement review opened the captured edit")
-		assert(
-			notices[#notices].message == "Active review changed while choosing a comment to edit; no changes were made"
-		)
-
-		current_workspace = workspace
-		review.edit("file-comment")
-		assert(compose_calls == 1 and type(submit) == "function")
-		assert(editor_options.title == "Edit" and editor_options.selected_type == "issue")
-		assert(
-			vim.deep_equal(
-				editor_options.type_cycle,
-				{ "issue", "suggestion", "rationale", "question", "pedantic", "praise" }
-			)
-		)
-		current_workspace = vim.deepcopy(workspace)
-		current_workspace.session.id = "replacement-after-compose"
-		assert(submit("Changed again", false, "question") == false)
-		assert(mutations == 0, "replacement review received the captured edit")
-		assert(notices[#notices].message == "Active review changed while editing a comment; no changes were made")
-
-		current_workspace = workspace
-		review.edit("file-comment")
-		assert(compose_calls == 2)
-		assert(submit("Changed", false, "rationale"))
-		assert(mutations == 1 and vim.deep_equal(edited_values, { body = "Changed", type = "rationale" }))
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.update_title = originals.update_title
-	editor.compose = originals.compose
-	scope.detect_drift = originals.detect_drift
-	store.edit = originals.edit
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	vim.ui.select = originals.select
-	vim.notify = originals.notify
-	assert(ok, err)
-end)
-
-test("TUICR publication serializes writes and blocks review mutations", function()
-	local diffview = require("config.review_diffview")
-	local store = require("config.review_store")
-	local tuicr = require("config.review_tuicr")
-	local editor = require("config.review_editor")
-	local root = "/tmp/review-publication"
-	local item = {
-		id = "finding",
-		type = "issue",
-		status = "draft",
-		body = "Finding body",
-		reply_to = vim.NIL,
-		anchor = {},
-	}
-	local workspace = {
-		root = root,
-		session = {
-			id = "session",
-			repo_root = root,
-			stale = false,
-			scope = { kind = "commit", label = "HEAD", commit_oid = string.rep("a", 40) },
-			bridge = { round = "11111111-1111-1111-1111-111111111111" },
-			items = { item },
-		},
-	}
-	local originals = {
-		workspace = diffview.workspace,
-		update_title = diffview.update_title,
-		add = tuicr.add,
-		delete = store.delete,
-		mark_exported = store.mark_exported,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-		has_active = editor.has_active,
-	}
-	local calls = 0
-	local pending
-	local deleted = false
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.update_title = function() end
-	review.refresh_marks = function() end
-	tuicr.add = function(_, _, _, callback)
-		calls = calls + 1
-		pending = callback
-	end
-	store.delete = function()
-		deleted = true
-	end
-	store.mark_exported = function(session, id, receipt)
-		local copy = vim.deepcopy(session)
-		copy.items[1].status = "exported"
-		copy.items[1].export_id = receipt
-		assert(id == "finding")
-		return copy
-	end
-	store.save = function(_, session)
-		return session
-	end
-
-	local ok, err = xpcall(function()
-		editor.has_active = function()
-			return true
-		end
-		review.export(false)
-		assert(calls == 0, "TUICR publication started while the comment editor was open")
-		editor.has_active = originals.has_active
-		review.export(false)
-		review.export(false)
-		review.delete("finding")
-		assert(calls == 1 and not deleted and type(pending) == "function")
-		local suspended, suspend_err = review.suspend_for_session()
-		assert(not suspended and suspend_err:find("publication", 1, true))
-		pending({ id = "remote-finding" })
-		assert(workspace.session.items[1].status == "exported")
-		workspace.session.items[1].status = "draft"
-		workspace.session.items[1].export_id = nil
-		review.export(false)
-		assert(calls == 2, "publication lock was not released")
-		pending(nil, { message = "fixture stop" })
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.update_title = originals.update_title
-	tuicr.add = originals.add
-	store.delete = originals.delete
-	store.mark_exported = originals.mark_exported
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	editor.has_active = originals.has_active
-	assert(ok, err)
-end)
-
-test("TUICR publication sends unresolved reply ancestors before their children", function()
-	local diffview = require("config.review_diffview")
-	local store = require("config.review_store")
-	local tuicr = require("config.review_tuicr")
-	local root = "/tmp/review-publication-ancestors"
-	local workspace = {
-		root = root,
-		session = {
-			id = "ancestor-session",
-			repo_root = root,
-			stale = false,
-			scope = { kind = "commit", label = "HEAD", commit_oid = string.rep("a", 40) },
-			bridge = { round = "11111111-1111-1111-1111-111111111111" },
-			items = {
-				{
-					id = "parent",
-					type = "rationale",
-					status = "resolved",
-					body = "Why this structure?",
-					reply_to = vim.NIL,
-					anchor = {},
+					anchor = {
+						kind = "range",
+						path = "lua/example.lua",
+						side = "right",
+						layer = "history",
+						start_line = 2,
+						end_line = 2,
+					},
 				},
 				{
-					id = "reply",
-					type = "rationale",
-					status = "reply",
-					body = "Use the smaller interface.",
-					reply_to = "parent",
-					anchor = {},
-				},
-			},
-		},
-	}
-	local originals = {
-		workspace = diffview.workspace,
-		update_title = diffview.update_title,
-		add = tuicr.add,
-		respond = tuicr.respond,
-		mark_exported = store.mark_exported,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-	}
-	local operations = {}
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.update_title = function() end
-	review.refresh_marks = function() end
-	tuicr.add = function(_, _, values, callback)
-		operations[#operations + 1] = { action = "add", values = values }
-		callback({ id = "remote-parent" })
-	end
-	tuicr.respond = function(_, _, values, callback)
-		operations[#operations + 1] = { action = "respond", values = values }
-		callback({ id = "remote-reply" })
-	end
-	store.mark_exported = function(session, id, receipt)
-		local copy = vim.deepcopy(session)
-		for _, item in ipairs(copy.items) do
-			if item.id == id then
-				item.status = "exported"
-				item.export_id = receipt
-				return copy
-			end
-		end
-	end
-	store.save = function(_, session)
-		return session
-	end
-
-	local ok, err = xpcall(function()
-		review.export(false)
-		assert(#operations == 2)
-		assert(operations[1].action == "add" and operations[1].values.delivery_key == "parent")
-		assert(operations[2].action == "respond" and operations[2].values.delivery_key == "reply")
-		assert(operations[2].values.reply_to == "remote-parent")
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.update_title = originals.update_title
-	tuicr.add = originals.add
-	tuicr.respond = originals.respond
-	store.mark_exported = originals.mark_exported
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	assert(ok, err)
-end)
-
-test("TUICR recovery publishes the full queue and requires a forced complete export before discard", function()
-	local diffview = require("config.review_diffview")
-	local store = require("config.review_store")
-	local tuicr = require("config.review_tuicr")
-	local originals = {
-		workspace = diffview.workspace,
-		update_title = diffview.update_title,
-		add = tuicr.add,
-		mark_exported = store.mark_exported,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-	}
-	local function run(force)
-		local root = "/tmp/review-publication-recovery-" .. tostring(force)
-		local workspace = {
-			root = root,
-			session = {
-				id = "recovery-session-" .. tostring(force),
-				repo_root = root,
-				stale = false,
-				scope = { kind = "commit", label = "HEAD", commit_oid = string.rep("a", 40) },
-				bridge = { round = "11111111-1111-1111-1111-111111111111" },
-				items = {
-					{ id = "first", type = "issue", status = "draft", body = "First", reply_to = vim.NIL, anchor = {} },
-					{
-						id = "second",
-						type = "suggestion",
-						status = "draft",
-						body = "Second",
-						reply_to = vim.NIL,
-						anchor = {},
+					sequence = 2,
+					type = "question",
+					anchor = {
+						kind = "range",
+						path = "lua/example.lua",
+						side = "right",
+						layer = "history",
+						start_line = 1,
+						end_line = 3,
 					},
 				},
 			},
+		},
+	}
+	review.decorate_buffer(workspace, buf)
+	local marks = vim.api.nvim_buf_get_extmarks(buf, -1, { 1, 0 }, { 1, -1 }, { details = true })
+	assert(
+		#marks == 1 and vim.trim(marks[1][4].sign_text or "") == "2",
+		"overlapping comments did not aggregate: " .. vim.inspect(marks)
+	)
+	assert(marks[1][4].virt_text[1][1]:find("2 review comments", 1, true))
+	vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("open presents in the ordinary tab, opens the native panel, and close owns no tab", function()
+	local scope_module = require("config.review_scope")
+	local store = require("config.review_store")
+	local changes = require("config.review_changes")
+	local mode = require("config.review_mode")
+	local presenter = require("config.review_presenter")
+	local panel = require("config.review_panel")
+	local exporter = require("config.review_export")
+	local tuicr = require("config.review_tuicr")
+	local originals = {
+		resolve = scope_module.resolve,
+		load = store.load,
+		new = store.new,
+		save = store.save,
+		edit = store.edit,
+		mark_tuicr_delivered = store.mark_tuicr_delivered,
+		save_recovery = store.save_recovery,
+		verify_recovery = store.verify_recovery,
+		build = changes.build,
+		detect_drift = scope_module.detect_drift,
+		mode_new = mode.new,
+		enable = mode.enable,
+		disable = mode.disable,
+		mode_suspend = mode.suspend,
+		mode_restore = mode.restore,
+		enroll_affected_buffer = mode.enroll_affected_buffer,
+		show = presenter.show,
+		clear = presenter.clear,
+		current_target = presenter.current_target,
+		panel_new = panel.new,
+		panel_open = panel.open,
+		panel_refresh = panel.refresh,
+		panel_update_source = panel.update_source,
+		panel_hide = panel.hide,
+		panel_close = panel.close,
+		panel_suspend = panel.suspend,
+		panel_restore = panel.restore,
+		deliver = exporter.deliver,
+		render = exporter.render,
+		render_recovery = exporter.render_recovery,
+		suspend_preview = exporter.suspend_preview,
+		restore_preview = exporter.restore_preview,
+		tuicr_add = tuicr.add,
+		tuicr_respond = tuicr.respond,
+	}
+	local repository = "/tmp/native-review-controller"
+	local scope = {
+		id = string.rep("a", 64),
+		kind = "commit",
+		label = "HEAD",
+		root = repository,
+	}
+	local broken_scope = {
+		id = string.rep("b", 64),
+		kind = "commit",
+		label = "BROKEN",
+		root = repository,
+	}
+	local function session_for(value)
+		return {
+			id = value.id,
+			repo_root = repository,
+			scope = value,
+			stale = false,
+			revision = 0,
+			items = {},
 		}
-		local delivered = {}
-		local save_calls = 0
-		diffview.workspace = function()
-			return workspace
+	end
+	local entry = {
+		identity = "history\0old.lua\0new.lua",
+		old_path = "old.lua",
+		new_path = "new.lua",
+		path = "new.lua",
+	}
+	local calls = {
+		built = 0,
+		enabled = 0,
+		disabled = 0,
+		shown = 0,
+		opened = 0,
+		closed = 0,
+		delivered = 0,
+		loaded = 0,
+		resolved = 0,
+		verified = 0,
+		enrolled = 0,
+		panel_refreshed = 0,
+		source_updates = 0,
+		trouble_refreshed = 0,
+		tuicr = 0,
+	}
+	local original_trouble = package.loaded.trouble
+	package.loaded.trouble = {
+		refresh = function(mode_name)
+			assert(mode_name == "review")
+			calls.trouble_refreshed = calls.trouble_refreshed + 1
+			local snapshot = assert(review.snapshot(true))
+			calls.trouble_anchor = snapshot.items[1] and snapshot.items[1].anchor.start_line or nil
+		end,
+	}
+	local original_file_comment = review.file_comment
+	scope_module.resolve = function(root_value, request)
+		assert(root_value == repository and request.kind == "commit")
+		calls.resolved = calls.resolved + 1
+		return request.rev == "BROKEN" and broken_scope or scope
+	end
+	local function load_live(root_value, id)
+		assert(root_value == repository)
+		calls.loaded = calls.loaded + 1
+		local workspace = review._active_workspace()
+		if workspace and workspace.session.id == id then
+			return vim.deepcopy(workspace.session)
 		end
-		tuicr.add = function(_, _, values, callback)
-			delivered[#delivered + 1] = values.delivery_key
-			callback({ id = "remote-" .. values.delivery_key })
+		return nil, "review state file is missing"
+	end
+	store.load = load_live
+	store.new = function(_, value)
+		return vim.deepcopy(session_for(value))
+	end
+	store.save = function(_, value)
+		local copy = vim.deepcopy(value)
+		copy.revision = copy.revision + 1
+		return copy
+	end
+	store.edit = function(value, id, fields)
+		local copy = vim.deepcopy(value)
+		for _, item in ipairs(copy.items) do
+			if item.id == id then
+				item.type = fields.type
+				item.body = fields.body
+				item.anchor = vim.deepcopy(fields.anchor)
+				return copy
+			end
 		end
-		store.mark_exported = function(session, id, receipt)
-			local copy = vim.deepcopy(session)
+		return nil, "review item does not exist"
+	end
+	changes.build = function(root_value, scope_value)
+		assert(root_value == repository and (scope_value == scope or scope_value == broken_scope))
+		calls.built = calls.built + 1
+		return { entries = { entry }, commits = {}, scope = scope_value }
+	end
+	mode.new = function(workspace)
+		return {
+			workspace = workspace,
+			origin = { tab = vim.api.nvim_get_current_tabpage(), win = vim.api.nvim_get_current_win() },
+			enabled = false,
+		}
+	end
+	mode.enable = function(state)
+		calls.enabled = calls.enabled + 1
+		if state.workspace.scope.id == broken_scope.id then
+			return nil, "simulated activation failure"
+		end
+		state.enabled = true
+		return true
+	end
+	mode.disable = function(state)
+		calls.disabled = calls.disabled + 1
+		state.enabled = false
+		state.presentation = nil
+		if vim.api.nvim_win_is_valid(state.origin.win) then
+			vim.api.nvim_set_current_tabpage(state.origin.tab)
+			vim.api.nvim_set_current_win(state.origin.win)
+		end
+	end
+	mode.suspend = function(state)
+		local snapshot = { enabled = state.enabled }
+		state.enabled = false
+		return snapshot
+	end
+	mode.restore = function(state, snapshot)
+		state.enabled = snapshot.enabled
+		return true
+	end
+	mode.enroll_affected_buffer = function(state, buf)
+		assert(state.workspace == review._active_workspace() and vim.api.nvim_buf_is_valid(buf))
+		calls.enrolled = calls.enrolled + 1
+		return true
+	end
+	presenter.show = function(state, selected, options)
+		calls.shown = calls.shown + 1
+		assert(selected == entry and options.layout == "inline" and options.context == "hunks")
+		vim.api.nvim_set_current_tabpage(state.origin.tab)
+		vim.api.nvim_set_current_win(state.origin.win)
+		local target = {
+			win = vim.api.nvim_get_current_win(),
+			buf = vim.api.nvim_get_current_buf(),
+			side = "new",
+		}
+		vim.b[target.buf].nvim_review_path = selected.new_path
+		vim.b[target.buf].nvim_review_side = "right"
+		vim.b[target.buf].nvim_review_layer = selected.layer or "history"
+		state.presentation = { target = target, inline = target, entry = selected }
+		return true
+	end
+	presenter.clear = function(state)
+		state.presentation = nil
+	end
+	presenter.current_target = function(state)
+		return state.presentation and state.presentation.target
+	end
+	panel.new = function(workspace, callbacks)
+		return {
+			workspace = workspace,
+			callbacks = callbacks,
+			visible = false,
+			focused = "files",
+			source_win = vim.api.nvim_get_current_win(),
+		}
+	end
+	panel.open = function(state)
+		calls.opened = calls.opened + 1
+		state.visible = true
+		return true
+	end
+	panel.refresh = function()
+		calls.panel_refreshed = calls.panel_refreshed + 1
+		return true
+	end
+	panel.update_source = function(state, source_win)
+		assert(vim.api.nvim_win_is_valid(source_win), "presenter supplied an invalid panel source")
+		calls.source_updates = calls.source_updates + 1
+		state.source_win = source_win
+		return source_win
+	end
+	panel.hide = function(state)
+		state.visible = false
+		return true
+	end
+	panel.close = function(state)
+		calls.closed = calls.closed + 1
+		state.visible = false
+		return true
+	end
+	panel.suspend = function(state)
+		local snapshot = { visible = state.visible, focused = state.focused }
+		state.visible = false
+		return snapshot
+	end
+	panel.restore = function(state, snapshot)
+		state.visible = snapshot and snapshot.visible == true
+		state.focused = snapshot and snapshot.focused or state.focused
+		return true
+	end
+	exporter.deliver = function(value, force)
+		calls.delivered = calls.delivered + 1
+		assert(value.id == scope.id)
+		return { markdown = "complete", previewed = false, ids = {} }
+	end
+	exporter.render = function(value, force)
+		assert(value.id == scope.id and force)
+		return value.stale and "stale exact snapshot" or "unsaved live review", {}
+	end
+	exporter.render_recovery = function(value)
+		assert(value.id == scope.id)
+		return value.stale and "stale exact snapshot" or "unsaved live review", {}
+	end
+	exporter.suspend_preview = function()
+		return nil
+	end
+	exporter.restore_preview = function(state, source_win)
+		assert(state == nil)
+		local workspace = assert(review._active_workspace())
+		assert(source_win == workspace.mode_state.presentation.target.win)
+		return true
+	end
+	store.save_recovery = function(root_value, value, markdown)
+		assert(root_value == repository and value.id == scope.id)
+		assert(markdown == (value.stale and "stale exact snapshot" or "unsaved live review"))
+		return { path = "/tmp/review-recovery.md", digest = string.rep("b", 64) }
+	end
+	store.verify_recovery = function(root_value, receipt)
+		assert(root_value == repository and receipt.path == "/tmp/review-recovery.md")
+		calls.verified = calls.verified + 1
+		return true
+	end
+	tuicr.add = function()
+		calls.tuicr = calls.tuicr + 1
+		error("unexpected TUICR add")
+	end
+	tuicr.respond = function()
+		calls.tuicr = calls.tuicr + 1
+		error("unexpected TUICR response")
+	end
+	review.file_comment = function()
+		calls.file_comment = (calls.file_comment or 0) + 1
+	end
+
+	local ok, err = xpcall(function()
+		vim.cmd("only")
+		local tabs = #vim.api.nvim_list_tabpages()
+		local workspace = assert(review.open({ kind = "commit", rev = "HEAD" }, repository))
+		assert(#vim.api.nvim_list_tabpages() == tabs)
+		assert(workspace.entry_identity == entry.identity and calls.shown == 1 and calls.opened == 1)
+		assert(calls.source_updates == 1 and workspace.panel.source_win == workspace.mode_state.presentation.target.win)
+		assert(review.mode("off") and not workspace.mode_on and workspace.panel.visible)
+		assert(review.mode("on") and workspace.mode_on and calls.shown == 2)
+		workspace.panel.visible = false
+		vim.cmd("tabnew")
+		local session_focus_tab = vim.api.nvim_get_current_tabpage()
+		local session_focus_win = vim.api.nvim_get_current_win()
+		local session_focus_buf = vim.api.nvim_get_current_buf()
+		vim.api.nvim_buf_set_lines(session_focus_buf, 0, -1, false, { "outside", "the", "review" })
+		vim.api.nvim_win_set_cursor(session_focus_win, { 2, 1 })
+		assert(review.suspend_for_session(), "review UI did not suspend from an unrelated tab")
+		assert(review.restore_after_session(), "review UI did not restore from an unrelated tab")
+		assert(vim.api.nvim_get_current_tabpage() == session_focus_tab, "session restore stole the active tab")
+		assert(vim.api.nvim_get_current_win() == session_focus_win, "session restore stole the active window")
+		assert(vim.api.nvim_get_current_buf() == session_focus_buf, "session restore replaced the active buffer")
+		assert(vim.deep_equal(vim.api.nvim_win_get_cursor(session_focus_win), { 2, 1 }), "session restore lost view")
+		vim.cmd("tabclose")
+		workspace.panel.visible = true
+		workspace.panel.callbacks.file_comment(entry.identity)
+		assert(calls.shown == 4 and calls.file_comment == 1 and not workspace.panel.visible)
+		local source_win = workspace.panel.source_win
+		local source_buf = vim.api.nvim_win_get_buf(source_win)
+		vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "one", "two", "three", "four", "five", "six" })
+		vim.api.nvim_win_set_cursor(source_win, { 3, 0 })
+		local comment_id = string.rep("c", 64)
+		workspace.session.items = {
+			{
+				id = comment_id,
+				type = "issue",
+				body = "Move this range",
+				anchor = {
+					kind = "range",
+					path = "new.lua",
+					side = "right",
+					layer = "history",
+					start_line = 1,
+					end_line = 2,
+					stale = true,
+				},
+			},
+		}
+		vim.cmd("botright new")
+		local comments_win = vim.api.nvim_get_current_win()
+		vim.bo.buftype = "nofile"
+		workspace.panel.visible = true
+		workspace.panel.callbacks.reanchor_comment(comment_id, source_win)
+		local moved = workspace.session.items[1].anchor
+		assert(moved.start_line == 3 and moved.end_line == 4, "multiline reanchor did not preserve its range")
+		assert(moved.path == "new.lua" and moved.side == "right" and moved.layer == "history")
+		assert(not moved.stale and vim.api.nvim_get_current_win() == comments_win)
+		vim.api.nvim_win_close(comments_win, true)
+		vim.api.nvim_set_current_win(source_win)
+		workspace.session.items = {}
+		review.setup()
+		calls.enrolled = 0
+		vim.api.nvim_exec_autocmds("BufEnter", { buffer = vim.api.nvim_get_current_buf() })
+		assert(calls.enrolled == 1, "BufEnter did not enroll an affected buffer opened during review mode")
+		vim.cmd("tabnew")
+		local invocation_tab = vim.api.nvim_get_current_tabpage()
+		local invocation_win = vim.api.nvim_get_current_win()
+		workspace.panel.visible = true
+		local failed, activation_err = review.open({ kind = "commit", rev = "BROKEN" }, repository)
+		assert(failed == nil and activation_err == "simulated activation failure")
+		assert(review._active_workspace() == workspace, "failed activation replaced the previous review")
+		assert(workspace.mode_on and workspace.panel.visible and workspace.mode_state.presentation)
+		assert(
+			vim.api.nvim_get_current_tabpage() == invocation_tab and vim.api.nvim_get_current_win() == invocation_win
+		)
+		assert(#vim.api.nvim_list_tabpages() == tabs + 1, "activation rollback changed tabs")
+		assert(review._workspaces[repository .. "\0" .. broken_scope.id] == nil)
+		vim.cmd("tabclose")
+		assert(review.export(false) and calls.delivered == 1)
+
+		-- Export and publication must fail closed if the persisted session is no
+		-- longer byte-for-byte represented by the live workspace. All external
+		-- delivery functions are stubs so these assertions have no side effects.
+		workspace.session.items = {
+			{
+				id = string.rep("e", 64),
+				sequence = 1,
+				type = "issue",
+				body = "eligible for remote delivery",
+				anchor = {
+					kind = "range",
+					path = "new.lua",
+					side = "right",
+					layer = "history",
+					start_line = 2,
+					end_line = 2,
+					stale = false,
+				},
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+		}
+		workspace.session.bridge = {
+			backend = "tuicr",
+			round = "123e4567-e89b-12d3-a456-426614174000",
+			trusted_scope_id = workspace.session.id,
+			linked_at = "2026-08-25T12:00:00Z",
+		}
+		local live_reference = workspace.session
+		local live_contents = vim.deepcopy(workspace.session)
+		local function assert_persistence_blocked(label, command)
+			workspace.unsaved_error = nil
+			workspace.recovery = nil
+			local loads_before = calls.loaded
+			local delivered_before = calls.delivered
+			local tuicr_before = calls.tuicr
+			assert(command() == nil, label .. " unexpectedly succeeded")
+			assert(calls.loaded == loads_before + 1, label .. " did not reload persisted state")
+			assert(calls.delivered == delivered_before, label .. " reached clipboard or preview delivery")
+			assert(calls.tuicr == tuicr_before, label .. " reached TUICR")
+			assert(workspace.session == live_reference, label .. " replaced the live session")
+			assert(vim.deep_equal(workspace.session, live_contents), label .. " changed live review contents")
+			assert(workspace.unsaved_error == nil and workspace.recovery == nil, label .. " invented unsaved state")
+		end
+
+		local remote = vim.deepcopy(live_contents)
+		remote.revision = remote.revision + 1
+		store.load = function(root_value, id)
+			assert(root_value == repository and id == live_contents.id)
+			calls.loaded = calls.loaded + 1
+			return vim.deepcopy(remote)
+		end
+		assert_persistence_blocked("normal export after revision drift", function()
+			return review.export(false)
+		end)
+		assert_persistence_blocked("forced export after revision drift", function()
+			return review.export(true)
+		end)
+		assert_persistence_blocked("normal publish after revision drift", function()
+			return review.publish(false)
+		end)
+		assert_persistence_blocked("forced publish after revision drift", function()
+			return review.publish(true)
+		end)
+
+		workspace.unsaved_error = nil
+		workspace.recovery = nil
+		local staged_loads = 0
+		store.load = function()
+			calls.loaded = calls.loaded + 1
+			staged_loads = staged_loads + 1
+			return vim.deepcopy(staged_loads == 1 and live_contents or remote)
+		end
+		local delivered_before_step = calls.delivered
+		assert(review.publish(false), "publication did not reach its per-item persistence check")
+		assert(staged_loads == 2, "publication did not recheck persistence immediately before TUICR")
+		assert(calls.tuicr == 0, "drift after publication preflight reached TUICR")
+		assert(calls.delivered == delivered_before_step, "publication drift reached local export delivery")
+		assert(workspace.session == live_reference and vim.deep_equal(workspace.session, live_contents))
+		assert(workspace.unsaved_error == nil and workspace.recovery == nil, "mid-publication drift invented state")
+
+		-- The adapter's status request is asynchronous. Recheck the exact persisted
+		-- item at its internal preflight boundary, freeze local transitions while a
+		-- write is pending, and never attach an in-flight receipt to newer content.
+		local controller_load = store.load
+		local controller_save = store.save
+		local controller_mark = store.mark_tuicr_delivered
+		local controller_save_recovery = store.save_recovery
+		local controller_verify_recovery = store.verify_recovery
+		local controller_render_recovery = exporter.render_recovery
+		local controller_build = changes.build
+		local controller_add = tuicr.add
+		local controller_respond = tuicr.respond
+		local persisted = vim.deepcopy(live_contents)
+		persisted.items[1].body = "body before status"
+		workspace.session = vim.deepcopy(persisted)
+		workspace.scope = workspace.session.scope
+		local recovery_sessions = {}
+		store.load = function(root_value, id)
+			assert(root_value == repository and id == persisted.id)
+			calls.loaded = calls.loaded + 1
+			return vim.deepcopy(persisted)
+		end
+		store.save = function(root_value, value)
+			assert(root_value == repository)
+			if value.revision ~= persisted.revision then
+				return nil, "simulated cross-process revision conflict"
+			end
+			local copy = vim.deepcopy(value)
+			copy.revision = copy.revision + 1
+			persisted = vim.deepcopy(copy)
+			return copy
+		end
+		store.mark_tuicr_delivered = function(value, id, receipt)
+			local copy = vim.deepcopy(value)
 			for _, item in ipairs(copy.items) do
 				if item.id == id then
-					item.status = "exported"
-					item.export_id = receipt
+					item.deliveries[#item.deliveries + 1] = {
+						backend = "tuicr",
+						receipt = receipt,
+						delivered_at = "2026-08-27T12:00:00Z",
+					}
 					return copy
 				end
 			end
+			return nil, "review item does not exist"
 		end
-		store.save = function()
-			save_calls = save_calls + 1
-			return nil, "fixture concurrent save"
+		exporter.render_recovery = function(value)
+			return "exact publication recovery for " .. value.items[1].body
 		end
-		review.export(force)
-		assert(vim.deep_equal(delivered, { "first", "second" }), "recovery stopped before the full TUICR queue")
-		assert(save_calls == 1, "recovery retried a known-conflicting local save")
-		assert(workspace.unsaved_error and workspace.session.items[2].status == "exported")
-		assert(workspace.recovery_exported == (force and true or nil))
-		if not force then
-			review.export(true)
-			assert(vim.deep_equal(delivered, { "first", "second" }), "forced recovery duplicated TUICR comments")
-			assert(workspace.recovery_exported, "forced retry did not recognize complete TUICR receipts")
+		store.save_recovery = function(root_value, value, markdown)
+			assert(root_value == repository)
+			assert(markdown == "exact publication recovery for " .. value.items[1].body)
+			recovery_sessions[#recovery_sessions + 1] = vim.deepcopy(value)
+			return { path = "/tmp/review-publication-recovery.md", digest = string.rep("c", 64) }
 		end
-	end
-
-	local ok, err = xpcall(function()
-		diffview.update_title = function() end
-		review.refresh_marks = function() end
-		run(false)
-		run(true)
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.update_title = originals.update_title
-	tuicr.add = originals.add
-	store.mark_exported = originals.mark_exported
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	assert(ok, err)
-end)
-
-test("an explicit TUICR UUID is verified for the repository before it is persisted", function()
-	local diffview = require("config.review_diffview")
-	local store = require("config.review_store")
-	local tuicr = require("config.review_tuicr")
-	local root = "/tmp/review-link-tuicr"
-	local round = "11111111-1111-1111-1111-111111111111"
-	local workspace = {
-		root = root,
-		session = { id = "session", scope = { kind = "commit" }, items = {} },
-		scope = { kind = "commit" },
-	}
-	review._workspaces[root] = workspace
-	local originals = {
-		list_rounds = tuicr.list_rounds,
-		link_tuicr = store.link_tuicr,
-		save = store.save,
-		update_title = diffview.update_title,
-		refresh_marks = review.refresh_marks,
-		notify = vim.notify,
-	}
-	local rounds = {}
-	local links = 0
-	tuicr.list_rounds = function(value, callback)
-		assert(value == root)
-		callback(rounds)
-	end
-	store.link_tuicr = function(session, selected)
-		links = links + 1
-		local copy = vim.deepcopy(session)
-		copy.bridge = { round = selected }
-		return copy
-	end
-	store.save = function(_, session)
-		return session
-	end
-	diffview.update_title = function() end
-	review.refresh_marks = function() end
-
-	local ok, err = xpcall(function()
-		review.link_tuicr(round, root)
-		assert(links == 0, "unknown explicit round was persisted")
-		rounds = { { round = round, repo_root = root } }
-		review.link_tuicr(round, root)
-		assert(links == 1 and workspace.session.bridge.round == round)
-
-		local messages = {}
-		vim.notify = function(message)
-			messages[#messages + 1] = message
-		end
-		store.save = function()
-			return nil, "fixture save conflict"
-		end
-		review.link_tuicr(round, root)
-		assert(#messages == 1 and messages[1]:find("fixture save conflict", 1, true))
-		assert(not messages[1]:find("Could not link TUICR round", 1, true))
-	end, debug.traceback)
-	tuicr.list_rounds = originals.list_rounds
-	store.link_tuicr = originals.link_tuicr
-	store.save = originals.save
-	diffview.update_title = originals.update_title
-	review.refresh_marks = originals.refresh_marks
-	vim.notify = originals.notify
-	review._workspaces[root] = nil
-	assert(ok, err)
-end)
-
-test("session suspension vetoes close failures and restores the original focus", function()
-	local diffview = require("config.review_diffview")
-	local original_close = diffview.close
-	local original_open = diffview.open
-	local original_workspace = diffview.workspace
-	local normal_tab = vim.api.nvim_get_current_tabpage()
-	vim.cmd("tabnew")
-	local review_tab = vim.api.nvim_get_current_tabpage()
-	local root = "/tmp/review-session-lifecycle"
-	local workspace = {
-		root = root,
-		tabpage = review_tab,
-		view_mode = "files",
-		scope = { kind = "commit" },
-		session = { id = "lifecycle" },
-	}
-	review._workspaces[root] = workspace
-	vim.api.nvim_set_current_tabpage(normal_tab)
-	diffview.workspace = function(tabpage)
-		return tabpage == workspace.tabpage and workspace or nil
-	end
-
-	local ok, err = xpcall(function()
-		diffview.close = function()
-			return nil, "fixture close failed"
-		end
-		local suspended, suspend_err = review.suspend_for_session()
-		assert(not suspended and suspend_err:find("fixture close failed", 1, true))
-		assert(vim.api.nvim_get_current_tabpage() == normal_tab and not workspace.suspending)
-
-		diffview.close = function()
-			vim.cmd("tabclose")
-			workspace.tabpage = nil
+		store.verify_recovery = function(root_value, receipt)
+			assert(root_value == repository and receipt.path == "/tmp/review-publication-recovery.md")
 			return true
 		end
-		diffview.open = function(value, mode)
-			assert(value == workspace and mode == "files")
-			vim.cmd("tabnew")
-			workspace.tabpage = vim.api.nvim_get_current_tabpage()
-			return true
+		changes.build = function(root_value, scope_value)
+			assert(root_value == repository and scope_value.id == scope.id)
+			calls.built = calls.built + 1
+			return { entries = { entry }, commits = {}, scope = scope_value }
 		end
-		assert(review.suspend_for_session())
-		assert(vim.api.nvim_get_current_tabpage() == normal_tab)
-		assert(review.restore_after_session())
-		assert(vim.api.nvim_get_current_tabpage() == normal_tab)
-		assert(vim.api.nvim_tabpage_is_valid(workspace.tabpage))
-	end, debug.traceback)
-	if workspace.tabpage and vim.api.nvim_tabpage_is_valid(workspace.tabpage) then
-		vim.api.nvim_set_current_tabpage(workspace.tabpage)
-		vim.cmd("tabclose")
-	end
-	review._workspaces[root] = nil
-	diffview.close = original_close
-	diffview.open = original_open
-	diffview.workspace = original_workspace
-	assert(ok, err)
-end)
 
-test("ReviewCode returns inherited external navigation to the exact review target", function()
-	local diffview = require("config.review_diffview")
-	local review_source = require("config.review_source")
-	local root = vim.fn.tempname() .. "-review-root"
-	local external = vim.fn.tempname() .. "-external-source.lua"
-	assert(vim.fn.mkdir(root, "p") == 1)
-	assert(vim.fn.writefile({ "return true" }, external) == 0)
-	pcall(vim.cmd, "silent! tabonly!")
-	vim.cmd("edit! " .. vim.fn.fnameescape(external))
-	local source_tab = vim.api.nvim_get_current_tabpage()
-	vim.cmd("tabnew")
-	local review_tab = vim.api.nvim_get_current_tabpage()
-	local workspace = {
-		root = root,
-		tabpage = review_tab,
-		view_mode = "files",
-		scope = { kind = "branch" },
-		session = { id = "external-navigation", items = {} },
-	}
-	local target = {
-		current_path = "lua/config/original.lua",
-		layer = "working",
-		revision = "LOCAL",
-		side = "right",
-		line = 41,
-		column = 7,
-	}
-	review._workspaces[root] = workspace
-	assert(review_source.set(source_tab, workspace, target))
-	vim.api.nvim_set_current_tabpage(source_tab)
-	local original_workspace = diffview.workspace
-	local original_select_file = diffview.select_file
-	local selected
-	diffview.workspace = function()
-		return nil
-	end
-	diffview.select_file = function(path, layer, value)
-		selected = { path = path, layer = layer, target = value }
-		return true
-	end
-
-	local ok, err = xpcall(function()
-		review.code()
-		assert(vim.api.nvim_get_current_tabpage() == review_tab, "ReviewCode did not return to the review tab")
-		assert(selected and selected.path == target.current_path and selected.layer == target.layer)
-		assert(vim.deep_equal(selected.target, target), "ReviewCode did not restore the captured exact target")
-	end, debug.traceback)
-	diffview.workspace = original_workspace
-	diffview.select_file = original_select_file
-	review_source.clear_workspace(workspace)
-	review._workspaces[root] = nil
-	pcall(vim.cmd, "silent! tabonly!")
-	vim.fn.delete(external)
-	vim.fn.delete(root, "d")
-	assert(ok, err)
-end)
-
-test("ReviewCode preserves current-repository fallback without explicit lineage", function()
-	local diffview = require("config.review_diffview")
-	local repo_module = require("config.repo")
-	local review_source = require("config.review_source")
-	pcall(vim.cmd, "silent! tabonly!")
-	vim.cmd("enew!")
-	local source_tab = vim.api.nvim_get_current_tabpage()
-	vim.cmd("tabnew")
-	local review_tab = vim.api.nvim_get_current_tabpage()
-	local root = "/tmp/review-repository-fallback"
-	local workspace = {
-		root = root,
-		tabpage = review_tab,
-		view_mode = "files",
-		scope = { kind = "branch" },
-		session = { id = "repository-fallback", items = {} },
-	}
-	review._workspaces[root] = workspace
-	review_source.clear(source_tab)
-	vim.api.nvim_set_current_tabpage(source_tab)
-	local originals = {
-		workspace = diffview.workspace,
-		select_file = diffview.select_file,
-		current_root = repo_module.current_root,
-		relative_existing = repo_module.relative_existing,
-	}
-	local selected
-	diffview.workspace = function()
-		return nil
-	end
-	diffview.select_file = function(path, layer, target)
-		selected = { path = path, layer = layer, target = target }
-		return true
-	end
-	repo_module.current_root = function()
-		return root
-	end
-	repo_module.relative_existing = function(value, path)
-		assert(value == root and type(path) == "string")
-		return "lua/config/current.lua"
-	end
-
-	local ok, err = xpcall(function()
-		review.code()
-		assert(vim.api.nvim_get_current_tabpage() == review_tab)
-		assert(selected and selected.path == "lua/config/current.lua")
-		assert(selected.layer == nil and selected.target == nil)
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.select_file = originals.select_file
-	repo_module.current_root = originals.current_root
-	repo_module.relative_existing = originals.relative_existing
-	review._workspaces[root] = nil
-	pcall(vim.cmd, "silent! tabonly!")
-	assert(ok, err)
-end)
-
-test("overlap deletion uses stable IDs and rejects replacement sessions", function()
-	local diffview = require("config.review_diffview")
-	local scope = require("config.review_scope")
-	local store = require("config.review_store")
-	local root = "/tmp/review-line-delete"
-	local function anchor(values)
-		return vim.tbl_extend("force", {
-			path = "lua/config/example.lua",
-			side = "right",
-			layer = "historical",
-			start_line = 12,
-			end_line = 16,
-			stale = false,
-		}, values or {})
-	end
-	local function item(id, values)
-		values = values or {}
-		return {
-			id = id,
-			sequence = values.sequence or 1,
-			type = values.type or "issue",
-			status = values.status or "draft",
-			body = values.body or id,
-			reply_to = vim.NIL,
-			anchor = values.anchor or anchor(),
-		}
-	end
-	local workspace = {
-		root = root,
-		tabpage = vim.api.nvim_get_current_tabpage(),
-		view_mode = "files",
-		scope = { kind = "commit" },
-		session = {
-			id = "session",
-			repo_root = root,
-			scope = { kind = "commit" },
-			stale = false,
-			items = {},
-		},
-	}
-	local originals = {
-		workspace = diffview.workspace,
-		current_target = diffview.current_target,
-		update_title = diffview.update_title,
-		detect_drift = scope.detect_drift,
-		delete = store.delete,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-		notify = vim.notify,
-		select = vim.ui.select,
-	}
-	local notices = {}
-	local deleted = {}
-	local target_calls = 0
-	local drift_checks = 0
-	local picker_calls = 0
-	local picker
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.current_target = function()
-		target_calls = target_calls + 1
-		return {
-			path = "lua/config/example.lua",
-			side = "right",
-			layer = "historical",
-			winid = vim.api.nvim_get_current_win(),
-		}
-	end
-	diffview.update_title = function() end
-	scope.detect_drift = function()
-		drift_checks = drift_checks + 1
-		return { stale = false }
-	end
-	store.delete = function(session, id)
-		deleted[#deleted + 1] = id
-		local copy = vim.deepcopy(session)
-		for index, candidate in ipairs(copy.items) do
-			if candidate.id == id then
-				table.remove(copy.items, index)
-				break
+		local pending
+		local remote_writes = 0
+		local function defer_operation(action)
+			return function(root_value, round, values, options, callback)
+				assert(root_value == repository and round == persisted.bridge.round)
+				assert(type(options) == "table" and type(options.preflight) == "function")
+				assert(not pending, "more than one TUICR operation was in flight")
+				pending = {
+					action = action,
+					values = vim.deepcopy(values),
+					options = options,
+					callback = callback,
+				}
 			end
 		end
-		return copy
-	end
-	store.save = function(_, session)
-		return session
-	end
-	review.refresh_marks = function() end
-	vim.notify = function(message, level, options)
-		notices[#notices + 1] = { message = message, level = level, title = options and options.title }
-	end
-	vim.ui.select = function(items, options, callback)
-		picker_calls = picker_calls + 1
-		picker = { items = items, options = options, callback = callback }
-	end
-	local buffer_lines = {}
-	for _ = 1, 16 do
-		buffer_lines[#buffer_lines + 1] = ""
-	end
-	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
-	vim.api.nvim_win_set_cursor(0, { 14, 0 })
+		tuicr.add = defer_operation("add")
+		tuicr.respond = defer_operation("respond")
 
-	local ok, err = xpcall(function()
-		review.delete()
-		assert(#deleted == 0)
-		assert(notices[#notices].message == "No review comment on the current line")
-		assert(notices[#notices].title == "Review")
-		assert(picker_calls == 0)
+		assert(review.publish(false) and pending, "publication did not reach TUICR status")
+		local stale_pending = pending
+		pending = nil
+		persisted.revision = persisted.revision + 1
+		persisted.items[1].body = "body changed during status"
+		local allowed, guard_err = stale_pending.options.preflight()
+		assert(not allowed and guard_err:find("another Neovim", 1, true))
+		assert(remote_writes == 0, "stale status preflight caused a TUICR write")
+		stale_pending.callback(nil, { code = "preflight_failed", message = guard_err })
+		assert(workspace.session.items[1].body == "body before status")
+		assert(#workspace.session.items[1].deliveries == 0 and #recovery_sessions == 0)
+		assert(review.refresh(), "review did not reload the authoritative post-status change")
+		assert(workspace.session.items[1].body == "body changed during status")
 
-		workspace.session.items = {
-			item("stale", { anchor = anchor({ stale = true }) }),
-			item("exported", { status = "exported" }),
-		}
-		review.delete()
-		assert(#deleted == 0)
-		assert(notices[#notices].message == "The review comment on the current line is unavailable for this action")
-		assert(picker_calls == 0)
+		local resolves_before_publish = calls.resolved
+		local loads_before_publish = calls.loaded
+		assert(review.publish(false) and pending, "publication did not wait at the second TUICR status")
+		local in_flight = pending
+		pending = nil
+		local refreshed, refresh_err = review.refresh()
+		assert(refreshed == nil and refresh_err:find("publication is still in progress", 1, true))
+		local opened, open_err = review.open({ kind = "commit", rev = "HEAD" }, repository)
+		assert(opened == nil and open_err:find("publication is still in progress", 1, true))
+		review.resolve(workspace.session.items[1].id)
+		assert(not review.close(true), "close replaced an in-flight review")
+		assert(calls.loaded == loads_before_publish + 2, "blocked transitions reloaded persisted review state")
+		assert(calls.resolved == resolves_before_publish, "blocked open resolved another review scope")
+		assert(workspace.session.items[1].resolution == "open", "blocked mutation changed the review item")
+		local write_allowed, write_err = in_flight.options.preflight()
+		assert(write_allowed, write_err)
+		remote_writes = remote_writes + 1
+		local in_flight_key = in_flight.values.delivery_key
+		persisted.revision = persisted.revision + 1
+		persisted.items[1].body = "body changed while add was in flight"
+		in_flight.callback({ id = "receipt-for-old-body" })
+		assert(remote_writes == 1, "the authorized in-flight TUICR write was not represented")
+		assert(workspace.session.items[1].body == "body changed during status")
+		assert(#workspace.session.items[1].deliveries == 0, "receipt was attached to a changed live item")
+		assert(#recovery_sessions == 1, "in-flight receipt did not create one exact recovery")
+		assert(recovery_sessions[1].items[1].body == "body changed during status")
+		assert(recovery_sessions[1].items[1].deliveries[1].receipt == "receipt-for-old-body")
 
-		workspace.session.items = { item("exported", { status = "exported" }), item("local") }
-		review.delete()
-		assert(vim.deep_equal(deleted, { "local" }))
-		assert(#workspace.session.items == 1 and workspace.session.items[1].id == "exported")
-		assert(picker_calls == 0, "unique current-line deletion opened an overlap picker")
+		assert(review.refresh(), "review did not reload after preserving the in-flight receipt")
+		assert(workspace.session.items[1].body == "body changed while add was in flight")
+		assert(review.publish(false) and pending, "corrected content was not publishable")
+		local corrected = pending
+		pending = nil
+		local corrected_allowed, corrected_err = corrected.options.preflight()
+		assert(corrected_allowed, corrected_err)
+		assert(corrected.values.delivery_key ~= in_flight_key, "changed content reused the old delivery key")
+		assert(#corrected.values.delivery_key <= 256, "content-bound delivery key exceeds TUICR's contract")
+		remote_writes = remote_writes + 1
+		corrected.callback({ id = "receipt-for-corrected-body" })
+		assert(persisted.items[1].body == "body changed while add was in flight")
+		assert(persisted.items[1].deliveries[1].receipt == "receipt-for-corrected-body")
 
-		local first = item("first", {
-			sequence = 8,
-			type = "suggestion",
-			status = "resolved",
-			body = "First body\nMore detail",
-		})
-		local second = item("second", {
-			sequence = 3,
-			type = "question",
-			status = "reply",
-			body = "Second body\nMore detail",
-			anchor = anchor({ start_line = 14, end_line = 14 }),
-		})
-		workspace.session.items = {
-			item("filtered-exported", { status = "exported" }),
-			first,
-			item("filtered-stale", { anchor = anchor({ stale = true }) }),
-			item("filtered-path", { anchor = anchor({ path = "lua/config/other.lua" }) }),
-			item("filtered-side", { anchor = anchor({ side = "left" }) }),
-			item("filtered-layer", { anchor = anchor({ layer = "working" }) }),
-			item("filtered-line", { anchor = anchor({ start_line = 1, end_line = 13 }) }),
-			second,
-		}
-		local notices_before_cancel = #notices
-		review.delete()
-		assert(picker_calls == 1)
-		assert(picker.options.prompt == "Delete review comment on current line")
-		assert(#picker.items == 2 and picker.items[1].id == "first" and picker.items[2].id == "second")
-		local first_label = picker.options.format_item(picker.items[1])
-		local second_label = picker.options.format_item(picker.items[2])
-		assert(first_label:find("08", 1, true) and first_label:find("suggestion", 1, true))
-		assert(first_label:find("resolved", 1, true) and first_label:find("lua/config/example.lua:12-16", 1, true))
-		assert(first_label:find("First body", 1, true) and not first_label:find("More detail", 1, true))
-		assert(second_label:find("03", 1, true) and second_label:find("question", 1, true))
-		assert(second_label:find("reply", 1, true) and second_label:find("lua/config/example.lua:14", 1, true))
-		assert(not second_label:find("lua/config/example.lua:14-14", 1, true))
-		picker.callback(nil)
-		assert(vim.deep_equal(deleted, { "local" }) and #notices == notices_before_cancel)
-
-		review.delete()
-		assert(picker_calls == 2 and picker.items[2].id == "second")
-		workspace.session = vim.deepcopy(workspace.session)
-		workspace.session.items[#workspace.session.items + 1] = item("new-overlap")
-		local target_calls_before_selection = target_calls
-		local drift_checks_before_selection = drift_checks
-		picker.callback(picker.items[2])
-		assert(vim.deep_equal(deleted, { "local", "second" }))
-		assert(target_calls == target_calls_before_selection + 1)
-		assert(drift_checks == drift_checks_before_selection + 1)
-		for _, candidate in ipairs(workspace.session.items) do
-			assert(candidate.id ~= "second", "overlap deletion kept the selected ID")
+		local function publishable_item(id, sequence, body, reply_to)
+			return {
+				id = id,
+				sequence = sequence,
+				type = sequence == 3 and "praise" or "question",
+				body = body,
+				anchor = vim.deepcopy(live_contents.items[1].anchor),
+				reply_to = reply_to or vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			}
 		end
-
-		for _, invalidation in ipairs({ "removed", "exported", "stale", "reanchored" }) do
-			workspace.session.items = { item("fallback"), item("selected") }
-			review.delete()
-			assert(#picker.items == 2 and picker.items[2].id == "selected")
-			if invalidation == "removed" then
-				table.remove(workspace.session.items, 2)
-			elseif invalidation == "exported" then
-				workspace.session.items[2].status = "exported"
-			elseif invalidation == "stale" then
-				workspace.session.items[2].anchor.stale = true
-			else
-				workspace.session.items[2].anchor.start_line = 1
-				workspace.session.items[2].anchor.end_line = 2
+		local parent_id = string.rep("1", 64)
+		local reply_id = string.rep("2", 64)
+		local independent_id = string.rep("3", 64)
+		local multiple = vim.deepcopy(workspace.session)
+		multiple.revision = multiple.revision + 1
+		multiple.items = {
+			publishable_item(parent_id, 1, "parent", nil),
+			publishable_item(reply_id, 2, "reply", parent_id),
+			publishable_item(independent_id, 3, "independent", nil),
+		}
+		persisted = vim.deepcopy(multiple)
+		workspace.session = vim.deepcopy(multiple)
+		workspace.scope = workspace.session.scope
+		local operations = {}
+		local function complete_operation(action)
+			return function(_, _, values, options, callback)
+				local operation_allowed, operation_err = options.preflight()
+				assert(operation_allowed, operation_err)
+				local receipt = "receipt-" .. tostring(#operations + 1)
+				operations[#operations + 1] = {
+					action = action,
+					values = vim.deepcopy(values),
+					receipt = receipt,
+				}
+				remote_writes = remote_writes + 1
+				callback({ id = receipt })
 			end
-			local deleted_before = #deleted
-			picker.callback(picker.items[2])
-			assert(#deleted == deleted_before, invalidation .. " selection deleted a fallback comment")
-			assert(workspace.session.items[1].id == "fallback")
-			assert(notices[#notices].message == "The review comment on the current line is unavailable for this action")
+		end
+		tuicr.add = complete_operation("add")
+		tuicr.respond = complete_operation("respond")
+		assert(review.publish(false), "multi-item TUICR publication did not start")
+		assert(#operations == 3, "multi-item publication did not serialize all items")
+		assert(operations[1].action == "add" and operations[2].action == "respond" and operations[3].action == "add")
+		assert(operations[2].values.reply_to == operations[1].receipt, "reply did not use the delivered parent receipt")
+		local delivery_keys = {}
+		for index, operation in ipairs(operations) do
+			assert(
+				not delivery_keys[operation.values.delivery_key],
+				"two distinct remote effects shared a delivery key"
+			)
+			delivery_keys[operation.values.delivery_key] = true
+			assert(#operation.values.delivery_key <= 256, "multi-item delivery key exceeds TUICR's contract")
+			assert(persisted.items[index].deliveries[1].receipt == operation.receipt)
 		end
 
-		workspace.session.items = { item("first"), item("selected") }
-		review.delete()
-		local stale_picker = picker
-		local selected_workspace = workspace
-		local replacement_workspace = vim.deepcopy(workspace)
-		replacement_workspace.session.id = "replacement-session"
-		replacement_workspace.session.items = { item("replacement") }
-		workspace = replacement_workspace
-		local deleted_before_replacement = #deleted
-		stale_picker.callback(stale_picker.items[2])
-		assert(#deleted == deleted_before_replacement, "stale overlap picker deleted from a captured session")
-		assert(#selected_workspace.session.items == 2 and selected_workspace.session.items[2].id == "selected")
-		assert(#replacement_workspace.session.items == 1 and replacement_workspace.session.items[1].id == "replacement")
+		store.load = controller_load
+		store.save = controller_save
+		store.mark_tuicr_delivered = controller_mark
+		store.save_recovery = controller_save_recovery
+		store.verify_recovery = controller_verify_recovery
+		exporter.render_recovery = controller_render_recovery
+		changes.build = controller_build
+		tuicr.add = controller_add
+		tuicr.respond = controller_respond
+		workspace.session = live_reference
+		workspace.scope = live_reference.scope
+		workspace.unsaved_error = nil
+		workspace.recovery = nil
+
+		store.load = function()
+			calls.loaded = calls.loaded + 1
+			return nil, "session.bridge.trusted_scope_id must match session.id"
+		end
+		assert_persistence_blocked("persisted link load error", function()
+			return review.publish(false)
+		end)
+
+		local wrong_identity = vim.deepcopy(live_contents)
+		wrong_identity.id = broken_scope.id
+		store.load = function()
+			calls.loaded = calls.loaded + 1
+			return vim.deepcopy(wrong_identity)
+		end
+		assert_persistence_blocked("persisted identity mismatch", function()
+			return review.export(false)
+		end)
+
+		local wrong_link = vim.deepcopy(live_contents)
+		wrong_link.bridge.round = "22222222-2222-2222-2222-222222222222"
+		store.load = function()
+			calls.loaded = calls.loaded + 1
+			return vim.deepcopy(wrong_link)
+		end
+		assert_persistence_blocked("persisted link mismatch", function()
+			return review.publish(true)
+		end)
+
+		local wrong_content = vim.deepcopy(live_contents)
+		wrong_content.items[1].body = "same revision, different persisted content"
+		store.load = function()
+			calls.loaded = calls.loaded + 1
+			return vim.deepcopy(wrong_content)
+		end
+		assert_persistence_blocked("same-revision content mismatch", function()
+			return review.export(false)
+		end)
+		assert(calls.tuicr == 0, "a persistence conflict caused a TUICR side effect")
+
+		workspace.unsaved_error = nil
+		workspace.recovery = nil
+		workspace.session.items = {}
+		workspace.session.bridge = vim.NIL
+		store.load = load_live
+		calls.verified = 0
+		workspace.scope.kind = "working"
+		workspace.session.scope.kind = "working"
+		scope_module.detect_drift = function()
+			return { stale = true }
+		end
+		assert(review.export(false) == nil and calls.delivered == 1, "normal stale export was delivered")
+		local forced = assert(review.export(true))
+		assert(calls.delivered == 2 and forced.recovery.path == "/tmp/review-recovery.md")
+		assert(calls.verified == 1, "forced stale export did not verify its recovery")
+		assert(not workspace.session.stale, "forced export mutated live review state")
+		workspace.scope.kind = "commit"
+		workspace.session.scope.kind = "commit"
+		workspace.session.items = { { anchor = { stale = true } } }
+		workspace.session.bridge = { backend = "tuicr" }
+		assert(review.export(false) == nil, "normal export ignored a stale comment anchor")
+		assert(review.publish(false) == nil, "normal TUICR publication ignored a stale comment anchor")
+		local anchor_forced = assert(review.export(true))
+		assert(anchor_forced.recovery.path == "/tmp/review-recovery.md" and calls.verified == 2)
+		assert(review.publish(true), "forced TUICR publication did not accept a verified stale-anchor recovery")
+		assert(calls.verified == 3, "forced TUICR publication did not verify its recovery")
+		local live_comment_id = string.rep("d", 64)
+		workspace.session.items = {
+			{
+				id = live_comment_id,
+				type = "question",
+				body = "This comment exists only in memory",
+				anchor = {
+					kind = "range",
+					path = "new.lua",
+					side = "right",
+					layer = "history",
+					start_line = 2,
+					end_line = 2,
+					stale = false,
+				},
+			},
+		}
+		workspace.session.bridge = vim.NIL
+		review.refresh_marks(workspace)
+		local function visible_review_lines()
+			local lines = {}
+			for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(source_buf, -1, 0, -1, { details = true })) do
+				if mark[4].sign_text and vim.trim(mark[4].sign_text) ~= "" then
+					lines[#lines + 1] = mark[2] + 1
+				end
+			end
+			table.sort(lines)
+			return lines
+		end
+		assert(vim.deep_equal(visible_review_lines(), { 2 }), "pre-conflict rail was not anchored at line 2")
+		store.save = function(_, value)
+			assert(value.items[1].anchor.start_line == 4)
+			return nil, "simulated revision conflict"
+		end
+		vim.api.nvim_set_current_win(source_win)
+		assert(review.present(entry.identity))
+		vim.api.nvim_win_set_cursor(source_win, { 4, 0 })
+		local panel_refreshes_before = calls.panel_refreshed
+		local trouble_refreshes_before = calls.trouble_refreshed
+		review.reanchor(live_comment_id, source_win)
+		assert(workspace.unsaved_error == "simulated revision conflict", "failed mutation was not kept live")
+		assert(workspace.recovery and workspace.recovery.path == "/tmp/review-recovery.md")
+		assert(workspace.session.items[1].anchor.start_line == 4, "failed save lost the live reanchor")
+		assert(vim.deep_equal(visible_review_lines(), { 4 }), "failed save left the rail at the persisted anchor")
+		assert(calls.panel_refreshed == panel_refreshes_before + 1, "failed save did not refresh the panel")
+		assert(calls.trouble_refreshed == trouble_refreshes_before + 1, "failed save did not refresh Trouble")
+		assert(calls.trouble_anchor == 4, "Trouble refreshed from the persisted anchor instead of the live session")
+		local delivered_before_recovery = calls.delivered
+		local loaded_before_recovery = calls.loaded
+		local first_recovery_export = assert(review.export(false), "live recovery could not be exported")
+		local second_recovery_export = assert(review.export(false), "live recovery export was not repeatable")
+		assert(calls.delivered == delivered_before_recovery + 2, "live recovery was not delivered twice")
+		assert(calls.loaded == loaded_before_recovery, "live recovery export reloaded and replaced persisted state")
 		assert(
-			notices[#notices].message
-				== "Active review changed while choosing a comment to delete; no changes were made"
+			first_recovery_export.recovery and second_recovery_export.recovery,
+			"live export lacked recovery receipt"
 		)
-		assert(notices[#notices].level == vim.log.levels.WARN and notices[#notices].title == "Review")
-		workspace = selected_workspace
-
-		workspace.session.items = { item("explicit") }
-		local calls_before = target_calls
-		review.delete("explicit")
-		assert(vim.deep_equal(deleted, { "local", "second", "explicit" }))
-		assert(target_calls == calls_before, "explicit ID deletion inspected the current line")
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.current_target = originals.current_target
-	diffview.update_title = originals.update_title
-	scope.detect_drift = originals.detect_drift
-	store.delete = originals.delete
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	vim.notify = originals.notify
-	vim.ui.select = originals.select
-	assert(ok, err)
-end)
-
-test("changing a line comment type uses the ordered picker and latest item state", function()
-	local diffview = require("config.review_diffview")
-	local scope = require("config.review_scope")
-	local store = require("config.review_store")
-	local root = "/tmp/review-line-type"
-	local anchor = {
-		path = "lua/config/example.lua",
-		side = "right",
-		layer = "historical",
-		start_line = 7,
-		end_line = 11,
-		stale = false,
-	}
-	local workspace = {
-		root = root,
-		tabpage = vim.api.nvim_get_current_tabpage(),
-		view_mode = "files",
-		scope = { kind = "commit" },
-		session = {
-			id = "session",
-			repo_root = root,
-			scope = { kind = "commit" },
-			stale = false,
-			items = {
-				{
-					id = "resolved",
-					sequence = 1,
-					type = "question",
-					status = "resolved",
-					body = "Original body",
-					reply_to = vim.NIL,
-					anchor = anchor,
-				},
-			},
-		},
-	}
-	local originals = {
-		workspace = diffview.workspace,
-		current_target = diffview.current_target,
-		update_title = diffview.update_title,
-		detect_drift = scope.detect_drift,
-		set_type = store.set_type,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-		notify = vim.notify,
-		select = vim.ui.select,
-	}
-	local picker_callback
-	local drift_checks = 0
-	local mutations = 0
-	local picker_calls = 0
-	local notices = {}
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.current_target = function()
-		return {
-			path = anchor.path,
-			side = anchor.side,
-			layer = anchor.layer,
-			winid = vim.api.nvim_get_current_win(),
+		assert(workspace.session.items[1].anchor.start_line == 4, "live export replaced the recovered anchor")
+		local live_session = workspace.session
+		local live_contents = vim.deepcopy(live_session)
+		local review_key = repository .. "\0" .. scope.id
+		local calls_before_guard = {
+			built = calls.built,
+			loaded = calls.loaded,
+			resolved = calls.resolved,
 		}
-	end
-	diffview.update_title = function() end
-	scope.detect_drift = function()
-		drift_checks = drift_checks + 1
-		return { stale = false }
-	end
-	store.set_type = function(session, id, item_type)
-		mutations = mutations + 1
-		assert(id == "resolved" and item_type == "rationale")
-		assert(session.items[1].body == "Latest body", "type change used the pre-picker item")
-		assert(session.items[1].status == "resolved")
-		local copy = vim.deepcopy(session)
-		copy.items[1].type = item_type
-		return copy
-	end
-	store.save = function(_, session)
-		return session
-	end
-	review.refresh_marks = function() end
-	vim.notify = function(message)
-		notices[#notices + 1] = message
-	end
-	vim.ui.select = function(items, options, callback)
-		picker_calls = picker_calls + 1
-		assert(vim.deep_equal(items, { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }))
-		assert(options.prompt == "Review comment type")
-		assert(options.format_item("suggestion") == "Suggestion")
-		picker_callback = callback
-	end
-	local buffer_lines = {}
-	for _ = 1, 11 do
-		buffer_lines[#buffer_lines + 1] = ""
-	end
-	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
-	vim.api.nvim_win_set_cursor(0, { 9, 0 })
-
-	local ok, err = xpcall(function()
-		review.change_type()
-		assert(type(picker_callback) == "function" and drift_checks == 1 and picker_calls == 1)
-		picker_callback(nil)
-		assert(mutations == 0 and #notices == 0 and drift_checks == 1)
-
-		picker_callback = nil
-		review.change_type()
-		assert(type(picker_callback) == "function" and picker_calls == 2)
-		workspace.session.items[1].body = "Latest body"
-		picker_callback("rationale")
-		assert(drift_checks == 3 and mutations == 1)
-		assert(workspace.session.items[1].type == "rationale")
-		assert(workspace.session.items[1].status == "resolved")
-		assert(#notices == 0)
+		local refreshed, refresh_err = review.refresh()
+		assert(refreshed == nil and refresh_err:find("unsaved in-memory changes", 1, true))
+		local reopened, reopen_err = review.open({ kind = "commit", rev = "HEAD" }, repository)
+		assert(reopened == nil and reopen_err:find("unsaved in-memory changes", 1, true))
+		local replaced, replace_err = review.open({ kind = "commit", rev = "BROKEN" }, repository)
+		assert(replaced == nil and replace_err:find("unsaved in-memory changes", 1, true))
+		assert(calls.built == calls_before_guard.built, "unsaved guard rebuilt a review model")
+		assert(calls.loaded == calls_before_guard.loaded, "unsaved guard reloaded persisted state")
+		assert(calls.resolved == calls_before_guard.resolved, "unsaved guard resolved a replacement scope")
+		assert(review._active_workspace() == workspace, "unsaved guard replaced the active workspace")
+		assert(review._workspaces[review_key] == workspace, "unsaved guard changed the workspace registry")
+		assert(workspace.session == live_session, "unsaved guard replaced the live session reference")
+		assert(vim.deep_equal(workspace.session, live_contents), "unsaved guard changed live comment contents")
+		local closes_before = calls.closed
+		store.verify_recovery = function()
+			calls.verified = calls.verified + 1
+			return false, "simulated digest mismatch"
+		end
+		assert(not review.close(true), "forced close accepted an unverified recovery")
+		assert(review._active_workspace() == workspace and calls.closed == closes_before)
+		store.verify_recovery = function(root_value, receipt)
+			assert(root_value == repository and receipt.path == "/tmp/review-recovery.md")
+			calls.verified = calls.verified + 1
+			return true
+		end
+		assert(not review.close(), "normal close discarded an unsaved review")
+		assert(review._active_workspace() == workspace and calls.closed == closes_before)
+		assert(review.close(true) and calls.closed == closes_before + 1)
+		assert(#vim.api.nvim_list_tabpages() == tabs and review._active_workspace() == nil)
 	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.current_target = originals.current_target
-	diffview.update_title = originals.update_title
-	scope.detect_drift = originals.detect_drift
-	store.set_type = originals.set_type
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	vim.notify = originals.notify
-	vim.ui.select = originals.select
-	assert(ok, err)
-end)
-
-test("overlapping type changes re-resolve stable IDs and reject replacement sessions", function()
-	local diffview = require("config.review_diffview")
-	local scope = require("config.review_scope")
-	local store = require("config.review_store")
-	local root = "/tmp/review-line-type-recheck"
-	local function item(id, values)
-		values = values or {}
-		return {
-			id = id,
-			sequence = values.sequence or 1,
-			type = values.type or "question",
-			status = values.status or "draft",
-			body = values.body or id,
-			reply_to = vim.NIL,
-			anchor = {
-				path = "lua/config/example.lua",
-				side = "right",
-				layer = "historical",
-				start_line = values.start_line or 7,
-				end_line = values.end_line or 11,
-				stale = values.stale or false,
-			},
-		}
-	end
-	local workspace = {
-		root = root,
-		tabpage = vim.api.nvim_get_current_tabpage(),
-		view_mode = "files",
-		scope = { kind = "commit" },
-		session = {
-			id = "session",
-			repo_root = root,
-			scope = { kind = "commit" },
-			stale = false,
-			items = { item("original") },
-		},
-	}
-	local originals = {
-		workspace = diffview.workspace,
-		current_target = diffview.current_target,
-		update_title = diffview.update_title,
-		detect_drift = scope.detect_drift,
-		set_type = store.set_type,
-		save = store.save,
-		refresh_marks = review.refresh_marks,
-		notify = vim.notify,
-		select = vim.ui.select,
-	}
-	local pickers = {}
-	local mutations = {}
-	local notices = {}
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.current_target = function()
-		return {
-			path = "lua/config/example.lua",
-			side = "right",
-			layer = "historical",
-			winid = vim.api.nvim_get_current_win(),
-		}
-	end
-	diffview.update_title = function() end
-	scope.detect_drift = function()
-		return { stale = false }
-	end
-	store.set_type = function(session, id, item_type)
-		mutations[#mutations + 1] = { id = id, item_type = item_type }
-		local copy = vim.deepcopy(session)
-		for _, candidate in ipairs(copy.items) do
-			if candidate.id == id then
-				candidate.type = item_type
-				return copy
-			end
+	for name, value in pairs(originals) do
+		if name == "resolve" then
+			scope_module.resolve = value
+		elseif
+			name == "load"
+			or name == "new"
+			or name == "save"
+			or name == "edit"
+			or name == "mark_tuicr_delivered"
+			or name == "save_recovery"
+			or name == "verify_recovery"
+		then
+			store[name] = value
+		elseif name == "build" then
+			changes.build = value
+		elseif name == "detect_drift" then
+			scope_module.detect_drift = value
+		elseif name == "mode_new" then
+			mode.new = value
+		elseif
+			name == "enable"
+			or name == "disable"
+			or name == "enroll_affected_buffer"
+			or name == "mode_suspend"
+			or name == "mode_restore"
+		then
+			mode[name:gsub("^mode_", "")] = value
+		elseif name == "show" or name == "clear" or name == "current_target" then
+			presenter[name] = value
+		elseif name:sub(1, 6) == "panel_" then
+			panel[name:sub(7)] = value
+		elseif
+			name == "deliver"
+			or name == "render"
+			or name == "render_recovery"
+			or name == "suspend_preview"
+			or name == "restore_preview"
+		then
+			exporter[name] = value
+		elseif name == "tuicr_add" then
+			tuicr.add = value
+		elseif name == "tuicr_respond" then
+			tuicr.respond = value
 		end
-		error("selected type-change ID was not present")
 	end
-	store.save = function(_, session)
-		return session
-	end
-	review.refresh_marks = function() end
-	vim.notify = function(message, level, options)
-		notices[#notices + 1] = { message = message, level = level, title = options and options.title }
-	end
-	vim.ui.select = function(items, options, callback)
-		pickers[#pickers + 1] = { items = items, options = options, callback = callback }
-	end
-	local buffer_lines = {}
-	for _ = 1, 11 do
-		buffer_lines[#buffer_lines + 1] = ""
-	end
-	vim.api.nvim_buf_set_lines(0, 0, -1, false, buffer_lines)
-
-	local ok, err = xpcall(function()
-		local ordered_types = { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }
-		local function open_comment_picker()
-			review.change_type()
-			local current = pickers[#pickers]
-			assert(current.options.prompt == "Change type of review comment on current line")
-			assert(#current.items == 2 and current.items[1].id == "first" and current.items[2].id == "selected")
-			return current
-		end
-		local function choose_comment(current)
-			current.callback(current.items[2])
-			local type_picker = pickers[#pickers]
-			assert(vim.deep_equal(type_picker.items, ordered_types))
-			assert(type(type_picker.options.format_item) == "function")
-			assert(type_picker.options.format_item("issue") == "Issue")
-			assert(type_picker.options.prompt == "Review comment type")
-			return type_picker
-		end
-
-		vim.api.nvim_win_set_cursor(0, { 9, 0 })
-		workspace.session.items = { item("first", { sequence = 4 }), item("selected", { sequence = 2 }) }
-		local notices_before_cancel = #notices
-		local comment_picker = open_comment_picker()
-		comment_picker.callback(nil)
-		assert(#pickers == 1 and #mutations == 0 and #notices == notices_before_cancel)
-
-		comment_picker = open_comment_picker()
-		local type_picker = choose_comment(comment_picker)
-		type_picker.callback(nil)
-		assert(#mutations == 0 and #notices == notices_before_cancel)
-
-		comment_picker = open_comment_picker()
-		type_picker = choose_comment(comment_picker)
-		workspace.session = vim.deepcopy(workspace.session)
-		workspace.session.items[#workspace.session.items + 1] = item("new-overlap")
-		type_picker.callback("rationale")
-		assert(#mutations == 1 and mutations[1].id == "selected" and mutations[1].item_type == "rationale")
-		assert(workspace.session.items[1].type == "question")
-		assert(workspace.session.items[2].id == "selected" and workspace.session.items[2].type == "rationale")
-		assert(workspace.session.items[3].id == "new-overlap" and workspace.session.items[3].type == "question")
-
-		workspace.session.items = { item("first"), item("selected") }
-		vim.api.nvim_win_set_cursor(0, { 9, 0 })
-		comment_picker = open_comment_picker()
-		type_picker = choose_comment(comment_picker)
-		vim.api.nvim_win_set_cursor(0, { 6, 0 })
-		type_picker.callback("rationale")
-		assert(#mutations == 1)
-		assert(notices[#notices].message == "No review comment on the current line")
-		assert(notices[#notices].title == "Review")
-
-		for _, invalidation in ipairs({ "removed", "exported", "stale", "reanchored" }) do
-			workspace.session.items = { item("first"), item("selected") }
-			vim.api.nvim_win_set_cursor(0, { 9, 0 })
-			comment_picker = open_comment_picker()
-			type_picker = choose_comment(comment_picker)
-			if invalidation == "removed" then
-				table.remove(workspace.session.items, 2)
-			elseif invalidation == "exported" then
-				workspace.session.items[2].status = "exported"
-			elseif invalidation == "stale" then
-				workspace.session.items[2].anchor.stale = true
-			else
-				workspace.session.items[2].anchor.start_line = 1
-				workspace.session.items[2].anchor.end_line = 2
-			end
-			local mutation_count = #mutations
-			type_picker.callback("rationale")
-			assert(#mutations == mutation_count, invalidation .. " type change mutated a fallback comment")
-			assert(workspace.session.items[1].id == "first" and workspace.session.items[1].type == "question")
-			assert(notices[#notices].message == "The review comment on the current line is unavailable for this action")
-		end
-
-		workspace.session.items = { item("first"), item("selected") }
-		vim.api.nvim_win_set_cursor(0, { 9, 0 })
-		comment_picker = open_comment_picker()
-		local overlap_workspace = workspace
-		local overlap_replacement = vim.deepcopy(workspace)
-		overlap_replacement.session.id = "replacement-overlap-session"
-		overlap_replacement.session.items = { item("replacement"), item("selected") }
-		workspace = overlap_replacement
-		type_picker = choose_comment(comment_picker)
-		local mutation_count = #mutations
-		type_picker.callback("rationale")
-		assert(#mutations == mutation_count, "stale overlap picker changed a captured session")
-		assert(overlap_workspace.session.items[2].type == "question")
-		assert(overlap_replacement.session.items[2].type == "question")
-		assert(notices[#notices].message == "Active review changed while choosing a comment type; no changes were made")
-		assert(notices[#notices].level == vim.log.levels.WARN and notices[#notices].title == "Review")
-
-		workspace = overlap_workspace
-		workspace.session.items = { item("first"), item("selected") }
-		comment_picker = open_comment_picker()
-		type_picker = choose_comment(comment_picker)
-		local type_picker_workspace = workspace
-		local type_picker_replacement = vim.deepcopy(workspace)
-		type_picker_replacement.session.id = "replacement-type-session"
-		type_picker_replacement.session.items = { item("replacement"), item("selected") }
-		workspace = type_picker_replacement
-		mutation_count = #mutations
-		type_picker.callback("rationale")
-		assert(#mutations == mutation_count, "stale type picker changed a captured session")
-		assert(type_picker_workspace.session.items[2].type == "question")
-		assert(type_picker_replacement.session.items[2].type == "question")
-		assert(notices[#notices].message == "Active review changed while choosing a comment type; no changes were made")
-		assert(notices[#notices].level == vim.log.levels.WARN and notices[#notices].title == "Review")
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.current_target = originals.current_target
-	diffview.update_title = originals.update_title
-	scope.detect_drift = originals.detect_drift
-	store.set_type = originals.set_type
-	store.save = originals.save
-	review.refresh_marks = originals.refresh_marks
-	vim.notify = originals.notify
-	vim.ui.select = originals.select
-	assert(ok, err)
-end)
-
-test("multiline comments render deterministic range text without marking file comments", function()
-	local diffview = require("config.review_diffview")
-	local buf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three", "four", "five" })
-	local workspace = {
-		view_mode = "files",
-		session = {
-			stale = false,
-			items = {
-				{
-					id = "second",
-					sequence = 2,
-					type = "suggestion",
-					anchor = {
-						path = "a.lua",
-						side = "right",
-						layer = "working",
-						start_line = 2,
-						end_line = 5,
-						stale = false,
-					},
-				},
-				{
-					id = "first",
-					sequence = 1,
-					type = "issue",
-					anchor = {
-						path = "a.lua",
-						side = "right",
-						layer = "working",
-						start_line = 2,
-						end_line = 4,
-						stale = false,
-					},
-				},
-				{
-					id = "file",
-					sequence = 3,
-					type = "question",
-					anchor = { path = "a.lua", side = "right", layer = "working", stale = false },
-				},
-			},
-		},
-	}
-	local original_target = diffview.current_target
-	diffview.current_target = function()
-		return { bufnr = buf, path = "a.lua", side = "right", layer = "working" }
-	end
-
-	local ok, err = xpcall(function()
-		review.decorate_buffer(workspace, buf)
-		local marks = vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })
-		local signs = 0
-		local range_chunks
-		for _, mark in ipairs(marks) do
-			local details = mark[4]
-			if details.sign_text then
-				signs = signs + 1
-			end
-			if details.virt_text then
-				range_chunks = details.virt_text
-			end
-		end
-		assert(signs == 2, "file-level comment drew a line sign")
-		assert(range_chunks and range_chunks[1][1] == "  ● 2-4" and range_chunks[2][1] == "  ● 2-5")
-	end, debug.traceback)
-	diffview.current_target = original_target
-	vim.api.nvim_buf_delete(buf, { force = true })
-	assert(ok, err)
-end)
-
-test("comment list picker jumps without mutating review state", function()
-	local diffview = require("config.review_diffview")
-	local workspace = {
-		root = "/tmp/review-comment-list",
-		tabpage = vim.api.nvim_get_current_tabpage(),
-		view_mode = "files",
-		session = {
-			stale = false,
-			items = {
-				{
-					id = "navigable",
-					sequence = 1,
-					type = "suggestion",
-					status = "draft",
-					body = "Use the helper",
-					anchor = {
-						path = "lua/config/example.lua",
-						side = "right",
-						layer = "historical",
-						start_line = 22,
-						start_column = 4,
-						stale = false,
-					},
-				},
-				{
-					id = "file-level",
-					sequence = 2,
-					type = "issue",
-					status = "draft",
-					body = "Whole file",
-					anchor = {
-						path = "lua/config/file.lua",
-						side = "right",
-						layer = "historical",
-						stale = false,
-					},
-				},
-				{
-					id = "stale",
-					sequence = 3,
-					type = "issue",
-					status = "draft",
-					body = "Old location",
-					anchor = {
-						path = "lua/old.lua",
-						side = "right",
-						layer = "historical",
-						start_line = 3,
-						stale = true,
-					},
-				},
-			},
-		},
-	}
-	local before = vim.deepcopy(workspace.session)
-	local originals = {
-		workspace = diffview.workspace,
-		select_file = diffview.select_file,
-		select = vim.ui.select,
-	}
-	local selected
-	local selection_calls = 0
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.select_file = function(path, layer, target)
-		selection_calls = selection_calls + 1
-		selected = { path = path, layer = layer, target = target }
-		return true
-	end
-	vim.ui.select = function(items, options, callback)
-		assert(options.prompt == "Review comments")
-		assert(#items == 2 and items[2].id == "file-level")
-		assert(options.format_item(items[1]):find("lua/config/example.lua:22", 1, true))
-		assert(options.format_item(items[2]):find("lua/config/file.lua [file]", 1, true))
-		callback(items[2])
-	end
-
-	local ok, err = xpcall(function()
-		review.comments()
-		assert(selection_calls == 1)
-		assert(selected.path == "lua/config/file.lua" and selected.layer == "historical")
-		assert(selected.target.side == "right" and selected.target.line == nil and selected.target.column == nil)
-		assert(vim.deep_equal(workspace.session, before), "comment navigation mutated the review")
-
-		vim.ui.select = function(items, _, callback)
-			assert(#items == 2)
-			callback(nil)
-		end
-		review.comments()
-		assert(selection_calls == 1, "picker cancellation changed the selected review location")
-		review.next()
-		review.next()
-		assert(selection_calls == 3 and selected.path == "lua/config/file.lua")
-	end, debug.traceback)
-	diffview.workspace = originals.workspace
-	diffview.select_file = originals.select_file
-	vim.ui.select = originals.select
-	assert(ok, err)
-end)
-
-test("setup exposes the namespaced command and mapping surface", function()
-	local diffview = require("config.review_diffview")
-	local original_set_controller = diffview.set_controller
-	diffview.set_controller = function(callbacks)
-		installed_controller = callbacks
-		original_set_controller(callbacks)
-	end
-	review.setup()
-	diffview.set_controller = original_set_controller
-	assert(type(installed_controller) == "table")
-	for _, command in ipairs({
-		"ReviewOpen",
-		"ReviewScope",
-		"ReviewSessions",
-		"ReviewFiles",
-		"ReviewCommits",
-		"ReviewCode",
-		"ReviewLayout",
-		"ReviewContext",
-		"ReviewComments",
-		"ReviewComment",
-		"ReviewFileComment",
-		"ReviewThreads",
-		"ReviewReply",
-		"ReviewEdit",
-		"ReviewDeleteDraft",
-		"ReviewChangeType",
-		"ReviewResolve",
-		"ReviewReopen",
-		"ReviewNext",
-		"ReviewPrev",
-		"ReviewRefresh",
-		"ReviewExport",
-		"ReviewLinkTuicr",
-		"ReviewClose",
-	}) do
-		assert(vim.fn.exists(":" .. command) == 2, command .. " is missing")
-	end
-	for _, mapping in ipairs({
-		"<leader>Ro",
-		"<leader>Rs",
-		"<leader>Rf",
-		"<leader>Rh",
-		"<leader>Rg",
-		"<leader>Rv",
-		"<leader>Rw",
-		"<leader>Rl",
-		"<leader>Ra",
-		"<leader>RA",
-		"<leader>RE",
-		"<leader>Rc",
-		"<leader>Rd",
-		"<leader>Rt",
-		"<leader>Re",
-		"<leader>Rr",
-		"<leader>Rq",
-		"[r",
-		"]r",
-	}) do
-		assert(vim.fn.maparg(mapping, "n") ~= "", mapping .. " is missing")
-	end
-	for lhs, rhs in pairs({
-		["<leader>Rg"] = "<Cmd>ReviewCode<CR>",
-		["<leader>Rv"] = "<Cmd>ReviewLayout<CR>",
-		["<leader>Rw"] = "<Cmd>ReviewContext<CR>",
-		["<leader>Rl"] = "<Cmd>ReviewComments<CR>",
-		["<leader>RA"] = "<Cmd>ReviewFileComment<CR>",
-		["<leader>RE"] = "<Cmd>ReviewEdit<CR>",
-		["<leader>Rc"] = "<Cmd>ReviewChangeType<CR>",
-		["<leader>Rd"] = "<Cmd>ReviewDeleteDraft<CR>",
-	}) do
-		assert(vim.fn.maparg(lhs, "n") == rhs, lhs .. " has unexpected RHS " .. vim.fn.maparg(lhs, "n"))
-	end
-	local original_context = diffview.context
-	local context_calls = {}
-	diffview.context = function(mode)
-		context_calls[#context_calls + 1] = mode == nil and "toggle" or mode
-		return true
-	end
-	vim.cmd("ReviewContext")
-	vim.cmd("ReviewContext full")
-	vim.cmd("ReviewContext hunks")
-	diffview.context = original_context
-	assert(vim.deep_equal(context_calls, { "toggle", "full", "hunks" }))
-	local original_notify = vim.notify
-	local warning
-	vim.notify = function(message)
-		warning = message
-	end
-	vim.cmd("ReviewContext invalid")
-	vim.notify = original_notify
-	assert(warning == "Usage: ReviewContext [hunks|full]", "invalid context argument did not show concise usage")
-	assert(vim.fn.maparg("<leader>Ra", "x") == ":<C-U>'<,'>ReviewComment<CR>")
-	local add_mapping = vim.fn.maparg("<leader>Ra", "n", false, true)
-	assert(add_mapping.desc:find("Visual range", 1, true), "normal review comment help omits Visual ranges")
-
-	local original_workspace = diffview.workspace
-	local original_close = diffview.close
-	local closed = 0
-	local workspace = {
-		root = "/tmp/review-empty-recovery",
-		tabpage = vim.api.nvim_get_current_tabpage(),
-		unsaved_error = "fixture conflict",
-		session = { id = "empty", items = {} },
-	}
-	diffview.workspace = function()
-		return workspace
-	end
-	diffview.close = function()
-		closed = closed + 1
-		return true
-	end
-	vim.cmd("ReviewClose!")
-	assert(closed == 1, "metadata-only conflict could not be explicitly discarded")
-	workspace.session.items = { { id = "draft" } }
-	pcall(vim.cmd, "ReviewClose!")
-	assert(closed == 1, "unexported recovery data was discarded")
-	workspace.recovery_exported = true
-	vim.cmd("ReviewClose!")
-	assert(closed == 2, "fully exported recovery could not be discarded")
-	diffview.workspace = original_workspace
-	diffview.close = original_close
-end)
-
-test("only a final non-transition review closure requests home recovery", function()
-	local tab_config = require("config.tabs")
-	local original_ensure_home = tab_config.ensure_home
-	local requests = 0
-	tab_config.ensure_home = function()
-		requests = requests + 1
-		return true
-	end
-
-	local owned_roots = {}
-	local function workspace(label)
-		local value = {
-			root = "/tmp/review-home-recovery-" .. label,
-			session = { id = label, items = {} },
-		}
-		review._workspaces[value.root] = value
-		owned_roots[#owned_roots + 1] = value.root
-		return value
-	end
-
-	local ok, err = xpcall(function()
-		local final = workspace("final")
-		installed_controller.view_closed(final)
-		assert(review._workspaces[final.root] == nil, "final closed review remained registered")
-		assert(requests == 1, "final review closure did not request home recovery")
-
-		local first = workspace("first-of-two")
-		local remaining = workspace("remaining")
-		installed_controller.view_closed(first)
-		assert(review._workspaces[first.root] == nil and review._workspaces[remaining.root] == remaining)
-		assert(requests == 1, "non-final review closure requested home recovery")
-		review._workspaces[remaining.root] = nil
-
-		for _, transition in ipairs({ "suspending", "replacing", "reopening" }) do
-			local current = workspace(transition)
-			current[transition] = true
-			installed_controller.view_closed(current)
-			assert(review._workspaces[current.root] == current, transition .. " closure removed the review workspace")
-			assert(requests == 1, transition .. " closure requested home recovery")
-			review._workspaces[current.root] = nil
-		end
-	end, debug.traceback)
-	tab_config.ensure_home = original_ensure_home
-	for _, root in ipairs(owned_roots) do
-		review._workspaces[root] = nil
-	end
-	assert(ok, err)
-end)
-
-test("closing a review clears every inherited source lineage", function()
-	local review_source = require("config.review_source")
-	local workspace = {
-		root = "/tmp/review-lineage-close",
-		tabpage = vim.api.nvim_get_current_tabpage(),
-		session = { id = "lineage-close", items = {} },
-	}
-	review._workspaces[workspace.root] = workspace
-	assert(review_source.set(vim.api.nvim_get_current_tabpage(), workspace, { current_path = "closed.lua" }))
-	installed_controller.view_closed(workspace)
-	assert(review._workspaces[workspace.root] == nil, "closed review remained current")
-	assert(review_source.get(vim.api.nvim_get_current_tabpage()) == nil, "closed review kept inherited lineage")
-end)
-
-test("global teardown persists every unsaved conflict recovery", function()
-	local export = require("config.review_export")
-	local store = require("config.review_store")
-	local original_render = export.render
-	local original_save_recovery = store.save_recovery
-	local workspace = {
-		root = "/tmp/review-conflict-recovery",
-		unsaved_error = "fixture conflict",
-		session = { id = "conflict", items = { { id = "draft" } } },
-	}
-	local saved_markdown
-	export.render = function(session, force)
-		assert(session == workspace.session and force)
-		return "# Complete recovery", { "draft" }
-	end
-	store.save_recovery = function(root, session, markdown)
-		assert(root == workspace.root and session == workspace.session)
-		saved_markdown = markdown
-		return { path = "/tmp/review-conflict-recovery.md", digest = string.rep("a", 64) }
-	end
-
-	local ok, err = xpcall(function()
-		review._workspaces[workspace.root] = workspace
-		vim.api.nvim_exec_autocmds("VimLeavePre", {})
-		assert(saved_markdown == "# Complete recovery")
-		assert(workspace.automatic_recovery.path == "/tmp/review-conflict-recovery.md")
-	end, debug.traceback)
-	review._workspaces[workspace.root] = nil
-	export.render = original_render
-	store.save_recovery = original_save_recovery
+	review.file_comment = original_file_comment
+	package.loaded.trouble = original_trouble
 	assert(ok, err)
 end)
 
@@ -1929,6 +1014,5 @@ if #failures > 0 then
 	end
 	vim.cmd("cquit")
 end
-
-print(string.format("code_review_spec: %d tests passed", count))
+print(("code_review_spec: %d tests passed"):format(count))
 vim.cmd("quitall!")

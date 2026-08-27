@@ -424,28 +424,6 @@ test("queued close coalesces double clicks and retains a stable non-current hand
 	assert(not tabs.request_close(target), "stale handle was accepted")
 end)
 
-test("all tab close entrypoints route review-owned tabs through the review guard", function()
-	reset_editor()
-	local target = vim.api.nvim_get_current_tabpage()
-	local review_diffview = require("config.review_diffview")
-	local code_review = require("config.code_review")
-	local original_workspace = review_diffview.workspace
-	local original_close_tab = code_review.close_tab
-	local requested
-	review_diffview.workspace = function(tabpage)
-		return tabpage == target and { tabpage = target } or nil
-	end
-	code_review.close_tab = function(tabpage)
-		requested = tabpage
-		return false
-	end
-	assert(not tabs.close(target), "review guard refusal was ignored")
-	equal(target, requested, "review close guard received the wrong stable tab handle")
-	assert(vim.api.nvim_tabpage_is_valid(target), "generic tab close bypassed the review guard")
-	review_diffview.workspace = original_workspace
-	code_review.close_tab = original_close_tab
-end)
-
 test("editor reuses only a valid marked home tab", function()
 	reset_editor()
 	local home = vim.api.nvim_get_current_tabpage()

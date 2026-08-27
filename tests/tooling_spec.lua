@@ -239,7 +239,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					modeline = false,
 				})
 				vim.api.nvim_buf_call(keymap_buf, function()
-					for _, lhs in ipairs({ "gd", "gD", "gi", "gr", "K", "<C-k>", "<leader>rn", "<leader>ca" }) do
+					for _, lhs in ipairs({ "gd", "gD", "gi", "gr", "K", "<C-k>", "<leader>lr", "<leader>ca" }) do
 						local mapping = vim.fn.maparg(lhs, "n", false, true)
 						assert(mapping and mapping.buffer == 1, "custom LSP mapping is missing: " .. lhs)
 					end

@@ -477,11 +477,11 @@ function M.venv_name(root)
 end
 
 function M.setup()
-	vim.keymap.set("n", "<leader>rp", M.open_repl, { desc = "Python REPL" })
-	vim.keymap.set("n", "<leader>rs", function()
+	vim.keymap.set("n", "<leader>pr", M.open_repl, { desc = "Python REPL" })
+	vim.keymap.set("n", "<leader>ps", function()
 		M.send(false)
 	end, { desc = "Send line to Python REPL" })
-	vim.keymap.set("x", "<leader>rs", function()
+	vim.keymap.set("x", "<leader>ps", function()
 		M.send(true)
 	end, { desc = "Send selection to Python REPL" })
 end
