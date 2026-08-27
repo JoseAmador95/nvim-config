@@ -212,88 +212,157 @@ test("review lineage migrates, clears, and prunes closed source tabs", function(
 	assert(review_source.get(live_tab) == nil, "review closure left source lineage behind")
 end)
 
-test("review composer opens with save and cancel mappings", function()
+local review_editor = require("config.review_editor")
+
+local function review_source_fixture()
+	local lines = {}
+	for index = 1, 20 do
+		lines[index] = "anchor fixture " .. index
+	end
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
+	return vim.api.nvim_get_current_win(), vim.api.nvim_get_current_buf(), lines
+end
+
+local function reservation(buf)
+	local found
+	for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, review_editor._namespace, 0, -1, { details = true })) do
+		if mark[4].virt_lines then
+			assert(not found, "review editor leaked more than one source reservation")
+			found = mark
+		end
+	end
+	return found
+end
+
+local function hint_text(buf)
+	for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, review_editor._namespace, 0, -1, { details = true })) do
+		local chunks = mark[4].virt_text
+		if chunks then
+			return table.concat(vim.tbl_map(function(chunk)
+				return chunk[1]
+			end, chunks))
+		end
+	end
+	return ""
+end
+
+test("review composer is borderless and anchored below reserved source rows", function()
 	reset_editor()
+	local source_win, source_buf, source_lines = review_source_fixture()
 	local result = "pending"
 	local interrupted = false
-	require("config.review_editor").compose({ title = "Fixture", body = "Draft" }, function(body, was_interrupted)
+	assert(review_editor.compose({
+		title = "Fixture",
+		body = "Draft",
+		source_win = source_win,
+		anchor_line = 2,
+	}, function(body, was_interrupted)
 		result = body
 		interrupted = was_interrupted == true
-	end)
+	end))
 	local win = vim.api.nvim_get_current_win()
 	local buf = vim.api.nvim_get_current_buf()
-	assert(require("config.review_editor").has_active())
-	assert(vim.api.nvim_win_get_config(win).relative == "editor")
-	assert(not vim.inspect(vim.api.nvim_win_get_config(win).title):find("<Tab> type", 1, true))
+	local config = vim.api.nvim_win_get_config(win)
+	assert(review_editor.has_active())
+	assert(config.relative == "win" and config.win == source_win)
+	equal({ 1, 0 }, config.bufpos, "composer was not attached below the one-based source anchor")
+	assert(config.border == "none" and config.height == 1)
+	local mark = assert(reservation(source_buf), "source reservation is missing")
+	assert(mark[2] == 1 and #mark[4].virt_lines == 1, "source reservation does not match the editor")
+	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "composer mutated source text")
+	assert(hint_text(buf):find("Fixture", 1, true) and not hint_text(buf):find("<Tab> type", 1, true))
 	for _, mapping in ipairs({ "q", "<Esc>", "<C-s>" }) do
 		assert(vim.fn.maparg(mapping, "n", false, true).buffer == 1, mapping .. " is not buffer-local")
 	end
 	vim.api.nvim_win_close(win, true)
 	assert(result == "Draft" and interrupted and not vim.api.nvim_buf_is_valid(buf))
-	assert(not require("config.review_editor").has_active())
+	assert(not review_editor.has_active() and not reservation(source_buf))
+	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "teardown mutated source text")
 end)
 
-test("review composer remains open when its submit callback rejects the save", function()
+test("review composer rejects an invalid source or transient anchor cleanly", function()
 	reset_editor()
+	local source_win, source_buf = review_source_fixture()
+	local notifications = {}
+	local original_notify = vim.notify
+	vim.notify = function(message)
+		notifications[#notifications + 1] = message
+	end
+	assert(not review_editor.compose({ body = "Missing source", anchor_line = 1 }, function() end))
+	assert(not review_editor.compose({ body = "Missing anchor", source_win = source_win }, function() end))
+	assert(
+		not review_editor.compose(
+			{ body = "Outside source", source_win = source_win, anchor_line = 99 },
+			function() end
+		)
+	)
+	vim.notify = original_notify
+	assert(#notifications == 3 and not review_editor.has_active() and not reservation(source_buf))
+end)
+
+test("rejected review save keeps the editor and reservation until acceptance", function()
+	reset_editor()
+	local source_win, source_buf, source_lines = review_source_fixture()
 	local accept = false
 	local calls = 0
-	require("config.review_editor").compose({ title = "Fixture", body = "Keep this" }, function(body)
+	assert(review_editor.compose({
+		title = "Fixture",
+		body = "Keep this",
+		source_win = source_win,
+		anchor_line = 3,
+	}, function(body)
 		assert(body == "Keep this")
 		calls = calls + 1
 		return accept
-	end)
+	end))
 	vim.cmd("stopinsert")
 	local submit = vim.fn.maparg("<C-s>", "n", false, true).callback
 	assert(type(submit) == "function")
+	local before = assert(reservation(source_buf))[1]
 	submit()
-	assert(calls == 1 and require("config.review_editor").has_active())
+	assert(calls == 1 and review_editor.has_active())
+	assert(reservation(source_buf)[1] == before, "rejected save discarded or replaced its reservation")
 	accept = true
 	submit()
-	assert(calls == 2 and not require("config.review_editor").has_active())
+	assert(calls == 2 and not review_editor.has_active() and not reservation(source_buf))
+	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "save mutated source text")
 end)
 
-test("review composer can persist synchronously before global teardown", function()
+test("review composer persists synchronously and recovers one rejected teardown", function()
 	reset_editor()
-	local body
-	local interrupted
-	local editor = require("config.review_editor")
-	editor.compose({ title = "Fixture", body = "Exit draft" }, function(value, was_interrupted)
-		body = value
-		interrupted = was_interrupted
-		return true
-	end)
-	assert(editor.persist_active())
-	assert(body == "Exit draft" and interrupted == true)
-	assert(not editor.has_active())
-end)
-
-test("review composer uses durable fallback when teardown submission is rejected", function()
-	reset_editor()
-	local recovered
-	local editor = require("config.review_editor")
-	editor.compose({
+	local source_win, source_buf = review_source_fixture()
+	local submitted = 0
+	local recovered = 0
+	assert(review_editor.compose({
 		title = "Fixture",
 		body = "Rejected exit draft",
+		source_win = source_win,
+		anchor_line = 4,
 		recover = function(body)
-			recovered = body
+			assert(body == "Rejected exit draft")
+			recovered = recovered + 1
 			return true
 		end,
-	}, function()
+	}, function(body, interrupted)
+		assert(body == "Rejected exit draft" and interrupted == true)
+		submitted = submitted + 1
 		return false
-	end)
-	assert(editor.persist_active())
-	assert(recovered == "Rejected exit draft")
-	assert(not editor.has_active())
+	end))
+	assert(review_editor.persist_active())
+	assert(submitted == 1 and recovered == 1)
+	assert(not review_editor.has_active() and not reservation(source_buf))
 end)
 
-test("new comment composer cycles its type in Normal mode and preserves it during recovery", function()
+test("new comment composer cycles type only in Normal mode and preserves it during recovery", function()
 	reset_editor()
+	local source_win, source_buf = review_source_fixture()
 	local submitted_type
 	local recovered_type
-	local editor = require("config.review_editor")
-	editor.compose({
+	assert(review_editor.compose({
 		title = "New",
 		body = "Typed draft",
+		source_win = source_win,
+		anchor_line = 5,
 		type_cycle = { "issue", "suggestion", "rationale" },
 		selected_type = "issue",
 		recover = function(body, selected_type)
@@ -304,76 +373,120 @@ test("new comment composer cycles its type in Normal mode and preserves it durin
 	}, function(_, _, selected_type)
 		submitted_type = selected_type
 		return false
-	end)
-	local win = vim.api.nvim_get_current_win()
+	end))
+	local buf = vim.api.nvim_get_current_buf()
 	vim.cmd("stopinsert")
 	local tab = vim.fn.maparg("<Tab>", "n", false, true)
 	assert(tab.buffer == 1 and type(tab.callback) == "function")
 	assert(vim.fn.maparg("<Tab>", "i", false, true).buffer ~= 1, "Insert-mode Tab was changed")
 	tab.callback()
-	local title = vim.inspect(vim.api.nvim_win_get_config(win).title)
-	assert(title:find("New suggestion", 1, true) and title:find("<Tab> type", 1, true))
-	assert(editor.persist_active())
+	assert(hint_text(buf):find("New suggestion", 1, true) and hint_text(buf):find("<Tab> type", 1, true))
+	assert(review_editor.persist_active())
 	assert(submitted_type == "suggestion" and recovered_type == "suggestion")
-	assert(not editor.has_active())
-
-	submitted_type = nil
-	editor.compose({
-		title = "New",
-		body = "Normal save",
-		type_cycle = { "issue", "suggestion" },
-		selected_type = "issue",
-	}, function(_, interrupted, selected_type)
-		assert(not interrupted)
-		submitted_type = selected_type
-		return true
-	end)
-	vim.cmd("stopinsert")
-	vim.fn.maparg("<Tab>", "n", false, true).callback()
-	vim.fn.maparg("<C-s>", "n", false, true).callback()
-	assert(submitted_type == "suggestion" and not editor.has_active())
+	assert(not review_editor.has_active() and not reservation(source_buf))
 end)
 
-test("review composer avoids a visible inclusive anchor and resizes within the editor", function()
+test("review composer grows from one to six screen rows and scrolls overflow", function()
 	reset_editor()
-	local source_win = vim.api.nvim_get_current_win()
-	local lines = {}
-	for index = 1, 40 do
-		lines[index] = "anchor fixture " .. index
-	end
-	vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
-	vim.api.nvim_win_set_cursor(source_win, { 1, 0 })
-	vim.cmd("redraw")
-	local editor = require("config.review_editor")
-	assert(editor.compose({
+	local source_win, source_buf, source_lines = review_source_fixture()
+	assert(review_editor.compose({
 		title = "Anchored",
-		body = "Draft",
+		body = "one",
 		source_win = source_win,
-		anchor_range = { first = 1, last = 2 },
+		anchor_range = { first = 4, last = 6 },
 	}, function()
 		return true
 	end))
 	local float = vim.api.nvim_get_current_win()
-	local float_position = vim.fn.win_screenpos(float)
-	local anchor_first = vim.fn.screenpos(source_win, 1, 1)
-	local anchor_last = vim.fn.screenpos(source_win, 2, 1)
-	local float_top = float_position[1]
-	local float_bottom = float_top + vim.api.nvim_win_get_height(float) - 1
+	local buf = vim.api.nvim_get_current_buf()
+	assert(vim.api.nvim_win_get_height(float) == 1 and #reservation(source_buf)[4].virt_lines == 1)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three" })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf, modeline = false })
+	assert(vim.api.nvim_win_get_height(float) == 3 and #reservation(source_buf)[4].virt_lines == 3)
+	local overflow = {}
+	for index = 1, 9 do
+		overflow[index] = "draft line " .. index
+	end
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, overflow)
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf, modeline = false })
+	local capped_height = vim.api.nvim_win_get_height(float)
+	local capped_reservation = #reservation(source_buf)[4].virt_lines
 	assert(
-		float_bottom < anchor_first.row or float_top > anchor_last.row,
-		"composer intersected the visible anchor despite available vertical space"
+		capped_height == 6 and capped_reservation == 6,
+		("overflow geometry was height=%d reservation=%d lines=%d autocmds=%d"):format(
+			capped_height,
+			capped_reservation,
+			vim.api.nvim_buf_line_count(buf),
+			#vim.api.nvim_get_autocmds({ event = "TextChanged", buffer = buf })
+		)
 	)
-	local previous_columns, previous_lines = vim.o.columns, vim.o.lines
-	vim.o.columns = 60
-	vim.o.lines = 18
-	vim.api.nvim_exec_autocmds("VimResized", { modeline = false })
-	local config = vim.api.nvim_win_get_config(float)
-	assert(config.width <= 56 and config.height <= 14 and config.row >= 0 and config.col >= 0)
-	vim.o.columns = previous_columns
-	vim.o.lines = previous_lines
+	vim.api.nvim_win_set_cursor(float, { #overflow, 0 })
+	vim.cmd("redraw")
+	local view = vim.api.nvim_win_call(float, vim.fn.winsaveview)
+	assert(view.topline > 1, "content beyond six rows did not scroll")
+	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "resize mutated source text")
 	vim.cmd("stopinsert")
 	vim.fn.maparg("<Esc>", "n", false, true).callback()
-	assert(not editor.has_active())
+	assert(not review_editor.has_active() and not reservation(source_buf))
+end)
+
+test("source loss interrupts and recovers exactly once", function()
+	reset_editor()
+	local _, source_buf, source_lines = review_source_fixture()
+	vim.cmd("vsplit")
+	local source_win = vim.api.nvim_get_current_win()
+	local callbacks = 0
+	local recoveries = 0
+	assert(review_editor.compose({
+		title = "Source loss",
+		body = "Recover me",
+		source_win = source_win,
+		anchor_line = 7,
+		recover = function(body)
+			assert(body == "Recover me")
+			recoveries = recoveries + 1
+			return true
+		end,
+	}, function(body, interrupted)
+		assert(body == "Recover me" and interrupted == true)
+		callbacks = callbacks + 1
+		return false
+	end))
+	vim.api.nvim_win_close(source_win, true)
+	assert(callbacks == 1 and recoveries == 1, "source teardown called callback or recovery more than once")
+	assert(not review_editor.has_active() and not reservation(source_buf))
+	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "source loss mutated source text")
+end)
+
+test("source buffer replacement interrupts and clears the anchored editor", function()
+	reset_editor()
+	local source_win, source_buf, source_lines = review_source_fixture()
+	local callbacks = 0
+	local recoveries = 0
+	assert(review_editor.compose({
+		title = "Source replacement",
+		body = "Recover replacement",
+		source_win = source_win,
+		anchor_line = 8,
+		recover = function(body)
+			assert(body == "Recover replacement")
+			recoveries = recoveries + 1
+			return true
+		end,
+	}, function(body, interrupted)
+		assert(body == "Recover replacement" and interrupted == true)
+		callbacks = callbacks + 1
+		return false
+	end))
+	local replacement = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_win_set_buf(source_win, replacement)
+	vim.wait(1000, function()
+		return not review_editor.has_active()
+	end, 10)
+	assert(callbacks == 1 and recoveries == 1, "source replacement did not recover exactly once")
+	assert(not reservation(source_buf), "source replacement leaked its reservation")
+	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "source replacement mutated text")
+	vim.api.nvim_buf_delete(replacement, { force = true })
 end)
 
 for _, path in ipairs(paths) do

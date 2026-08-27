@@ -121,21 +121,30 @@ The full terminal editor has a native, repository-scoped review mode that stays
 in the current ordinary tab. `:ReviewOpen` (or `<leader>ro`) freezes a working,
 commit, range, or default-branch scope; `<leader>rr` opens and closes its
 three-pane Files / Commits / Comments float. Selecting a file closes the float
-and focuses the reviewed current/new side. The Commits pane can select one
-commit or two endpoints from one linear, single-parent span; merge commits are
-reviewed individually. The Comments pane supports jumping,
+and focuses the reviewed current/new side. Its colored, fully expanded tree
+groups only non-empty change layers, supports collapsible directories, and
+shows status, line totals, rename origins, and comment counts. The Commits pane
+can select one commit or two endpoints from one linear, single-parent span;
+`c` clears only those endpoints and `b` returns to the exact frozen parent
+scope. Merge commits are reviewed individually. The Comments pane supports jumping,
 editing, deleting, replying, resolving/reopening, and reanchoring without a
 separate review tab.
 
 Review mode makes affected source buffers read-only and preserves their normal
 tab identity. `<leader>rv` switches inline and native synchronized side-by-side
 diffs; `<leader>rw` switches hunk-only and full-file context; `<leader>rg`
-focuses the current/new code. Current source keeps normal LSP. Historical old
+focuses the current/new code. Hunk-only inline mode starts with zero context and
+leaving a hunk jumps directly to the adjacent hunk instead of revealing hidden
+lines. The statusline and review-local winbar identify REV ON/OFF, the frozen
+scope, layer, layout/context, comment-preview state, side, and path. Current source keeps normal LSP. Historical old
 content never starts LSP, while `gd` from a historical-new snapshot bridges to
 the real current file only when the line is unchanged and preserves the cursor
 column. `<leader>ra` comments the current line or visual range, `<leader>rA`
 comments the file, and overlapping multiline comments use an aggregate rail
-while remaining individually editable from the Comments pane.
+while remaining individually editable from the Comments pane. Pausing on a
+commented range shows one concise inline row per comment; `<leader>ri` toggles
+those previews without removing the rail. The borderless composer reserves up
+to six visual rows directly below the source anchor and scrolls longer text.
 
 `:ReviewExport[!]` always renders the complete saved review and may be repeated;
 it copies Markdown or opens a closable float when no clipboard is available.
@@ -149,8 +158,9 @@ only open, undelivered comments are published through `tuicr-round`. Ordinary
 workflows.
 
 The review mappings use the lower-case `<leader>r` namespace: `rr` panel, `ro`
-open, `rm` mode, `rs` scope, `rf/rh/rl` panel panes, `rv` layout, `rw` context,
-`rg` code, `ra/rA` comments, `re` edit, `rc` type, `rd` delete, `rp` reply,
+open, `rm` mode, `rs` scope, `rb` parent scope, `rf/rh/rl` panel panes, `rv`
+layout, `rw` context, `ri` inline previews, `rg` code, `ra/rA` comments, `re`
+edit, `rc` type, `rd` delete, `rp` reply,
 `rt` resolve, `rE` export, `ru` refresh, and `rq` close. `]r` and `[r` navigate
 comments. Tests use `<leader>Tn` / `<leader>Td`, Python uses `<leader>pr` /
 `<leader>ps`, and LSP rename uses `<leader>lr`.

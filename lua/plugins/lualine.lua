@@ -68,6 +68,7 @@ return {
 						statusline.navic,
 					},
 					lualine_x = {
+						statusline.review,
 						statusline.devpod,
 						statusline.python,
 						statusline.cmake,

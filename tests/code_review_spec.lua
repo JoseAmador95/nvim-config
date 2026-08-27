@@ -46,11 +46,13 @@ test("mapping table uses only the approved lowercase review vocabulary", functio
 		"<leader>ro",
 		"<leader>rm",
 		"<leader>rs",
+		"<leader>rb",
 		"<leader>rf",
 		"<leader>rh",
 		"<leader>rl",
 		"<leader>rv",
 		"<leader>rw",
+		"<leader>ri",
 		"<leader>rg",
 		"<leader>ra",
 		"<leader>rA",
@@ -71,6 +73,31 @@ test("mapping table uses only the approved lowercase review vocabulary", functio
 	end, review.mapping_specs())
 	assert(vim.deep_equal(actual, expected))
 	assert(review.help_groups().common == "review")
+end)
+
+test("inline comment previews use status, range, first content, and Unicode-safe ellipsis", function()
+	local item = {
+		type = "suggestion",
+		body = "  \n\t  \ná🙂 first content\nsecond line",
+		anchor = { kind = "range", start_line = 3, end_line = 5 },
+		reply_to = vim.NIL,
+		resolution = "open",
+		deliveries = {},
+	}
+	local multiline = review._inline_preview_text(item, 80)
+	assert(multiline:find("[suggestion][draft] L3-5", 1, true))
+	assert(multiline:find("á🙂 first content", 1, true) and multiline:sub(-3) == "…")
+	assert(pcall(vim.str_utfindex, multiline), "multiline preview contains invalid UTF-8")
+
+	item.body = string.rep("á🙂", 80)
+	item.anchor.end_line = item.anchor.start_line
+	local truncated = review._inline_preview_text(item, 34)
+	assert(truncated:find("L3", 1, true) and truncated:sub(-3) == "…")
+	assert(pcall(vim.str_utfindex, truncated), "truncated preview contains invalid UTF-8")
+
+	item.body = "short body"
+	local short = review._inline_preview_text(item, 80)
+	assert(short:find("short body", 1, true) and short:sub(-3) ~= "…")
 end)
 
 test("inclusive cursor matching covers multiline overlaps", function()
@@ -147,6 +174,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 	local panel = require("config.review_panel")
 	local exporter = require("config.review_export")
 	local tuicr = require("config.review_tuicr")
+	local editor_module = require("config.review_editor")
 	local originals = {
 		resolve = scope_module.resolve,
 		load = store.load,
@@ -157,6 +185,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		save_recovery = store.save_recovery,
 		verify_recovery = store.verify_recovery,
 		build = changes.build,
+		selection_request = changes.selection_request,
 		detect_drift = scope_module.detect_drift,
 		mode_new = mode.new,
 		enable = mode.enable,
@@ -167,6 +196,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		show = presenter.show,
 		clear = presenter.clear,
 		current_target = presenter.current_target,
+		refresh_winbars = presenter.refresh_winbars,
 		panel_new = panel.new,
 		panel_open = panel.open,
 		panel_refresh = panel.refresh,
@@ -182,6 +212,8 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		restore_preview = exporter.restore_preview,
 		tuicr_add = tuicr.add,
 		tuicr_respond = tuicr.respond,
+		editor_compose = editor_module.compose,
+		editor_has_active = editor_module.has_active,
 	}
 	local repository = "/tmp/native-review-controller"
 	local scope = {
@@ -194,6 +226,12 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		id = string.rep("b", 64),
 		kind = "commit",
 		label = "BROKEN",
+		root = repository,
+	}
+	local child_scope = {
+		id = string.rep("c", 64),
+		kind = "commit",
+		label = "CHILD-FROZEN",
 		root = repository,
 	}
 	local function session_for(value)
@@ -212,6 +250,13 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		new_path = "new.lua",
 		path = "new.lua",
 	}
+	local child_entry = {
+		identity = "history\0child-old.lua\0child.lua",
+		old_path = "child-old.lua",
+		new_path = "child.lua",
+		path = "child.lua",
+		layer = "history",
+	}
 	local calls = {
 		built = 0,
 		enabled = 0,
@@ -226,9 +271,13 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		enrolled = 0,
 		panel_refreshed = 0,
 		source_updates = 0,
+		winbars_refreshed = 0,
 		trouble_refreshed = 0,
 		tuicr = 0,
+		composed = {},
 	}
+	local notifications = {}
+	local review_events = {}
 	local original_trouble = package.loaded.trouble
 	package.loaded.trouble = {
 		refresh = function(mode_name)
@@ -239,10 +288,19 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		end,
 	}
 	local original_file_comment = review.file_comment
+	local original_notify = vim.notify
+	vim.notify = function(value)
+		notifications[#notifications + 1] = tostring(value)
+	end
 	scope_module.resolve = function(root_value, request)
 		assert(root_value == repository and request.kind == "commit")
 		calls.resolved = calls.resolved + 1
-		return request.rev == "BROKEN" and broken_scope or scope
+		if request.rev == "BROKEN" then
+			return broken_scope
+		elseif request.rev == "CHILD" then
+			return child_scope
+		end
+		return scope
 	end
 	local function load_live(root_value, id)
 		assert(root_value == repository)
@@ -275,9 +333,16 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		return nil, "review item does not exist"
 	end
 	changes.build = function(root_value, scope_value)
-		assert(root_value == repository and (scope_value == scope or scope_value == broken_scope))
+		assert(
+			root_value == repository
+				and (scope_value == scope or scope_value == broken_scope or scope_value == child_scope)
+		)
 		calls.built = calls.built + 1
-		return { entries = { entry }, commits = {}, scope = scope_value }
+		return { entries = { scope_value == child_scope and child_entry or entry }, commits = {}, scope = scope_value }
+	end
+	changes.selection_request = function(_, first, second)
+		assert(first == "child-oid" and second == nil)
+		return { kind = "commit", rev = "CHILD" }
 	end
 	mode.new = function(workspace)
 		return {
@@ -288,7 +353,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 	end
 	mode.enable = function(state)
 		calls.enabled = calls.enabled + 1
-		if state.workspace.scope.id == broken_scope.id then
+		if state.workspace.scope.id == broken_scope.id or state.workspace.fail_enable then
 			return nil, "simulated activation failure"
 		end
 		state.enabled = true
@@ -309,6 +374,9 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		return snapshot
 	end
 	mode.restore = function(state, snapshot)
+		if state.workspace.fail_restore then
+			return nil, "simulated restore failure"
+		end
 		state.enabled = snapshot.enabled
 		return true
 	end
@@ -319,7 +387,8 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 	end
 	presenter.show = function(state, selected, options)
 		calls.shown = calls.shown + 1
-		assert(selected == entry and options.layout == "inline" and options.context == "hunks")
+		assert(selected == state.workspace.model.entries[1])
+		assert(options.layout == state.workspace.layout and options.context == state.workspace.context)
 		vim.api.nvim_set_current_tabpage(state.origin.tab)
 		vim.api.nvim_set_current_win(state.origin.win)
 		local target = {
@@ -338,6 +407,11 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 	end
 	presenter.current_target = function(state)
 		return state.presentation and state.presentation.target
+	end
+	presenter.refresh_winbars = function(state)
+		assert(state.workspace == review._active_workspace())
+		calls.winbars_refreshed = calls.winbars_refreshed + 1
+		return state.presentation ~= nil
 	end
 	panel.new = function(workspace, callbacks)
 		return {
@@ -358,10 +432,12 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		return true
 	end
 	panel.update_source = function(state, source_win)
-		assert(vim.api.nvim_win_is_valid(source_win), "presenter supplied an invalid panel source")
-		calls.source_updates = calls.source_updates + 1
-		state.source_win = source_win
-		return source_win
+		if source_win and vim.api.nvim_win_is_valid(source_win) then
+			calls.source_updates = calls.source_updates + 1
+			state.source_win = source_win
+			return source_win
+		end
+		return vim.api.nvim_win_is_valid(state.source_win or -1) and state.source_win or nil
 	end
 	panel.hide = function(state)
 		state.visible = false
@@ -422,19 +498,60 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		calls.tuicr = calls.tuicr + 1
 		error("unexpected TUICR response")
 	end
+	editor_module.compose = function(options, callback)
+		calls.composed[#calls.composed + 1] = { options = vim.deepcopy(options), callback = callback }
+		return true
+	end
 	review.file_comment = function()
 		calls.file_comment = (calls.file_comment or 0) + 1
 	end
 
 	local ok, err = xpcall(function()
 		vim.cmd("only")
+		vim.api.nvim_create_autocmd("User", {
+			group = vim.api.nvim_create_augroup("NvimConfigReviewChangedSpec", { clear = true }),
+			pattern = "NvimConfigReviewChanged",
+			callback = function(event)
+				review_events[#review_events + 1] = vim.deepcopy(event.data)
+			end,
+		})
 		local tabs = #vim.api.nvim_list_tabpages()
 		local workspace = assert(review.open({ kind = "commit", rev = "HEAD" }, repository))
+		assert(#review_events == 1, "open did not emit one stable review state")
 		assert(#vim.api.nvim_list_tabpages() == tabs)
 		assert(workspace.entry_identity == entry.identity and calls.shown == 1 and calls.opened == 1)
 		assert(calls.source_updates == 1 and workspace.panel.source_win == workspace.mode_state.presentation.target.win)
+		local status = review.status()
+		assert(status.active and status.mode_on and status.scope_kind == "commit" and status.scope_label == "HEAD")
+		assert(status.layout == "inline" and status.context == "hunks" and status.inline_comments)
+		assert(vim.deep_equal(status.entry, {
+			identity = entry.identity,
+			path = "new.lua",
+			layer = "history",
+			side = "CURRENT",
+		}))
+		status.entry.path = "mutated"
+		review_events[1].entry.path = "also mutated"
+		assert(review.status().entry.path == "new.lua", "status/event data was not detached")
+		assert(workspace.inline_comments == true and workspace.session.inline_comments == nil)
+		assert(review.inline_comments("off") and workspace.inline_comments == false)
+		workspace = assert(review.open({ kind = "commit", rev = "HEAD" }, repository))
+		assert(workspace.inline_comments == false, "same exact workspace lost its transient inline-comment preference")
+		assert(workspace.session.inline_comments == nil and calls.shown == 2 and calls.opened == 2)
+		local winbars_before_toggle = calls.winbars_refreshed
+		assert(review.inline_comments("on") and workspace.inline_comments == true)
+		assert(calls.winbars_refreshed == winbars_before_toggle + 1, "inline toggle did not refresh review winbars")
 		assert(review.mode("off") and not workspace.mode_on and workspace.panel.visible)
-		assert(review.mode("on") and workspace.mode_on and calls.shown == 2)
+		assert(review_events[#review_events].mode_on == false and review.status().entry.side == "CURRENT")
+		local show_before_failure = presenter.show
+		local events_before_failed_mode = #review_events
+		presenter.show = function()
+			return nil, "simulated presentation failure"
+		end
+		assert(not review.mode("on") and not workspace.mode_on)
+		assert(#review_events == events_before_failed_mode, "failed mode activation emitted review state")
+		presenter.show = show_before_failure
+		assert(review.mode("on") and workspace.mode_on and calls.shown == 3)
 		workspace.panel.visible = false
 		vim.cmd("tabnew")
 		local session_focus_tab = vim.api.nvim_get_current_tabpage()
@@ -451,7 +568,75 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		vim.cmd("tabclose")
 		workspace.panel.visible = true
 		workspace.panel.callbacks.file_comment(entry.identity)
-		assert(calls.shown == 4 and calls.file_comment == 1 and not workspace.panel.visible)
+		assert(calls.shown == 5 and calls.file_comment == 1 and not workspace.panel.visible)
+		review.file_comment = original_file_comment
+
+		local parent = workspace
+		local parent_session = parent.session
+		local parent_model = parent.model
+		local parent_scope = parent.scope
+		local parent_panel = parent.panel
+		parent.layout = "split"
+		parent.context = "full"
+		parent.inline_comments = false
+		parent.panel.visible = true
+		parent.panel.focused = "commits"
+		parent.panel.endpoints = { first = "frozen-first", second = "frozen-second" }
+		local resolved_before_child = calls.resolved
+		local built_before_child = calls.built
+		local events_before_child = #review_events
+		parent.panel.callbacks.apply_commit("child-oid")
+		local child = assert(review._active_workspace())
+		assert(child ~= parent and child.scope.id == child_scope.id and child.scope.label == "CHILD-FROZEN")
+		assert(#review._scope_history == 1)
+		assert(child.layout == "split" and child.context == "full" and child.inline_comments == false)
+		assert(calls.resolved == resolved_before_child + 1 and calls.built == built_before_child + 1)
+		assert(#review_events == events_before_child + 1, "commit drill-in did not emit one stable state")
+
+		parent.fail_enable = true
+		local events_before_failed_back = #review_events
+		local backed, back_err = child.panel.callbacks.scope_back()
+		assert(backed == nil and back_err:find("simulated activation failure", 1, true))
+		assert(review._active_workspace() == child and child.mode_on and #review._scope_history == 1)
+		assert(#review_events == events_before_failed_back, "failed parent restore emitted an intermediate state")
+		parent.fail_enable = nil
+		assert(child.panel.callbacks.scope_back(), "scope back did not restore the frozen parent")
+		workspace = assert(review._active_workspace())
+		assert(workspace == parent and workspace.session == parent_session and workspace.model == parent_model)
+		assert(workspace.scope == parent_scope and workspace.panel == parent_panel and #review._scope_history == 0)
+		assert(workspace.entry_identity == entry.identity and workspace.mode_on)
+		assert(workspace.layout == "split" and workspace.context == "full" and workspace.inline_comments == false)
+		assert(workspace.panel.visible and workspace.panel.focused == "commits")
+		assert(vim.deep_equal(workspace.panel.endpoints, { first = "frozen-first", second = "frozen-second" }))
+		assert(calls.resolved == resolved_before_child + 1, "scope back resolved moving refs")
+		assert(calls.built == built_before_child + 1, "scope back rebuilt the frozen model")
+
+		assert(not review.scope_back())
+		assert(notifications[#notifications] == "Already at full review scope")
+
+		workspace.panel.callbacks.apply_commit("child-oid")
+		child = assert(review._active_workspace())
+		assert(#review._scope_history == 1)
+		local events_before_failed_open = #review_events
+		local failed_manual = review.open({ kind = "commit", rev = "BROKEN" }, repository)
+		assert(failed_manual == nil and review._active_workspace() == child and #review._scope_history == 1)
+		assert(#review_events == events_before_failed_open, "failed manual activation emitted review state")
+		assert(child.panel.callbacks.scope_back() and review._active_workspace() == parent)
+
+		parent.panel.callbacks.apply_commit("child-oid")
+		assert(#review._scope_history == 1)
+		workspace = assert(review.open({ kind = "commit", rev = "HEAD" }, repository))
+		assert(#review._scope_history == 0, "successful manual open retained nested scope history")
+		assert(not review.scope_back() and notifications[#notifications] == "Already at full review scope")
+		workspace.fail_restore = true
+		assert(review.suspend_for_session())
+		local events_before_failed_restore = #review_events
+		local restored, restore_err = review.restore_after_session()
+		assert(restored == nil and restore_err:find("simulated restore failure", 1, true))
+		assert(#review_events == events_before_failed_restore, "failed session restore emitted intermediate state")
+		workspace.fail_restore = nil
+		assert(review.mode("on"), "review mode did not recover after failed session restore")
+
 		local source_win = workspace.panel.source_win
 		local source_buf = vim.api.nvim_win_get_buf(source_win)
 		vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "one", "two", "three", "four", "five", "six" })
@@ -489,6 +674,195 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		calls.enrolled = 0
 		vim.api.nvim_exec_autocmds("BufEnter", { buffer = vim.api.nvim_get_current_buf() })
 		assert(calls.enrolled == 1, "BufEnter did not enroll an affected buffer opened during review mode")
+
+		local command = vim.api.nvim_get_commands({ builtin = false }).ReviewInlineComments
+		assert(command and command.nargs == "?", "ReviewInlineComments command is missing or has the wrong arity")
+		assert(vim.api.nvim_get_commands({ builtin = false }).ReviewScopeBack, "ReviewScopeBack command is missing")
+		local inline_mapping = vim.fn.maparg("<leader>ri", "n", false, true)
+		assert((inline_mapping.rhs or ""):lower() == "<cmd>reviewinlinecomments<cr>", vim.inspect(inline_mapping))
+		local back_mapping = vim.fn.maparg("<leader>rb", "n", false, true)
+		assert((back_mapping.rhs or ""):lower() == "<cmd>reviewscopeback<cr>", vim.inspect(back_mapping))
+		vim.cmd("ReviewInlineComments off")
+		assert(workspace.inline_comments == false)
+		vim.cmd("ReviewInlineComments on")
+		assert(workspace.inline_comments == true and workspace.session.inline_comments == nil)
+
+		local function preview_marks()
+			return vim.api.nvim_buf_get_extmarks(source_buf, review._preview_namespace, 0, -1, { details = true })
+		end
+		local function rail_count()
+			local count = 0
+			for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(source_buf, -1, 0, -1, { details = true })) do
+				if mark[4].sign_text and vim.trim(mark[4].sign_text) ~= "" then
+					count = count + 1
+				end
+			end
+			return count
+		end
+		local function preview_item(sequence, type_name, body, first, last)
+			return {
+				id = string.rep(tostring(sequence), 64),
+				sequence = sequence,
+				type = type_name,
+				body = body,
+				anchor = {
+					kind = "range",
+					path = "new.lua",
+					side = "right",
+					layer = "history",
+					start_line = first,
+					end_line = last,
+					stale = false,
+				},
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			}
+		end
+		local second = preview_item(2, "suggestion", "  \nsecond visible line\ncontinued", 1, 4)
+		local first = preview_item(1, "issue", string.rep("á🙂", 80), 2, 4)
+		local third = preview_item(3, "praise", "short praise", 3, 5)
+		local file_item = {
+			id = string.rep("f", 64),
+			sequence = 4,
+			type = "question",
+			body = "file body",
+			anchor = { kind = "file", path = "new.lua", side = "right", layer = "history", stale = false },
+			reply_to = vim.NIL,
+			resolution = "open",
+			deliveries = {},
+		}
+		local unrelated = preview_item(5, "pedantic", "wrong side", 1, 4)
+		unrelated.anchor.side = "left"
+		workspace.session.items = { second, first, third, file_item, unrelated }
+		vim.api.nvim_set_current_win(source_win)
+		vim.api.nvim_win_set_cursor(source_win, { 3, 0 })
+		review.refresh_marks(workspace)
+		local rails = rail_count()
+		assert(rails > 0, "range comments did not render rails before passive preview")
+		vim.api.nvim_exec_autocmds("CursorHold", { buffer = source_buf, modeline = false })
+		local marks = preview_marks()
+		assert(#marks == 2 and marks[1][2] == 3 and marks[2][2] == 4, vim.inspect(marks))
+		assert(#marks[1][4].virt_lines == 2 and #marks[2][4].virt_lines == 1)
+		local first_text = marks[1][4].virt_lines[1][1][1]
+		local second_text = marks[1][4].virt_lines[2][1][1]
+		assert(first_text:find("[issue][draft] L2-4", 1, true) and first_text:sub(-3) == "…")
+		assert(second_text:find("[suggestion][draft] L1-4", 1, true))
+		assert(second_text:find("second visible line", 1, true) and second_text:sub(-3) == "…")
+		assert(pcall(vim.str_utfindex, first_text) and pcall(vim.str_utfindex, second_text))
+
+		review._clear_inline_preview()
+		vim.bo[source_buf].buftype = "nofile"
+		vim.b[source_buf].nvim_review_role = "snapshot"
+		assert(review._show_inline_preview(), "historical review snapshot did not render passive comments")
+		vim.bo[source_buf].buftype = ""
+		vim.b[source_buf].nvim_review_role = nil
+
+		vim.cmd("ReviewInlineComments off")
+		assert(#preview_marks() == 0 and rail_count() == rails, "preview toggle removed review rails")
+		assert(not review._show_inline_preview(), "disabled passive preview was rendered")
+		vim.cmd("ReviewInlineComments on")
+		for _, event in ipairs({ "CursorMoved", "InsertEnter", "BufLeave", "WinLeave", "TabLeave", "WinScrolled" }) do
+			assert(review._show_inline_preview(), event .. " fixture could not render a preview")
+			vim.api.nvim_exec_autocmds(event, { modeline = false })
+			assert(#preview_marks() == 0, event .. " did not clear passive preview")
+			assert(rail_count() == rails, event .. " cleared review rails")
+		end
+
+		editor_module.has_active = function()
+			return true
+		end
+		assert(not review._show_inline_preview(), "active composer did not suppress passive preview")
+		editor_module.has_active = originals.editor_has_active
+
+		assert(review._show_inline_preview())
+		assert(review.mode("off") and #preview_marks() == 0 and rail_count() == rails)
+		assert(not review._show_inline_preview(), "mode-off passive preview was rendered")
+		assert(review.mode("on"))
+		rails = rail_count()
+
+		local all_preview_items = workspace.session.items
+		workspace.session.items = { file_item, unrelated }
+		assert(not review._show_inline_preview(), "file or unrelated comment produced a passive preview")
+		workspace.session.items = all_preview_items
+		vim.cmd("botright new")
+		local comments_win = vim.api.nvim_get_current_win()
+		vim.bo.buftype = "nofile"
+		vim.b.nvim_review_panel_role = "comments"
+		assert(not review._show_inline_preview(), "panel/nofile buffer produced a passive preview")
+		vim.api.nvim_set_current_win(source_win)
+
+		assert(review._show_inline_preview())
+		workspace.unsaved_error = "preview refresh fixture"
+		local preview_refresh, preview_refresh_err = review.refresh()
+		assert(preview_refresh == nil and preview_refresh_err:find("unsaved in-memory changes", 1, true))
+		assert(#preview_marks() == 0, "failed refresh retained passive preview")
+		workspace.unsaved_error = nil
+		assert(review._show_inline_preview() and review.present(entry.identity))
+		assert(#preview_marks() == 0, "presentation retained passive preview")
+		assert(review._show_inline_preview() and review.suspend_for_session())
+		assert(#preview_marks() == 0, "session suspension retained passive preview")
+		assert(review.restore_after_session())
+
+		local composed_before = #calls.composed
+		vim.api.nvim_set_current_win(source_win)
+		vim.api.nvim_win_set_cursor(source_win, { 2, 0 })
+		assert(review._show_inline_preview())
+		review.comment(2, 3, "question")
+		assert(#calls.composed == composed_before + 1 and #preview_marks() == 0)
+		local range_options = calls.composed[#calls.composed].options
+		assert(range_options.source_win == source_win and range_options.anchor_line == 3)
+		assert(range_options.anchor_range.first == 2 and range_options.anchor_range.last == 3)
+		assert(range_options.anchor.kind == "range" and range_options.anchor.anchor_line == nil)
+
+		vim.api.nvim_win_set_cursor(source_win, { 4, 0 })
+		review.file_comment("praise")
+		local file_options = calls.composed[#calls.composed].options
+		assert(file_options.source_win == source_win and file_options.anchor_line == 4)
+		assert(file_options.anchor_range == nil and file_options.anchor.kind == "file")
+		assert(file_options.anchor.start_line == nil and file_options.anchor.anchor_line == nil)
+
+		workspace.panel.visible = true
+		vim.api.nvim_set_current_win(comments_win)
+		review.general_comment("rationale")
+		local general_options = calls.composed[#calls.composed].options
+		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(general_options.source_win == source_win and general_options.anchor_line == 4)
+		assert(general_options.anchor.kind == "general" and general_options.anchor.anchor_line == nil)
+
+		workspace.session.items = { first }
+		workspace.panel.visible = true
+		vim.api.nvim_set_current_win(comments_win)
+		review.edit(first.id)
+		local edit_options = calls.composed[#calls.composed].options
+		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(edit_options.source_win == source_win and edit_options.anchor_line == 4)
+		assert(edit_options.anchor_range.first == 2 and edit_options.anchor_range.last == 4)
+
+		workspace.panel.visible = true
+		vim.api.nvim_set_current_win(comments_win)
+		review.reply(first.id)
+		local reply_options = calls.composed[#calls.composed].options
+		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(reply_options.source_win == source_win and reply_options.anchor_line == 4)
+		assert(reply_options.anchor_range.first == 2 and reply_options.anchor_range.last == 4)
+
+		local saved_presentation = workspace.mode_state.presentation
+		local saved_source = workspace.panel.source_win
+		workspace.mode_state.presentation = nil
+		workspace.panel.source_win = -1
+		vim.api.nvim_set_current_win(comments_win)
+		local composed_without_source = #calls.composed
+		review.general_comment("issue")
+		assert(#calls.composed == composed_without_source, "general comment opened without reviewed source")
+		workspace.mode_state.presentation = saved_presentation
+		workspace.panel.source_win = saved_source
+		vim.api.nvim_win_close(comments_win, true)
+		vim.api.nvim_set_current_win(source_win)
+		workspace.session.items = {}
+		workspace.panel.visible = false
+		review.refresh_marks(workspace)
+
 		vim.cmd("tabnew")
 		local invocation_tab = vim.api.nvim_get_current_tabpage()
 		local invocation_win = vim.api.nvim_get_current_win()
@@ -955,8 +1329,11 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		end
 		assert(not review.close(), "normal close discarded an unsaved review")
 		assert(review._active_workspace() == workspace and calls.closed == closes_before)
+		local events_before_close = #review_events
 		assert(review.close(true) and calls.closed == closes_before + 1)
 		assert(#vim.api.nvim_list_tabpages() == tabs and review._active_workspace() == nil)
+		assert(#review_events == events_before_close + 1 and review_events[#review_events].active == false)
+		assert(vim.deep_equal(review.status(), { active = false, mode_on = false }))
 	end, debug.traceback)
 	for name, value in pairs(originals) do
 		if name == "resolve" then
@@ -971,8 +1348,8 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 			or name == "verify_recovery"
 		then
 			store[name] = value
-		elseif name == "build" then
-			changes.build = value
+		elseif name == "build" or name == "selection_request" then
+			changes[name] = value
 		elseif name == "detect_drift" then
 			scope_module.detect_drift = value
 		elseif name == "mode_new" then
@@ -985,7 +1362,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 			or name == "mode_restore"
 		then
 			mode[name:gsub("^mode_", "")] = value
-		elseif name == "show" or name == "clear" or name == "current_target" then
+		elseif name == "show" or name == "clear" or name == "current_target" or name == "refresh_winbars" then
 			presenter[name] = value
 		elseif name:sub(1, 6) == "panel_" then
 			panel[name:sub(7)] = value
@@ -1001,9 +1378,12 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 			tuicr.add = value
 		elseif name == "tuicr_respond" then
 			tuicr.respond = value
+		elseif name == "editor_compose" or name == "editor_has_active" then
+			editor_module[name:sub(8)] = value
 		end
 	end
 	review.file_comment = original_file_comment
+	vim.notify = original_notify
 	package.loaded.trouble = original_trouble
 	assert(ok, err)
 end)

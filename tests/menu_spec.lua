@@ -161,8 +161,10 @@ test("review layout and context are palette-only namespaced commands", function(
 	for id, expected in pairs({
 		["command.review_panel"] = { "Toggle Review Panel", "<leader>rr" },
 		["command.review_mode"] = { "Toggle Read-only Review Mode", "<leader>rm" },
+		["command.review_scope_back"] = { "Return to Parent Review Scope", "<leader>rb" },
 		["command.review_code"] = { "Focus Reviewed Code", "<leader>rg" },
 		["command.review_comments"] = { "Focus Review Comments", "<leader>rl" },
+		["command.review_inline_comments"] = { "Toggle Inline Comment Previews", "<leader>ri" },
 		["command.review_file_comment"] = { "Add File-level Review Comment", "<leader>rA" },
 		["command.review_edit"] = { "Edit Review Comment", "<leader>re" },
 		["command.review_change_type"] = { "Change Comment Type at Current Line", "<leader>rc" },

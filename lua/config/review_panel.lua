@@ -8,6 +8,55 @@ local PANEL_ORDER = { "files", "commits", "comments" }
 local PANEL_TITLES = { files = " Files ", commits = " Commits ", comments = " Comments " }
 local PANEL_NAMES = { files = "files", commits = "commits", comments = "comments" }
 local COMMIT_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_commits")
+local FILE_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_files")
+
+local STATUS_HIGHLIGHTS = {
+	A = "ReviewPanelStatusAdded",
+	["?"] = "ReviewPanelStatusUntracked",
+	M = "ReviewPanelStatusModified",
+	R = "ReviewPanelStatusRenamed",
+	C = "ReviewPanelStatusCopied",
+	T = "ReviewPanelStatusTypeChanged",
+	U = "ReviewPanelStatusUnmerged",
+	X = "ReviewPanelStatusUnknown",
+	D = "ReviewPanelStatusDeleted",
+}
+
+local HIGHLIGHT_LINKS = {
+	ReviewPanelSection = "Title",
+	ReviewPanelFolder = "Directory",
+	ReviewPanelFolderIcon = "Directory",
+	ReviewPanelFile = "Normal",
+	ReviewPanelFileSelected = "Type",
+	ReviewPanelFileIcon = "Special",
+	ReviewPanelPath = "Comment",
+	ReviewPanelNonText = "NonText",
+	ReviewPanelInsertions = "DiffAdd",
+	ReviewPanelDeletions = "DiffDelete",
+	ReviewPanelComments = "DiagnosticInfo",
+	ReviewPanelStatusAdded = "DiffAdd",
+	ReviewPanelStatusUntracked = "DiagnosticHint",
+	ReviewPanelStatusModified = "DiffChange",
+	ReviewPanelStatusRenamed = "Special",
+	ReviewPanelStatusCopied = "Special",
+	ReviewPanelStatusTypeChanged = "DiffChange",
+	ReviewPanelStatusUnmerged = "DiagnosticWarn",
+	ReviewPanelStatusUnknown = "DiagnosticError",
+	ReviewPanelStatusDeleted = "DiffDelete",
+}
+
+local function apply_highlights()
+	for name, link in pairs(HIGHLIGHT_LINKS) do
+		vim.api.nvim_set_hl(0, name, { default = true, link = link })
+	end
+end
+
+apply_highlights()
+local highlight_group = vim.api.nvim_create_augroup("NvimReviewPanelHighlights", { clear = true })
+vim.api.nvim_create_autocmd("ColorScheme", {
+	group = highlight_group,
+	callback = apply_highlights,
+})
 
 local function valid_buf(buf)
 	return type(buf) == "number" and vim.api.nvim_buf_is_valid(buf)
@@ -67,13 +116,25 @@ local function safe_cursor(win)
 	return { cursor[1], cursor[2] }
 end
 
+local function row_key(row)
+	return type(row) == "table" and row.key or row
+end
+
+local function row_value(row)
+	return type(row) == "table" and row.value or row
+end
+
 local function capture_pane(pane)
 	if not valid_win(pane.win) then
 		return
 	end
 	local cursor = safe_cursor(pane.win)
 	pane.cursor = cursor
-	pane.selected = pane.rows[cursor[1]] or pane.selected
+	local row = pane.rows[cursor[1]]
+	if row then
+		pane.selected = row_key(row)
+		pane.selected_ancestors = type(row) == "table" and vim.deepcopy(row.ancestors or {}) or nil
+	end
 	vim.api.nvim_win_call(pane.win, function()
 		pane.view = vim.fn.winsaveview()
 	end)
@@ -132,6 +193,15 @@ local function invoke(state, name, ...)
 end
 
 local function selected_value(state, name)
+	local pane = state.panes[name]
+	if not pane or not valid_win(pane.win) then
+		return nil
+	end
+	capture_pane(pane)
+	return row_value(pane.rows[pane.cursor[1]])
+end
+
+local function selected_row(state, name)
 	local pane = state.panes[name]
 	if not pane or not valid_win(pane.win) then
 		return nil
@@ -198,15 +268,24 @@ local function install_pane_maps(state, name, buf)
 	install_common_maps(state, buf)
 	if name == "files" then
 		vim.keymap.set("n", "<CR>", function()
-			local identity = selected_value(state, "files")
-			if identity then
-				invoke(state, "select_entry", identity)
+			local row = selected_row(state, "files")
+			if type(row) ~= "table" then
+				return
 			end
-		end, { buffer = buf, silent = true, desc = "Present exact review entry" })
+			if row.kind == "group" or row.kind == "directory" then
+				state.collapsed[row.key] = not state.collapsed[row.key]
+				M.refresh(state)
+				M.focus(state, "files")
+			elseif row.kind == "file" then
+				state.panes.files.selected_file = row.value
+				invoke(state, "select_entry", row.value)
+			end
+		end, { buffer = buf, silent = true, desc = "Open review file or toggle tree node" })
 		vim.keymap.set("n", "<leader>rA", function()
-			local identity = selected_value(state, "files")
-			if identity then
-				invoke(state, "file_comment", identity)
+			local row = selected_row(state, "files")
+			if type(row) == "table" and row.kind == "file" then
+				state.panes.files.selected_file = row.value
+				invoke(state, "file_comment", row.value)
 			end
 		end, { buffer = buf, silent = true, desc = "Comment selected review file" })
 	elseif name == "commits" then
@@ -214,11 +293,20 @@ local function install_pane_maps(state, name, buf)
 			choose_commit(state)
 		end, { buffer = buf, silent = true, desc = "Select commit endpoint" })
 		vim.keymap.set("n", "c", function()
+			local selected = state.commit_first ~= nil or state.commit_second ~= nil
 			state.commit_first = nil
 			state.commit_second = nil
 			M.refresh(state)
 			M.focus(state, "commits")
+			vim.notify(
+				selected and "Commit endpoints cleared" or "No commit endpoints selected",
+				vim.log.levels.INFO,
+				{ title = "Review" }
+			)
 		end, { buffer = buf, silent = true, desc = "Clear commit selection" })
+		vim.keymap.set("n", "b", function()
+			invoke(state, "scope_back")
+		end, { buffer = buf, silent = true, desc = "Return to parent review scope" })
 		vim.keymap.set("n", "<CR>", function()
 			apply_commit(state)
 		end, { buffer = buf, silent = true, desc = "Open selected commit span" })
@@ -329,30 +417,259 @@ local function comment_counts(workspace)
 	return counts
 end
 
-local function file_lines(state)
-	local lines = { header(state), "Enter present · 1/2/3 or Tab focus · q hide", "" }
-	local rows = {}
-	local counts = comment_counts(state.workspace)
-	for _, entry in ipairs(state.workspace.model.entries or {}) do
-		local path = entry.path or entry.new_path or entry.old_path or "<unknown>"
-		local layer = entry.layer or "history"
-		local location = path
-		if entry.renamed or (entry.old_path and entry.new_path and entry.old_path ~= entry.new_path) then
-			location = (entry.old_path or "<none>") .. " -> " .. (entry.new_path or "<none>")
+local function add_segment(rendered, text, highlight)
+	text = tostring(text or "")
+	local first = #rendered.text
+	rendered.text = rendered.text .. text
+	if highlight and text ~= "" then
+		rendered.highlights[#rendered.highlights + 1] = {
+			first = first,
+			last = #rendered.text,
+			group = highlight,
+		}
+	end
+end
+
+local function new_rendered_line()
+	return { text = "", highlights = {} }
+end
+
+local function devicon(path)
+	local ok, icons = pcall(require, "nvim-web-devicons")
+	if not ok or type(icons) ~= "table" or type(icons.get_icon) ~= "function" then
+		return "◇", "ReviewPanelFileIcon", false
+	end
+	local basename = vim.fs.basename(path) or path
+	local extension = basename:match("%.([^.]*)$") or ""
+	local icon, highlight = icons.get_icon(basename, extension, { default = true })
+	if not icon or icon == "" then
+		return "◇", "ReviewPanelFileIcon", true
+	end
+	return icon, highlight or "ReviewPanelFileIcon", true
+end
+
+local function group_definitions(workspace)
+	if workspace.scope.kind == "working" then
+		return {
+			{ id = "staged", label = "Staged" },
+			{ id = "unstaged", label = "Unstaged" },
+			{ id = "untracked", label = "Untracked" },
+		}
+	end
+	return { { id = "changes", label = "Changes" } }
+end
+
+local function entry_path(entry)
+	return entry.new_path or entry.path or entry.old_path or "<unknown>"
+end
+
+local function new_tree_node(name, path, key)
+	return {
+		name = name,
+		path = path,
+		key = key,
+		directories = {},
+		files = {},
+		file_count = 0,
+	}
+end
+
+local function add_tree_entry(root, group_id, entry)
+	local path = entry_path(entry)
+	local parts = vim.split(path, "/", { plain = true, trimempty = true })
+	if #parts == 0 then
+		parts = { path }
+	end
+	local node = root
+	local directory_parts = {}
+	node.file_count = node.file_count + 1
+	for index = 1, #parts - 1 do
+		local name = parts[index]
+		directory_parts[#directory_parts + 1] = name
+		local directory_path = table.concat(directory_parts, "/")
+		if not node.directories[name] then
+			node.directories[name] =
+				new_tree_node(name, directory_path, "directory:" .. group_id .. ":" .. directory_path)
 		end
-		lines[#lines + 1] = string.format(
-			"[%s][%s] %s  (%d)",
-			entry.status or "?",
-			layer,
-			location,
-			(counts[entry.old_path] or 0) + (entry.new_path ~= entry.old_path and (counts[entry.new_path] or 0) or 0)
+		node = node.directories[name]
+		node.file_count = node.file_count + 1
+	end
+	node.files[#node.files + 1] = {
+		entry = entry,
+		basename = parts[#parts],
+		path = path,
+		key = "file:" .. entry.identity,
+	}
+end
+
+local function sorted_directories(node)
+	local values = {}
+	for _, directory in pairs(node.directories) do
+		values[#values + 1] = directory
+	end
+	table.sort(values, function(left, right)
+		return left.name < right.name
+	end)
+	return values
+end
+
+local function sorted_files(node)
+	local values = vim.list_slice(node.files)
+	table.sort(values, function(left, right)
+		if left.basename ~= right.basename then
+			return left.basename < right.basename
+		end
+		return left.entry.identity < right.entry.identity
+	end)
+	return values
+end
+
+local function prepend(value, values)
+	local result = { value }
+	vim.list_extend(result, values)
+	return result
+end
+
+local function file_stats(entry)
+	if entry.metadata_only or entry.binary or type(entry.hunks) ~= "table" then
+		return nil
+	end
+	local additions = 0
+	local deletions = 0
+	for _, hunk in ipairs(entry.hunks) do
+		deletions = deletions + (tonumber(hunk[2]) or 0)
+		additions = additions + (tonumber(hunk[4]) or 0)
+	end
+	return additions, deletions
+end
+
+local function file_status(entry)
+	if entry.layer == "untracked" then
+		return "?"
+	end
+	return entry.status or "X"
+end
+
+local function append_rendered(lines, rows, decorations, rendered, row)
+	lines[#lines + 1] = rendered.text
+	rows[#lines] = row
+	decorations[#lines] = rendered.highlights
+end
+
+local function render_file(lines, rows, decorations, state, file, depth, ancestors, counts)
+	local entry = file.entry
+	local rendered = new_rendered_line()
+	local status = file_status(entry)
+	add_segment(rendered, status, STATUS_HIGHLIGHTS[status] or "ReviewPanelStatusUnknown")
+	add_segment(rendered, " " .. string.rep("  ", depth), "ReviewPanelNonText")
+	local icon, icon_highlight = devicon(file.path)
+	add_segment(rendered, icon .. " ", icon_highlight)
+	local selected = state.panes.files.selected_file == entry.identity
+		or state.workspace.entry_identity == entry.identity
+	add_segment(rendered, file.basename, selected and "ReviewPanelFileSelected" or "ReviewPanelFile")
+	local additions, deletions = file_stats(entry)
+	if additions then
+		add_segment(rendered, " +" .. additions, "ReviewPanelInsertions")
+		add_segment(rendered, " -" .. deletions, "ReviewPanelDeletions")
+	end
+	local count = (counts[entry.old_path] or 0)
+		+ (entry.new_path ~= entry.old_path and (counts[entry.new_path] or 0) or 0)
+	add_segment(rendered, " (" .. count .. ")", "ReviewPanelComments")
+	if entry.old_path and entry.new_path and entry.old_path ~= entry.new_path then
+		add_segment(rendered, " ← " .. entry.old_path, "ReviewPanelPath")
+	end
+	append_rendered(lines, rows, decorations, rendered, {
+		kind = "file",
+		key = file.key,
+		value = entry.identity,
+		ancestors = vim.deepcopy(ancestors),
+	})
+end
+
+local function render_directory(lines, rows, decorations, state, node, depth, ancestors, counts, icons_available)
+	local collapsed = state.collapsed[node.key] == true
+	local rendered = new_rendered_line()
+	add_segment(rendered, string.rep("  ", depth), "ReviewPanelNonText")
+	add_segment(rendered, collapsed and "▸ " or "▾ ", "ReviewPanelNonText")
+	add_segment(rendered, (icons_available and (collapsed and "" or "") or "□") .. " ", "ReviewPanelFolderIcon")
+	add_segment(rendered, node.name .. "/", "ReviewPanelFolder")
+	if collapsed then
+		add_segment(rendered, " (" .. node.file_count .. ")", "ReviewPanelNonText")
+	end
+	append_rendered(lines, rows, decorations, rendered, {
+		kind = "directory",
+		key = node.key,
+		ancestors = vim.deepcopy(ancestors),
+	})
+	if collapsed then
+		return
+	end
+	local child_ancestors = prepend(node.key, ancestors)
+	for _, directory in ipairs(sorted_directories(node)) do
+		render_directory(
+			lines,
+			rows,
+			decorations,
+			state,
+			directory,
+			depth + 1,
+			child_ancestors,
+			counts,
+			icons_available
 		)
-		rows[#lines] = entry.identity
+	end
+	for _, file in ipairs(sorted_files(node)) do
+		render_file(lines, rows, decorations, state, file, depth + 1, child_ancestors, counts)
+	end
+end
+
+local function file_lines(state)
+	local lines = { header(state), "Enter open/toggle · 1/2/3 or Tab focus · q hide", "" }
+	local rows = {}
+	local decorations = {}
+	local counts = comment_counts(state.workspace)
+	local groups = {}
+	for _, definition in ipairs(group_definitions(state.workspace)) do
+		groups[definition.id] = {
+			definition = definition,
+			tree = new_tree_node(definition.label, "", "group:" .. definition.id),
+		}
+	end
+	for _, entry in ipairs(state.workspace.model.entries or {}) do
+		local group_id = state.workspace.scope.kind == "working" and entry.layer or "changes"
+		if groups[group_id] then
+			add_tree_entry(groups[group_id].tree, group_id, entry)
+		end
+	end
+	local _, _, has_icons = devicon("fallback")
+	for _, definition in ipairs(group_definitions(state.workspace)) do
+		local group = groups[definition.id]
+		if group.tree.file_count > 0 then
+			local collapsed = state.collapsed[group.tree.key] == true
+			local rendered = new_rendered_line()
+			add_segment(rendered, collapsed and "▸ " or "▾ ", "ReviewPanelNonText")
+			add_segment(rendered, definition.label, "ReviewPanelSection")
+			add_segment(rendered, " (" .. group.tree.file_count .. ")", "ReviewPanelNonText")
+			append_rendered(lines, rows, decorations, rendered, {
+				kind = "group",
+				key = group.tree.key,
+				ancestors = {},
+			})
+			if not collapsed then
+				local ancestors = { group.tree.key }
+				for _, directory in ipairs(sorted_directories(group.tree)) do
+					render_directory(lines, rows, decorations, state, directory, 1, ancestors, counts, has_icons)
+				end
+				for _, file in ipairs(sorted_files(group.tree)) do
+					render_file(lines, rows, decorations, state, file, 1, ancestors, counts)
+				end
+			end
+		end
 	end
 	if #(state.workspace.model.entries or {}) == 0 then
 		lines[#lines + 1] = "No changed files"
 	end
-	return lines, rows
+	return lines, rows, decorations
 end
 
 local function commit_date(commit)
@@ -360,7 +677,7 @@ local function commit_date(commit)
 end
 
 local function commit_lines(state)
-	local lines = { "Space endpoints · Enter apply · c clear", "" }
+	local lines = { "Space endpoints · Enter apply · c clear · b back", "" }
 	local rows = {}
 	for _, commit in ipairs(state.workspace.model.commits or {}) do
 		local marker = " "
@@ -436,6 +753,22 @@ local function set_lines(pane, lines, rows)
 	pane.rows = rows
 end
 
+local function decorate_files(pane, decorations)
+	if not valid_buf(pane.buf) then
+		return
+	end
+	apply_highlights()
+	vim.api.nvim_buf_clear_namespace(pane.buf, FILE_NAMESPACE, 0, -1)
+	for line, highlights in pairs(decorations or {}) do
+		for _, highlight in ipairs(highlights) do
+			vim.api.nvim_buf_set_extmark(pane.buf, FILE_NAMESPACE, line - 1, highlight.first, {
+				end_col = highlight.last,
+				hl_group = highlight.group,
+			})
+		end
+	end
+end
+
 local function restore_pane(pane)
 	if not valid_win(pane.win) or not valid_buf(pane.buf) then
 		return
@@ -443,9 +776,22 @@ local function restore_pane(pane)
 	local line = pane.cursor[1]
 	if pane.selected then
 		for candidate, value in pairs(pane.rows) do
-			if value == pane.selected then
+			if row_key(value) == pane.selected then
 				line = candidate
 				break
+			end
+		end
+		if row_key(pane.rows[line]) ~= pane.selected then
+			for _, ancestor in ipairs(pane.selected_ancestors or {}) do
+				for candidate, value in pairs(pane.rows) do
+					if row_key(value) == ancestor then
+						line = candidate
+						break
+					end
+				end
+				if row_key(pane.rows[line]) == ancestor then
+					break
+				end
 			end
 		end
 	end
@@ -504,8 +850,14 @@ function M.new(workspace, callbacks)
 		resize_autocmd = nil,
 		commit_first = nil,
 		commit_second = nil,
+		collapsed = {},
 		panes = {
-			files = { rows = {}, cursor = { 4, 0 }, view = {} },
+			files = {
+				rows = {},
+				cursor = { 4, 0 },
+				view = {},
+				selected_file = workspace.entry_identity,
+			},
 			commits = { rows = {}, cursor = { 3, 0 }, view = {} },
 			comments = { rows = {}, cursor = { 3, 0 }, view = {} },
 		},
@@ -522,10 +874,11 @@ function M.refresh(state, workspace)
 	end
 	capture_all(state)
 	ensure_windows(state)
-	local files, file_rows = file_lines(state)
+	local files, file_rows, file_decorations = file_lines(state)
 	local commits, commit_rows = commit_lines(state)
 	local comments, comment_rows = comment_lines(state)
 	set_lines(state.panes.files, files, file_rows)
+	decorate_files(state.panes.files, file_decorations)
 	set_lines(state.panes.commits, commits, commit_rows)
 	set_lines(state.panes.comments, comments, comment_rows)
 	decorate_commits(state)
@@ -558,7 +911,6 @@ function M.open(state, focus)
 	local current = vim.api.nvim_get_current_win()
 	resolve_source_win(state, current)
 	state.visible = true
-	ensure_windows(state)
 	M.refresh(state)
 	if not state.resize_autocmd then
 		state.resize_autocmd = vim.api.nvim_create_autocmd("VimResized", {

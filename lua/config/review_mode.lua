@@ -17,6 +17,7 @@ local WINDOW_OPTIONS = {
 	"foldmethod",
 	"scrollbind",
 	"wrap",
+	"winbar",
 	"winhighlight",
 }
 

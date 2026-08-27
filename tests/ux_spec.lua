@@ -138,6 +138,49 @@ package.loaded["nvim-navic"] = original_navic
 statusline.update_root(0)
 assert(vim.b.nvim_config_root == vim.uv.fs_realpath(repo), "statusline did not cache the filesystem project root")
 
+local original_review = package.loaded["config.code_review"]
+local review_status = {
+	active = true,
+	mode_on = false,
+	scope_kind = "range",
+	scope_label = "base..head",
+	layout = "split",
+	context = "full",
+	inline_comments = false,
+	entry = { identity = "entry", path = "lua/example.lua", layer = "history", side = "OLD" },
+}
+package.loaded["config.code_review"] = {
+	status = function()
+		return vim.deepcopy(review_status)
+	end,
+}
+assert(
+	statusline.review()
+		== "REV OFF · range:base..head · history · split/full · comments:off · OLD · lua/example.lua",
+	"review statusline lost the native review state"
+)
+review_status.active = false
+assert(statusline.review() == "", "inactive review statusline stayed visible")
+package.loaded["config.code_review"] = original_review
+
+local original_lualine = package.loaded.lualine
+local lualine_options
+local lualine_refreshes = 0
+package.loaded.lualine = {
+	setup = function(options)
+		lualine_options = options
+	end,
+	refresh = function(options)
+		assert(vim.deep_equal(options, { place = { "statusline" } }))
+		lualine_refreshes = lualine_refreshes + 1
+	end,
+}
+require("plugins.lualine").config()
+assert(lualine_options.sections.lualine_x[1] == statusline.review, "lualine omitted the review component")
+vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigReviewChanged", modeline = false })
+assert(lualine_refreshes == 1, "review state changes did not refresh lualine")
+package.loaded.lualine = original_lualine
+
 vim.o.background = "dark"
 vim.api.nvim_set_hl(0, "Normal", { bg = 0x101010, fg = 0xf0f0f0 })
 vim.api.nvim_set_hl(0, "Visual", { bg = 0x223344 })

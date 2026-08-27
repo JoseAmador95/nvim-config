@@ -334,6 +334,28 @@ test("window snapshots are consumed so later cycles preserve newer ordinary stat
 	assert(state.window_snapshots[win] == nil, "second restored snapshot was retained")
 end)
 
+test("window snapshots restore the exact local winbar across review cycles", function()
+	reset()
+	local win = vim.api.nvim_get_current_win()
+	local first = "%#Title#ordinary %% first%*"
+	vim.wo[win].winbar = first
+	local state = mode.new(workspace())
+	assert(mode.enable(state))
+	vim.wo[win].winbar = " REV ON · inline/hunks "
+	mode.disable(state)
+	assert(vim.wo[win].winbar == first, "first review cycle did not restore winbar")
+
+	local second = "%#Comment#ordinary %% second%*"
+	vim.wo[win].winbar = second
+	assert(mode.enable(state))
+	mode.capture_window(state, win)
+	assert(state.window_snapshots[win], "later review cycle did not capture the window")
+	vim.wo[win].winbar = " REV OFF · split/full "
+	mode.disable(state)
+	assert(vim.wo[win].winbar == second, "later review cycle restored a stale winbar")
+	assert(state.window_snapshots[win] == nil, "restored winbar snapshot was retained")
+end)
+
 test("late affected buffers enroll only while enabled and refuse unsaved changes", function()
 	reset()
 	local state = mode.new({

@@ -29,9 +29,10 @@ Neovim owns a repository/session review controller in `config.code_review`:
   local hunk navigation, and restores every prior buffer mapping and window
   option when disabled.
 - `review_presenter` has independent `inline|split` and `hunks|full` axes. Inline
-  hunk mode uses strong start/end bands; inline full mode shows the complete
-  file without artificial hunk boundaries. Split mode uses Neovim's native diff
-  and synchronized scrolling so insertions and deletions align. Full split mode
+  hunk mode uses zero context, strong start/end bands, and direct cursor jumps
+  across concealed gaps; inline full mode shows the complete file without
+  artificial hunk boundaries. Split mode uses Neovim's native diff and
+  synchronized scrolling so insertions and deletions align. Full split mode
   opens folds; hunk split mode uses native diff folds.
 - The preferred right/new side is a real current buffer only when its exact
   bytes, including line-ending format and final newline, match the frozen model.
@@ -40,9 +41,12 @@ Neovim owns a repository/session review controller in `config.code_review`:
   current file only through an unchanged line mapping and preserves the source
   column; old content never bridges.
 - `review_panel` is one dismissible three-pane float composed only of core
-  Neovim windows. Files selects and focuses the current/new source; Commits
-  selects one commit or two endpoints from one linear, single-parent span;
-  merge commits are reviewed individually. Comments lists every file, range,
+  Neovim windows. Files is a colored, collapsible tree with change groups,
+  status, line totals, rename origins, and comment counts. Commits selects one
+  commit or two endpoints from one linear, single-parent span; nested commit
+  scopes keep an in-memory stack of exact parent workspaces and UI snapshots,
+  so returning never resolves refs or rebuilds the frozen model. Merge commits
+  are reviewed individually. Comments lists every file, range,
   and general comment and exposes jump/edit/delete/type/reply/resolve and
   reanchor operations. It never creates a tab and is suspended during normal
   session serialization.
@@ -50,7 +54,9 @@ Neovim owns a repository/session review controller in `config.code_review`:
   Resolution and delivery are independent. Version-1 state migrates under the
   existing owner lock with a backup and rollback. Multiline comments render a
   rail beside line numbers; overlapping comments collapse into a visible count
-  while remaining separate items in the panel.
+  while remaining separate items in the panel. CursorHold previews use a
+  separate transient namespace, and the anchored borderless composer reserves
+  virtual rows without changing source text or the persisted schema.
 - `ReviewExport` renders all comments every time and copies complete Markdown or
   uses a temporary float. It does not mark comments delivered. Normal export
   refuses working-tree drift, session drift, and stale anchors;
@@ -60,9 +66,11 @@ Neovim owns a repository/session review controller in `config.code_review`:
   `ReviewPublish[!]` is a separate explicit TUICR operation and sends only open,
   undelivered items through `tuicr-round`, persisting each receipt.
 - The public key namespace is lower-case `<leader>r`. The main entries are `rr`
-  panel, `ro` open, `rm` mode, `rs` scope, `rf/rh/rl` panes, `rv` layout, `rw`
-  context, `rg` code, `ra/rA` add, `re` edit, `rc` type, `rd` delete, `rp` reply,
-  `rt` resolve, `rE` export, `ru` refresh, and `rq` close. `[r` and `]r` navigate.
+  panel, `ro` open, `rm` mode, `rs` scope, `rb` parent scope, `rf/rh/rl` panes,
+  `rv` layout, `rw` context, `ri` inline previews, `rg` code, `ra/rA` add, `re`
+  edit, `rc` type, `rd` delete, `rp` reply, `rt` resolve, `rE` export, `ru`
+  refresh, and `rq` close. `[r` and `]r` navigate. A review status component and
+  review-local winbar expose the active frozen scope and presentation state.
 
 Raw Diffview is intentionally independent. Its plugin specification contains no
 review imports, hooks, guarded actions, custom help groups, or tab-close

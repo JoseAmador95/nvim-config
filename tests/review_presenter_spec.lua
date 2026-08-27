@@ -88,6 +88,22 @@ local fold_disk_lines = {
 	"fourteen",
 }
 assert(vim.fn.writefile(fold_disk_lines, fold_path) == 0)
+local cursor_path = fixture .. "/cursor.lua"
+local cursor_disk_lines = {
+	"line 01",
+	"line 02",
+	"line 03 new",
+	"line 04",
+	"line 05",
+	"line 06",
+	"line 07",
+	"line 08",
+	"line 09 new",
+	"line 10",
+	"line 11",
+	"line 12",
+}
+assert(vim.fn.writefile(cursor_disk_lines, cursor_path) == 0)
 
 local function entry(new_text)
 	local old_text = "one\nold\nthree\n"
@@ -139,6 +155,34 @@ local function fold_entry()
 	}
 end
 
+local function cursor_entry()
+	local old_lines = vim.deepcopy(cursor_disk_lines)
+	old_lines[3] = "line 03 old"
+	old_lines[9] = "line 09 old"
+	local old_text = table.concat(old_lines, "\n") .. "\n"
+	local new_text = table.concat(cursor_disk_lines, "\n") .. "\n"
+	return {
+		identity = "history\0cursor.lua\0cursor.lua",
+		status = "M",
+		layer = "history",
+		old_path = "cursor.lua",
+		new_path = "cursor.lua",
+		path = "cursor.lua",
+		old_text = old_text,
+		new_text = new_text,
+		old_oid = string.rep("5", 40),
+		new_oid = string.rep("6", 40),
+		old_mode = "100644",
+		new_mode = "100644",
+		hunks = vim.diff(old_text, new_text, { result_type = "indices" }),
+		binary = false,
+		submodule = false,
+		metadata_only = false,
+		added = false,
+		deleted = false,
+	}
+end
+
 local function setup_state(configure_window, selected_path, relative_path)
 	vim.cmd("silent! only")
 	vim.cmd("edit! " .. vim.fn.fnameescape(selected_path or path))
@@ -168,6 +212,23 @@ local function setup_fold_state()
 			vim.cmd("normal! ggzo")
 		end)
 	end, fold_path, "folds.lua")
+end
+
+local function setup_cursor_state()
+	local state, buf = setup_state(function(win)
+		vim.wo[win].winbar = "%#Title#ordinary %% cursor%*"
+	end, cursor_path, "cursor.lua")
+	state.workspace.scope = { kind = "branch", label = "topic%ready" }
+	state.workspace.mode_on = true
+	state.workspace.inline_comments = false
+	return state, buf, cursor_entry()
+end
+
+local function move_and_fire(win, buf, line)
+	vim.api.nvim_set_current_win(win)
+	vim.api.nvim_win_set_cursor(win, { line, 0 })
+	vim.api.nvim_exec_autocmds("CursorMoved", { buffer = buf, modeline = false })
+	return vim.api.nvim_win_get_cursor(win)[1]
 end
 
 local function setup_nested_fold_state()
@@ -213,6 +274,129 @@ local function decoration_details(state)
 	end
 	return values
 end
+
+test("inline hunks use zero context and keep the exact review window out of concealed gaps", function()
+	local state, buf, selected = setup_cursor_state()
+	local review_win = state.origin.win
+	local ordinary_win
+	local previous_diffopt = vim.o.diffopt
+	local ok, err = xpcall(function()
+		vim.api.nvim_set_current_win(review_win)
+		vim.cmd("rightbelow vsplit")
+		ordinary_win = vim.api.nvim_get_current_win()
+		assert(vim.api.nvim_win_get_buf(ordinary_win) == buf)
+		vim.wo[ordinary_win].winbar = "ordinary sibling"
+		vim.api.nvim_set_current_win(review_win)
+
+		vim.o.diffopt = "internal,filler,closeoff,context:7"
+		assert(presenter.show(state, selected))
+		assert(vim.o.diffopt == "internal,filler,closeoff,context:7", "inline hunks mutated diffopt")
+		local guard = assert(state.presentation.cursor_guard, "inline hunks did not install a cursor guard")
+		assert(guard.win == review_win and guard.buf == buf and type(guard.generation) == "number")
+		assert(vim.deep_equal(guard.sections, { { first = 3, last = 3 }, { first = 9, last = 9 } }))
+		assert(vim.api.nvim_win_get_cursor(review_win)[1] == 3, "leading context was not clamped")
+		assert(vim.wo[review_win].concealcursor == "nvic")
+		local winbar = vim.wo[review_win].winbar
+		for _, fragment in ipairs({
+			"REV ON",
+			"branch:topic%%ready",
+			"history",
+			"inline/hunks",
+			"comments:off",
+			"CURRENT",
+			"cursor.lua",
+		}) do
+			assert(winbar:find(fragment, 1, true), "review winbar lacks " .. fragment .. ": " .. winbar)
+		end
+		state.workspace.inline_comments = true
+		assert(presenter.refresh_winbars(state), "active review winbar did not refresh")
+		assert(vim.wo[review_win].winbar:find("comments:on", 1, true))
+		assert(vim.wo[ordinary_win].winbar == "ordinary sibling", "winbar refresh touched an ordinary window")
+		state.workspace.inline_comments = false
+		assert(presenter.refresh_winbars(state))
+
+		assert(move_and_fire(review_win, buf, 4) == 9, "forward hunk exit did not jump forward")
+		assert(move_and_fire(review_win, buf, 8) == 3, "backward hunk exit did not jump backward")
+		assert(move_and_fire(review_win, buf, 6) == 9, "equidistant direct jump did not prefer forward")
+		assert(move_and_fire(review_win, buf, 5) == 3, "direct gap jump did not choose the nearest boundary")
+		assert(move_and_fire(review_win, buf, 1) == 3, "leading gap did not clamp to the first hunk")
+		assert(move_and_fire(review_win, buf, 12) == 9, "trailing gap did not clamp to the last hunk")
+
+		assert(move_and_fire(review_win, buf, 3) == 3)
+		assert(presenter.prev_hunk(state) and vim.api.nvim_win_get_cursor(review_win)[1] == 9, "[h lost wrapping")
+		assert(presenter.next_hunk(state) and vim.api.nvim_win_get_cursor(review_win)[1] == 3, "]h lost wrapping")
+
+		assert(move_and_fire(ordinary_win, buf, 6) == 6, "guard trapped an ordinary window of the same buffer")
+		assert(vim.wo[ordinary_win].winbar == "ordinary sibling", "review changed an ordinary window winbar")
+
+		local old_generation = guard.generation
+		assert(presenter.toggle_context(state))
+		assert(not guard.active and state.presentation.cursor_guard == nil, "full context retained the old guard")
+		assert(state.presentation.context == "full" and vim.o.diffopt == "internal,filler,closeoff,context:7")
+		for _, details in ipairs(decoration_details(state)) do
+			assert(details.conceal_lines == nil, "full context retained a concealed range")
+			for _, virtual in ipairs(details.virt_lines or {}) do
+				assert(not (virtual[1] and virtual[1][1] or ""):find("HUNK", 1, true))
+			end
+		end
+		assert(move_and_fire(review_win, buf, 6) == 6, "full context still trapped the cursor")
+
+		assert(presenter.toggle_context(state))
+		local replacement = assert(state.presentation.cursor_guard, "hunk context did not recreate the guard")
+		assert(replacement.generation ~= old_generation, "presentation generation was reused")
+		presenter.clear(state)
+		assert(not presenter.refresh_winbars(state), "winbar refresh claimed an absent presentation")
+		assert(not replacement.active and state.presentation == nil, "clear retained the cursor guard")
+		assert(vim.wo[review_win].winbar == "%#Title#ordinary %% cursor%*", "clear did not restore winbar")
+		assert(move_and_fire(review_win, buf, 6) == 6, "cleared presentation still trapped the cursor")
+	end, debug.traceback)
+	vim.o.diffopt = previous_diffopt
+	pcall(presenter.clear, state)
+	pcall(mode.disable, state)
+	if ordinary_win and vim.api.nvim_win_is_valid(ordinary_win) then
+		vim.api.nvim_win_close(ordinary_win, true)
+	end
+	assert(ok, err)
+end)
+
+test("inline hunks without hunks install neither concealment nor cursor guard", function()
+	local state, buf, selected = setup_cursor_state()
+	selected.old_text = selected.new_text
+	selected.hunks = {}
+	assert(presenter.show(state, selected))
+	assert(state.presentation.cursor_guard == nil)
+	for _, details in ipairs(decoration_details(state)) do
+		assert(details.conceal_lines == nil and details.virt_lines == nil, "empty diff added hunk presentation")
+	end
+	assert(move_and_fire(state.origin.win, buf, 6) == 6, "empty diff trapped the cursor")
+	presenter.clear(state)
+	mode.disable(state)
+end)
+
+test("split winbars identify both sides and restore the ordinary origin winbar", function()
+	local original = "%#Comment#ordinary %% split%*"
+	local state = setup_state(function(win)
+		vim.wo[win].winbar = original
+	end)
+	state.workspace.scope = { kind = "commit", label = "HEAD%exact" }
+	state.workspace.mode_on = false
+	state.workspace.inline_comments = true
+	local selected = entry()
+	selected.layer = "staged"
+	assert(presenter.show(state, selected, { layout = "split", context = "full" }))
+	local left = vim.wo[state.presentation.left.win].winbar
+	local right = vim.wo[state.presentation.right.win].winbar
+	for _, value in ipairs({ left, right }) do
+		for _, fragment in ipairs({ "REV OFF", "commit:HEAD%%exact", "staged", "split/full", "comments:on" }) do
+			assert(value:find(fragment, 1, true), "split winbar lacks " .. fragment .. ": " .. value)
+		end
+	end
+	assert(left:find("OLD", 1, true) and left:find("sample.lua", 1, true))
+	assert(right:find("CURRENT", 1, true) and right:find("sample.lua", 1, true))
+	presenter.clear(state)
+	assert(vim.wo[state.origin.win].winbar == original, "origin winbar was not restored")
+	mode.disable(state)
+end)
 
 test("inline reuses only the exact real current buffer and renders deleted virtual lines", function()
 	local state, real = setup_state()

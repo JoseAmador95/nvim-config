@@ -428,6 +428,7 @@ function M.definitions(dispatch)
 			palette_item("command.review_open", "Open Default Code Review", "<leader>ro"),
 			palette_item("command.review_mode", "Toggle Read-only Review Mode", "<leader>rm"),
 			palette_item("command.review_scope", "Choose Review Scope or Session", "<leader>rs"),
+			palette_item("command.review_scope_back", "Return to Parent Review Scope", "<leader>rb"),
 			palette_item("command.review_sessions", "Open Saved Review Session"),
 			palette_item("command.review_files", "Focus Review Files", "<leader>rf"),
 			palette_item("command.review_commits", "Focus Review Commits", "<leader>rh"),
@@ -446,6 +447,7 @@ function M.definitions(dispatch)
 				nil,
 				{ "context", "hunks", "full", "whole file", "folds" }
 			),
+			palette_item("command.review_inline_comments", "Toggle Inline Comment Previews", "<leader>ri"),
 			palette_item("command.review_comments", "Focus Review Comments", "<leader>rl"),
 			palette_item("command.review_comment", "Add Review Comment", "<leader>ra"),
 			palette_item("command.review_file_comment", "Add File-level Review Comment", "<leader>rA"),

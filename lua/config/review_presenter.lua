@@ -6,6 +6,8 @@ local review_mode = require("config.review_mode")
 local repo = require("config.repo")
 
 local BAND_HIGHLIGHT = "NvimReviewHunkBand"
+local INLINE_HUNK_CONTEXT = 0
+local presentation_generation = 0
 
 local function valid_buf(buf)
 	return type(buf) == "number" and vim.api.nvim_buf_is_valid(buf)
@@ -167,24 +169,14 @@ local function side_buffer(state, entry, side)
 	return scratch(entry, side, state), false
 end
 
-local function diff_context()
-	for option in vim.o.diffopt:gmatch("[^,]+") do
-		local value = option:match("^context:(%d+)$")
-		if value then
-			return tonumber(value)
-		end
-	end
-	return 6
-end
-
-local function sections(entry, side, line_count)
-	local context = diff_context()
+local function sections(entry, side, line_count, context)
+	context = math.max(0, context or INLINE_HUNK_CONTEXT)
 	local values = {}
 	for _, hunk in ipairs(entry.hunks or {}) do
 		local start = side == "old" and hunk[1] or hunk[3]
 		local count = side == "old" and hunk[2] or hunk[4]
-		local first = count == 0 and math.max(1, start) or math.max(1, start)
-		local last = count == 0 and first or start + count - 1
+		local first = math.min(line_count, math.max(1, start))
+		local last = count == 0 and first or math.min(line_count, math.max(first, start + count - 1))
 		values[#values + 1] = {
 			first = math.max(1, first - context),
 			last = math.min(line_count, math.max(first, last) + context),
@@ -207,9 +199,11 @@ end
 
 local function hide_context(buf, win, namespace, visible)
 	local line_count = vim.api.nvim_buf_line_count(buf)
+	local omitted = {}
 	local first = 1
 	for _, section in ipairs(visible) do
 		if first < section.first then
+			omitted[#omitted + 1] = { first = first, last = section.first - 1 }
 			vim.api.nvim_buf_set_extmark(buf, namespace, first - 1, 0, {
 				conceal_lines = "",
 				end_row = section.first - 2,
@@ -219,6 +213,7 @@ local function hide_context(buf, win, namespace, visible)
 		first = section.last + 1
 	end
 	if first <= line_count then
+		omitted[#omitted + 1] = { first = first, last = line_count }
 		vim.api.nvim_buf_set_extmark(buf, namespace, first - 1, 0, {
 			conceal_lines = "",
 			end_row = line_count - 1,
@@ -228,6 +223,178 @@ local function hide_context(buf, win, namespace, visible)
 	if type(vim.api.nvim_win_add_ns) == "function" then
 		vim.api.nvim_win_add_ns(win, namespace)
 	end
+	return omitted
+end
+
+local function nearest_boundary(line, before, after)
+	if not before then
+		return after and after.first or nil
+	elseif not after then
+		return before.last
+	end
+	local backward = line - before.last
+	local forward = after.first - line
+	return forward <= backward and after.first or before.last
+end
+
+local function gap_boundaries(sections_value, line)
+	local before
+	for _, section in ipairs(sections_value) do
+		if line < section.first then
+			return before, section
+		elseif line <= section.last then
+			return nil
+		end
+		before = section
+	end
+	return before, nil
+end
+
+local function correct_concealed_cursor(guard)
+	if
+		not guard.active
+		or guard.adjusting
+		or not valid_win(guard.win)
+		or not valid_buf(guard.buf)
+		or vim.api.nvim_win_get_buf(guard.win) ~= guard.buf
+	then
+		return
+	end
+	local line = vim.api.nvim_win_get_cursor(guard.win)[1]
+	local before, after = gap_boundaries(guard.sections, line)
+	if before == nil and after == nil then
+		guard.last_line = line
+		return
+	end
+	local previous = guard.last_line
+	local target
+	if previous and math.abs(line - previous) == 1 then
+		if line > previous then
+			target = after and after.first or before and before.last
+		else
+			target = before and before.last or after and after.first
+		end
+	end
+	target = target or nearest_boundary(line, before, after)
+	if not target or target == line then
+		guard.last_line = line
+		return
+	end
+	guard.adjusting = true
+	local moved = pcall(vim.api.nvim_win_set_cursor, guard.win, { target, 0 })
+	guard.adjusting = false
+	if moved then
+		guard.last_line = target
+	end
+end
+
+local function clear_cursor_guard(presentation)
+	local guard = presentation and presentation.cursor_guard
+	if not guard then
+		return
+	end
+	presentation.cursor_guard = nil
+	guard.active = false
+	for _, id in ipairs(guard.autocmds or {}) do
+		pcall(vim.api.nvim_del_autocmd, id)
+	end
+end
+
+local function install_cursor_guard(state, presentation, buf, win, visible, omitted)
+	if #visible == 0 or #omitted == 0 then
+		return
+	end
+	local guard = {
+		active = true,
+		autocmds = {},
+		buf = buf,
+		generation = presentation.generation,
+		sections = vim.deepcopy(visible),
+		win = win,
+	}
+	presentation.cursor_guard = guard
+	guard.autocmds[#guard.autocmds + 1] = vim.api.nvim_create_autocmd("CursorMoved", {
+		buffer = buf,
+		desc = "Keep the native review cursor inside visible hunks",
+		callback = function(event)
+			if
+				event.buf ~= guard.buf
+				or vim.api.nvim_get_current_win() ~= guard.win
+				or state.presentation ~= presentation
+				or presentation.cursor_guard ~= guard
+				or guard.generation ~= presentation.generation
+			then
+				return
+			end
+			correct_concealed_cursor(guard)
+		end,
+	})
+	guard.autocmds[#guard.autocmds + 1] = vim.api.nvim_create_autocmd("WinClosed", {
+		pattern = tostring(win),
+		desc = "Release native review cursor ownership",
+		callback = function()
+			clear_cursor_guard(presentation)
+		end,
+	})
+	guard.last_line = vim.api.nvim_win_get_cursor(win)[1]
+	correct_concealed_cursor(guard)
+end
+
+local function statusline_escape(value)
+	return tostring(value):gsub("%%", "%%%%")
+end
+
+local function review_winbar(state, entry, side, layout, context)
+	local workspace = state.workspace or {}
+	local scope = workspace.scope or {}
+	local mode_on = workspace.mode_on
+	if type(mode_on) ~= "boolean" then
+		mode_on = state.enabled == true
+	end
+	local scope_kind = scope.kind or "review"
+	local scope_label = scope.label or scope.id or "unknown"
+	local layer = entry.layer or "history"
+	local path = side == "old" and entry.old_path or entry.new_path
+	local comments = workspace.inline_comments
+	if type(comments) ~= "boolean" then
+		comments = workspace.inline_comments_visible
+	end
+	local values = {
+		"REV " .. (mode_on and "ON" or "OFF"),
+		scope_kind .. ":" .. scope_label,
+		layer,
+		layout .. "/" .. context,
+	}
+	if type(comments) == "boolean" then
+		values[#values + 1] = "comments:" .. (comments and "on" or "off")
+	end
+	values[#values + 1] = side == "old" and "OLD" or "CURRENT"
+	values[#values + 1] = path or entry.path or "<none>"
+	return " " .. table.concat(vim.tbl_map(statusline_escape, values), " · ") .. " "
+end
+
+local function set_review_winbar(state, presentation, side)
+	if valid_win(side.win) and vim.api.nvim_win_get_buf(side.win) == side.buf then
+		vim.wo[side.win].winbar =
+			review_winbar(state, presentation.entry, side.side, presentation.layout, presentation.context)
+	end
+end
+
+---Refresh winbars owned by the current review presentation only.
+---@param state table
+---@return boolean
+function M.refresh_winbars(state)
+	local presentation = state and state.presentation
+	if not presentation then
+		return false
+	end
+	for _, name in ipairs({ "inline", "left", "right" }) do
+		local side = presentation[name]
+		if side then
+			set_review_winbar(state, presentation, side)
+		end
+	end
+	return true
 end
 
 local function highlight_lines(buf, namespace, first, count, group)
@@ -279,10 +446,13 @@ local function decorate(state, entry, buf, win, side, context, inline)
 		render_deleted_inline(buf, namespace, entry)
 	end
 	if context == "hunks" and inline then
+		local visible = sections(entry, side, vim.api.nvim_buf_line_count(buf), INLINE_HUNK_CONTEXT)
+		if #visible == 0 then
+			return
+		end
 		vim.wo[win].conceallevel = math.max(2, vim.wo[win].conceallevel)
-		vim.wo[win].concealcursor = ""
-		local visible = sections(entry, side, vim.api.nvim_buf_line_count(buf))
-		hide_context(buf, win, namespace, visible)
+		vim.wo[win].concealcursor = "nvic"
+		local omitted = hide_context(buf, win, namespace, visible)
 		for index, section in ipairs(visible) do
 			vim.api.nvim_buf_set_extmark(buf, namespace, section.first - 1, 0, {
 				virt_lines = { { { (" HUNK %d/%d "):format(index, #visible), BAND_HIGHLIGHT } } },
@@ -292,6 +462,7 @@ local function decorate(state, entry, buf, win, side, context, inline)
 				virt_lines = { { { (" END HUNK %d/%d "):format(index, #visible), BAND_HIGHLIGHT } } },
 			})
 		end
+		install_cursor_guard(state, state.presentation, buf, win, visible, omitted)
 	end
 end
 
@@ -389,8 +560,10 @@ function M.show(state, entry, options)
 	vim.api.nvim_set_current_win(state.origin.win)
 	review_mode.capture_window(state, state.origin.win)
 	vim.api.nvim_set_hl(0, BAND_HIGHLIGHT, { default = true, link = "Comment" })
+	presentation_generation = presentation_generation + 1
 	local presentation = {
 		entry = entry,
+		generation = presentation_generation,
 		layout = layout,
 		context = context,
 		decorations = {},
@@ -409,6 +582,7 @@ function M.show(state, entry, options)
 		put_buffer(state.origin.win, buf)
 		vim.wo[state.origin.win].foldenable = false
 		decorate(state, entry, buf, state.origin.win, side, context, true)
+		set_review_winbar(state, presentation, presentation.inline)
 		presentation.target = { entry = entry, side = side, win = state.origin.win, buf = buf, path = entry.path }
 	else
 		local left_buf = side_buffer(state, entry, "old")
@@ -422,6 +596,8 @@ function M.show(state, entry, options)
 			presentation.right = { win = right_win, buf = right_buf, side = "new", real = real }
 			remember_owned(presentation, right_buf)
 			decorate(state, entry, right_buf, right_win, "new", context, false)
+			set_review_winbar(state, presentation, presentation.left)
+			set_review_winbar(state, presentation, presentation.right)
 			local scrollopt = vim.o.scrollopt
 			enable_native_diff(state.origin.win, right_win, context)
 			presentation.scrollopt_added = added_options(scrollopt, vim.o.scrollopt)
@@ -429,6 +605,7 @@ function M.show(state, entry, options)
 			presentation.target =
 				{ entry = entry, side = "new", win = right_win, buf = right_buf, path = entry.new_path }
 		else
+			set_review_winbar(state, presentation, presentation.left)
 			presentation.target =
 				{ entry = entry, side = "old", win = state.origin.win, buf = left_buf, path = entry.old_path }
 		end
@@ -475,6 +652,7 @@ function M.clear(state)
 	if not presentation then
 		return
 	end
+	clear_cursor_guard(presentation)
 	state.presentation = nil
 	state.clear_presentation = nil
 	for _, item in ipairs(presentation.decorations) do

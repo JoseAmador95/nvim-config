@@ -67,6 +67,24 @@ function M.devpod()
 	return ""
 end
 
+function M.review()
+	local ok, review = pcall(require, "config.code_review")
+	local status = ok and review.status() or nil
+	if not status or not status.active then
+		return ""
+	end
+	local entry = status.entry or {}
+	return table.concat({
+		"REV " .. (status.mode_on and "ON" or "OFF"),
+		tostring(status.scope_kind or "review") .. ":" .. tostring(status.scope_label or "unknown"),
+		tostring(entry.layer or "history"),
+		tostring(status.layout or "inline") .. "/" .. tostring(status.context or "hunks"),
+		"comments:" .. (status.inline_comments and "on" or "off"),
+		tostring(entry.side or "CURRENT"),
+		tostring(entry.path or "<none>"),
+	}, " · ")
+end
+
 function M.setup_refresh()
 	local group = vim.api.nvim_create_augroup("NvimConfigStatusline", { clear = true })
 	vim.api.nvim_create_autocmd({ "BufEnter", "DirChanged" }, {
@@ -77,7 +95,12 @@ function M.setup_refresh()
 	})
 	vim.api.nvim_create_autocmd("User", {
 		group = group,
-		pattern = { "NvimConfigPythonChanged", "NvimConfigCMakeChanged", "NvimConfigDevPodChanged" },
+		pattern = {
+			"NvimConfigPythonChanged",
+			"NvimConfigCMakeChanged",
+			"NvimConfigDevPodChanged",
+			"NvimConfigReviewChanged",
+		},
 		callback = function()
 			local ok, lualine = pcall(require, "lualine")
 			if ok then
