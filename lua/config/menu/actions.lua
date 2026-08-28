@@ -175,6 +175,7 @@ local commands = {
 	review_export = { "ReviewExport" },
 	review_edit = { "ReviewEdit" },
 	review_file_comment = { "ReviewFileComment" },
+	review_general_comment = { "ReviewGeneralComment" },
 	review_files = { "ReviewFiles" },
 	review_inline_comments = { "ReviewInlineComments" },
 	review_link_tuicr = { "ReviewLinkTuicr" },

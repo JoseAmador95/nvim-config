@@ -473,7 +473,8 @@ end)
 
 test("near-limit v2 sessions produce complete owner-only verified recovery", function()
 	local session = fresh()
-	local context = string.rep("\n", store.max_anchor_context)
+	local context_marker = "PRIVATE_SOURCE_CONTEXT"
+	local context = context_marker .. string.rep("\n", store.max_anchor_context - #context_marker)
 	local item_count = 30
 	for index = 1, item_count do
 		session = assert(store.add(session, {
@@ -499,7 +500,11 @@ test("near-limit v2 sessions produce complete owner-only verified recovery", fun
 	local markdown, ids = assert(exporter.render_recovery(saved))
 	local _, heading_count = markdown:gsub("## ISSUE", "")
 	assert(#ids == item_count and heading_count == item_count, "recovery omitted review items")
-	assert(#markdown > 2 * store.max_bytes, "fixture does not exercise JSON-to-Markdown expansion")
+	for index = 1, item_count do
+		assert(markdown:find(("near-limit item %02d"):format(index), 1, true), "recovery omitted an item body")
+	end
+	assert(not markdown:find(context_marker, 1, true), "recovery leaked private anchor context")
+	assert(not markdown:find("Context (`", 1, true), "recovery retained the source-context section")
 	assert(#markdown <= store.max_recovery_bytes, "valid recovery exceeded its derived bound")
 
 	local receipt = assert(store.save_recovery(root, saved, markdown, deps))

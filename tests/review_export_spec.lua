@@ -60,14 +60,33 @@ local function session()
 	}
 end
 
-test("Markdown includes exact scope, context, type, status, and replies", function()
+test("Markdown includes exact scope, compact anchors, status, and replies", function()
 	local markdown, ids = assert(exporter.render(session()))
 	assert(markdown:find("Commit: `" .. oid .. "`", 1, true))
-	assert(markdown:find("## RATIONALE — lua/config/example.lua:8", 1, true))
-	assert(markdown:find("rationale, draft, right, historical", 1, true))
-	assert(markdown:find("Context (`", 1, true))
-	assert(markdown:find("### Reply: RATIONALE", 1, true))
+	assert(markdown:find("## RATIONALE — lua/config/example.lua:8 [NEW]", 1, true))
+	assert(not markdown:find("lua/config/example.lua:8-8", 1, true))
+	assert(markdown:find("_draft_", 1, true))
+	assert(not markdown:find("Context (`", 1, true))
+	assert(not markdown:find("local values = tuple(enum)", 1, true))
+	assert(not markdown:find(session().items[1].anchor.context_hash, 1, true))
+	assert(not markdown:find("right, historical", 1, true))
+	assert(markdown:find("### Reply: RATIONALE — lua/config/example.lua:8 [NEW]", 1, true))
 	assert(vim.deep_equal(ids, { "root", "reply" }))
+end)
+
+test("Markdown renders old multiline anchors without source context", function()
+	local value = session()
+	value.items[1].anchor.path = "lua/config/old.lua"
+	value.items[1].anchor.side = "left"
+	value.items[1].anchor.start_line = 3
+	value.items[1].anchor.end_line = 5
+	value.items[1].anchor.context = "private old source"
+	value.items[1].anchor.context_hash = vim.fn.sha256(value.items[1].anchor.context)
+	value.items[2] = nil
+	local markdown = assert(exporter.render(value))
+	assert(markdown:find("## RATIONALE — lua/config/old.lua:3-5 [OLD]", 1, true))
+	assert(not markdown:find("private old source", 1, true))
+	assert(not markdown:find(value.items[1].anchor.context_hash, 1, true))
 end)
 
 test("Markdown renders file-level comments without inventing a line", function()
@@ -90,9 +109,28 @@ test("Markdown renders file-level comments without inventing a line", function()
 		},
 	}
 	local markdown, ids = assert(exporter.render(value))
-	assert(markdown:find("## SUGGESTION — lua/config/example.lua", 1, true))
+	assert(markdown:find("## SUGGESTION — lua/config/example.lua [NEW]", 1, true))
 	assert(not markdown:find("lua/config/example.lua:1", 1, true))
 	assert(vim.deep_equal(ids, { "file" }))
+end)
+
+test("Markdown renders review-level comments without a file or side", function()
+	local value = session()
+	value.items = {
+		{
+			id = "review",
+			type = "praise",
+			resolution = "open",
+			deliveries = {},
+			body = "The review is easy to follow.",
+			reply_to = vim.NIL,
+			anchor = { kind = "general", stale = false },
+		},
+	}
+	local markdown, ids = assert(exporter.render(value))
+	assert(markdown:find("## PRAISE — REVIEW", 1, true))
+	assert(not markdown:find("## PRAISE — REVIEW [", 1, true))
+	assert(vim.deep_equal(ids, { "review" }))
 end)
 
 test("recovery records an intentionally empty live review without changing normal export", function()

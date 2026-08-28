@@ -11,9 +11,9 @@ but a dedicated Diffview tab interrupts the normal editing workspace and makes
 review state, current source, and historical content difficult to distinguish.
 
 The reviewer must support working trees, commits, contiguous commit spans, and
-whole branches; file/range/general comments; repeatable export; optional TUICR
-publication; inline and side-by-side views; and both hunk-only and complete-file
-context without taking ownership of a tab.
+whole branches; file/range/review-level comments; repeatable export; optional
+TUICR publication; inline and side-by-side views; and both hunk-only and
+complete-file context without taking ownership of a tab.
 
 ## Decision
 
@@ -28,18 +28,32 @@ Neovim owns a repository/session review controller in `config.code_review`:
   affected buffers, makes enrolled current buffers read-only, installs only its
   local hunk navigation, and restores every prior buffer mapping and window
   option when disabled.
-- `review_presenter` has independent `inline|split` and `hunks|full` axes. Inline
-  hunk mode uses zero context, strong start/end bands, and direct cursor jumps
-  across concealed gaps; inline full mode shows the complete file without
-  artificial hunk boundaries. Split mode uses Neovim's native diff and
-  synchronized scrolling so insertions and deletions align. Full split mode
-  opens folds; hunk split mode uses native diff folds.
-- The preferred right/new side is a real current buffer only when its exact
-  bytes, including line-ending format and final newline, match the frozen model.
-  Otherwise it is an isolated read-only snapshot. Historical old, snapshot, and
-  panel buffers cannot attach LSP. A historical-new `gd` may bridge to the real
-  current file only through an unchanged line mapping and preserves the source
-  column; old content never bridges.
+- `review_presenter` has independent `inline|split` and `hunks|full` axes. Both
+  hunk views use the validated review-local context, full-width gray start/end
+  bands, optional Tree-sitter function/class labels, and direct cursor jumps
+  across concealed gaps without changing global `diffopt`. Full mode shows the
+  complete file without artificial hunk boundaries. Inline mode uses one
+  protected, immutable unified projection in the ordinary review window. Shared
+  context is one real row; each replacement emits real OLD rows followed by real
+  NEW/CURRENT rows. Every row is cursor-addressable and maps deterministically to
+  its canonical source path and line, including rename, line-ending, and final
+  newline metadata. A two-column `OLD │ NEW` source-line gutter retains native
+  fold and comment signs. Only changed OLD/NEW rows receive diff highlights.
+  Split mode retains Neovim's native alignment and synchronized scrolling, gives
+  both versions real, focusable rows, hides context through window-scoped
+  decorations, renders old/new changes with theme-derived red/green groups, and
+  gives blank native filler the normal background. It retains one structural
+  context line when the configured context is zero. For a size-changing hunk at
+  BOF or EOF, only a boundary band without a shared real-row anchor is omitted.
+- The unified projection is a protected `nofile` buffer marked before `FileType`
+  and cannot attach LSP. Read-only navigation, hover, and diagnostics may bridge
+  conservatively only from display rows with a safe NEW/CURRENT mapping to the
+  real current source. OLD, changed, or otherwise unmappable rows do not bridge,
+  and mutation-oriented LSP operations remain unavailable. In split mode,
+  CURRENT is a real current buffer only when its exact bytes, including
+  line-ending format and final newline, match the frozen model; otherwise it is
+  an isolated read-only snapshot. Historical OLD, snapshot, unified, and panel
+  buffers remain LSP-blocked.
 - `review_panel` is one dismissible three-pane float composed only of core
   Neovim windows. Files is a colored, collapsible tree with change groups,
   status, line totals, rename origins, and comment counts. Commits selects one
@@ -48,20 +62,36 @@ Neovim owns a repository/session review controller in `config.code_review`:
   changing manually marked endpoints. Nested commit scopes keep an in-memory
   stack of exact parent workspaces and UI snapshots,
   so returning never resolves refs or rebuilds the frozen model. Merge commits
-  are reviewed individually. Comments lists every file, range,
-  and general comment and exposes jump/edit/delete/type/reply/resolve and
-  reanchor operations. It never creates a tab and is suspended during normal
-  session serialization.
-- Store version 2 represents `general`, `file`, and `range` anchors explicitly.
-  Resolution and delivery are independent. Version-1 state migrates under the
-  existing owner lock with a backup and rollback. Multiline comments render a
-  rail beside line numbers; overlapping comments collapse into a visible count
-  while remaining separate items in the panel. CursorHold previews use a
-  separate transient namespace, and the anchored borderless composer reserves
-  virtual rows without changing source text or the persisted schema.
+  are reviewed individually. Comments lists every file, range, and review-level
+  comment and exposes jump/edit/confirmed-delete/type/reply/resolve operations;
+  `a` adds a review-level comment. Reanchoring remains an explicit
+  command/palette action outside that float. The panel never creates a tab and
+  is suspended during normal session serialization.
+- Store version 2 represents internal `general`, `file`, and `range` anchors
+  explicitly. Resolution and delivery are independent. Version-1 state migrates
+  under the existing owner lock with a backup and rollback. Range anchors persist
+  canonical source path, OLD/NEW side, layer, and source line coordinates, never
+  unified display rows. A selection spanning both OLD-exclusive and NEW-exclusive
+  rows is rejected; OLD comments can be created, edited, and jumped to directly
+  without leaving inline view. Multiline comments render a rail beside line
+  numbers with one type-colored badge at an anchor start and only a
+  guide/terminator on continuation rows. Same-type starts and overlaps compact to
+  `2` through `9`, then `9+`, while remaining separate panel items.
+  File comments render as explicitly labeled virtual `0 │ [OLD]` or
+  `0 │ [NEW]` rows for the anchor's path, side, and layer. CursorHold previews use
+  a separate transient namespace. A range composer reserves a one-to-six-row
+  borderless body and a separate instruction row without changing source text or
+  the persisted schema.
+  File and review-level create/edit/reply flows use a centered rounded modal
+  capped at 88 by 18 rows and reserve no source rows. Normal-mode double Enter
+  and `<C-s>` share one save path.
 - `ReviewExport` renders all comments every time and copies complete Markdown or
-  uses a temporary float. It does not mark comments delivered. Normal export
-  refuses working-tree drift, session drift, and stale anchors;
+  uses a temporary float. The header retains the frozen scope and exact
+  revisions. Comment headings contain only file, line/range, and `[OLD]` or
+  `[NEW]` location data; items retain status, body, and reply hierarchy. Export
+  deliberately omits source snippets, captured context, context hashes, and the
+  internal change-layer value. It does not mark comments delivered. Normal
+  export refuses working-tree drift, session drift, and stale anchors;
   `ReviewExport!` exports only after writing and verifying owner-only recovery
   Markdown. Global drift labels the saved snapshot stale, while anchor drift is
   recorded on the affected comment.
@@ -69,10 +99,11 @@ Neovim owns a repository/session review controller in `config.code_review`:
   undelivered items through `tuicr-round`, persisting each receipt.
 - The public key namespace is lower-case `<leader>r`. The main entries are `rr`
   panel, `ro` open, `rm` mode, `rs` scope, `rb` parent scope, `rf/rh/rl` panes,
-  `rv` layout, `rw` context, `ri` inline previews, `rg` code, `ra/rA` add, `re`
-  edit, `rc` type, `rd` delete, `rp` reply, `rt` resolve, `rE` export, `ru`
-  refresh, and `rq` close. `[r` and `]r` navigate. A review status component and
-  review-local winbar expose the active frozen scope and presentation state.
+  `rv` layout, `rw` context, `ri` inline previews, `rg` code, `ra/rA` line-or-file
+  add, `rR` review-level add, `re` edit, `rc` type, `rd` delete, `rp` reply, `rt`
+  resolve, `rE` export, `ru` refresh, and `rq` close. `[r` and `]r` navigate. A
+  review status component and review-local winbar expose the active frozen scope
+  and presentation state.
 
 Raw Diffview is intentionally independent. Its plugin specification contains no
 review imports, hooks, guarded actions, custom help groups, or tab-close
@@ -85,12 +116,14 @@ export and can be abandoned only through the verified `ReviewClose!` path.
 ## Consequences
 
 Reviewing no longer leaves the user's normal tab or changes its bufferline
-identity. Current exact source retains LSP diagnostics and navigation; historical
-content remains safe and deterministic. The panel can be opened only when
-needed, and exported text is always available in chat-oriented workflows without
-requiring a TUICR UUID.
+identity. OLD and NEW rows are both directly reviewable inline while persisted
+anchors remain tied to exact source coordinates. The mixed projection itself
+never becomes an LSP document; conservative CURRENT bridges preserve useful
+read-only navigation, hover, and diagnostics without exposing OLD rows or
+mutation operations. The panel can be opened only when needed, and exported text
+is always available in chat-oriented workflows without requiring a TUICR UUID.
 
-Working scopes become stale instead of silently remapping anchors. A changed
-historical line cannot use the LSP bridge, and a current buffer whose bytes differ
-from the frozen side cannot receive a review anchor. These refusals are
-intentional evidence-preservation boundaries.
+Working scopes become stale instead of silently remapping anchors. An OLD or
+unmappable NEW row cannot use the LSP bridge, and a mixed-side range cannot become
+a partial review anchor. These refusals are intentional evidence-preservation
+boundaries.

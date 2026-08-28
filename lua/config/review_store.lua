@@ -12,10 +12,9 @@ local SCOPE_VERSION = 1
 local STORE_VERSION = 2
 local LEGACY_STORE_VERSION = 1
 local MAX_BYTES = 1024 * 1024
--- Newline-heavy anchor contexts expand by up to 2.5x when JSON escapes are
--- rendered as four-space-indented Markdown. Four store payloads also leave a
--- bounded margin for per-item headings and tags without making recovery
--- unbounded independently of the persisted-session contract.
+-- Recovery Markdown adds headings, status, and interruption diagnostics to the
+-- strict JSON payload. Four store payloads leave bounded headroom for that
+-- projection without making recovery independently unbounded.
 local MAX_RECOVERY_BYTES = 4 * MAX_BYTES
 local MAX_ITEMS = 2000
 local MAX_DELIVERIES = 32

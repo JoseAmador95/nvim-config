@@ -22,6 +22,7 @@
 --     clangd = { path = "clangd", profile = "full" },
 --     dap = { ui = "dap-ui" }, -- dap-ui | dap-view
 --     mason = { auto_install = true },
+--     review = { hunk_context = 3 }, -- finite non-negative integer
 --     log_watch = { max_lines = 100000, max_bytes = 67108864 },
 --     diagram_cache = { max_age_seconds = 2592000, max_bytes = 268435456 },
 --     path = { "~/bin" },          -- dirs prepended to $PATH
@@ -62,6 +63,12 @@ local SCHEMA = {
 		type = "table",
 		fields = {
 			auto_install = { type = "boolean", default = true },
+		},
+	},
+	review = {
+		type = "table",
+		fields = {
+			hunk_context = { type = "number", default = 3, finite = true, integer = true, min = 0 },
 		},
 	},
 	log_watch = {
@@ -313,6 +320,16 @@ function validate_value(spec, value, path, errors)
 		errors[#errors + 1] = string.format("%s: expected %s, got %s", path, t, type(value))
 		return spec.default
 	end
+	if t == "number" then
+		local invalid = (spec.finite and (value ~= value or value == math.huge or value == -math.huge))
+			or (spec.integer and value % 1 ~= 0)
+			or (spec.min and value < spec.min)
+		if invalid then
+			errors[#errors + 1] =
+				string.format("%s: expected a finite non-negative integer, got %s", path, vim.inspect(value))
+			return spec.default
+		end
+	end
 	return value
 end
 
@@ -456,6 +473,9 @@ return {
 
   -- Attempt each exact Mason/managed tool pin once on interactive startup.
   mason = { auto_install = true },
+
+  -- Unchanged lines shown around each native review hunk.
+  review = { hunk_context = 3 },
 
   -- Safety bounds for incremental log following and rendered-diagram cache.
   log_watch = { max_lines = 100000, max_bytes = 64 * 1024 * 1024 },

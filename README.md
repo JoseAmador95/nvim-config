@@ -36,7 +36,11 @@ mutates plugins, parsers, or the committed lock.
 
 Host-specific settings belong in `~/.nvim-local.lua`; create a documented
 template with `:NvimConfigInit`. `:NvimConfigDump` recursively redacts
-environment values.
+environment values. Native review hunk views show three unchanged lines on
+either side by default; set `review = { hunk_context = 0 }` (or another
+non-negative integer) to change that review-local context. Split view keeps one
+structural context line when configured to zero so native old/new filler stays
+aligned.
 
 The debug UI defaults to `dap-ui`. Select the pinned `nvim-dap-view`
 alternative with `dap = { ui = "dap-view" }` in local config, or for one
@@ -121,7 +125,7 @@ The full terminal editor has a native, repository-scoped review mode that stays
 in the current ordinary tab. `:ReviewOpen` (or `<leader>ro`) freezes a working,
 commit, range, or default-branch scope; `<leader>rr` opens and closes its
 three-pane Files / Commits / Comments float. Selecting a file closes the float
-and focuses the reviewed current/new side. Its colored, fully expanded tree
+and focuses the reviewed code. Its colored, fully expanded tree
 groups only non-empty change layers, supports collapsible directories, and
 shows status, line totals, rename origins, and comment counts. The Commits pane
 can select one commit or two endpoints from one linear, single-parent span;
@@ -129,31 +133,65 @@ visual-selecting contiguous commit rows and pressing `Enter` reviews the whole
 selected span without changing manually marked endpoints, while normal `Enter`
 keeps using the current row or marked endpoints. `c` clears only those endpoints
 and `b` returns to the exact frozen parent scope. Merge commits are reviewed
-individually. The Comments pane supports jumping,
-editing, deleting, replying, resolving/reopening, and reanchoring without a
-separate review tab.
+individually. The Comments pane supports jumping, editing, confirmed deletion,
+replying, and resolving/reopening without a separate review tab; `a` adds a
+review-level comment. `<leader>rR` provides the same review-level action from
+ordinary review buffers. Reanchoring remains available through
+`:ReviewReanchor` and the command palette.
 
 Review mode makes affected source buffers read-only and preserves their normal
-tab identity. `<leader>rv` switches inline and native synchronized side-by-side
-diffs; `<leader>rw` switches hunk-only and full-file context; `<leader>rg`
-focuses the current/new code. Hunk-only inline mode starts with zero context and
-leaving a hunk jumps directly to the adjacent hunk instead of revealing hidden
-lines. The statusline and review-local winbar identify REV ON/OFF, the frozen
-scope, layer, layout/context, comment-preview state, side, and path. Current source keeps normal LSP. Historical old
-content never starts LSP, while `gd` from a historical-new snapshot bridges to
-the real current file only when the line is unchanged and preserves the cursor
-column. `<leader>ra` comments the current line or visual range, `<leader>rA`
-comments the file, and overlapping multiline comments use an aggregate rail
-while remaining individually editable from the Comments pane. Pausing on a
-commented range shows one concise inline row per comment; `<leader>ri` toggles
-those previews without removing the rail. The borderless composer reserves up
-to six visual rows directly below the source anchor and scrolls longer text.
+tab identity. `<leader>rv` switches between one inline unified projection and a
+native synchronized side-by-side diff; `<leader>rw` switches hunk-only and
+full-file context; and `<leader>rg` focuses the reviewed code. Inline unchanged
+context appears once, while each replacement places real OLD rows before real
+NEW/CURRENT rows. Every code row is cursor-addressable in the ordinary review
+window, and its `OLD │ NEW` gutter shows both source line numbers when available
+without replacing fold or comment signs. Side-by-side remains Neovim's native
+two-pane diff with both versions real and focusable. Jumping to an OLD or NEW
+comment stays inline and moves directly to its projected row.
+
+Both hunk views use the configured review-local context, add full-width gray
+start/end bands, and name the enclosing function or class when its declaration
+is hidden. In side-by-side mode, a size-changing hunk at the start or end of a
+file omits only the boundary band that has no matching source row on both sides.
+Leaving a visible section jumps directly to the adjacent one; full-file mode has
+no artificial bands. Only real changed OLD/NEW rows use the theme's red/green
+diff colors, while shared context and alignment-only split filler keep the normal
+background. The statusline and review-local winbar identify REV ON/OFF, the
+frozen scope, layer, layout/context, comment-preview state, source columns, and
+path. The unified projection is LSP-blocked. Read-only navigation, hover, and
+diagnostics are conservatively bridged from mapped NEW/CURRENT rows to the real
+current source; OLD or otherwise unmappable rows remain unavailable, and
+mutation operations are never proxied. An exact CURRENT pane in side-by-side
+view retains its ordinary LSP behavior.
+
+`<leader>ra` comments the current line or visual range, `<leader>rA` comments the
+file, and `<leader>rR` comments the review. A selection resolves to canonical
+source path, side, and line coordinates; a range containing both OLD-exclusive
+and NEW-exclusive rows is rejected instead of being partially anchored. Display
+rows are never persisted. OLD comments can be created, edited, and jumped to
+directly in inline view. File comments appear before file contents as virtual
+`0 │ [OLD]` or `0 │ [NEW]` rows for their canonical path and change layer.
+Multiline rails place one colored type badge at each anchor start;
+continuation rows show only the guide and terminator. Same-type starts and
+overlaps use compact counts (`2` through `9`, then `9+`) without losing the
+per-type colors. Pausing on a commented range shows one concise inline row per
+comment; `<leader>ri` toggles those previews without removing the rail. A
+line/range composer reserves a one-to-six-row borderless body plus a dedicated
+instruction row directly below the source anchor and scrolls longer text. File
+and review-level comments, including edits and replies, use a centered rounded
+modal capped at 88 by 18 rows without reserving source lines. In Normal mode,
+`<CR><CR>` saves through the same path as `<C-s>`.
 
 `:ReviewExport[!]` always renders the complete saved review and may be repeated;
-it copies Markdown or opens a closable float when no clipboard is available.
-Normal export refuses working-tree drift, session drift, or stale anchors. The
-bang form first writes and verifies an owner-only recovery; global drift labels
-the saved snapshot stale, while anchor drift remains attached to the affected
+it copies Markdown or opens a closable float when no clipboard is available. Its
+header retains the frozen scope and exact revisions. Each item retains its
+status, body, and reply structure plus only its file and line/range location with
+`[OLD]` or `[NEW]`; review-level items use `REVIEW`. Export omits source snippets,
+captured context, context hashes, and the internal change-layer value. Normal
+export refuses working-tree drift, session drift, or stale anchors. The bang
+form first writes and verifies an owner-only recovery; global drift labels the
+saved snapshot stale, while anchor drift remains attached to the affected
 comment.
 `:ReviewLinkTuicr` and `:ReviewPublish[!]` are separate, explicit operations;
 only open, undelivered comments are published through `tuicr-round`. Ordinary
@@ -162,11 +200,11 @@ workflows.
 
 The review mappings use the lower-case `<leader>r` namespace: `rr` panel, `ro`
 open, `rm` mode, `rs` scope, `rb` parent scope, `rf/rh/rl` panel panes, `rv`
-layout, `rw` context, `ri` inline previews, `rg` code, `ra/rA` comments, `re`
-edit, `rc` type, `rd` delete, `rp` reply,
-`rt` resolve, `rE` export, `ru` refresh, and `rq` close. `]r` and `[r` navigate
-comments. Tests use `<leader>Tn` / `<leader>Td`, Python uses `<leader>pr` /
-`<leader>ps`, and LSP rename uses `<leader>lr`.
+layout, `rw` context, `ri` inline previews, `rg` code, `ra/rA` line-or-file
+comments, `rR` review-level comment, `re` edit, `rc` type, `rd` delete, `rp`
+reply, `rt` resolve, `rE` export, `ru` refresh, and `rq` close. `]r` and `[r`
+navigate comments. Tests use `<leader>Tn` / `<leader>Td`, Python uses
+`<leader>pr` / `<leader>ps`, and LSP rename uses `<leader>lr`.
 
 The terminal-only TUICR and agent interchange commands are intentionally absent
 from VSCode and `nvimpager`:

@@ -219,6 +219,46 @@ test("local config diagnostics redact environment values without mutating cache"
 	vim.fn.delete(root, "rf")
 end)
 
+test("review hunk context accepts only finite non-negative integers and is present in the template", function()
+	local root = temp_dir()
+	local config_path = root .. "/host.lua"
+	local original_override = vim.env.NVIM_CONFIG_FILE
+	local original_notify = vim.notify
+	local notifications = {}
+	vim.env.NVIM_CONFIG_FILE = config_path
+	vim.notify = function(message)
+		notifications[#notifications + 1] = tostring(message)
+	end
+	package.loaded["config.local_config"] = nil
+	local local_config = require("config.local_config")
+
+	assert(local_config.read().review.hunk_context == 3)
+	assert(#local_config.errors() == 0)
+
+	assert(vim.fn.writefile({ "return { review = { hunk_context = 0 } }" }, config_path) == 0)
+	assert(local_config.reload().review.hunk_context == 0)
+	assert(#local_config.errors() == 0)
+	assert(vim.fn.writefile({ "return { review = { hunk_context = 7 } }" }, config_path) == 0)
+	assert(local_config.reload().review.hunk_context == 7)
+	assert(#local_config.errors() == 0)
+
+	for _, invalid in ipairs({ "'three'", "-1", "1.5", "0 / 0", "math.huge", "-math.huge" }) do
+		assert(vim.fn.writefile({ "return { review = { hunk_context = " .. invalid .. " } }" }, config_path) == 0)
+		local before = #notifications
+		assert(local_config.reload().review.hunk_context == 3, "invalid context did not use the default: " .. invalid)
+		assert(table.concat(local_config.errors(), "\n"):find("review.hunk_context", 1, true))
+		assert(#notifications == before + 1, "invalid context did not use local-config diagnostics: " .. invalid)
+	end
+
+	vim.cmd("NvimConfigInit!")
+	local generated = table.concat(vim.fn.readfile(config_path), "\n")
+	assert(generated:find("review = { hunk_context = 3 }", 1, true), "generated template omitted review context")
+
+	vim.notify = original_notify
+	vim.env.NVIM_CONFIG_FILE = original_override
+	vim.fn.delete(root, "rf")
+end)
+
 test("removed Claude credential is never exported while ordinary environment values remain supported", function()
 	local root = temp_dir()
 	local config_path = root .. "/host.lua"

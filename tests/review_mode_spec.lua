@@ -98,6 +98,49 @@ test("active protection immediately rejects local option escapes", function()
 	assert(not vim.bo[buf].readonly and vim.bo[buf].modifiable, "disable did not restore ordinary options")
 end)
 
+test("transient protection rejects escapes without active-buffer roles and releases every owner", function()
+	reset()
+	local state = mode.new(workspace())
+	assert(mode.enable(state))
+	local transient = vim.api.nvim_create_buf(false, true)
+	vim.bo[transient].buftype = "nofile"
+	assert(mode.protect_transient(state, transient))
+	assert(vim.bo[transient].readonly and not vim.bo[transient].modifiable)
+	assert(mode.active_for_buffer(transient) == nil, "transient became an active current review buffer")
+	assert(vim.b[transient].nvim_review_role == nil, "transient protection assigned an LSP role")
+	assert(buffer_mapping(transient, "[h").buffer ~= 1 and buffer_mapping(transient, "]h").buffer ~= 1)
+
+	vim.api.nvim_buf_call(transient, function()
+		vim.cmd("noautocmd setlocal noreadonly")
+		vim.api.nvim_exec_autocmds("OptionSet", { pattern = "readonly" })
+		vim.cmd("noautocmd setlocal modifiable")
+		vim.api.nvim_exec_autocmds("OptionSet", { pattern = "modifiable" })
+	end)
+	assert(vim.bo[transient].readonly and not vim.bo[transient].modifiable, "transient option escape survived")
+	assert(not pcall(vim.api.nvim_buf_set_lines, transient, 0, -1, false, { "mutated" }))
+
+	assert(mode.release_transient(state, transient))
+	assert(next(state.protected_transients) == nil and mode.enforce_protection(transient) == false)
+	vim.api.nvim_buf_call(transient, function()
+		vim.cmd("noautocmd setlocal noreadonly modifiable")
+		vim.api.nvim_exec_autocmds("OptionSet", { pattern = "modifiable" })
+	end)
+	assert(not vim.bo[transient].readonly and vim.bo[transient].modifiable, "released transient stayed owned")
+
+	assert(mode.protect_transient(state, transient))
+	vim.api.nvim_buf_delete(transient, { force = true })
+	assert(next(state.protected_transients) == nil, "BufWipeout retained transient ownership")
+	assert(mode.enforce_protection(transient) == false)
+
+	local lingering = vim.api.nvim_create_buf(false, true)
+	vim.bo[lingering].buftype = "nofile"
+	assert(mode.protect_transient(state, lingering))
+	mode.disable(state)
+	assert(next(state.protected_transients) == nil, "disable retained transient ownership")
+	assert(mode.active_for_buffer(lingering) == nil and mode.enforce_protection(lingering) == false)
+	vim.api.nvim_buf_delete(lingering, { force = true })
+end)
+
 test("modified affected buffers are refused without partial state", function()
 	reset()
 	local buf = vim.api.nvim_get_current_buf()
@@ -354,6 +397,53 @@ test("window snapshots restore the exact local winbar across review cycles", fun
 	mode.disable(state)
 	assert(vim.wo[win].winbar == second, "later review cycle restored a stale winbar")
 	assert(state.window_snapshots[win] == nil, "restored winbar snapshot was retained")
+end)
+
+test("window snapshots restore gutter options and inherited fillchars exactly", function()
+	reset()
+	local win = vim.api.nvim_get_current_win()
+	local previous_global_fillchars = vim.o.fillchars
+	local previous_local_fillchars = vim.api.nvim_get_option_value("fillchars", { scope = "local", win = win })
+	local previous = {
+		number = vim.wo[win].number,
+		numberwidth = vim.wo[win].numberwidth,
+		relativenumber = vim.wo[win].relativenumber,
+		signcolumn = vim.wo[win].signcolumn,
+		statuscolumn = vim.wo[win].statuscolumn,
+	}
+	local ok, err = xpcall(function()
+		vim.o.fillchars = "diff:-,eob:~"
+		vim.api.nvim_set_option_value("fillchars", "", { scope = "local", win = win })
+		vim.wo[win].number = false
+		vim.wo[win].relativenumber = true
+		vim.wo[win].numberwidth = 6
+		vim.wo[win].signcolumn = "yes:2"
+		vim.wo[win].statuscolumn = "%=%l "
+		local state = mode.new(workspace())
+		assert(state.window_snapshots[win].local_options.fillchars == "")
+		assert(mode.enable(state))
+		vim.api.nvim_win_call(win, function()
+			vim.opt_local.fillchars = { diff = " ", eob = "!" }
+		end)
+		vim.wo[win].number = true
+		vim.wo[win].relativenumber = false
+		vim.wo[win].numberwidth = 2
+		vim.wo[win].signcolumn = "auto:1-9"
+		vim.wo[win].statuscolumn = "%s%l"
+		mode.disable(state)
+		assert(vim.api.nvim_get_option_value("fillchars", { scope = "local", win = win }) == "")
+		assert(vim.opt_local.fillchars:get().diff == "-", "restored window stopped inheriting global fillchars")
+		assert(not vim.wo[win].number and vim.wo[win].relativenumber)
+		assert(vim.wo[win].numberwidth == 6)
+		assert(vim.wo[win].signcolumn == "yes:2")
+		assert(vim.wo[win].statuscolumn == "%=%l ")
+	end, debug.traceback)
+	vim.o.fillchars = previous_global_fillchars
+	vim.api.nvim_set_option_value("fillchars", previous_local_fillchars, { scope = "local", win = win })
+	for name, value in pairs(previous) do
+		vim.wo[win][name] = value
+	end
+	assert(ok, err)
 end)
 
 test("late affected buffers enroll only while enabled and refuse unsaved changes", function()

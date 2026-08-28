@@ -27,6 +27,14 @@ local function has_plugin(name)
 	return false
 end
 
+local function assert_review_band_visible()
+	local band = vim.api.nvim_get_hl(0, { name = "NvimReviewNativeHunkBand", link = false })
+	local normal = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
+	local statusline = vim.api.nvim_get_hl(0, { name = "StatusLine", link = false })
+	assert(band.bg == statusline.bg, "native review band did not inherit the active StatusLine background")
+	assert(band.bg ~= normal.bg, "native review band is indistinguishable from the editor background")
+end
+
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,
 	callback = function()
@@ -57,6 +65,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				vim.cmd("Theme vscode")
 				assert(theme.selection().colorscheme == "vscode", ":Theme vscode did not update selection")
 				assert(vim.g.colors_name == "vscode", ":Theme vscode did not repaint")
+				if not pager.active then
+					assert_review_band_visible()
+				end
 
 				vim.cmd("Theme catppuccin")
 				assert(theme.selection().colorscheme == "catppuccin", ":Theme catppuccin did not persist selection")

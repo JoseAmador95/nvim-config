@@ -16,14 +16,40 @@ local review_tuicr = require("config.review_tuicr")
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comments")
 local PREVIEW_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comment_preview")
 local REVIEW_TYPES = { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }
+local COMMENT_SIGN_TYPES = { "issue", "suggestion", "question", "rationale", "pedantic", "praise" }
 local TYPE_SIGNS = {
-	issue = { text = "●", highlight = "DiagnosticSignError" },
-	suggestion = { text = "◆", highlight = "DiagnosticSignWarn" },
-	rationale = { text = "R", highlight = "DiagnosticSignInfo" },
-	question = { text = "?", highlight = "DiagnosticSignInfo" },
-	pedantic = { text = "·", highlight = "DiagnosticSignHint" },
-	praise = { text = "♥", highlight = "DiagnosticSignHint" },
+	issue = { text = "●", highlight = "NvimReviewCommentIssue" },
+	suggestion = { text = "◆", highlight = "NvimReviewCommentSuggestion" },
+	question = { text = "?", highlight = "NvimReviewCommentQuestion" },
+	rationale = { text = "R", highlight = "NvimReviewCommentRationale" },
+	pedantic = { text = "·", highlight = "NvimReviewCommentPedantic" },
+	praise = { text = "♥", highlight = "NvimReviewCommentPraise" },
 }
+local TYPE_HIGHLIGHT_LINKS = {
+	issue = "DiagnosticSignError",
+	suggestion = "DiagnosticSignWarn",
+	question = "DiagnosticSignInfo",
+	rationale = "Special",
+	pedantic = "DiagnosticSignHint",
+	praise = "DiagnosticSignOk",
+}
+
+local function apply_comment_highlights()
+	for _, item_type in ipairs(REVIEW_TYPES) do
+		vim.api.nvim_set_hl(
+			0,
+			TYPE_SIGNS[item_type].highlight,
+			{ default = true, link = TYPE_HIGHLIGHT_LINKS[item_type] }
+		)
+	end
+end
+
+apply_comment_highlights()
+local comment_highlight_group = vim.api.nvim_create_augroup("NvimReviewCommentHighlights", { clear = true })
+vim.api.nvim_create_autocmd("ColorScheme", {
+	group = comment_highlight_group,
+	callback = apply_comment_highlights,
+})
 local HELP_GROUPS = { common = "review", diff_line = "review_diff", file = "review_file" }
 local MAPPINGS = {
 	{ lhs = "<leader>rr", rhs = "<cmd>ReviewPanel<cr>", desc = "Toggle review panel", help = "common" },
@@ -40,6 +66,7 @@ local MAPPINGS = {
 	{ lhs = "<leader>rg", rhs = "<cmd>ReviewCode<cr>", desc = "Focus reviewed code", help = "common" },
 	{ lhs = "<leader>ra", rhs = "<cmd>ReviewComment<cr>", desc = "Add line/range comment", help = "diff_line" },
 	{ lhs = "<leader>rA", rhs = "<cmd>ReviewFileComment<cr>", desc = "Add file comment", help = "file" },
+	{ lhs = "<leader>rR", rhs = "<cmd>ReviewGeneralComment<cr>", desc = "Add review-level comment", help = "common" },
 	{ lhs = "<leader>re", rhs = "<cmd>ReviewEdit<cr>", desc = "Edit review comment", help = "common" },
 	{ lhs = "<leader>rc", rhs = "<cmd>ReviewChangeType<cr>", desc = "Change comment type", help = "diff_line" },
 	{ lhs = "<leader>rd", rhs = "<cmd>ReviewDeleteDraft<cr>", desc = "Delete review comment", help = "diff_line" },
@@ -186,6 +213,12 @@ local function status_side(workspace, entry)
 		for _, name in ipairs({ "inline", "left", "right" }) do
 			local side = presentation[name]
 			if side and side.win == current then
+				if side.side == "unified" then
+					local display_line = vim.api.nvim_win_get_cursor(current)[1]
+					local source_ref =
+						review_presenter.source_at(workspace.mode_state, display_line, presentation.generation)
+					return source_ref and source_ref.side or "new"
+				end
 				return side.side
 			end
 		end
@@ -459,6 +492,7 @@ local function panel_callbacks(expected)
 				M.file_comment()
 			end
 		end,
+		general_comment = M.general_comment,
 		apply_commit = function(first, second)
 			local workspace = workspace_for_key(expected)
 			if not workspace then
@@ -480,9 +514,6 @@ local function panel_callbacks(expected)
 		change_type = M.change_type,
 		reply_comment = M.reply,
 		toggle_resolution = M.toggle_resolution,
-		reanchor_comment = function(id, source_win)
-			return M.reanchor(id, source_win)
-		end,
 	}
 end
 
@@ -1063,6 +1094,16 @@ local function presentation_target(workspace, win)
 	for _, name in ipairs({ "left", "right", "inline" }) do
 		local side = presentation[name]
 		if side and side.win == win then
+			if side.side == "unified" and presentation.projection then
+				return {
+					entry = presentation.entry,
+					buf = side.buf,
+					win = side.win,
+					generation = presentation.generation,
+					layer = presentation.entry.layer or "history",
+					unified = true,
+				}
+			end
 			local old = side.side == "old"
 			return {
 				entry = presentation.entry,
@@ -1130,15 +1171,12 @@ local function normal_targets(workspace, buf, win)
 end
 
 local function choose_target(workspace, captured, callback)
-	if
-		not valid_win(captured.win)
-		or not valid_buf(captured.buf)
-		or vim.api.nvim_win_get_buf(captured.win) ~= captured.buf
-	then
+	if not valid_buf(captured.buf) then
 		callback(nil, "review target changed before it could be captured")
 		return
 	end
-	local target = presentation_target(workspace, captured.win)
+	local captured_visible = valid_win(captured.win) and vim.api.nvim_win_get_buf(captured.win) == captured.buf
+	local target = captured_visible and presentation_target(workspace, captured.win) or nil
 	if target and target.buf == captured.buf then
 		callback(target)
 		return
@@ -1160,16 +1198,29 @@ local function choose_target(workspace, captured, callback)
 	end
 end
 
-local function context_for_buffer(buf, first, last)
-	local count = vim.api.nvim_buf_line_count(buf)
+local function source_lines(entry, side)
+	local text = side == "left" and entry.old_text or entry.new_text
+	if type(text) ~= "string" or text == "" then
+		return {}
+	end
+	text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+	if text:sub(-1) == "\n" then
+		text = text:sub(1, -2)
+	end
+	return vim.split(text, "\n", { plain = true })
+end
+
+local function context_for_entry(entry, side, first, last)
+	local lines = source_lines(entry, side)
+	local count = #lines
 	local context_first = math.max(1, first - 3)
 	local context_last = math.min(count, last + 3)
-	local context = table.concat(vim.api.nvim_buf_get_lines(buf, context_first - 1, context_last, false), "\n")
+	local context = table.concat(vim.list_slice(lines, context_first, context_last), "\n")
 	if context == "" then
 		context = "\n"
 	end
 	if #context > review_store.max_anchor_context then
-		context = table.concat(vim.api.nvim_buf_get_lines(buf, first - 1, last, false), "\n")
+		context = table.concat(vim.list_slice(lines, first, last), "\n")
 		local truncated, truncate_err = review_store.truncate_utf8(context, review_store.max_anchor_context)
 		if not truncated then
 			return nil, "could not capture valid UTF-8 review context: " .. tostring(truncate_err)
@@ -1179,27 +1230,129 @@ local function context_for_buffer(buf, first, last)
 	return context
 end
 
-local function make_anchor(workspace, target, kind, first, last)
+local function unified_file_source(workspace, target, display_line, preferred_side)
+	local source_ref, source_err = review_presenter.source_at(workspace.mode_state, display_line, target.generation)
+	if not source_ref then
+		return nil, source_err
+	end
+	local preferred = preferred_side == "left" and "old" or preferred_side == "right" and "new" or nil
+	local side
+	if source_ref.old_path and not source_ref.new_path then
+		side = "old"
+	elseif source_ref.new_path and not source_ref.old_path then
+		side = "new"
+	elseif preferred and source_ref[preferred .. "_path"] then
+		side = preferred
+	else
+		side = "new"
+	end
+	local path = source_ref[side .. "_path"]
+	if not path then
+		return nil, "display row has no file on the selected source side"
+	end
+	return {
+		display_first = display_line,
+		display_last = display_line,
+		entry = source_ref.entry,
+		layer = source_ref.layer,
+		path = path,
+		side = side,
+	}
+end
+
+local function resolve_capture(workspace, target, kind, first, last, preferred_side)
+	first, last = math.min(first, last), math.max(first, last)
+	if target.unified then
+		local resolved, resolve_err
+		if kind == "file" then
+			resolved, resolve_err = unified_file_source(workspace, target, first, preferred_side)
+		else
+			resolved, resolve_err =
+				review_presenter.resolve_range(workspace.mode_state, first, last, target.generation, preferred_side)
+		end
+		if not resolved then
+			return nil, resolve_err
+		end
+		resolved.anchor_side = resolved.anchor_side or (resolved.side == "old" and "left" or "right")
+		resolved.entry = resolved.entry or target.entry
+		return resolved
+	end
+
+	local lines = source_lines(target.entry, target.side)
+	if #lines == 0 and kind == "range" then
+		return nil, "empty review content has no line anchor; use a file comment"
+	end
+	local resolved_first = math.max(1, math.min(first, math.max(1, #lines)))
+	local resolved_last = math.max(resolved_first, math.min(last, math.max(1, #lines)))
+	return {
+		anchor_side = target.side,
+		display_first = resolved_first,
+		display_last = resolved_last,
+		end_line = resolved_last,
+		entry = target.entry,
+		layer = target.layer,
+		path = target.path,
+		start_line = resolved_first,
+	}
+end
+
+local function make_anchor(workspace, target, kind, first, last, preferred_side)
+	local resolved, resolve_err = resolve_capture(workspace, target, kind, first, last, preferred_side)
+	if not resolved then
+		return nil, resolve_err
+	end
 	local anchor = {
 		kind = kind,
-		path = target.path,
-		side = target.side,
-		layer = target.layer,
+		path = resolved.path,
+		side = resolved.anchor_side,
+		layer = resolved.layer,
 		stale = workspace.session.stale,
 	}
 	if kind == "range" then
-		local count = vim.api.nvim_buf_line_count(target.buf)
-		first, last = math.min(first, last), math.max(first, last)
-		anchor.start_line = math.max(1, math.min(first, count))
-		anchor.end_line = math.max(anchor.start_line, math.min(last, count))
-		local context, context_err = context_for_buffer(target.buf, anchor.start_line, anchor.end_line)
+		anchor.start_line = resolved.start_line
+		anchor.end_line = resolved.end_line
+		local context, context_err = context_for_entry(resolved.entry, anchor.side, anchor.start_line, anchor.end_line)
 		if not context then
 			return nil, context_err
 		end
 		anchor.context = context
 		anchor.context_hash = vim.fn.sha256(anchor.context):lower()
 	end
-	return anchor
+	return anchor, nil, {
+		first = resolved.display_first,
+		last = resolved.display_last,
+	}
+end
+
+local function displayed_anchor(workspace, anchor)
+	local presentation = workspace.mode_state and workspace.mode_state.presentation
+	if not presentation then
+		return nil, "review presentation is unavailable"
+	end
+	if presentation.projection and presentation.inline then
+		local rows, rows_err = review_presenter.rows_for_anchor(workspace.mode_state, anchor, presentation.generation)
+		if not rows then
+			return nil, rows_err
+		end
+		local revealed, reveal_err = review_presenter.reveal_rows(workspace.mode_state, rows, presentation.generation)
+		if not revealed then
+			return nil, reveal_err
+		end
+		return {
+			buf = presentation.inline.buf,
+			first = rows[1],
+			last = rows[#rows],
+			rows = rows,
+			win = presentation.inline.win,
+		}
+	end
+	local side = anchor.side == "left" and presentation.left or presentation.right or presentation.inline
+	if not side or not valid_win(side.win) or not valid_buf(side.buf) then
+		return nil, "comment side is unavailable"
+	end
+	local first = anchor.kind == "range" and anchor.start_line or 1
+	local last = anchor.kind == "range" and (anchor.end_line or first) or first
+	return { buf = side.buf, first = first, last = last, win = side.win }
 end
 
 local function capture(first, last)
@@ -1251,6 +1404,11 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 			notify(target_err, vim.log.levels.ERROR)
 			return
 		end
+		local anchor, anchor_err, display = make_anchor(workspace, target, kind, captured.first, captured.last)
+		if not anchor then
+			notify(anchor_err, vim.log.levels.ERROR)
+			return
+		end
 		local target_visible = valid_win(target.win) and vim.api.nvim_win_get_buf(target.win) == target.buf
 		if not target_visible or review_panel.is_open(workspace.panel) then
 			local shown, show_err = M.present(target.entry.identity, expected)
@@ -1258,31 +1416,32 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 				notify(show_err, vim.log.levels.ERROR)
 				return
 			end
-			local presented = presentation_target(workspace)
+			local presented, display_err = displayed_anchor(workspace, anchor)
 			review_panel.hide(workspace.panel)
-			target = presented
-			if not target then
-				notify("Could not focus the selected review side", vim.log.levels.ERROR)
+			if not presented then
+				notify(display_err, vim.log.levels.ERROR)
 				return
 			end
-			local line = math.max(1, math.min(captured.first, vim.api.nvim_buf_line_count(target.buf)))
-			vim.api.nvim_set_current_win(target.win)
-			vim.api.nvim_win_set_cursor(target.win, { line, 0 })
+			target = presented
+			display = { first = presented.first, last = presented.last }
 		end
-		local anchor, anchor_err = make_anchor(workspace, target, kind, captured.first, captured.last)
-		if not anchor then
-			notify(anchor_err, vim.log.levels.ERROR)
+		if
+			not valid_win(target.win)
+			or not valid_buf(target.buf)
+			or vim.api.nvim_win_get_buf(target.win) ~= target.buf
+		then
+			notify("Reviewed code window is no longer available", vim.log.levels.ERROR)
 			return
 		end
-		local ui_line = anchor.kind == "range" and anchor.end_line
-			or math.max(1, math.min(captured.first, vim.api.nvim_buf_line_count(target.buf)))
+		vim.api.nvim_set_current_win(target.win)
+		vim.api.nvim_win_set_cursor(target.win, { display.last, 0 })
 		compose(workspace, {
-			title = "New",
+			title = anchor.kind == "file" and "New file comment" or "New",
 			type_cycle = REVIEW_TYPES,
 			selected_type = requested_type or REVIEW_TYPES[1],
 			source_win = target.win,
-			anchor_line = ui_line,
-			anchor_range = anchor.kind == "range" and { first = anchor.start_line, last = anchor.end_line } or nil,
+			anchor_line = anchor.kind == "range" and display.last or nil,
+			anchor_range = anchor.kind == "range" and { first = display.first, last = display.last } or nil,
 			anchor = anchor,
 		}, function(body, interrupted, selected_type)
 			if not body then
@@ -1444,17 +1603,16 @@ function M.general_comment(requested_type)
 	end
 	vim.api.nvim_set_current_win(source.win)
 	compose(workspace, {
-		title = "New general comment",
+		title = "New review-level comment",
 		type_cycle = REVIEW_TYPES,
 		selected_type = requested_type or REVIEW_TYPES[1],
 		source_win = source.win,
-		anchor_line = source.line,
 		anchor = anchor,
 	}, function(body, interrupted, selected_type)
 		if not body then
 			return true
 		end
-		local current = active_for_key(expected, "composing a general comment")
+		local current = active_for_key(expected, "composing a review-level comment")
 		if not current or (not interrupted and not allow_mutation(current)) then
 			return false
 		end
@@ -1482,11 +1640,47 @@ local function current_location(workspace)
 	if not target then
 		return nil
 	end
+	local display_line = vim.api.nvim_win_get_cursor(target.win)[1]
+	if target.unified then
+		local source_ref = review_presenter.source_at(workspace.mode_state, display_line, target.generation)
+		if not source_ref then
+			return nil
+		end
+		local refs = {}
+		if source_ref.old_path and source_ref.old_line then
+			refs[#refs + 1] = {
+				path = source_ref.old_path,
+				side = "left",
+				layer = source_ref.layer,
+				line = source_ref.old_line,
+			}
+		end
+		if source_ref.new_path and source_ref.new_line then
+			refs[#refs + 1] = {
+				path = source_ref.new_path,
+				side = "right",
+				layer = source_ref.layer,
+				line = source_ref.new_line,
+			}
+		end
+		return {
+			path = source_ref.path,
+			side = source_ref.anchor_side,
+			layer = source_ref.layer,
+			line = source_ref.source_line,
+			display_line = display_line,
+			refs = refs,
+			win = target.win,
+			buf = target.buf,
+			unified = true,
+		}
+	end
 	return {
 		path = target.path,
 		side = target.side,
 		layer = target.layer,
-		line = vim.api.nvim_win_get_cursor(target.win)[1],
+		line = display_line,
+		display_line = display_line,
 		win = target.win,
 		buf = target.buf,
 	}
@@ -1521,11 +1715,45 @@ local function contains_line(anchor, location)
 		return false
 	end
 	local last = anchor.end_line or anchor.start_line
-	return anchor.path == location.path
-		and anchor.side == location.side
-		and anchor.layer == location.layer
-		and anchor.start_line <= location.line
-		and location.line <= last
+	for _, candidate in ipairs(location.refs or { location }) do
+		if
+			anchor.path == candidate.path
+			and anchor.side == candidate.side
+			and anchor.layer == candidate.layer
+			and anchor.start_line <= candidate.line
+			and candidate.line <= last
+		then
+			return true
+		end
+	end
+	return false
+end
+
+local function location_targets_anchor(anchor, location)
+	if not anchor or not location then
+		return false
+	end
+	for _, candidate in ipairs(location.refs or { location }) do
+		if anchor.path == candidate.path and anchor.side == candidate.side and anchor.layer == candidate.layer then
+			return anchor.kind ~= "range" or contains_line(anchor, location)
+		end
+	end
+	return false
+end
+
+local function mapped_anchor_rows(workspace, anchor, buf)
+	local presentation = workspace.mode_state and workspace.mode_state.presentation
+	if presentation and presentation.projection and presentation.inline and presentation.inline.buf == buf then
+		return review_presenter.rows_for_anchor(workspace.mode_state, anchor, presentation.generation)
+	end
+	if anchor.kind ~= "range" or not anchor.start_line then
+		return { 1 }
+	end
+	local rows = {}
+	for line = anchor.start_line, anchor.end_line or anchor.start_line do
+		rows[#rows + 1] = line
+	end
+	return rows
 end
 
 local function first_body_line(body)
@@ -1623,12 +1851,16 @@ local function show_inline_preview()
 	local grouped = {}
 	local rows = {}
 	for _, item in ipairs(items) do
-		local row = math.max(1, math.min(item.anchor.end_line or item.anchor.start_line, count))
-		if not grouped[row] then
-			grouped[row] = {}
-			rows[#rows + 1] = row
+		local mapped = mapped_anchor_rows(workspace, item.anchor, buf)
+		local row = mapped and mapped[#mapped] or nil
+		row = row and math.max(1, math.min(row, count)) or nil
+		if row then
+			if not grouped[row] then
+				grouped[row] = {}
+				rows[#rows + 1] = row
+			end
+			grouped[row][#grouped[row] + 1] = item
 		end
-		grouped[row][#grouped[row] + 1] = item
 	end
 	table.sort(rows)
 	local maximum = inline_preview_width(win)
@@ -1648,11 +1880,15 @@ end
 
 local function item_label(item)
 	local anchor = item.anchor
-	local location = anchor.kind == "general" and "general" or anchor.path
+	local location = anchor.kind == "general" and "review" or anchor.path
 	if anchor.kind == "range" then
 		location = location .. ":" .. anchor.start_line .. "-" .. (anchor.end_line or anchor.start_line)
 	elseif anchor.kind == "file" then
 		location = location .. " [file]"
+	end
+	local side = review_panel.anchor_side_label(anchor)
+	if side then
+		location = "[" .. side .. "] " .. location
 	end
 	local preview = (item.body:match("[^\n]+") or item.body):gsub("%s+", " ")
 	return string.format(
@@ -1663,6 +1899,24 @@ local function item_label(item)
 		location,
 		preview
 	)
+end
+
+local function delete_prompt(item)
+	local anchor = item.anchor
+	local location = anchor.kind == "general" and "review" or anchor.path
+	if anchor.kind == "range" then
+		local last = anchor.end_line or anchor.start_line
+		location = location .. ":" .. anchor.start_line .. (last ~= anchor.start_line and "-" .. last or "")
+	elseif anchor.kind == "file" then
+		location = location .. " [file]"
+	end
+	local side = review_panel.anchor_side_label(anchor)
+	if side then
+		location = "[" .. side .. "] " .. location
+	end
+	local excerpt, multiline = first_body_line(item.body)
+	excerpt = display_excerpt(excerpt, 48, multiline)
+	return string.format("Delete #%02d [%s] %s · %s?", item.sequence, item.type, location, excerpt)
 end
 
 local function choose_item(workspace, id, prompt, callback)
@@ -1713,13 +1967,7 @@ local function item_editor_source(workspace, item)
 	end
 
 	local location = current_location(workspace)
-	local exact = location
-		and anchor.path == location.path
-		and anchor.side == location.side
-		and anchor.layer == location.layer
-	if exact and anchor.kind == "range" then
-		exact = contains_line(anchor, location)
-	end
+	local exact = location_targets_anchor(anchor, location)
 	if panel_open or not exact then
 		if not M.jump(item.id) then
 			return nil
@@ -1745,19 +1993,32 @@ end
 local function compose_item(workspace, item, action)
 	local expected = workspace_key(workspace)
 	local edit = action == "edit"
+	local title = edit and "Edit" or "Reply"
+	if item.anchor.kind == "file" or item.anchor.kind == "general" then
+		local scope = item.anchor.kind == "file" and "file" or "review-level"
+		title = edit and ("Edit " .. scope .. " comment") or ("Reply to " .. scope .. " comment")
+	end
 	local location = item_editor_source(workspace, item)
 	if not location then
 		return false
 	end
+	local display
+	if item.anchor.kind == "range" then
+		local display_err
+		display, display_err = displayed_anchor(workspace, item.anchor)
+		if not display then
+			notify(display_err, vim.log.levels.ERROR)
+			return false
+		end
+	end
 	compose(workspace, {
-		title = edit and "Edit" or "Reply",
+		title = title,
 		body = edit and item.body or "",
 		type_cycle = edit and REVIEW_TYPES or nil,
-		selected_type = edit and item.type or nil,
+		selected_type = (edit or item.anchor.kind == "file" or item.anchor.kind == "general") and item.type or nil,
 		source_win = location.win,
-		anchor_line = item.anchor.kind == "range" and (item.anchor.end_line or item.anchor.start_line) or location.line,
-		anchor_range = item.anchor.kind == "range" and { first = item.anchor.start_line, last = item.anchor.end_line }
-			or nil,
+		anchor_line = display and display.last or nil,
+		anchor_range = display and { first = display.first, last = display.last } or nil,
 		anchor = item.anchor,
 	}, function(body, interrupted, selected_type)
 		if not body then
@@ -1835,8 +2096,38 @@ local function direct_mutation(id, prompt, mutator)
 end
 
 function M.delete(id)
-	direct_mutation(id, "Delete review comment", function(workspace, item)
-		return review_store.delete(workspace.session, item.id)
+	local workspace = current_workspace()
+	if not workspace or not allow_mutation(workspace) then
+		return
+	end
+	local expected = workspace_key(workspace)
+	choose_item(workspace, id, "Delete review comment", function(selected)
+		if not selected then
+			return
+		end
+		local selected_id = selected.id
+		vim.ui.select({ "Cancel", "Delete" }, { prompt = delete_prompt(selected) }, function(choice)
+			if choice ~= "Delete" then
+				return
+			end
+			local current = active_for_key(expected, "deleting a review comment")
+			local stable = current and find_item(current.session, selected_id)
+			if not stable then
+				if current then
+					notify("Review comment changed before it could be deleted", vim.log.levels.ERROR)
+				end
+				return
+			end
+			if not allow_mutation(current) then
+				return
+			end
+			local changed, err = review_store.delete(current.session, stable.id)
+			if changed then
+				save_mutation(current, changed)
+			else
+				notify(err, vim.log.levels.ERROR)
+			end
+		end)
 	end)
 end
 
@@ -1915,7 +2206,7 @@ function M.reanchor(id, source_win)
 			return
 		end
 		if selected.anchor.kind == "general" then
-			notify("General review comments do not have a location to reanchor", vim.log.levels.INFO)
+			notify("Review-level comments do not have a location to reanchor", vim.log.levels.INFO)
 			return
 		end
 		choose_target(current, captured, function(target, target_err)
@@ -1932,11 +2223,35 @@ function M.reanchor(id, source_win)
 			if item.anchor.kind == "general" then
 				anchor = { kind = "general", stale = false }
 			elseif item.anchor.kind == "file" then
-				anchor, anchor_err = make_anchor(current, target, "file", 1, 1)
+				anchor, anchor_err =
+					make_anchor(current, target, "file", captured.first, captured.first, item.anchor.side)
 			else
 				local length = (item.anchor.end_line or item.anchor.start_line) - item.anchor.start_line
 				local first = vim.api.nvim_win_get_cursor(target.win)[1]
-				anchor, anchor_err = make_anchor(current, target, "range", first, first + length)
+				if target.unified then
+					local resolved
+					resolved, anchor_err = review_presenter.resolve_range(
+						current.mode_state,
+						first,
+						first,
+						target.generation,
+						item.anchor.side
+					)
+					if resolved then
+						local canonical = {
+							entry = target.entry,
+							buf = target.buf,
+							win = target.win,
+							path = resolved.path,
+							side = resolved.anchor_side,
+							layer = resolved.layer,
+						}
+						anchor, anchor_err =
+							make_anchor(current, canonical, "range", resolved.start_line, resolved.start_line + length)
+					end
+				else
+					anchor, anchor_err = make_anchor(current, target, "range", first, first + length)
+				end
 			end
 			if not anchor then
 				notify(anchor_err, vim.log.levels.ERROR)
@@ -1991,25 +2306,33 @@ function M.jump(id)
 		notify("Comment path is not represented in the exact review model", vim.log.levels.ERROR)
 		return false
 	end
-	if anchor.side == "left" and workspace.layout == "inline" and not entry.deleted then
-		workspace.layout = "split"
-	end
 	local shown, err = M.present(entry.identity)
 	if not shown then
 		notify(err, vim.log.levels.ERROR)
 		return false
 	end
 	local presentation = workspace.mode_state.presentation
-	local target = anchor.side == "left" and presentation.left or presentation.right or presentation.inline
+	local target
+	local line
+	if presentation.projection then
+		local display_err
+		target, display_err = displayed_anchor(workspace, anchor)
+		if not target then
+			notify(display_err, vim.log.levels.ERROR)
+			return false
+		end
+		line = target.first
+	else
+		target = anchor.side == "left" and presentation.left or presentation.right or presentation.inline
+		line = anchor.start_line or 1
+	end
 	if not target or not valid_win(target.win) then
 		notify("Comment side is unavailable", vim.log.levels.ERROR)
 		return false
 	end
 	vim.api.nvim_set_current_win(target.win)
-	if anchor.start_line then
-		local line = math.max(1, math.min(anchor.start_line, vim.api.nvim_buf_line_count(target.buf)))
-		vim.api.nvim_win_set_cursor(target.win, { line, math.max(0, (anchor.start_column or 1) - 1) })
-	end
+	line = math.max(1, math.min(line, vim.api.nvim_buf_line_count(target.buf)))
+	vim.api.nvim_win_set_cursor(target.win, { line, math.max(0, (anchor.start_column or 1) - 1) })
 	return true
 end
 
@@ -2509,19 +2832,65 @@ function M.link_tuicr(requested)
 	end)
 end
 
-local function anchor_targets_buffer(workspace, anchor, buf)
+local function anchor_rows_for_buffer(workspace, anchor, buf)
 	if anchor.kind == "general" then
-		return false
+		return nil
+	end
+	local presentation = workspace.mode_state and workspace.mode_state.presentation
+	if presentation and presentation.projection and presentation.inline and presentation.inline.buf == buf then
+		return review_presenter.rows_for_anchor(workspace.mode_state, anchor, presentation.generation)
 	end
 	if vim.b[buf].nvim_review_path == anchor.path then
-		return vim.b[buf].nvim_review_side == anchor.side and vim.b[buf].nvim_review_layer == anchor.layer
+		if vim.b[buf].nvim_review_side == anchor.side and vim.b[buf].nvim_review_layer == anchor.layer then
+			return mapped_anchor_rows(workspace, anchor, buf)
+		end
+		return nil
 	end
 	for _, target in ipairs(normal_targets(workspace, buf, 0)) do
 		if target.path == anchor.path and target.side == anchor.side and target.layer == anchor.layer then
-			return true
+			return mapped_anchor_rows(workspace, anchor, buf)
 		end
 	end
-	return false
+	return nil
+end
+
+local function aggregate_connector(mark)
+	if mark.starts and not mark.ends and not mark.middle then
+		return "╭"
+	elseif mark.ends and not mark.starts and not mark.middle then
+		return "╰"
+	end
+	return "│"
+end
+
+local function aggregate_sign_text(item_type, mark)
+	local icon = TYPE_SIGNS[item_type].text
+	local shows_badge = mark.single or mark.starts
+	if not shows_badge then
+		return aggregate_connector(mark)
+	elseif mark.count > 1 and mark.count < 10 then
+		return tostring(mark.count)
+	elseif mark.count >= 10 then
+		return "9+"
+	elseif not mark.multiline then
+		return icon
+	elseif mark.starts then
+		return aggregate_connector(mark) .. icon
+	end
+	return aggregate_connector(mark)
+end
+
+local function file_comment_virtual_line(item)
+	local side = item.anchor.side == "left" and "OLD" or "NEW"
+	local prefix = ("0 │ [%s][%s][%s] "):format(side, item.type, review_store.item_status(item))
+	local body, multiline = first_body_line(item.body)
+	local excerpt = display_excerpt(body, math.max(1, 88 - vim.fn.strdisplaywidth(prefix)), multiline)
+	local sign = TYPE_SIGNS[item.type] or TYPE_SIGNS.question
+	return {
+		{ "0 │ ", "LineNr" },
+		{ ("[%s][%s][%s] "):format(side, item.type, review_store.item_status(item)), sign.highlight },
+		{ excerpt, "Comment" },
+	}
 end
 
 function M.decorate_buffer(workspace, buf)
@@ -2532,34 +2901,66 @@ function M.decorate_buffer(workspace, buf)
 	vim.api.nvim_buf_clear_namespace(buf, NAMESPACE, 0, -1)
 	local count = vim.api.nvim_buf_line_count(buf)
 	local marks = {}
+	local file_comments = {}
 	for _, item in ipairs(workspace.session.items or {}) do
 		local anchor = item.anchor
-		if anchor.kind == "range" and anchor_targets_buffer(workspace, anchor, buf) then
-			local first = math.max(1, math.min(anchor.start_line, count))
-			local last = math.max(first, math.min(anchor.end_line or first, count))
-			local sign = TYPE_SIGNS[item.type] or TYPE_SIGNS.question
-			for line = first, last do
-				local text = sign.text
-				if last > first then
-					text = line == first and "╭" or line == last and "╰" or "│"
-				end
+		local anchor_rows = anchor_rows_for_buffer(workspace, anchor, buf)
+		if anchor.kind == "file" and anchor_rows then
+			file_comments[#file_comments + 1] = file_comment_virtual_line(item)
+		elseif anchor.kind == "range" and anchor_rows then
+			local rendered_rows = vim.tbl_filter(function(line)
+				return line >= 1 and line <= count
+			end, anchor_rows)
+			local item_type = TYPE_SIGNS[item.type] and item.type or "question"
+			for index, line in ipairs(rendered_rows) do
 				marks[line] = marks[line] or {}
-				marks[line][#marks[line] + 1] = { text = text, highlight = sign.highlight }
+				local mark = marks[line][item_type]
+				if not mark then
+					mark = {
+						count = 0,
+						ends = false,
+						middle = false,
+						multiline = false,
+						single = false,
+						starts = false,
+					}
+					marks[line][item_type] = mark
+				end
+				mark.count = mark.count + 1
+				if #rendered_rows > 1 then
+					mark.multiline = true
+					if index == 1 then
+						mark.starts = true
+					elseif index == #rendered_rows then
+						mark.ends = true
+					else
+						mark.middle = true
+					end
+				else
+					mark.single = true
+				end
 			end
 		end
 	end
-	for line, entries in pairs(marks) do
-		local options = { priority = 80 }
-		if #entries == 1 then
-			options.sign_text = entries[1].text
-			options.sign_hl_group = entries[1].highlight
-		else
-			options.sign_text = #entries < 10 and tostring(#entries) or "9+"
-			options.sign_hl_group = "DiagnosticSignInfo"
-			options.virt_text = { { string.format("  %d review comments", #entries), "Comment" } }
-			options.virt_text_pos = "eol"
+	if #file_comments > 0 then
+		vim.api.nvim_buf_set_extmark(buf, NAMESPACE, 0, 0, {
+			priority = 70,
+			virt_lines = file_comments,
+			virt_lines_above = true,
+			virt_lines_leftcol = true,
+		})
+	end
+	for line, line_marks in pairs(marks) do
+		for type_index, item_type in ipairs(COMMENT_SIGN_TYPES) do
+			local mark = line_marks[item_type]
+			if mark then
+				vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line - 1, 0, {
+					priority = 90 - type_index,
+					sign_hl_group = TYPE_SIGNS[item_type].highlight,
+					sign_text = aggregate_sign_text(item_type, mark),
+				})
+			end
 		end
-		vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line - 1, 0, options)
 	end
 end
 
@@ -2575,10 +2976,18 @@ function M.refresh_marks(workspace)
 		return
 	end
 	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		if valid_buf(buf) and (buffer_in_root(workspace.root, buf) or vim.b[buf].nvim_review_path) then
+		if
+			valid_buf(buf)
+			and (
+				buffer_in_root(workspace.root, buf)
+				or vim.b[buf].nvim_review_path
+				or vim.b[buf].nvim_review_role == "unified"
+			)
+		then
 			M.decorate_buffer(workspace, buf)
 		end
 	end
+	review_presenter.refresh_bands(workspace.mode_state)
 end
 
 function M.snapshot()

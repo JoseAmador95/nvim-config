@@ -144,7 +144,7 @@ test("tmux refresh is a namespaced palette-only descriptor", function()
 	assert(not find_item(compact, "tmux.refresh_dev_session"), "tmux refresh leaked into the context menu")
 end)
 
-test("review layout and context are palette-only namespaced commands", function()
+test("review presentation and comment actions are palette-only namespaced commands", function()
 	local menu_context = context.new({ filetype = "lua", mode = "n" })
 	local palette = catalog.build(menu_context, function() end, "palette")
 	local compact = catalog.build(menu_context, function() end, "context")
@@ -166,6 +166,7 @@ test("review layout and context are palette-only namespaced commands", function(
 		["command.review_comments"] = { "Focus Review Comments", "<leader>rl" },
 		["command.review_inline_comments"] = { "Toggle Inline Comment Previews", "<leader>ri" },
 		["command.review_file_comment"] = { "Add File-level Review Comment", "<leader>rA" },
+		["command.review_general_comment"] = { "Add Review-level Comment", "<leader>rR" },
 		["command.review_edit"] = { "Edit Review Comment", "<leader>re" },
 		["command.review_change_type"] = { "Change Comment Type at Current Line", "<leader>rc" },
 		["command.review_delete"] = { "Delete Comment at Current Line", "<leader>rd" },

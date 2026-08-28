@@ -56,6 +56,7 @@ test("mapping table uses only the approved lowercase review vocabulary", functio
 		"<leader>rg",
 		"<leader>ra",
 		"<leader>rA",
+		"<leader>rR",
 		"<leader>re",
 		"<leader>rc",
 		"<leader>rd",
@@ -116,53 +117,244 @@ test("inclusive cursor matching covers multiline overlaps", function()
 		side = location.side,
 		layer = location.layer,
 	}, location))
+	local shared = {
+		path = "lua/new.lua",
+		side = "right",
+		layer = "history",
+		line = 4,
+		refs = {
+			{ path = "lua/old.lua", side = "left", layer = "history", line = 4 },
+			{ path = "lua/new.lua", side = "right", layer = "history", line = 4 },
+		},
+	}
+	for _, side in ipairs({
+		{ path = "lua/old.lua", side = "left" },
+		{ path = "lua/new.lua", side = "right" },
+	}) do
+		assert(review._contains_line({
+			kind = "range",
+			path = side.path,
+			side = side.side,
+			layer = "history",
+			start_line = 4,
+			end_line = 4,
+		}, shared))
+	end
 end)
 
-test("overlapping comment rails render one visible aggregate marker", function()
+test("comment rails compact each line and type with stable priorities", function()
 	local buf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three" })
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three", "four", "five" })
 	vim.b[buf].nvim_review_path = "lua/example.lua"
 	vim.b[buf].nvim_review_side = "right"
 	vim.b[buf].nvim_review_layer = "history"
+	local items = {}
+	local sequence = 0
+	local function range_item(item_type, first, last, fields)
+		sequence = sequence + 1
+		local value = {
+			id = ("%064d"):format(sequence),
+			sequence = sequence,
+			type = item_type,
+			body = item_type .. " body",
+			anchor = {
+				kind = "range",
+				path = "lua/example.lua",
+				side = "right",
+				layer = "history",
+				start_line = first,
+				end_line = last,
+			},
+			reply_to = vim.NIL,
+			resolution = "open",
+			deliveries = {},
+		}
+		for name, field in pairs(fields or {}) do
+			value[name] = field
+		end
+		items[#items + 1] = value
+	end
+	range_item("issue", 1, 1, { deliveries = { { backend = "tuicr" } } })
+	range_item("suggestion", 1, 1, { resolution = "resolved" })
+	range_item("question", 2, 2)
+	range_item("question", 2, 2, { reply_to = items[3].id })
+	for _ = 1, 9 do
+		range_item("rationale", 3, 3)
+	end
+	range_item("pedantic", 1, 3)
+	range_item("praise", 4, 5)
+	range_item("praise", 3, 4)
+	for _ = 1, 10 do
+		range_item("issue", 4, 5)
+	end
+	items[#items + 1] = {
+		id = string.rep("f", 64),
+		sequence = sequence + 1,
+		type = "issue",
+		anchor = { kind = "file", path = "lua/example.lua", side = "right", layer = "history" },
+	}
+	items[#items + 1] = {
+		id = string.rep("g", 64),
+		sequence = sequence + 2,
+		type = "praise",
+		anchor = { kind = "general" },
+	}
 	local workspace = {
 		root = "/tmp/review-aggregate",
+		session = { items = items },
+	}
+	local external_namespace = vim.api.nvim_create_namespace("code_review_spec_external_sign")
+	vim.api.nvim_buf_set_extmark(buf, external_namespace, 0, 0, {
+		priority = 100,
+		sign_hl_group = "WarningMsg",
+		sign_text = "X",
+	})
+	review.decorate_buffer(workspace, buf)
+	local expected = {
+		[1] = {
+			NvimReviewCommentIssue = "●",
+			NvimReviewCommentSuggestion = "◆",
+			NvimReviewCommentPedantic = "╭·",
+		},
+		[2] = { NvimReviewCommentQuestion = "2", NvimReviewCommentPedantic = "│" },
+		[3] = {
+			NvimReviewCommentRationale = "9",
+			NvimReviewCommentPedantic = "╰",
+			NvimReviewCommentPraise = "╭♥",
+		},
+		[4] = { NvimReviewCommentIssue = "9+", NvimReviewCommentPraise = "2" },
+		[5] = { NvimReviewCommentIssue = "╰", NvimReviewCommentPraise = "╰" },
+	}
+	local priorities = {
+		NvimReviewCommentIssue = 89,
+		NvimReviewCommentSuggestion = 88,
+		NvimReviewCommentQuestion = 87,
+		NvimReviewCommentRationale = 86,
+		NvimReviewCommentPedantic = 85,
+		NvimReviewCommentPraise = 84,
+	}
+	local seen = {}
+	for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })) do
+		local details = mark[4]
+		if priorities[details.sign_hl_group] then
+			local line = mark[2] + 1
+			local sign_text = vim.trim(details.sign_text)
+			seen[line] = seen[line] or {}
+			assert(seen[line][details.sign_hl_group] == nil, "line/type rail emitted more than one sign")
+			seen[line][details.sign_hl_group] = sign_text
+			assert(details.priority == priorities[details.sign_hl_group], "review type priority changed")
+			assert(vim.fn.strdisplaywidth(sign_text) <= 2, "review sign exceeds two display cells")
+			assert(details.virt_text == nil, "review rail retained an EOL summary")
+		end
+	end
+	assert(vim.deep_equal(seen, expected), "unexpected compact rail projection: " .. vim.inspect(seen))
+	local external = vim.api.nvim_buf_get_extmarks(buf, external_namespace, 0, -1, { details = true })
+	assert(
+		#external == 1 and vim.trim(external[1][4].sign_text or "") == "X",
+		"review rails replaced another sign provider"
+	)
+	vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("file comments render as virtual line zero only on their exact side", function()
+	local function comment(sequence, item_type, body, anchor)
+		return {
+			id = ("%064d"):format(sequence),
+			sequence = sequence,
+			type = item_type,
+			body = body,
+			anchor = anchor,
+			reply_to = vim.NIL,
+			resolution = "open",
+			deliveries = {},
+		}
+	end
+	local workspace = {
+		root = "/tmp/review-file-comments",
 		session = {
 			items = {
-				{
-					sequence = 1,
-					type = "issue",
-					anchor = {
-						kind = "range",
-						path = "lua/example.lua",
-						side = "right",
-						layer = "history",
-						start_line = 2,
-						end_line = 2,
-					},
-				},
-				{
-					sequence = 2,
-					type = "question",
-					anchor = {
-						kind = "range",
-						path = "lua/example.lua",
-						side = "right",
-						layer = "history",
-						start_line = 1,
-						end_line = 3,
-					},
-				},
+				comment(1, "issue", string.rep("á🙂", 80) .. "\ncontinued", {
+					kind = "file",
+					path = "lua/example.lua",
+					side = "right",
+					layer = "history",
+				}),
+				comment(2, "praise", "second current comment", {
+					kind = "file",
+					path = "lua/example.lua",
+					side = "right",
+					layer = "history",
+				}),
+				comment(3, "question", "old-only comment", {
+					kind = "file",
+					path = "lua/example.lua",
+					side = "left",
+					layer = "history",
+				}),
+				comment(4, "rationale", "review-only comment", { kind = "general" }),
 			},
 		},
 	}
-	review.decorate_buffer(workspace, buf)
-	local marks = vim.api.nvim_buf_get_extmarks(buf, -1, { 1, 0 }, { 1, -1 }, { details = true })
-	assert(
-		#marks == 1 and vim.trim(marks[1][4].sign_text or "") == "2",
-		"overlapping comments did not aggregate: " .. vim.inspect(marks)
-	)
-	assert(marks[1][4].virt_text[1][1]:find("2 review comments", 1, true))
-	vim.api.nvim_buf_delete(buf, { force = true })
+	local function decorated(side)
+		local buf = vim.api.nvim_create_buf(false, true)
+		local original = { "first", "second" }
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, original)
+		vim.b[buf].nvim_review_path = "lua/example.lua"
+		vim.b[buf].nvim_review_side = side
+		vim.b[buf].nvim_review_layer = "history"
+		review.decorate_buffer(workspace, buf)
+		local virtual
+		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })) do
+			if mark[4].virt_lines then
+				assert(virtual == nil, "file comments emitted multiple line-zero extmarks")
+				virtual = mark[4].virt_lines
+				assert(mark[2] == 0 and mark[4].virt_lines_above and mark[4].virt_lines_leftcol)
+			end
+		end
+		assert(vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), original))
+		return buf, assert(virtual, "matching file comment did not render line zero")
+	end
+	local right_buf, right = decorated("right")
+	assert(#right == 2, "CURRENT line zero included an opposite-side or review-level comment")
+	local right_first = table.concat(vim.tbl_map(function(chunk)
+		return chunk[1]
+	end, right[1]))
+	local right_second = table.concat(vim.tbl_map(function(chunk)
+		return chunk[1]
+	end, right[2]))
+	assert(right_first:find("0 │ [NEW][issue][draft]", 1, true) == 1 and right_first:sub(-3) == "…")
+	assert(pcall(vim.str_utfindex, right_first), "line-zero excerpt contains invalid UTF-8")
+	assert(right_second:find("0 │ [NEW][praise][draft] second current comment", 1, true) == 1)
+	assert(not right_first:find("old-only", 1, true) and not right_first:find("review-only", 1, true))
+
+	local left_buf, left = decorated("left")
+	assert(#left == 1, "OLD line zero included CURRENT comments")
+	local left_text = table.concat(vim.tbl_map(function(chunk)
+		return chunk[1]
+	end, left[1]))
+	assert(left_text == "0 │ [OLD][question][draft] old-only comment")
+	vim.api.nvim_buf_delete(right_buf, { force = true })
+	vim.api.nvim_buf_delete(left_buf, { force = true })
+end)
+
+test("comment sign highlights are theme-linked, restored, and user-overridable", function()
+	local links = {
+		NvimReviewCommentIssue = "DiagnosticSignError",
+		NvimReviewCommentSuggestion = "DiagnosticSignWarn",
+		NvimReviewCommentQuestion = "DiagnosticSignInfo",
+		NvimReviewCommentRationale = "Special",
+		NvimReviewCommentPedantic = "DiagnosticSignHint",
+		NvimReviewCommentPraise = "DiagnosticSignOk",
+	}
+	for group, link in pairs(links) do
+		assert(vim.api.nvim_get_hl(0, { name = group, link = true }).link == link, group .. " link changed")
+	end
+	vim.api.nvim_set_hl(0, "NvimReviewCommentIssue", { link = "String" })
+	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "review-comment-user-override" })
+	assert(vim.api.nvim_get_hl(0, { name = "NvimReviewCommentIssue", link = true }).link == "String")
+	vim.cmd("highlight clear NvimReviewCommentIssue")
+	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "review-comment-default-link" })
+	assert(vim.api.nvim_get_hl(0, { name = "NvimReviewCommentIssue", link = true }).link == "DiagnosticSignError")
 end)
 
 test("open presents in the ordinary tab, opens the native panel, and close owns no tab", function()
@@ -181,6 +373,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		new = store.new,
 		save = store.save,
 		edit = store.edit,
+		delete = store.delete,
 		mark_tuicr_delivered = store.mark_tuicr_delivered,
 		save_recovery = store.save_recovery,
 		verify_recovery = store.verify_recovery,
@@ -244,11 +437,35 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 			items = {},
 		}
 	end
+	local old_lines = {
+		"old one",
+		"old two",
+		"old three",
+		"old four",
+		"old five",
+		"old six",
+		"old seven",
+		"old eight",
+	}
+	local new_lines = vim.deepcopy(old_lines)
+	new_lines[4] = "new four"
+	local old_text = table.concat(old_lines, "\n") .. "\n"
+	local new_text = table.concat(new_lines, "\n") .. "\n"
 	local entry = {
 		identity = "history\0old.lua\0new.lua",
+		status = "R",
+		layer = "history",
 		old_path = "old.lua",
 		new_path = "new.lua",
 		path = "new.lua",
+		old_text = old_text,
+		new_text = new_text,
+		hunks = vim.diff(old_text, new_text, { result_type = "indices" }),
+		metadata_only = false,
+		binary = false,
+		submodule = false,
+		added = false,
+		deleted = false,
 	}
 	local child_entry = {
 		identity = "history\0child-old.lua\0child.lua",
@@ -289,6 +506,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 	}
 	local original_file_comment = review.file_comment
 	local original_notify = vim.notify
+	local original_select = vim.ui.select
 	vim.notify = function(value)
 		notifications[#notifications + 1] = tostring(value)
 	end
@@ -327,6 +545,17 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 				item.type = fields.type
 				item.body = fields.body
 				item.anchor = vim.deepcopy(fields.anchor)
+				return copy
+			end
+		end
+		return nil, "review item does not exist"
+	end
+	store.delete = function(value, id)
+		calls.delete_session = value
+		local copy = vim.deepcopy(value)
+		for index, item in ipairs(copy.items) do
+			if item.id == id then
+				table.remove(copy.items, index)
 				return copy
 			end
 		end
@@ -391,15 +620,21 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		assert(options.layout == state.workspace.layout and options.context == state.workspace.context)
 		vim.api.nvim_set_current_tabpage(state.origin.tab)
 		vim.api.nvim_set_current_win(state.origin.win)
+		local side = "new"
 		local target = {
 			win = vim.api.nvim_get_current_win(),
 			buf = vim.api.nvim_get_current_buf(),
-			side = "new",
+			side = side,
 		}
-		vim.b[target.buf].nvim_review_path = selected.new_path
-		vim.b[target.buf].nvim_review_side = "right"
+		vim.b[target.buf].nvim_review_path = side == "old" and selected.old_path or selected.new_path
+		vim.b[target.buf].nvim_review_side = side == "old" and "left" or "right"
 		vim.b[target.buf].nvim_review_layer = selected.layer or "history"
-		state.presentation = { target = target, inline = target, entry = selected }
+		state.presentation = {
+			target = target,
+			inline = options.layout == "inline" and target or nil,
+			entry = selected,
+			layout = options.layout,
+		}
 		return true
 	end
 	presenter.clear = function(state)
@@ -523,7 +758,8 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		assert(calls.source_updates == 1 and workspace.panel.source_win == workspace.mode_state.presentation.target.win)
 		local status = review.status()
 		assert(status.active and status.mode_on and status.scope_kind == "commit" and status.scope_label == "HEAD")
-		assert(status.layout == "inline" and status.context == "hunks" and status.inline_comments)
+		assert(status.layout == "inline" and status.context == "hunks")
+		assert(status.inline_comments)
 		assert(vim.deep_equal(status.entry, {
 			identity = entry.identity,
 			path = "new.lua",
@@ -552,6 +788,9 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		assert(#review_events == events_before_failed_mode, "failed mode activation emitted review state")
 		presenter.show = show_before_failure
 		assert(review.mode("on") and workspace.mode_on and calls.shown == 3)
+
+		assert(review.layout("split"))
+		assert(review.layout("inline"))
 		workspace.panel.visible = false
 		vim.cmd("tabnew")
 		local session_focus_tab = vim.api.nvim_get_current_tabpage()
@@ -561,14 +800,16 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		vim.api.nvim_win_set_cursor(session_focus_win, { 2, 1 })
 		assert(review.suspend_for_session(), "review UI did not suspend from an unrelated tab")
 		assert(review.restore_after_session(), "review UI did not restore from an unrelated tab")
+		assert(workspace.mode_state.presentation.target.side == "new")
 		assert(vim.api.nvim_get_current_tabpage() == session_focus_tab, "session restore stole the active tab")
 		assert(vim.api.nvim_get_current_win() == session_focus_win, "session restore stole the active window")
 		assert(vim.api.nvim_get_current_buf() == session_focus_buf, "session restore replaced the active buffer")
 		assert(vim.deep_equal(vim.api.nvim_win_get_cursor(session_focus_win), { 2, 1 }), "session restore lost view")
 		vim.cmd("tabclose")
 		workspace.panel.visible = true
+		local shown_before_file_comment = calls.shown
 		workspace.panel.callbacks.file_comment(entry.identity)
-		assert(calls.shown == 5 and calls.file_comment == 1 and not workspace.panel.visible)
+		assert(calls.shown == shown_before_file_comment + 1 and calls.file_comment == 1 and not workspace.panel.visible)
 		review.file_comment = original_file_comment
 
 		local parent = workspace
@@ -589,7 +830,8 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		local child = assert(review._active_workspace())
 		assert(child ~= parent and child.scope.id == child_scope.id and child.scope.label == "CHILD-FROZEN")
 		assert(#review._scope_history == 1)
-		assert(child.layout == "split" and child.context == "full" and child.inline_comments == false)
+		assert(child.layout == "split" and child.context == "full")
+		assert(child.inline_comments == false)
 		assert(calls.resolved == resolved_before_child + 1 and calls.built == built_before_child + 1)
 		assert(#review_events == events_before_child + 1, "commit drill-in did not emit one stable state")
 
@@ -605,7 +847,8 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		assert(workspace == parent and workspace.session == parent_session and workspace.model == parent_model)
 		assert(workspace.scope == parent_scope and workspace.panel == parent_panel and #review._scope_history == 0)
 		assert(workspace.entry_identity == entry.identity and workspace.mode_on)
-		assert(workspace.layout == "split" and workspace.context == "full" and workspace.inline_comments == false)
+		assert(workspace.layout == "split" and workspace.context == "full")
+		assert(workspace.inline_comments == false)
 		assert(workspace.panel.visible and workspace.panel.focused == "commits")
 		assert(vim.deep_equal(workspace.panel.endpoints, { first = "frozen-first", second = "frozen-second" }))
 		assert(calls.resolved == resolved_before_child + 1, "scope back resolved moving refs")
@@ -637,6 +880,376 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		workspace.fail_restore = nil
 		assert(review.mode("on"), "review mode did not recover after failed session restore")
 
+		local integration_origin_win = workspace.panel.source_win
+		vim.api.nvim_set_current_win(integration_origin_win)
+		local stub_mode_state = workspace.mode_state
+		local stub_presenter = {
+			show = presenter.show,
+			clear = presenter.clear,
+			current_target = presenter.current_target,
+		}
+		local integration_state = originals.mode_new(workspace)
+		assert(originals.enable(integration_state), "actual review mode could not enable for old-side integration")
+		workspace.mode_state = integration_state
+		workspace.mode_on = true
+		workspace.layout = "split"
+		workspace.context = "full"
+		presenter.show = originals.show
+		presenter.clear = originals.clear
+		presenter.current_target = originals.current_target
+		local composed_before_old_side = #calls.composed
+		assert(review.present(entry.identity), "actual split presenter could not render the controller fixture")
+		local left = assert(integration_state.presentation.left, "split presentation did not expose an old side")
+		assert(vim.b[left.buf].nvim_review_side == "left" and vim.b[left.buf].nvim_review_path == entry.old_path)
+		assert(vim.api.nvim_buf_get_lines(left.buf, 3, 4, false)[1] == "old four", "old line was not real text")
+		vim.api.nvim_set_current_win(left.win)
+		vim.api.nvim_win_set_cursor(left.win, { 4, 0 })
+		review.comment(4, 4, "question")
+		assert(#calls.composed == composed_before_old_side + 1, "old-side comment did not reach the composer")
+		local old_options = calls.composed[#calls.composed].options
+		local old_anchor = old_options.anchor
+		assert(old_options.source_win == left.win and old_options.anchor_line == 4)
+		assert(old_anchor.path == entry.old_path and old_anchor.side == "left" and old_anchor.layer == "history")
+		assert(old_anchor.start_line == 4 and old_anchor.end_line == 4)
+		local expected_old_context = table.concat(vim.list_slice(old_lines, 1, 7), "\n")
+		assert(old_anchor.context == expected_old_context, "old-side anchor captured the wrong context")
+		assert(old_anchor.context_hash == vim.fn.sha256(expected_old_context):lower())
+		local old_comment_id = string.rep("9", 64)
+		workspace.session.items = {
+			{
+				id = old_comment_id,
+				sequence = 9,
+				type = "question",
+				body = "Old-side controller proof",
+				anchor = vim.deepcopy(old_anchor),
+				reply_to = vim.NIL,
+				resolution = "resolved",
+				deliveries = { { backend = "tuicr", receipt = "old-side-proof" } },
+			},
+		}
+		review.refresh_marks(workspace)
+		local old_rails = vim.api.nvim_buf_get_extmarks(left.buf, -1, { 3, 0 }, { 3, -1 }, { details = true })
+		local rendered_old_rail = false
+		for _, mark in ipairs(old_rails) do
+			if mark[4].sign_hl_group == "NvimReviewCommentQuestion" and vim.trim(mark[4].sign_text or "") == "?" then
+				rendered_old_rail = true
+			end
+		end
+		assert(rendered_old_rail, "old-side anchor could not render its comment rail")
+		workspace.session.items[1].deliveries = {}
+
+		local confirmations = {}
+		vim.ui.select = function(choices, options, callback)
+			confirmations[#confirmations + 1] = {
+				choices = vim.deepcopy(choices),
+				options = vim.deepcopy(options),
+				callback = callback,
+			}
+		end
+		for _, cancellation in ipairs({ vim.NIL, "Cancel" }) do
+			review.delete(old_comment_id)
+			local confirmation = confirmations[#confirmations]
+			assert(vim.deep_equal(confirmation.choices, { "Cancel", "Delete" }))
+			assert(confirmation.options.prompt:find("#09 [question] [OLD] old.lua:4", 1, true))
+			confirmation.callback(cancellation == vim.NIL and nil or cancellation)
+			assert(#workspace.session.items == 1, "cancelled deletion changed the review")
+		end
+		review.delete(old_comment_id)
+		local latest_session = vim.deepcopy(workspace.session)
+		latest_session.items[1].body = "Latest old-side body"
+		workspace.session = latest_session
+		confirmations[#confirmations].callback("Delete")
+		assert(calls.delete_session == latest_session, "delete did not refetch the latest active session")
+		assert(#workspace.session.items == 0, "confirmed deletion did not save")
+		vim.ui.select = original_select
+
+		local current_comment_id = string.rep("8", 64)
+		local current_anchor = vim.deepcopy(old_anchor)
+		current_anchor.path = entry.new_path
+		current_anchor.side = "right"
+		workspace.session.items = {
+			{
+				id = old_comment_id,
+				sequence = 9,
+				type = "question",
+				body = "Old inline jump",
+				anchor = vim.deepcopy(old_anchor),
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+			{
+				id = current_comment_id,
+				sequence = 10,
+				type = "suggestion",
+				body = "Current inline jump",
+				anchor = current_anchor,
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+		}
+		workspace.layout = "inline"
+		assert(review.present(entry.identity))
+		local inline = integration_state.presentation.inline
+		local composed_before_unified = #calls.composed
+		vim.api.nvim_set_current_win(inline.win)
+
+		vim.api.nvim_win_set_cursor(inline.win, { 4, 0 })
+		review.comment(4, 4, "issue")
+		local old_inline_options = calls.composed[#calls.composed].options
+		assert(#calls.composed == composed_before_unified + 1)
+		assert(old_inline_options.source_win == inline.win and old_inline_options.anchor_line == 4)
+		assert(vim.deep_equal(old_inline_options.anchor_range, { first = 4, last = 4 }))
+		assert(old_inline_options.anchor.path == entry.old_path and old_inline_options.anchor.side == "left")
+		assert(old_inline_options.anchor.start_line == 4 and old_inline_options.anchor.end_line == 4)
+		assert(old_inline_options.anchor.context:find("old four", 1, true))
+		assert(not old_inline_options.anchor.context:find("new four", 1, true))
+
+		vim.api.nvim_win_set_cursor(inline.win, { 5, 0 })
+		review.comment(5, 5, "suggestion")
+		local new_inline_options = calls.composed[#calls.composed].options
+		assert(new_inline_options.anchor_line == 5 and new_inline_options.anchor.side == "right")
+		assert(new_inline_options.anchor.path == entry.new_path and new_inline_options.anchor.start_line == 4)
+		assert(new_inline_options.anchor.context:find("new four", 1, true))
+		assert(not new_inline_options.anchor.context:find("old four", 1, true))
+
+		vim.api.nvim_win_set_cursor(inline.win, { 3, 0 })
+		review.comment(3, 3, "rationale")
+		local shared_options = calls.composed[#calls.composed].options
+		assert(shared_options.anchor.side == "right" and shared_options.anchor.start_line == 3)
+		review.comment(3, 4, "question")
+		local old_range_options = calls.composed[#calls.composed].options
+		assert(old_range_options.anchor.side == "left")
+		assert(old_range_options.anchor.start_line == 3 and old_range_options.anchor.end_line == 4)
+		assert(vim.deep_equal(old_range_options.anchor_range, { first = 3, last = 4 }))
+		review.comment(5, 6, "praise")
+		local new_range_options = calls.composed[#calls.composed].options
+		assert(new_range_options.anchor.side == "right")
+		assert(new_range_options.anchor.start_line == 4 and new_range_options.anchor.end_line == 5)
+		assert(vim.deep_equal(new_range_options.anchor_range, { first = 5, last = 6 }))
+		local composed_before_mixed = #calls.composed
+		review.comment(4, 5, "issue")
+		assert(#calls.composed == composed_before_mixed, "mixed OLD/NEW selection opened the composer")
+		assert(notifications[#notifications]:find("OLD-only and NEW-only", 1, true))
+		vim.api.nvim_win_set_cursor(inline.win, { 4, 0 })
+		review.file_comment("praise")
+		local old_file_options = calls.composed[#calls.composed].options
+		assert(old_file_options.anchor.kind == "file")
+		assert(old_file_options.anchor.side == "left" and old_file_options.anchor.path == entry.old_path)
+		vim.api.nvim_win_set_cursor(inline.win, { 3, 0 })
+		review.file_comment("issue")
+		local shared_file_options = calls.composed[#calls.composed].options
+		assert(shared_file_options.anchor.kind == "file")
+		assert(shared_file_options.anchor.side == "right" and shared_file_options.anchor.path == entry.new_path)
+
+		local direct_items = vim.deepcopy(workspace.session.items)
+		workspace.session.items = {
+			{
+				id = string.rep("4", 64),
+				sequence = 4,
+				type = "question",
+				body = "OLD mapped rail",
+				anchor = {
+					kind = "range",
+					path = entry.old_path,
+					side = "left",
+					layer = "history",
+					start_line = 4,
+					end_line = 5,
+				},
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+			{
+				id = string.rep("5", 64),
+				sequence = 5,
+				type = "suggestion",
+				body = "NEW mapped rail",
+				anchor = {
+					kind = "range",
+					path = entry.new_path,
+					side = "right",
+					layer = "history",
+					start_line = 3,
+					end_line = 4,
+				},
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+			{
+				id = string.rep("6", 64),
+				sequence = 6,
+				type = "praise",
+				body = "OLD file",
+				anchor = { kind = "file", path = entry.old_path, side = "left", layer = "history" },
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+			{
+				id = string.rep("7", 64),
+				sequence = 7,
+				type = "issue",
+				body = "NEW file",
+				anchor = { kind = "file", path = entry.new_path, side = "right", layer = "history" },
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+			{
+				id = string.rep("a", 64),
+				sequence = 8,
+				type = "rationale",
+				body = "Panel only",
+				anchor = { kind = "general" },
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+		}
+		review.refresh_marks(workspace)
+		local rail_rows = { question = {}, suggestion = {} }
+		local file_text = ""
+		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(inline.buf, -1, 0, -1, { details = true })) do
+			local details = mark[4]
+			if details.sign_hl_group == "NvimReviewCommentQuestion" then
+				rail_rows.question[mark[2] + 1] = true
+			elseif details.sign_hl_group == "NvimReviewCommentSuggestion" then
+				rail_rows.suggestion[mark[2] + 1] = true
+			end
+			for _, virtual in ipairs(details.virt_lines or {}) do
+				file_text = file_text
+					.. table.concat(vim.tbl_map(function(chunk)
+						return chunk[1]
+					end, virtual))
+			end
+		end
+		assert(rail_rows.question[4] and rail_rows.question[6] and not rail_rows.question[5])
+		assert(rail_rows.suggestion[3] and rail_rows.suggestion[5] and not rail_rows.suggestion[4])
+		assert(file_text:find("[OLD][praise][draft]", 1, true))
+		assert(file_text:find("[NEW][issue][draft]", 1, true))
+		assert(not file_text:find("Panel only", 1, true))
+		workspace.session.items = direct_items
+		review.refresh_marks(workspace)
+
+		local shared_old_id = string.rep("d", 64)
+		local shared_new_id = string.rep("e", 64)
+		workspace.session.items = {
+			{
+				id = shared_old_id,
+				sequence = 11,
+				type = "question",
+				body = "OLD shared lookup",
+				anchor = {
+					kind = "range",
+					path = entry.old_path,
+					side = "left",
+					layer = "history",
+					start_line = 3,
+					end_line = 3,
+					stale = false,
+				},
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+			{
+				id = shared_new_id,
+				sequence = 12,
+				type = "suggestion",
+				body = "NEW shared lookup",
+				anchor = {
+					kind = "range",
+					path = entry.new_path,
+					side = "right",
+					layer = "history",
+					start_line = 3,
+					end_line = 3,
+					stale = false,
+				},
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+		}
+		vim.api.nvim_win_set_cursor(inline.win, { 3, 0 })
+		local local_choices
+		vim.ui.select = function(choices)
+			local_choices = vim.deepcopy(choices)
+		end
+		review.edit()
+		assert(#local_choices == 2, "shared display row did not query both source anchors")
+		vim.ui.select = original_select
+		workspace.inline_comments = true
+		assert(review._show_inline_preview(), "shared display row did not show both inline previews")
+		local preview = vim.api.nvim_buf_get_extmarks(
+			inline.buf,
+			review._preview_namespace,
+			{ 2, 0 },
+			{ 2, -1 },
+			{ details = true }
+		)
+		assert(#preview == 1 and #(preview[1][4].virt_lines or {}) == 2)
+		review._clear_inline_preview()
+		review.reanchor(shared_old_id, inline.win)
+		local preferred_anchor = assert(workspace.session.items[1]).anchor
+		assert(preferred_anchor.side == "left" and preferred_anchor.path == entry.old_path)
+		assert(preferred_anchor.start_line == 3, "shared-row reanchor did not preserve the existing OLD side")
+		workspace.session.items = direct_items
+		review.refresh_marks(workspace)
+		local hidden_id = string.rep("f", 64)
+		workspace.session.items = {
+			{
+				id = hidden_id,
+				sequence = 13,
+				type = "issue",
+				body = "Hidden context jump",
+				anchor = {
+					kind = "range",
+					path = entry.new_path,
+					side = "right",
+					layer = "history",
+					start_line = 8,
+					end_line = 8,
+					stale = false,
+				},
+				reply_to = vim.NIL,
+				resolution = "open",
+				deliveries = {},
+			},
+		}
+		workspace.context = "hunks"
+		assert(review.present(entry.identity))
+		assert(review.jump(hidden_id), "comment in concealed unified context did not open")
+		assert(integration_state.presentation.inline.side == "unified")
+		assert(vim.api.nvim_win_get_cursor(integration_state.presentation.inline.win)[1] == 9)
+		workspace.context = "full"
+		workspace.session.items = direct_items
+
+		assert(review.jump(old_comment_id), "OLD inline comment did not open")
+		assert(workspace.layout == "inline")
+		assert(integration_state.presentation.inline.side == "unified")
+		assert(vim.api.nvim_win_get_cursor(integration_state.presentation.inline.win)[1] == 4)
+		assert(review.jump(current_comment_id), "CURRENT inline comment did not open")
+		assert(workspace.layout == "inline")
+		assert(integration_state.presentation.inline.side == "unified")
+		assert(vim.api.nvim_win_get_cursor(integration_state.presentation.inline.win)[1] == 5)
+		workspace.session.items = {}
+
+		originals.disable(integration_state)
+		presenter.show = stub_presenter.show
+		presenter.clear = stub_presenter.clear
+		presenter.current_target = stub_presenter.current_target
+		workspace.mode_state = stub_mode_state
+		workspace.mode_on = true
+		workspace.panel.source_win = integration_origin_win
+		vim.api.nvim_set_current_win(integration_origin_win)
+		assert(review.present(entry.identity), "stub presentation did not return to CURRENT")
+		review.refresh_marks(workspace)
+
 		local source_win = workspace.panel.source_win
 		local source_buf = vim.api.nvim_win_get_buf(source_win)
 		vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "one", "two", "three", "four", "five", "six" })
@@ -662,7 +1275,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		local comments_win = vim.api.nvim_get_current_win()
 		vim.bo.buftype = "nofile"
 		workspace.panel.visible = true
-		workspace.panel.callbacks.reanchor_comment(comment_id, source_win)
+		review.reanchor(comment_id, source_win)
 		local moved = workspace.session.items[1].anchor
 		assert(moved.start_line == 3 and moved.end_line == 4, "multiline reanchor did not preserve its range")
 		assert(moved.path == "new.lua" and moved.side == "right" and moved.layer == "history")
@@ -677,11 +1290,20 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 
 		local command = vim.api.nvim_get_commands({ builtin = false }).ReviewInlineComments
 		assert(command and command.nargs == "?", "ReviewInlineComments command is missing or has the wrong arity")
+		assert(
+			vim.api.nvim_get_commands({ builtin = false }).ReviewGeneralComment,
+			"ReviewGeneralComment command is missing"
+		)
 		assert(vim.api.nvim_get_commands({ builtin = false }).ReviewScopeBack, "ReviewScopeBack command is missing")
 		local inline_mapping = vim.fn.maparg("<leader>ri", "n", false, true)
 		assert((inline_mapping.rhs or ""):lower() == "<cmd>reviewinlinecomments<cr>", vim.inspect(inline_mapping))
 		local back_mapping = vim.fn.maparg("<leader>rb", "n", false, true)
 		assert((back_mapping.rhs or ""):lower() == "<cmd>reviewscopeback<cr>", vim.inspect(back_mapping))
+		local review_comment_mapping = vim.fn.maparg("<leader>rR", "n", false, true)
+		assert(
+			(review_comment_mapping.rhs or ""):lower() == "<cmd>reviewgeneralcomment<cr>",
+			vim.inspect(review_comment_mapping)
+		)
 		vim.cmd("ReviewInlineComments off")
 		assert(workspace.inline_comments == false)
 		vim.cmd("ReviewInlineComments on")
@@ -728,6 +1350,16 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 			type = "question",
 			body = "file body",
 			anchor = { kind = "file", path = "new.lua", side = "right", layer = "history", stale = false },
+			reply_to = vim.NIL,
+			resolution = "open",
+			deliveries = {},
+		}
+		local general_item = {
+			id = string.rep("e", 64),
+			sequence = 6,
+			type = "rationale",
+			body = "general body",
+			anchor = { kind = "general", stale = false },
 			reply_to = vim.NIL,
 			resolution = "open",
 			deliveries = {},
@@ -790,6 +1422,32 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		vim.bo.buftype = "nofile"
 		vim.b.nvim_review_panel_role = "comments"
 		assert(not review._show_inline_preview(), "panel/nofile buffer produced a passive preview")
+		local picker
+		vim.ui.select = function(choices, options)
+			picker = { choices = choices, options = options }
+		end
+		workspace.panel.visible = true
+		workspace.session.items = { first, unrelated, general_item }
+		review.edit()
+		assert(picker and #picker.choices == 3, "review action did not open the shared comment picker")
+		local picker_labels = {}
+		for _, choice in ipairs(picker.choices) do
+			picker_labels[choice.id] = picker.options.format_item(choice)
+		end
+		assert(picker_labels[first.id]:find("[CURRENT] new.lua:2-4", 1, true))
+		assert(picker_labels[unrelated.id]:find("[OLD] new.lua:1-4", 1, true))
+		assert(
+			not picker_labels[general_item.id]:find("[OLD]", 1, true)
+				and not picker_labels[general_item.id]:find("[CURRENT]", 1, true),
+			"review-level picker item invented a review side"
+		)
+		assert(
+			picker_labels[general_item.id]:find("review", 1, true),
+			"review-level item retained internal terminology"
+		)
+		vim.ui.select = original_select
+		workspace.panel.visible = false
+		workspace.session.items = all_preview_items
 		vim.api.nvim_set_current_win(source_win)
 
 		assert(review._show_inline_preview())
@@ -805,12 +1463,18 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		assert(review.restore_after_session())
 
 		local composed_before = #calls.composed
+		local function assert_modal_options(options, kind)
+			assert(options.source_win == source_win and options.anchor.kind == kind)
+			assert(options.anchor_line == nil, kind .. " composer received an incidental anchor line")
+			assert(options.anchor_range == nil, kind .. " composer received an incidental anchor range")
+		end
 		vim.api.nvim_set_current_win(source_win)
 		vim.api.nvim_win_set_cursor(source_win, { 2, 0 })
 		assert(review._show_inline_preview())
 		review.comment(2, 3, "question")
 		assert(#calls.composed == composed_before + 1 and #preview_marks() == 0)
 		local range_options = calls.composed[#calls.composed].options
+		assert(range_options.title == "New")
 		assert(range_options.source_win == source_win and range_options.anchor_line == 3)
 		assert(range_options.anchor_range.first == 2 and range_options.anchor_range.last == 3)
 		assert(range_options.anchor.kind == "range" and range_options.anchor.anchor_line == nil)
@@ -818,16 +1482,17 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		vim.api.nvim_win_set_cursor(source_win, { 4, 0 })
 		review.file_comment("praise")
 		local file_options = calls.composed[#calls.composed].options
-		assert(file_options.source_win == source_win and file_options.anchor_line == 4)
-		assert(file_options.anchor_range == nil and file_options.anchor.kind == "file")
+		assert(file_options.title == "New file comment" and file_options.selected_type == "praise")
+		assert_modal_options(file_options, "file")
 		assert(file_options.anchor.start_line == nil and file_options.anchor.anchor_line == nil)
 
 		workspace.panel.visible = true
 		vim.api.nvim_set_current_win(comments_win)
-		review.general_comment("rationale")
+		workspace.panel.callbacks.general_comment("rationale")
 		local general_options = calls.composed[#calls.composed].options
 		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
-		assert(general_options.source_win == source_win and general_options.anchor_line == 4)
+		assert(general_options.title == "New review-level comment" and general_options.selected_type == "rationale")
+		assert_modal_options(general_options, "general")
 		assert(general_options.anchor.kind == "general" and general_options.anchor.anchor_line == nil)
 
 		workspace.session.items = { first }
@@ -836,6 +1501,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		review.edit(first.id)
 		local edit_options = calls.composed[#calls.composed].options
 		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(edit_options.title == "Edit")
 		assert(edit_options.source_win == source_win and edit_options.anchor_line == 4)
 		assert(edit_options.anchor_range.first == 2 and edit_options.anchor_range.last == 4)
 
@@ -844,8 +1510,49 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		review.reply(first.id)
 		local reply_options = calls.composed[#calls.composed].options
 		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(reply_options.title == "Reply" and reply_options.selected_type == nil)
 		assert(reply_options.source_win == source_win and reply_options.anchor_line == 4)
 		assert(reply_options.anchor_range.first == 2 and reply_options.anchor_range.last == 4)
+
+		workspace.session.items = { file_item }
+		workspace.panel.visible = true
+		vim.api.nvim_set_current_win(comments_win)
+		review.edit(file_item.id)
+		local file_edit_options = calls.composed[#calls.composed].options
+		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(file_edit_options.title == "Edit file comment" and file_edit_options.selected_type == file_item.type)
+		assert_modal_options(file_edit_options, "file")
+		workspace.panel.visible = true
+		vim.api.nvim_set_current_win(comments_win)
+		review.reply(file_item.id)
+		local file_reply_options = calls.composed[#calls.composed].options
+		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(
+			file_reply_options.title == "Reply to file comment" and file_reply_options.selected_type == file_item.type
+		)
+		assert_modal_options(file_reply_options, "file")
+
+		workspace.session.items = { general_item }
+		workspace.panel.visible = true
+		vim.api.nvim_set_current_win(comments_win)
+		review.edit(general_item.id)
+		local general_edit_options = calls.composed[#calls.composed].options
+		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(
+			general_edit_options.title == "Edit review-level comment"
+				and general_edit_options.selected_type == general_item.type
+		)
+		assert_modal_options(general_edit_options, "general")
+		workspace.panel.visible = true
+		vim.api.nvim_set_current_win(comments_win)
+		review.reply(general_item.id)
+		local general_reply_options = calls.composed[#calls.composed].options
+		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
+		assert(
+			general_reply_options.title == "Reply to review-level comment"
+				and general_reply_options.selected_type == general_item.type
+		)
+		assert_modal_options(general_reply_options, "general")
 
 		local saved_presentation = workspace.mode_state.presentation
 		local saved_source = workspace.panel.source_win
@@ -854,7 +1561,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		vim.api.nvim_set_current_win(comments_win)
 		local composed_without_source = #calls.composed
 		review.general_comment("issue")
-		assert(#calls.composed == composed_without_source, "general comment opened without reviewed source")
+		assert(#calls.composed == composed_without_source, "review-level comment opened without reviewed source")
 		workspace.mode_state.presentation = saved_presentation
 		workspace.panel.source_win = saved_source
 		vim.api.nvim_win_close(comments_win, true)
@@ -1343,6 +2050,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 			or name == "new"
 			or name == "save"
 			or name == "edit"
+			or name == "delete"
 			or name == "mark_tuicr_delivered"
 			or name == "save_recovery"
 			or name == "verify_recovery"
@@ -1384,6 +2092,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 	end
 	review.file_comment = original_file_comment
 	vim.notify = original_notify
+	vim.ui.select = original_select
 	package.loaded.trouble = original_trouble
 	assert(ok, err)
 end)

@@ -4,6 +4,7 @@ local M = {}
 local review_lsp = require("config.review_lsp")
 
 local active_buffers = {}
+local protected_transients = {}
 local option_guard_ready = false
 local protection_writes = {}
 local WINDOW_OPTIONS = {
@@ -11,11 +12,17 @@ local WINDOW_OPTIONS = {
 	"conceallevel",
 	"cursorbind",
 	"diff",
+	"fillchars",
 	"foldenable",
 	"foldcolumn",
 	"foldlevel",
 	"foldmethod",
+	"number",
+	"numberwidth",
+	"relativenumber",
 	"scrollbind",
+	"signcolumn",
+	"statuscolumn",
 	"wrap",
 	"winbar",
 	"winhighlight",
@@ -48,7 +55,14 @@ end
 
 local function enforce_protection(buf)
 	local state = active_buffers[buf]
-	if not state or not state.enabled or not state.enrolled[buf] then
+	local enrolled = state and state.enabled and state.enrolled[buf]
+	if not enrolled then
+		state = protected_transients[buf]
+		if not state or not state.protected_transients[buf] then
+			return false
+		end
+	end
+	if not valid_buf(buf) then
 		return false
 	end
 	if vim.bo[buf].readonly and not vim.bo[buf].modifiable then
@@ -71,6 +85,16 @@ local function ensure_option_guard()
 			local protected, err = enforce_protection(buf)
 			if protected == nil then
 				vim.notify("Could not protect review buffer: " .. tostring(err), vim.log.levels.ERROR)
+			end
+		end,
+	})
+	vim.api.nvim_create_autocmd("BufWipeout", {
+		group = group,
+		callback = function(event)
+			local state = protected_transients[event.buf]
+			if state then
+				state.protected_transients[event.buf] = nil
+				protected_transients[event.buf] = nil
 			end
 		end,
 	})
@@ -252,6 +276,9 @@ local function capture_window(state, win)
 	for _, name in ipairs(WINDOW_OPTIONS) do
 		options[name] = vim.wo[win][name]
 	end
+	local local_options = {
+		fillchars = vim.api.nvim_get_option_value("fillchars", { scope = "local", win = win }),
+	}
 	local view
 	local folds
 	vim.api.nvim_win_call(win, function()
@@ -262,6 +289,7 @@ local function capture_window(state, win)
 	state.window_snapshots[win] = {
 		buf = vim.api.nvim_win_get_buf(win),
 		folds = folds,
+		local_options = local_options,
 		options = options,
 		view = view,
 	}
@@ -274,8 +302,11 @@ local function restore_window(state, win)
 		return
 	end
 	for name, value in pairs(snapshot.options) do
-		vim.wo[win][name] = value
+		if name ~= "fillchars" then
+			vim.wo[win][name] = value
+		end
 	end
+	vim.api.nvim_set_option_value("fillchars", snapshot.local_options.fillchars, { scope = "local", win = win })
 	if vim.api.nvim_win_get_buf(win) == snapshot.buf then
 		vim.api.nvim_win_call(win, function()
 			apply_fold_states(snapshot.folds or {}, snapshot.options.foldmethod == "manual")
@@ -387,6 +418,7 @@ function M.new(workspace)
 		},
 		enabled = false,
 		enrolled = {},
+		protected_transients = {},
 		auxiliary = {},
 		window_snapshots = {},
 		handlers = {},
@@ -394,6 +426,47 @@ function M.new(workspace)
 	}
 	capture_window(state, win)
 	return state
+end
+
+---Protect one presenter-owned scratch buffer without enrolling it as current source.
+---@param state table
+---@param buf integer
+---@return boolean?
+---@return string? err
+function M.protect_transient(state, buf)
+	ensure_option_guard()
+	if not valid_buf(buf) then
+		return nil, "buffer is no longer valid"
+	end
+	if active_buffers[buf] then
+		return nil, "buffer is already enrolled by a review"
+	end
+	local previous = protected_transients[buf]
+	if previous and previous ~= state then
+		return nil, "buffer is already protected by another review"
+	end
+	state.protected_transients[buf] = true
+	protected_transients[buf] = state
+	local protected, protect_err = protect_buffer(buf)
+	if not protected then
+		state.protected_transients[buf] = nil
+		protected_transients[buf] = nil
+		return nil, protect_err
+	end
+	return true
+end
+
+---Release transient protection ownership without enrolling or restoring the scratch buffer.
+---@param state table
+---@param buf integer
+---@return boolean released
+function M.release_transient(state, buf)
+	if protected_transients[buf] ~= state then
+		return false
+	end
+	protected_transients[buf] = nil
+	state.protected_transients[buf] = nil
+	return true
 end
 
 ---Enroll one real current buffer, applying review-local readonly state and hunk maps.
@@ -550,6 +623,9 @@ function M.disable(state)
 	end
 	for buf, record in pairs(vim.deepcopy(state.enrolled)) do
 		restore_enrolled(state, buf, record)
+	end
+	for buf in pairs(vim.deepcopy(state.protected_transients)) do
+		M.release_transient(state, buf)
 	end
 	close_auxiliary(state)
 	for win in pairs(state.window_snapshots) do

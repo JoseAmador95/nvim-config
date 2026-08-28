@@ -1,5 +1,6 @@
 local M = {}
 
+local editor = require("config.editor")
 local review_lsp = require("config.review_lsp")
 
 local NATIVE_DEFAULT_KEYMAPS = {
@@ -19,6 +20,16 @@ local function notify(message, level)
 end
 
 local open_location_list
+
+local function position_params(bufnr, row, byte_column, client)
+	return {
+		textDocument = vim.lsp.util.make_text_document_params(bufnr),
+		position = {
+			line = row,
+			character = vim.lsp.util.character_offset(bufnr, row, byte_column, client.offset_encoding),
+		},
+	}
+end
 
 local function has_client(method, title, bufnr)
 	local target = bufnr or vim.api.nvim_get_current_buf()
@@ -46,13 +57,11 @@ local function request_location_at(action, bufnr, line, column)
 	local text = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
 	local byte_column = math.max(0, math.min(column - 1, #text))
 	vim.lsp.buf_request_all(bufnr, action.method, function(client)
-		return {
-			textDocument = vim.lsp.util.make_text_document_params(bufnr),
-			position = {
-				line = row,
-				character = vim.lsp.util.character_offset(bufnr, row, byte_column, client.offset_encoding),
-			},
-		}
+		local params = position_params(bufnr, row, byte_column, client)
+		if action.references then
+			params.context = { includeDeclaration = true }
+		end
+		return params
 	end, function(results)
 		local items = {}
 		for client_id, response in pairs(results) do
@@ -97,7 +106,7 @@ open_location_list = function(action, options)
 			notify(action.title .. ": invalid location from server", vim.log.levels.WARN)
 			return
 		end
-		require("config.editor").open_file_in_tab(path, {
+		editor.open_file_in_tab(path, {
 			lnum = item.lnum or 1,
 			col = item.col or 1,
 		})
@@ -150,6 +159,19 @@ local location_actions = {
 			vim.lsp.buf.definition(opts)
 		end,
 	},
+	implementation = {
+		method = "textDocument/implementation",
+		title = "Go to implementation",
+	},
+	references = {
+		method = "textDocument/references",
+		references = true,
+		title = "References",
+	},
+	type_definition = {
+		method = "textDocument/typeDefinition",
+		title = "Go to type definition",
+	},
 }
 
 local function goto_location(name)
@@ -173,13 +195,88 @@ function M.definition()
 	return goto_location("definition")
 end
 
----Request a definition for an explicit buffer position without using current-window state.
+---Request one location-oriented LSP action for an explicit buffer position.
+---@param name "declaration"|"definition"|"implementation"|"references"|"type_definition"
 ---@param bufnr integer
 ---@param line integer One-based line.
 ---@param column integer One-based byte column.
 ---@return boolean
+function M.location_at(name, bufnr, line, column)
+	local action = location_actions[name]
+	if not action then
+		error("unknown LSP location action: " .. tostring(name))
+	end
+	return request_location_at(action, bufnr, line, column)
+end
+
 function M.definition_at(bufnr, line, column)
-	return request_location_at(location_actions.definition, bufnr, line, column)
+	return M.location_at("definition", bufnr, line, column)
+end
+
+local function hover_contents(results)
+	local values = {}
+	for client_id, response in pairs(results) do
+		if response and not response.err and response.result and response.result.contents then
+			local lines = vim.lsp.util.convert_input_to_markdown_lines(response.result.contents)
+			if #lines > 0 then
+				values[#values + 1] = { client_id = client_id, lines = lines }
+			end
+		end
+	end
+	local contents = {}
+	for _, value in ipairs(values) do
+		if #values > 1 then
+			local client = vim.lsp.get_client_by_id(value.client_id)
+			contents[#contents + 1] = "# " .. (client and client.name or ("LSP " .. value.client_id))
+		end
+		vim.list_extend(contents, value.lines)
+		contents[#contents + 1] = "---"
+	end
+	contents[#contents] = nil
+	return contents
+end
+
+---Request hover for an explicit source position while keeping the review window active.
+---@param bufnr integer
+---@param line integer One-based line.
+---@param column integer One-based byte column.
+---@param options? { border?: string, winid?: integer, valid?: fun(): boolean }
+---@return boolean
+function M.hover_at(bufnr, line, column, options)
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return false
+	end
+	local clients = has_client("textDocument/hover", "Hover", bufnr)
+	if not clients then
+		return false
+	end
+	options = options or {}
+	local request_win = options.winid or vim.api.nvim_get_current_win()
+	local valid = options.valid
+	local float_options = vim.deepcopy(options)
+	float_options.winid = nil
+	float_options.valid = nil
+	float_options.border = float_options.border or "rounded"
+	float_options.focus_id = "textDocument/hover"
+	local row = math.max(0, math.min(line - 1, vim.api.nvim_buf_line_count(bufnr) - 1))
+	local text = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
+	local byte_column = math.max(0, math.min(column - 1, #text))
+	vim.lsp.buf_request_all(bufnr, "textDocument/hover", function(client)
+		return position_params(bufnr, row, byte_column, client)
+	end, function(results)
+		if (type(valid) == "function" and not valid()) or not vim.api.nvim_win_is_valid(request_win) then
+			return
+		end
+		local contents = hover_contents(results)
+		if #contents == 0 then
+			notify("Hover: no information found")
+			return
+		end
+		vim.api.nvim_win_call(request_win, function()
+			vim.lsp.util.open_floating_preview(contents, "markdown", float_options)
+		end)
+	end)
+	return true
 end
 
 local function global_keymap(mode, lhs)

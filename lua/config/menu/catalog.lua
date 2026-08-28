@@ -451,6 +451,7 @@ function M.definitions(dispatch)
 			palette_item("command.review_comments", "Focus Review Comments", "<leader>rl"),
 			palette_item("command.review_comment", "Add Review Comment", "<leader>ra"),
 			palette_item("command.review_file_comment", "Add File-level Review Comment", "<leader>rA"),
+			palette_item("command.review_general_comment", "Add Review-level Comment", "<leader>rR"),
 			palette_item("command.review_edit", "Edit Review Comment", "<leader>re"),
 			palette_item("command.review_change_type", "Change Comment Type at Current Line", "<leader>rc"),
 			palette_item("command.review_delete", "Delete Comment at Current Line", "<leader>rd"),

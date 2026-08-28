@@ -5,6 +5,7 @@ local review_lsp = require("config.review_lsp")
 local review_store = require("config.review_store")
 
 local PREVIEW_NAME = "review-export://markdown"
+local SIDE_LABELS = { left = "OLD", right = "NEW" }
 local preview_state
 
 local function scope_fields(scope)
@@ -27,31 +28,18 @@ end
 
 local function location(anchor)
 	if not anchor.path then
-		return "General"
+		return "REVIEW"
 	end
 	local suffix = anchor.start_line and ":" .. anchor.start_line or ""
 	if anchor.end_line and anchor.end_line ~= anchor.start_line then
 		suffix = suffix .. "-" .. anchor.end_line
 	end
-	return anchor.path .. suffix
+	local side = SIDE_LABELS[anchor.side]
+	return anchor.path .. suffix .. (side and " [" .. side .. "]" or "")
 end
 
-local function indented_context(context)
-	local lines = {}
-	for _, line in ipairs(vim.split(context, "\n", { plain = true })) do
-		lines[#lines + 1] = "    " .. line
-	end
-	return lines
-end
-
-local function item_tags(item, force, session_stale)
-	local tags = { item.type, review_store.item_status(item) }
-	if item.anchor.side then
-		tags[#tags + 1] = item.anchor.side
-	end
-	if item.anchor.layer then
-		tags[#tags + 1] = item.anchor.layer
-	end
+local function item_status(item, force, session_stale)
+	local tags = { review_store.item_status(item) }
 	if force and (session_stale or item.anchor.stale) then
 		tags[#tags + 1] = "stale"
 	end
@@ -61,15 +49,9 @@ end
 local function append_item(lines, item, force, session_stale, heading)
 	lines[#lines + 1] = string.format("%s %s — %s", heading, item.type:upper(), location(item.anchor))
 	lines[#lines + 1] = ""
-	lines[#lines + 1] = "_" .. item_tags(item, force, session_stale) .. "_"
+	lines[#lines + 1] = "_" .. item_status(item, force, session_stale) .. "_"
 	lines[#lines + 1] = ""
 	lines[#lines + 1] = item.body
-	if item.anchor.context and item.anchor.context ~= "" then
-		lines[#lines + 1] = ""
-		lines[#lines + 1] = "Context (`" .. item.anchor.context_hash .. "`):"
-		lines[#lines + 1] = ""
-		vim.list_extend(lines, indented_context(item.anchor.context))
-	end
 	lines[#lines + 1] = ""
 end
 

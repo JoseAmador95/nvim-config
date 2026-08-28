@@ -7,8 +7,10 @@ local review_store = require("config.review_store")
 local PANEL_ORDER = { "files", "commits", "comments" }
 local PANEL_TITLES = { files = " Files ", commits = " Commits ", comments = " Comments " }
 local PANEL_NAMES = { files = "files", commits = "commits", comments = "comments" }
+local MAX_PANEL_WIDTH = 200
 local COMMIT_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_commits")
 local FILE_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_files")
+local SIDE_LABELS = { left = "OLD", right = "CURRENT" }
 
 local STATUS_HIGHLIGHTS = {
 	A = "ReviewPanelStatusAdded",
@@ -90,7 +92,9 @@ local function valid_source_win(state, win)
 	if vim.bo[buf].buftype == "" then
 		return true
 	end
-	return vim.b[buf].nvim_review_role == "old" or vim.b[buf].nvim_review_role == "snapshot"
+	return vim.b[buf].nvim_review_role == "old"
+		or vim.b[buf].nvim_review_role == "snapshot"
+		or vim.b[buf].nvim_review_role == "unified"
 end
 
 local function resolve_source_win(state, preferred)
@@ -149,7 +153,7 @@ end
 local function dimensions()
 	local available_width = math.max(12, vim.o.columns - 4)
 	local available_height = math.max(8, vim.o.lines - 4)
-	local width = math.max(12, math.min(150, available_width))
+	local width = math.max(12, math.min(MAX_PANEL_WIDTH, available_width))
 	local height = math.max(8, math.min(48, available_height))
 	local left = math.max(5, math.floor((width - 1) * 0.42))
 	local right = math.max(6, width - left - 1)
@@ -343,23 +347,16 @@ local function install_pane_maps(state, name, buf)
 			c = "change_type",
 			r = "reply_comment",
 			s = "toggle_resolution",
-			m = "reanchor_comment",
 		}
 		for lhs, callback in pairs(actions) do
 			local action = callback
 			vim.keymap.set("n", lhs, function()
-				if action == "reanchor_comment" then
-					local source_win = resolve_source_win(state)
-					if not source_win then
-						vim.notify("Reviewed code window is no longer available", vim.log.levels.ERROR)
-						return
-					end
-					comment_action(state, action, source_win)
-				else
-					comment_action(state, action)
-				end
+				comment_action(state, action)
 			end, { buffer = buf, silent = true, desc = "Review comment action" })
 		end
+		vim.keymap.set("n", "a", function()
+			invoke(state, "general_comment")
+		end, { buffer = buf, silent = true, desc = "Add review-level comment" })
 	end
 end
 
@@ -701,7 +698,8 @@ local function commit_date(commit)
 	return commit.date or commit.author_date or commit.committed_at or ""
 end
 
-local function commit_lines(state)
+local function commit_lines(state, maximum)
+	maximum = maximum or dimensions().commits.width
 	local lines = { "Space mark · Enter apply · c clear · b back", "Visual Enter applies selected span" }
 	local rows = {}
 	for _, commit in ipairs(state.workspace.model.commits or {}) do
@@ -715,14 +713,14 @@ local function commit_lines(state)
 			vim.tbl_filter(function(value)
 				return value ~= ""
 			end, {
-				commit_date(commit),
-				commit.author or commit.author_name or "",
 				commit.subject or commit.summary or "",
+				commit.author or commit.author_name or "",
+				commit_date(commit),
 			}),
 			" · "
 		)
-		lines[#lines + 1] =
-			string.format("%s %s%s", marker, commit.oid:sub(1, 10), details ~= "" and " · " .. details or "")
+		local line = string.format("%s %s%s", marker, commit.oid:sub(1, 10), details ~= "" and " · " .. details or "")
+		lines[#lines + 1] = short_text(line, maximum)
 		rows[#lines] = commit.oid
 	end
 	if #(state.workspace.model.commits or {}) == 0 then
@@ -734,7 +732,7 @@ end
 local function anchor_label(anchor)
 	local kind = anchor.kind or (not anchor.path and "general" or anchor.start_line and "range" or "file")
 	if kind == "general" then
-		return "general"
+		return "review"
 	end
 	local value = anchor.path
 	if kind == "range" then
@@ -747,16 +745,22 @@ local function anchor_label(anchor)
 	return kind .. " " .. value
 end
 
+local function anchor_side_label(anchor)
+	return type(anchor) == "table" and SIDE_LABELS[anchor.side] or nil
+end
+
 local function comment_lines(state)
-	local lines = { "Enter jump · e edit · d delete · c type · r reply · s resolve · m reanchor", "" }
+	local lines = { "a review · Enter jump · e edit · d delete · c type · r reply · s resolve", "" }
 	local rows = {}
 	for _, item in ipairs(state.workspace.session.items or {}) do
 		local body = short_text(item.body:match("[^\n]+") or item.body, 54)
+		local side = anchor_side_label(item.anchor)
 		lines[#lines + 1] = string.format(
-			"%02d [%s][%s] %s · %s",
+			"%02d [%s][%s] %s%s · %s",
 			item.sequence,
 			item.type,
 			review_store.item_status(item),
+			side and "[" .. side .. "] " or "",
 			anchor_label(item.anchor),
 			body
 		)
@@ -900,7 +904,7 @@ function M.refresh(state, workspace)
 	capture_all(state)
 	ensure_windows(state)
 	local files, file_rows, file_decorations = file_lines(state)
-	local commits, commit_rows = commit_lines(state)
+	local commits, commit_rows = commit_lines(state, vim.api.nvim_win_get_width(state.panes.commits.win))
 	local comments, comment_rows = comment_lines(state)
 	set_lines(state.panes.files, files, file_rows)
 	decorate_files(state.panes.files, file_decorations)
@@ -919,13 +923,7 @@ function M.reflow(state)
 	if not state.visible then
 		return
 	end
-	local geometry = dimensions()
-	for _, name in ipairs(PANEL_ORDER) do
-		local pane = state.panes[name]
-		if valid_win(pane.win) then
-			vim.api.nvim_win_set_config(pane.win, window_config(name, geometry[name]))
-		end
-	end
+	return M.refresh(state)
 end
 
 ---Open all three panes without creating or switching tabs.
@@ -1064,5 +1062,6 @@ M._dimensions = dimensions
 M._file_lines = file_lines
 M._commit_lines = commit_lines
 M._comment_lines = comment_lines
+M.anchor_side_label = anchor_side_label
 
 return M

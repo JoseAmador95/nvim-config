@@ -21,7 +21,20 @@ end
 local panel = require("config.review_panel")
 local review_lsp = require("config.review_lsp")
 
-local function item(id, sequence, kind, path, first, last)
+test("wide screens give the review panel more room", function()
+	local previous_columns = vim.o.columns
+	local ok, err = xpcall(function()
+		vim.o.columns = 240
+		local geometry = panel._dimensions()
+		local width = geometry.files.width + geometry.commits.width + 1
+		assert(width == 200, "wide review panel did not use its expanded width")
+		assert(geometry.commits.width > 87, "Commits pane retained the old width cap")
+	end, debug.traceback)
+	vim.o.columns = previous_columns
+	assert(ok, err)
+end)
+
+local function item(id, sequence, kind, path, first, last, side)
 	return {
 		id = id,
 		sequence = sequence,
@@ -30,7 +43,7 @@ local function item(id, sequence, kind, path, first, last)
 		anchor = {
 			kind = kind,
 			path = path,
-			side = path and "right" or nil,
+			side = path and (side or "right") or nil,
 			layer = path and "history" or nil,
 			start_line = first,
 			end_line = last,
@@ -41,6 +54,27 @@ local function item(id, sequence, kind, path, first, last)
 		deliveries = {},
 	}
 end
+
+test("comment rows expose old and current sides without inventing one for general comments", function()
+	local comment_workspace = {
+		session = {
+			items = {
+				item(string.rep("1", 64), 1, "general"),
+				item(string.rep("2", 64), 2, "range", "lua/example.lua", 3, 5, "left"),
+				item(string.rep("3", 64), 3, "range", "lua/example.lua", 3, 5, "right"),
+				item(string.rep("4", 64), 4, "file", "lua/example.lua", nil, nil, "left"),
+				item(string.rep("5", 64), 5, "file", "lua/example.lua", nil, nil, "right"),
+			},
+		},
+	}
+	local rendered = panel._comment_lines({ workspace = comment_workspace })
+	assert(not rendered[3]:find("[OLD]", 1, true) and not rendered[3]:find("[CURRENT]", 1, true))
+	assert(rendered[3]:find("review", 1, true), "review-level comment retained internal terminology")
+	assert(rendered[4]:find("[OLD] range lua/example.lua:3-5", 1, true))
+	assert(rendered[5]:find("[CURRENT] range lua/example.lua:3-5", 1, true))
+	assert(rendered[6]:find("[OLD] file lua/example.lua", 1, true))
+	assert(rendered[7]:find("[CURRENT] file lua/example.lua", 1, true))
+end)
 
 local workspace = {
 	root = "/tmp/example-repository",
@@ -72,6 +106,44 @@ local workspace = {
 		},
 	},
 }
+
+test("commit rows prioritize subjects and expand safely after resize", function()
+	vim.cmd("only")
+	vim.cmd("enew!")
+	local previous_columns = vim.o.columns
+	local resize_workspace = vim.deepcopy(workspace)
+	local commit = resize_workspace.model.commits[1]
+	commit.subject = "Subject " .. string.rep("á🙂", 80)
+	commit.author = string.rep("Author", 20)
+	local state = panel.new(resize_workspace, {})
+	local ok, err = xpcall(function()
+		vim.o.columns = 120
+		assert(panel.open(state, "commits"))
+		local pane = state.panes.commits
+		local narrow_width = vim.api.nvim_win_get_width(pane.win)
+		local narrow_row = vim.api.nvim_buf_get_lines(pane.buf, 2, 3, false)[1]
+		assert(narrow_row:find("Subject", 1, true), "commit metadata hid the subject")
+		assert(narrow_row:find("…", 1, true), "narrow commit row did not show an ellipsis")
+		assert(pcall(vim.str_utfindex, narrow_row), "narrow commit row contains invalid UTF-8")
+		assert(vim.fn.strdisplaywidth(narrow_row) <= narrow_width, "narrow commit row exceeds its pane")
+
+		vim.api.nvim_win_set_cursor(pane.win, { 3, 0 })
+		vim.o.columns = 240
+		panel.reflow(state)
+		local wide_width = vim.api.nvim_win_get_width(pane.win)
+		local wide_row = vim.api.nvim_buf_get_lines(pane.buf, 2, 3, false)[1]
+		assert(wide_width > narrow_width, "Commits pane did not expand after resize")
+		assert(vim.fn.strdisplaywidth(wide_row) > vim.fn.strdisplaywidth(narrow_row), "commit row was not rerendered")
+		assert(vim.fn.strdisplaywidth(wide_row) <= wide_width, "wide commit row exceeds its pane")
+		assert(vim.api.nvim_win_get_cursor(pane.win)[1] == 3, "resize lost the selected commit row")
+		assert(pane.rows[3] == commit.oid, "resize changed the selected commit identity")
+	end, debug.traceback)
+	if state.visible then
+		panel.close(state)
+	end
+	vim.o.columns = previous_columns
+	assert(ok, err)
+end)
 
 local function find_row(pane, predicate)
 	for line, row in pairs(pane.rows) do
@@ -127,8 +199,11 @@ test("three core floats preserve the ordinary tab and expose all panel roles", f
 		edit_comment = function(id)
 			calls.edit = id
 		end,
-		reanchor_comment = function(id, source_win)
-			calls.reanchor = { id = id, source_win = source_win, current_win = vim.api.nvim_get_current_win() }
+		delete_comment = function(id)
+			calls.delete = id
+		end,
+		general_comment = function()
+			calls.general_comment = (calls.general_comment or 0) + 1
 		end,
 	})
 	assert(panel.open(state, "files"))
@@ -177,12 +252,16 @@ test("three core floats preserve the ordinary tab and expose all panel roles", f
 
 	panel.focus(state, "comments")
 	vim.api.nvim_win_set_cursor(state.panes.comments.win, { 4, 0 })
+	local comments_help = vim.api.nvim_buf_get_lines(state.panes.comments.buf, 0, 1, false)[1]
+	assert(not comments_help:find("reanchor", 1, true), "Comments help retained reanchor")
+	assert(comments_help:find("a review", 1, true), "Comments help omitted review-level creation")
+	assert(vim.fn.maparg("m", "n", false, true).buffer ~= 1, "Comments pane retained the reanchor mapping")
+	vim.fn.maparg("a", "n", false, true).callback()
+	assert(calls.general_comment == 1, "Comments pane did not create a review-level comment")
 	vim.fn.maparg("e", "n", false, true).callback()
 	assert(calls.edit == workspace.session.items[2].id, "comment callback did not receive a stable ID")
-	vim.fn.maparg("m", "n", false, true).callback()
-	assert(calls.reanchor.id == workspace.session.items[2].id)
-	assert(calls.reanchor.source_win == source, "reanchor did not receive the panel source window")
-	assert(calls.reanchor.current_win == state.panes.comments.win, "reanchor changed panel focus before callback")
+	vim.fn.maparg("d", "n", false, true).callback()
+	assert(calls.delete == workspace.session.items[2].id, "delete callback did not receive a stable ID")
 
 	local comments_win = state.panes.comments.win
 	vim.api.nvim_win_close(comments_win, true)
@@ -522,18 +601,13 @@ test("commit controls clear only endpoints and delegate scope back", function()
 	assert(ok, err)
 end)
 
-test("presentation replacement refreshes reanchor source without accepting panel floats", function()
+test("presentation replacement refreshes the source without accepting panel floats", function()
 	vim.cmd("only")
 	vim.cmd("enew!")
 	local replacement = vim.api.nvim_get_current_win()
 	vim.cmd("rightbelow vnew")
 	local previous = vim.api.nvim_get_current_win()
-	local calls = {}
-	local state = panel.new(workspace, {
-		reanchor_comment = function(id, source_win)
-			calls.reanchor = { id = id, source_win = source_win, current_win = vim.api.nvim_get_current_win() }
-		end,
-	})
+	local state = panel.new(workspace, {})
 	assert(panel.open(state, "comments"))
 	assert(state.source_win == previous, "panel did not capture the current split target")
 
@@ -554,15 +628,15 @@ test("presentation replacement refreshes reanchor source without accepting panel
 	assert(state.source_win == replacement, "ordinary nofile split replaced the reviewed-code source")
 	vim.b[vim.api.nvim_win_get_buf(trouble_like)].nvim_review_role = "snapshot"
 	assert(panel.update_source(state, trouble_like) == trouble_like, "presented snapshot was rejected as a source")
+	vim.b[vim.api.nvim_win_get_buf(trouble_like)].nvim_review_role = "unified"
+	assert(panel.update_source(state, trouble_like) == trouble_like, "unified projection was rejected as a source")
 	assert(panel.update_source(state, replacement) == replacement, "real source was not restored after snapshot check")
 	vim.api.nvim_win_close(trouble_like, true)
 
 	panel.focus(state, "comments")
 	vim.api.nvim_win_set_cursor(state.panes.comments.win, { 4, 0 })
-	vim.fn.maparg("m", "n", false, true).callback()
-	assert(calls.reanchor.id == workspace.session.items[2].id)
-	assert(calls.reanchor.source_win == replacement and vim.api.nvim_win_is_valid(calls.reanchor.source_win))
-	assert(calls.reanchor.current_win == comments_win, "source refresh changed panel focus before reanchor")
+	assert(vim.fn.maparg("m", "n", false, true).buffer ~= 1, "Comments pane retained the reanchor mapping")
+	assert(vim.api.nvim_get_current_win() == comments_win, "source refresh changed Comments-pane focus")
 	panel.close(state)
 	assert(vim.api.nvim_get_current_win() == replacement, "panel did not restore the refreshed source")
 end)
