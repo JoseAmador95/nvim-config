@@ -1,10 +1,5 @@
--- Native Neovim 0.12 LSP setup. Installation is deliberately separate:
--- mason-lspconfig only supplies mappings/commands, mason-tool-installer owns
--- explicit manual sync, and config.tool_bootstrap owns the one-shot lifecycle.
-
-local function offline()
-	return vim.env.NVIM_CONFIG_OFFLINE == "1"
-end
+-- Native Neovim 0.12 LSP setup. verified-tools owns all installation;
+-- mason-lspconfig only supplies package mappings and native LSP integration.
 
 local function host_context()
 	local rust_tools = require("config.rust_tools")
@@ -32,21 +27,10 @@ local function setup_mason_lsp()
 	end
 end
 
-local function manual_mason_tools()
-	if offline() then
-		return {}
+local function retire_mason_mutations()
+	for _, name in ipairs({ "MasonInstall", "MasonUninstall", "MasonUninstallAll", "MasonUpdate" }) do
+		pcall(vim.api.nvim_del_user_command, name)
 	end
-	local toolchain = require("config.toolchain")
-	local tools = {}
-	for _, name in ipairs(toolchain.mason_order) do
-		local entry = assert(toolchain.mason_entry(name), "missing Mason manifest entry: " .. name)
-		tools[#tools + 1] = {
-			name,
-			version = entry.version,
-			condition = require("config.tool_bootstrap").mason_condition(entry),
-		}
-	end
-	return tools
 end
 
 return {
@@ -56,7 +40,7 @@ return {
 			return not vim.g.vscode
 		end,
 		event = "VeryLazy",
-		cmd = { "Mason", "MasonInstall", "MasonUninstall", "MasonUninstallAll", "MasonUpdate", "MasonLog" },
+		cmd = { "Mason", "MasonLog" },
 		init = function()
 			require("config.tool_bootstrap").setup()
 		end,
@@ -64,7 +48,20 @@ return {
 			require("mason").setup({
 				install_root_dir = require("config.tool_paths").mason_root(),
 				PATH = "append",
+				ui = {
+					check_outdated_packages_on_open = false,
+					keymaps = {
+						install_package = "<Nop>",
+						update_package = "<Nop>",
+						check_package_version = "<Nop>",
+						update_all_packages = "<Nop>",
+						check_outdated_packages = "<Nop>",
+						uninstall_package = "<Nop>",
+						cancel_installation = "<Nop>",
+					},
+				},
 			})
+			retire_mason_mutations()
 			require("config.tool_bootstrap").mason_ready()
 		end,
 	},
@@ -94,27 +91,6 @@ return {
 					return context.rust_analyzer_path
 				end
 			end))
-		end,
-	},
-
-	{
-		"WhoIsSethDaniel/mason-tool-installer.nvim",
-		cond = function()
-			return not vim.g.vscode
-		end,
-		cmd = { "MasonToolsInstall", "MasonToolsInstallSync" },
-		dependencies = { "mason-org/mason.nvim" },
-		config = function()
-			require("mason-tool-installer").setup({
-				ensure_installed = manual_mason_tools(),
-				auto_update = false,
-				run_on_start = false,
-				integrations = {
-					["mason-lspconfig"] = false,
-					["mason-null-ls"] = false,
-					["mason-nvim-dap"] = false,
-				},
-			})
 		end,
 	},
 }

@@ -3,8 +3,16 @@ vim.o.swapfile = false
 vim.o.hidden = true
 
 local repo = vim.fn.getcwd()
+local plugin = repo .. "/local-plugins/tab-first.nvim"
 vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+vim.opt.runtimepath:prepend(plugin)
+package.path = table.concat({
+	plugin .. "/lua/?.lua",
+	plugin .. "/lua/?/init.lua",
+	repo .. "/lua/?.lua",
+	repo .. "/lua/?/init.lua",
+	package.path,
+}, ";")
 
 local failures = {}
 local count = 0
@@ -175,6 +183,32 @@ test("transient tabs are neither captured nor reused by history restoration", fu
 	assert(vim.api.nvim_get_current_tabpage() ~= transient, "history restoration reused the transient window")
 	assert(not tabs.is_transient(vim.api.nvim_get_current_tabpage()), "history restored into another transient tab")
 	equal(vim.uv.fs_realpath(second), current_path(), "history restored the wrong destination")
+end)
+
+test("exhausted semantic history delegates to the native jumplist", function()
+	reset_editor()
+	local first = make_file("fallback-first")
+	local second = make_file("fallback-second")
+	local fallbacks = {}
+	require("tab_first").setup({
+		history = {
+			native_fallback = function(direction)
+				fallbacks[#fallbacks + 1] = direction
+			end,
+		},
+	})
+
+	vim.cmd("edit! " .. vim.fn.fnameescape(first))
+	editor.open_file_in_tab(second)
+	assert(history.back(), "semantic back did not reach the first entry")
+	equal({}, fallbacks, "native back ran before semantic history was exhausted")
+	assert(not history.back(), "exhausted semantic back reported a semantic traversal")
+	equal({ -1 }, fallbacks, "exhausted back did not delegate to the native jumplist")
+
+	assert(history.forward(), "semantic forward did not reach the second entry")
+	equal({ -1 }, fallbacks, "native forward ran before semantic history was exhausted")
+	assert(not history.forward(), "exhausted semantic forward reported a semantic traversal")
+	equal({ -1, 1 }, fallbacks, "exhausted forward did not delegate to the native jumplist")
 end)
 
 test("setup exposes commands and back-forward mappings", function()

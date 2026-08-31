@@ -217,6 +217,13 @@ end
 
 local lazy_stat = uv.fs_stat(lazypath)
 if not lazy_stat then
+	if vim.env.NVIM_CONFIG_BOOTSTRAP ~= "1" then
+		error(
+			("lazy.nvim is missing at %s; run scripts/bootstrap-config explicitly before starting Neovim"):format(
+				lazypath
+			)
+		)
+	end
 	bootstrap_lazy()
 	lazy_stat = uv.fs_stat(lazypath)
 end
@@ -345,14 +352,18 @@ else
 	end
 end
 
+local runtime_paths = { repo_root }
+vim.list_extend(runtime_paths, require("config.local_plugins").paths())
+
 require("lazy").setup(specs, {
 	defaults = { lazy = true }, -- lazy-load by default
+	install = { missing = vim.env.NVIM_CONFIG_BOOTSTRAP == "1" },
 	lockfile = lockfile,
 	ui = { border = "rounded" },
 	change_detection = { notify = false },
 	performance = {
 		rtp = {
-			paths = { repo_root },
+			paths = runtime_paths,
 			disabled_plugins = { "gzip", "tarPlugin", "zipPlugin", "netrwPlugin" },
 		},
 	},

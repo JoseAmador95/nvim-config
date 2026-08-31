@@ -30,6 +30,7 @@ local exiting = false
 local exit_flag_registered = false
 local manual_save_active = false
 local direct_save
+local sessionoptions = "blank,buffers,curdir,folds,help,tabpages,winsize,winpos,localoptions"
 
 local function notify_review_hook_failure(action, error_message)
 	vim.notify(
@@ -67,8 +68,44 @@ local function suspend_code_review_for_session()
 	return true
 end
 
+local function notify_log_hook_failure(action, error_message)
+	vim.notify(
+		string.format("Could not %s log following for session: %s", action, tostring(error_message)),
+		vim.log.levels.ERROR,
+		{ title = "Session" }
+	)
+end
+
+local function suspend_log_follow_for_session()
+	local log_watch = package.loaded["config.log_watch"]
+	if type(log_watch) ~= "table" or type(log_watch.suspend_for_session) ~= "function" then
+		return true
+	end
+	local called, suspended, suspend_error = pcall(log_watch.suspend_for_session)
+	if not called or suspended ~= true then
+		notify_log_hook_failure("suspend", called and suspend_error or suspended)
+		return false
+	end
+	if exiting or type(log_watch.restore_after_session) ~= "function" then
+		return true
+	end
+	vim.schedule(function()
+		if exiting then
+			return
+		end
+		local restore_called, restored, restore_error = pcall(log_watch.restore_after_session)
+		if not restore_called or restored ~= true then
+			notify_log_hook_failure("restore", restore_called and restore_error or restored)
+		end
+	end)
+	return true
+end
+
 local function save_session_manually(session_name, save, save_opts)
 	if not suspend_code_review_for_session() then
+		return false
+	end
+	if not suspend_log_follow_for_session() then
 		return false
 	end
 	if should_skip_session_save() then
@@ -122,12 +159,18 @@ return {
 				if not manual_save_active and not suspend_code_review_for_session() then
 					return false
 				end
+				if not manual_save_active and not suspend_log_follow_for_session() then
+					return false
+				end
 				return not should_skip_session_save()
 			end,
 		},
 	},
 	config = function(_, opts)
-		vim.o.sessionoptions = "blank,buffers,curdir,folds,help,tabpages,winsize,winpos,terminal,localoptions"
+		-- Terminal lifecycle buffers are process views, not durable editor state.
+		-- Omitting `terminal` prevents :mksession and auto-session from
+		-- resurrecting an ephemeral process during restore.
+		vim.o.sessionoptions = sessionoptions
 		if not exit_flag_registered then
 			local group = vim.api.nvim_create_augroup("NvimConfigAutoSession", { clear = true })
 			vim.api.nvim_create_autocmd("VimLeavePre", {

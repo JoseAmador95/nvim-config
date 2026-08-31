@@ -26,10 +26,10 @@ return {
 		"nvim-treesitter/nvim-treesitter",
 		version = false,
 		lazy = false,
-		build = ":TSUpdate",
 		config = function()
 			require("nvim-treesitter").setup()
 			require("config.treesitter_runtime").setup({
+				profile = vim.g.vscode and "vscode" or "full",
 				parsers = parsers,
 				highlight = not vim.g.vscode,
 				indent = not vim.g.vscode,

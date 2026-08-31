@@ -33,19 +33,18 @@ Both bootstrap and the offline gate isolate `XDG_CONFIG_HOME`, so a persisted
 
 ## Runtime tool installation
 
-At full-editor startup, each eligible managed-release or Mason `name@version`
-is claimed exactly once in persistent state before installation starts. A
-success, failure, interruption, or corrupt claim is never retried
-automatically, which prevents repeated failure messages on shared hosts. The
-manual command can reclaim an interrupted attempt only after its owning
-process has exited; live or unverifiable owners remain locked. Set
-`mason.auto_install = false` in local config to opt out. Manual retries are
-explicit:
+Full-editor startup plans and attests eligible managed-release and Mason
+identities without installing. Explicit work is claimed once in persistent
+state; a failure, interruption, or corrupt claim is never retried
+automatically. A manual repair can reclaim an interrupted attempt only after
+its owner exits; live or unverifiable owners remain locked.
 
-- `:NvimConfigToolsInstall [all|mmdflux|plantuml]` installs verified
-  official precompiled releases; `!` installs the managed pin even when a host
-  copy exists, without changing the host-first `PATH` precedence.
-- `:MasonToolsInstallSync` retries the exact Mason manifest.
+- `:NvimConfigToolsInstall [all|name]` installs or retries the exact release or
+  Mason identity. `!` explicitly repairs existing/drifted state or installs a
+  managed pin when an external probe is incompatible.
+
+Mason's UI is inspection-only: install, update, uninstall and registry-refresh
+commands and mappings are disabled.
 
 `PATH` precedence is `local_config.path` (declared order), `~/.local/bin`, the
 inherited host path, managed release binaries, then Mason. The editor and pager
@@ -76,7 +75,7 @@ been removed; PlantUML diagram rendering is unchanged.
 | Lint/format | Save-only lint routing, formatter chains, no-LSP fallback and missing-tool behavior | Project-specific linter configuration |
 | Diagrams | Scanner, renderer generations, atomic cache writes, corruption and pruning | Kitty image display, browser opening and visual layout |
 | LogWatch | Append, partial lines, truncation, rotation, deletion/recreation and retention limits | Sustained observation of a high-volume production log |
-| DevPod editor | Launcher/RPC schemas, argv transport, path containment, private state, provider/config identity and Git mutation fingerprints | A real Podman workspace, image lifecycle hooks and bidirectional SSH forwarding |
+| Dev Container editor | CLI/spool schemas, argv transport, path containment, private state, stale locks, offline propagation and fail-closed routing | A real Dev Container runtime, image lifecycle hooks and host SSH-agent forwarding |
 
 GitHub Actions runs the same bootstrap and check on `ubuntu-24.04` and
 `macos-15`. Hosted success is delivery evidence only after the branch has been

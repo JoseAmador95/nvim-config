@@ -3,6 +3,7 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
+vim.opt.runtimepath:prepend(repo .. "/local-plugins/project-python.nvim")
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
 local fixture = vim.fn.tempname()
@@ -246,14 +247,14 @@ test("manual selections are root-scoped and stale interpreters are discarded", f
 	vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
-test("Pyright, Neotest, and DAP consume the same root selection", function()
+test("Pyright, Neotest, and DAP consume the same root selection without interpreter probes", function()
 	local config = { root_dir = fixture .. "/a", settings = { pyright = { disableOrganizeImports = true } } }
 	python.before_init({}, config)
 	assert(config.settings.python.pythonPath == python_a)
 	assert(config.settings.pyright.disableOrganizeImports)
 	assert(vim.deep_equal(python.neotest_python(fixture .. "/a"), { python_a }))
 	assert(python.neotest_runner({ python_a }) == "pytest")
-	assert(python.neotest_runner({ python_b }) == "unittest")
+	assert(python.neotest_runner({ python_b }) == "pytest")
 
 	vim.api.nvim_set_current_buf(buf_a)
 	local dap = { listeners = { on_config = {} } }
@@ -271,16 +272,49 @@ test("Pyright automatic configuration preserves explicit interpreter and venv se
 		{ venv = "chosen" },
 	}) do
 		local initial = { root_dir = fixture .. "/a", settings = { python = vim.deepcopy(explicit) } }
-		python.before_init({}, initial)
+		local initial_snapshot = python.before_init({}, initial)
 		assert(vim.deep_equal(initial.settings.python, explicit))
+		assert(initial_snapshot.source == "explicit" and initial_snapshot.validity == "invalid")
 		local updated = { root_dir = fixture .. "/a", settings = { python = vim.deepcopy(explicit) } }
-		python.on_new_config(updated, fixture .. "/a")
+		local updated_snapshot = python.on_new_config(updated, fixture .. "/a")
 		assert(vim.deep_equal(updated.settings.python, explicit))
+		assert(updated_snapshot.source == "explicit" and updated_snapshot.validity == "invalid")
 	end
 
 	local automatic = { root_dir = fixture .. "/a", settings = {} }
 	python.on_new_config(automatic, fixture .. "/a")
 	assert(automatic.settings.python.pythonPath == python.for_root(fixture .. "/a"))
+end)
+
+test("host snapshots are copied and explicit project failures never fall back", function()
+	local root = fixture .. "/explicit-invalid"
+	local automatic = root .. "/.venv/bin/python"
+	interpreter(automatic, false)
+	local original_neoconf = package.loaded.neoconf
+	package.loaded.neoconf = {
+		get = function(key)
+			return key == "vscode" and { python = { pythonPath = root .. "/missing/python" } } or {}
+		end,
+	}
+	local snapshot = python.snapshot(root)
+	assert(snapshot.source == "explicit" and snapshot.validity == "invalid")
+	assert(python.for_root(root) == nil, "invalid explicit interpreter fell back to .venv")
+	snapshot.value.interpreter = "mutated"
+	assert(python.snapshot(root).value.interpreter == nil, "snapshot mutation leaked into plugin state")
+	package.loaded.neoconf = original_neoconf
+end)
+
+test("host discovery and Neotest runner never execute Python", function()
+	local original_system = vim.system
+	vim.system = function()
+		error("Python discovery executed a process")
+	end
+	local ok, err = xpcall(function()
+		assert(type(python.for_root(fixture .. "/a")) == "string")
+		assert(python.neotest_runner({ python_a }) == "pytest")
+	end, debug.traceback)
+	vim.system = original_system
+	assert(ok, err)
 end)
 
 test("manual activation restarts only Pyright clients for the selected root", function()
@@ -376,7 +410,7 @@ test("sending code opens and focuses the project REPL automatically", function()
 	focused_specs = {}
 	sent = {}
 	python.send(false)
-	assert(#opened_specs == 1 and vim.deep_equal(opened_specs[1].argv, { python_a, "-i" }))
+	assert(#opened_specs == 1 and vim.deep_equal(opened_specs[1].launch.argv, { python_a, "-i" }))
 	assert(#sent == 1 and sent[1].text == 'exec("answer = 6 * 7")')
 	python.send(false)
 	assert(#opened_specs == 1, "an existing REPL was opened twice")
@@ -405,7 +439,7 @@ test("a live REPL asks before adopting a changed interpreter", function()
 	active_python = python_a
 	python.refresh_current()
 	python.open_repl()
-	assert(#toggled_specs == 1 and vim.deep_equal(toggled_specs[1].argv, { python_a, "-i" }))
+	assert(#toggled_specs == 1 and vim.deep_equal(toggled_specs[1].launch.argv, { python_a, "-i" }))
 	local prompt
 	vim.ui.select = function(items, opts)
 		prompt = { items = items, opts = opts }

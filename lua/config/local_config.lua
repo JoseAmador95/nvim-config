@@ -32,6 +32,8 @@
 --
 -- Override the host path with $NVIM_CONFIG_FILE (for testing).
 
+local trusted_workspace = require("trusted_workspace")
+
 local M = {}
 
 local TITLE = "nvim.config"
@@ -137,6 +139,26 @@ local function project_path()
 	return vim.fn.fnamemodify(vim.fn.getcwd() .. "/" .. PROJECT_NAME, ":p")
 end
 
+local function trust_state_root()
+	local override = vim.env.NVIM_CONFIG_TRUST_STATE_ROOT
+	if override and override ~= "" then
+		return vim.fn.fnamemodify(vim.fn.expand(override), ":p")
+	end
+	return vim.fs.joinpath(vim.fn.stdpath("state"), "trusted-workspace")
+end
+
+local function workspace_mode()
+	if vim.g.vscode or vim.env.NVIM_APPNAME == "nvimpager" then
+		return "host-only"
+	end
+	return "full"
+end
+
+local function repo_identity()
+	local cwd = vim.fn.getcwd()
+	return vim.uv.fs_realpath(cwd) or vim.fs.normalize(cwd)
+end
+
 -- Loading -----------------------------------------------------------------
 
 local function notify(msg, level)
@@ -182,41 +204,7 @@ local function load_project(path)
 	end
 	local chunk, err = load(contents, "@" .. path)
 	local result = run_chunk(chunk, err, path)
-	return result, result and "loaded" or "error"
-end
-
--- Deep merge --------------------------------------------------------------
-
-local function is_array(t)
-	if type(t) ~= "table" then
-		return false
-	end
-	local n = 0
-	for k in pairs(t) do
-		if type(k) ~= "number" then
-			return false
-		end
-		n = n + 1
-	end
-	return n > 0
-end
-
-local function deep_merge(base, override)
-	if type(base) ~= "table" or type(override) ~= "table" then
-		return override
-	end
-	-- Lists replace wholesale instead of merging elements by position.
-	if is_array(base) or is_array(override) then
-		return override
-	end
-	local out = {}
-	for k, v in pairs(base) do
-		out[k] = v
-	end
-	for k, v in pairs(override) do
-		out[k] = deep_merge(out[k], v)
-	end
-	return out
+	return result, result and "loaded" or "error", result and vim.fn.sha256(contents) or nil
 end
 
 -- Validation --------------------------------------------------------------
@@ -338,22 +326,96 @@ end
 local function compute()
 	sources = {}
 	last_errors = {}
+	local mode = workspace_mode()
+	local setup_ok, setup_err = trusted_workspace.setup({
+		state_root = trust_state_root(),
+		mode = mode,
+	})
+	if not setup_ok then
+		last_errors[#last_errors + 1] = "trusted workspace state: " .. tostring(setup_err)
+	end
 
 	local home = home_path()
 	local host_cfg, host_status = load_host(home)
 	sources[#sources + 1] = { path = home, status = host_status }
-	local merged = host_cfg or {}
+	local _, host_err = trusted_workspace.register_source({
+		id = "local-config-host",
+		layer = "host",
+		value = host_cfg or {},
+	})
+	if host_err then
+		last_errors[#last_errors + 1] = "host source: " .. tostring(host_err)
+	end
 
 	local project = project_path()
 	if project ~= home then
-		local proj_cfg, proj_status = load_project(project)
+		local proj_cfg
+		local proj_status
+		local fingerprint
+		if mode == "full" then
+			proj_cfg, proj_status, fingerprint = load_project(project)
+		else
+			proj_status = "disabled"
+		end
 		sources[#sources + 1] = { path = project, status = proj_status }
 		if proj_cfg then
-			merged = deep_merge(merged, proj_cfg)
+			local repo = repo_identity()
+			local _, source_err = trusted_workspace.register_source({
+				id = "local-config-project",
+				layer = "project",
+				repo = repo,
+				fingerprint = fingerprint,
+				value = proj_cfg,
+			})
+			if source_err then
+				last_errors[#last_errors + 1] = "project source: " .. tostring(source_err)
+			end
+			local approved, approval_err = trusted_workspace.approve(repo, "local-config-project", fingerprint)
+			if not approved then
+				last_errors[#last_errors + 1] = "project approval: " .. tostring(approval_err)
+			end
+		else
+			local _, source_err = trusted_workspace.register_source({
+				id = "local-config-project",
+				layer = "project",
+				repo = repo_identity(),
+				fingerprint = "disabled:" .. tostring(proj_status),
+				value = {},
+				enabled = false,
+			})
+			if source_err then
+				last_errors[#last_errors + 1] = "project source: " .. tostring(source_err)
+			end
+		end
+	else
+		local _, source_err = trusted_workspace.register_source({
+			id = "local-config-project",
+			layer = "project",
+			repo = repo_identity(),
+			fingerprint = "disabled:same-as-host",
+			value = {},
+			enabled = false,
+		})
+		if source_err then
+			last_errors[#last_errors + 1] = "project source: " .. tostring(source_err)
 		end
 	end
 
-	local validated = validate_fields(SCHEMA, merged, "", last_errors)
+	local snapshot, snapshot_err = trusted_workspace.snapshot()
+	if not snapshot then
+		last_errors[#last_errors + 1] = "trusted workspace snapshot: " .. tostring(snapshot_err)
+		snapshot = { value = {} }
+	end
+	local authority_status = trusted_workspace.status()
+	if
+		type(authority_status) == "table"
+		and type(authority_status.candidate) == "table"
+		and type(authority_status.candidate.validity) == "table"
+		and type(authority_status.candidate.validity.errors) == "table"
+	then
+		vim.list_extend(last_errors, authority_status.candidate.validity.errors)
+	end
+	local validated = validate_fields(SCHEMA, snapshot.value, "", last_errors)
 	if #last_errors > 0 then
 		notify("Local config issues:\n  " .. table.concat(last_errors, "\n  "))
 	end
@@ -366,7 +428,7 @@ function M.read()
 	if cache == nil then
 		cache = compute()
 	end
-	return cache
+	return vim.deepcopy(cache)
 end
 
 function M.get(key, default)
@@ -399,12 +461,12 @@ end
 -- Introspection for :NvimConfigDump and :checkhealth.
 function M.sources()
 	M.read()
-	return sources
+	return vim.deepcopy(sources)
 end
 
 function M.errors()
 	M.read()
-	return last_errors
+	return vim.deepcopy(last_errors)
 end
 
 local function redact_all(value)

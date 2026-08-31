@@ -4,6 +4,7 @@ vim.o.swapfile = false
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+require("config.local_plugins").setup()
 
 local failures = {}
 local count = 0
@@ -349,7 +350,7 @@ test("lazy bootstrap reports clone failure without network access", function()
 		"--cmd",
 		"set runtimepath^=" .. repo,
 		"-c",
-		"lua local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
+		"lua require('config.local_plugins').setup(); local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
 	}, {
 		text = true,
 		env = {
@@ -357,6 +358,7 @@ test("lazy bootstrap reports clone failure without network access", function()
 			NVIM_LOG_FILE = root .. "/child-nvim.log",
 			XDG_DATA_HOME = root .. "/data",
 			NVIM_APPNAME = "nvim-security-spec",
+			NVIM_CONFIG_BOOTSTRAP = "1",
 		},
 	}):wait(10000)
 	vim.fn.delete(root, "rf")
@@ -384,7 +386,7 @@ test("lazy bootstrap checks out the exact lock commit before loading", function(
 		"--cmd",
 		"set runtimepath^=" .. repo,
 		"-c",
-		"lua require('config.lazy'); assert(vim.g.fake_lazy_setup); vim.cmd('quitall!')",
+		"lua require('config.local_plugins').setup(); require('config.lazy'); assert(vim.g.fake_lazy_setup); vim.cmd('quitall!')",
 	}, {
 		text = true,
 		env = {
@@ -395,6 +397,7 @@ test("lazy bootstrap checks out the exact lock commit before loading", function(
 			NVIM_CONFIG_FILE = root .. "/no-local-config.lua",
 			FAKE_GIT_LOG = log,
 			FAKE_LAZY_COMMIT = locked.commit,
+			NVIM_CONFIG_BOOTSTRAP = "1",
 		},
 	}):wait(10000)
 
@@ -437,7 +440,7 @@ test("existing lazy checkout mismatch fails closed before loading or mutation", 
 		"--cmd",
 		"set runtimepath^=" .. repo,
 		"-c",
-		"lua local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
+		"lua require('config.local_plugins').setup(); local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
 	}, {
 		text = true,
 		env = {
@@ -485,7 +488,7 @@ test("ignored files in an otherwise locked lazy checkout fail closed", function(
 		"--cmd",
 		"set runtimepath+=" .. repo,
 		"-c",
-		"lua local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
+		"lua require('config.local_plugins').setup(); local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
 	}, {
 		text = true,
 		env = {
@@ -518,7 +521,7 @@ test("hidden Git index flags cannot conceal a lazy checkout", function()
 		"--cmd",
 		"set runtimepath+=" .. repo,
 		"-c",
-		"lua local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
+		"lua require('config.local_plugins').setup(); local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
 	}, {
 		text = true,
 		env = {
@@ -549,7 +552,7 @@ test("Git repository redirect environment cannot bypass lazy validation", functi
 		"--cmd",
 		"set runtimepath+=" .. repo,
 		"-c",
-		"lua require('config.lazy'); assert(vim.g.fake_lazy_setup); vim.cmd('quitall!')",
+		"lua require('config.local_plugins').setup(); require('config.lazy'); assert(vim.g.fake_lazy_setup); vim.cmd('quitall!')",
 	}, {
 		text = true,
 		env = {
@@ -580,7 +583,7 @@ test("lazy bootstrap cleans staging when locked checkout fails", function()
 		"--cmd",
 		"set runtimepath^=" .. repo,
 		"-c",
-		"lua local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
+		"lua require('config.local_plugins').setup(); local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
 	}, {
 		text = true,
 		env = {
@@ -592,6 +595,7 @@ test("lazy bootstrap cleans staging when locked checkout fails", function()
 			FAKE_GIT_LOG = log,
 			FAKE_LAZY_COMMIT = locked.commit,
 			FAKE_CHECKOUT_EXIT = "24",
+			NVIM_CONFIG_BOOTSTRAP = "1",
 		},
 	}):wait(10000)
 

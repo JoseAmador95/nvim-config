@@ -5,6 +5,7 @@ vim.g.mapleader = " "
 
 local root = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(root)
+vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 
 local failures = {}
@@ -74,6 +75,26 @@ test("mapping table uses only the approved lowercase review vocabulary", functio
 	end, review.mapping_specs())
 	assert(vim.deep_equal(actual, expected))
 	assert(review.help_groups().common == "review")
+end)
+
+test("host adapter owns global review commands and mappings without retired publication", function()
+	review.setup()
+	for _, command in ipairs({
+		"ReviewOpen",
+		"ReviewPanel",
+		"ReviewComment",
+		"ReviewFileComment",
+		"ReviewGeneralComment",
+		"ReviewReanchor",
+		"ReviewExport",
+		"ReviewClose",
+	}) do
+		assert(vim.fn.exists(":" .. command) == 2, command .. " is missing from the host adapter")
+	end
+	for _, command in ipairs({ "ReviewPublish", "ReviewLinkTuicr", "ReviewRoundStart", "TuicrReview" }) do
+		assert(vim.fn.exists(":" .. command) == 0, command .. " survived retirement")
+	end
+	assert(vim.fn.maparg("<leader>ro", "n", false, true).desc == "Open default review", "host review mapping")
 end)
 
 test("inline comment previews use status, range, first content, and Unicode-safe ellipsis", function()
@@ -358,15 +379,15 @@ test("comment sign highlights are theme-linked, restored, and user-overridable",
 end)
 
 test("open presents in the ordinary tab, opens the native panel, and close owns no tab", function()
-	local scope_module = require("config.review_scope")
-	local store = require("config.review_store")
-	local changes = require("config.review_changes")
-	local mode = require("config.review_mode")
-	local presenter = require("config.review_presenter")
-	local panel = require("config.review_panel")
-	local exporter = require("config.review_export")
-	local tuicr = require("config.review_tuicr")
-	local editor_module = require("config.review_editor")
+	local native_review = require("config.native_review")
+	local scope_module = native_review.scope
+	local store = native_review.store
+	local changes = native_review.changes
+	local mode = native_review.mode
+	local presenter = native_review.presenter
+	local panel = native_review.panel
+	local exporter = native_review.export
+	local editor_module = native_review.editor
 	local originals = {
 		resolve = scope_module.resolve,
 		load = store.load,
@@ -374,7 +395,6 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		save = store.save,
 		edit = store.edit,
 		delete = store.delete,
-		mark_tuicr_delivered = store.mark_tuicr_delivered,
 		save_recovery = store.save_recovery,
 		verify_recovery = store.verify_recovery,
 		build = changes.build,
@@ -403,8 +423,6 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		render_recovery = exporter.render_recovery,
 		suspend_preview = exporter.suspend_preview,
 		restore_preview = exporter.restore_preview,
-		tuicr_add = tuicr.add,
-		tuicr_respond = tuicr.respond,
 		editor_compose = editor_module.compose,
 		editor_has_active = editor_module.has_active,
 	}
@@ -490,7 +508,6 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		source_updates = 0,
 		winbars_refreshed = 0,
 		trouble_refreshed = 0,
-		tuicr = 0,
 		composed = {},
 	}
 	local notifications = {}
@@ -724,14 +741,6 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		assert(root_value == repository and receipt.path == "/tmp/review-recovery.md")
 		calls.verified = calls.verified + 1
 		return true
-	end
-	tuicr.add = function()
-		calls.tuicr = calls.tuicr + 1
-		error("unexpected TUICR add")
-	end
-	tuicr.respond = function()
-		calls.tuicr = calls.tuicr + 1
-		error("unexpected TUICR response")
 	end
 	editor_module.compose = function(options, callback)
 		calls.composed[#calls.composed + 1] = { options = vim.deepcopy(options), callback = callback }
@@ -1586,363 +1595,6 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		vim.cmd("tabclose")
 		assert(review.export(false) and calls.delivered == 1)
 
-		-- Export and publication must fail closed if the persisted session is no
-		-- longer byte-for-byte represented by the live workspace. All external
-		-- delivery functions are stubs so these assertions have no side effects.
-		workspace.session.items = {
-			{
-				id = string.rep("e", 64),
-				sequence = 1,
-				type = "issue",
-				body = "eligible for remote delivery",
-				anchor = {
-					kind = "range",
-					path = "new.lua",
-					side = "right",
-					layer = "history",
-					start_line = 2,
-					end_line = 2,
-					stale = false,
-				},
-				reply_to = vim.NIL,
-				resolution = "open",
-				deliveries = {},
-			},
-		}
-		workspace.session.bridge = {
-			backend = "tuicr",
-			round = "123e4567-e89b-12d3-a456-426614174000",
-			trusted_scope_id = workspace.session.id,
-			linked_at = "2026-08-25T12:00:00Z",
-		}
-		local live_reference = workspace.session
-		local live_contents = vim.deepcopy(workspace.session)
-		local function assert_persistence_blocked(label, command)
-			workspace.unsaved_error = nil
-			workspace.recovery = nil
-			local loads_before = calls.loaded
-			local delivered_before = calls.delivered
-			local tuicr_before = calls.tuicr
-			assert(command() == nil, label .. " unexpectedly succeeded")
-			assert(calls.loaded == loads_before + 1, label .. " did not reload persisted state")
-			assert(calls.delivered == delivered_before, label .. " reached clipboard or preview delivery")
-			assert(calls.tuicr == tuicr_before, label .. " reached TUICR")
-			assert(workspace.session == live_reference, label .. " replaced the live session")
-			assert(vim.deep_equal(workspace.session, live_contents), label .. " changed live review contents")
-			assert(workspace.unsaved_error == nil and workspace.recovery == nil, label .. " invented unsaved state")
-		end
-
-		local remote = vim.deepcopy(live_contents)
-		remote.revision = remote.revision + 1
-		store.load = function(root_value, id)
-			assert(root_value == repository and id == live_contents.id)
-			calls.loaded = calls.loaded + 1
-			return vim.deepcopy(remote)
-		end
-		assert_persistence_blocked("normal export after revision drift", function()
-			return review.export(false)
-		end)
-		assert_persistence_blocked("forced export after revision drift", function()
-			return review.export(true)
-		end)
-		assert_persistence_blocked("normal publish after revision drift", function()
-			return review.publish(false)
-		end)
-		assert_persistence_blocked("forced publish after revision drift", function()
-			return review.publish(true)
-		end)
-
-		workspace.unsaved_error = nil
-		workspace.recovery = nil
-		local staged_loads = 0
-		store.load = function()
-			calls.loaded = calls.loaded + 1
-			staged_loads = staged_loads + 1
-			return vim.deepcopy(staged_loads == 1 and live_contents or remote)
-		end
-		local delivered_before_step = calls.delivered
-		assert(review.publish(false), "publication did not reach its per-item persistence check")
-		assert(staged_loads == 2, "publication did not recheck persistence immediately before TUICR")
-		assert(calls.tuicr == 0, "drift after publication preflight reached TUICR")
-		assert(calls.delivered == delivered_before_step, "publication drift reached local export delivery")
-		assert(workspace.session == live_reference and vim.deep_equal(workspace.session, live_contents))
-		assert(workspace.unsaved_error == nil and workspace.recovery == nil, "mid-publication drift invented state")
-
-		-- The adapter's status request is asynchronous. Recheck the exact persisted
-		-- item at its internal preflight boundary, freeze local transitions while a
-		-- write is pending, and never attach an in-flight receipt to newer content.
-		local controller_load = store.load
-		local controller_save = store.save
-		local controller_mark = store.mark_tuicr_delivered
-		local controller_save_recovery = store.save_recovery
-		local controller_verify_recovery = store.verify_recovery
-		local controller_render_recovery = exporter.render_recovery
-		local controller_build = changes.build
-		local controller_add = tuicr.add
-		local controller_respond = tuicr.respond
-		local persisted = vim.deepcopy(live_contents)
-		persisted.items[1].body = "body before status"
-		workspace.session = vim.deepcopy(persisted)
-		workspace.scope = workspace.session.scope
-		local recovery_sessions = {}
-		store.load = function(root_value, id)
-			assert(root_value == repository and id == persisted.id)
-			calls.loaded = calls.loaded + 1
-			return vim.deepcopy(persisted)
-		end
-		store.save = function(root_value, value)
-			assert(root_value == repository)
-			if value.revision ~= persisted.revision then
-				return nil, "simulated cross-process revision conflict"
-			end
-			local copy = vim.deepcopy(value)
-			copy.revision = copy.revision + 1
-			persisted = vim.deepcopy(copy)
-			return copy
-		end
-		store.mark_tuicr_delivered = function(value, id, receipt)
-			local copy = vim.deepcopy(value)
-			for _, item in ipairs(copy.items) do
-				if item.id == id then
-					item.deliveries[#item.deliveries + 1] = {
-						backend = "tuicr",
-						receipt = receipt,
-						delivered_at = "2026-08-27T12:00:00Z",
-					}
-					return copy
-				end
-			end
-			return nil, "review item does not exist"
-		end
-		exporter.render_recovery = function(value)
-			return "exact publication recovery for " .. value.items[1].body
-		end
-		store.save_recovery = function(root_value, value, markdown)
-			assert(root_value == repository)
-			assert(markdown == "exact publication recovery for " .. value.items[1].body)
-			recovery_sessions[#recovery_sessions + 1] = vim.deepcopy(value)
-			return { path = "/tmp/review-publication-recovery.md", digest = string.rep("c", 64) }
-		end
-		store.verify_recovery = function(root_value, receipt)
-			assert(root_value == repository and receipt.path == "/tmp/review-publication-recovery.md")
-			return true
-		end
-		changes.build = function(root_value, scope_value)
-			assert(root_value == repository and scope_value.id == scope.id)
-			calls.built = calls.built + 1
-			return { entries = { entry }, commits = {}, scope = scope_value }
-		end
-
-		local pending
-		local remote_writes = 0
-		local function defer_operation(action)
-			return function(root_value, round, values, options, callback)
-				assert(root_value == repository and round == persisted.bridge.round)
-				assert(type(options) == "table" and type(options.preflight) == "function")
-				assert(not pending, "more than one TUICR operation was in flight")
-				pending = {
-					action = action,
-					values = vim.deepcopy(values),
-					options = options,
-					callback = callback,
-				}
-			end
-		end
-		tuicr.add = defer_operation("add")
-		tuicr.respond = defer_operation("respond")
-
-		assert(review.publish(false) and pending, "publication did not reach TUICR status")
-		local stale_pending = pending
-		pending = nil
-		persisted.revision = persisted.revision + 1
-		persisted.items[1].body = "body changed during status"
-		local allowed, guard_err = stale_pending.options.preflight()
-		assert(not allowed and guard_err:find("another Neovim", 1, true))
-		assert(remote_writes == 0, "stale status preflight caused a TUICR write")
-		stale_pending.callback(nil, { code = "preflight_failed", message = guard_err })
-		assert(workspace.session.items[1].body == "body before status")
-		assert(#workspace.session.items[1].deliveries == 0 and #recovery_sessions == 0)
-		assert(review.refresh(), "review did not reload the authoritative post-status change")
-		assert(workspace.session.items[1].body == "body changed during status")
-
-		local resolves_before_publish = calls.resolved
-		local loads_before_publish = calls.loaded
-		assert(review.publish(false) and pending, "publication did not wait at the second TUICR status")
-		local in_flight = pending
-		pending = nil
-		local refreshed, refresh_err = review.refresh()
-		assert(refreshed == nil and refresh_err:find("publication is still in progress", 1, true))
-		local opened, open_err = review.open({ kind = "commit", rev = "HEAD" }, repository)
-		assert(opened == nil and open_err:find("publication is still in progress", 1, true))
-		review.resolve(workspace.session.items[1].id)
-		assert(not review.close(true), "close replaced an in-flight review")
-		assert(calls.loaded == loads_before_publish + 2, "blocked transitions reloaded persisted review state")
-		assert(calls.resolved == resolves_before_publish, "blocked open resolved another review scope")
-		assert(workspace.session.items[1].resolution == "open", "blocked mutation changed the review item")
-		local write_allowed, write_err = in_flight.options.preflight()
-		assert(write_allowed, write_err)
-		remote_writes = remote_writes + 1
-		local in_flight_key = in_flight.values.delivery_key
-		persisted.revision = persisted.revision + 1
-		persisted.items[1].body = "body changed while add was in flight"
-		in_flight.callback({ id = "receipt-for-old-body" })
-		assert(remote_writes == 1, "the authorized in-flight TUICR write was not represented")
-		assert(workspace.session.items[1].body == "body changed during status")
-		assert(#workspace.session.items[1].deliveries == 0, "receipt was attached to a changed live item")
-		assert(#recovery_sessions == 1, "in-flight receipt did not create one exact recovery")
-		assert(recovery_sessions[1].items[1].body == "body changed during status")
-		assert(recovery_sessions[1].items[1].deliveries[1].receipt == "receipt-for-old-body")
-
-		assert(review.refresh(), "review did not reload after preserving the in-flight receipt")
-		assert(workspace.session.items[1].body == "body changed while add was in flight")
-		assert(review.publish(false) and pending, "corrected content was not publishable")
-		local corrected = pending
-		pending = nil
-		local corrected_allowed, corrected_err = corrected.options.preflight()
-		assert(corrected_allowed, corrected_err)
-		assert(corrected.values.delivery_key ~= in_flight_key, "changed content reused the old delivery key")
-		assert(#corrected.values.delivery_key <= 256, "content-bound delivery key exceeds TUICR's contract")
-		remote_writes = remote_writes + 1
-		corrected.callback({ id = "receipt-for-corrected-body" })
-		assert(persisted.items[1].body == "body changed while add was in flight")
-		assert(persisted.items[1].deliveries[1].receipt == "receipt-for-corrected-body")
-
-		local function publishable_item(id, sequence, body, reply_to)
-			return {
-				id = id,
-				sequence = sequence,
-				type = sequence == 3 and "praise" or "question",
-				body = body,
-				anchor = vim.deepcopy(live_contents.items[1].anchor),
-				reply_to = reply_to or vim.NIL,
-				resolution = "open",
-				deliveries = {},
-			}
-		end
-		local parent_id = string.rep("1", 64)
-		local reply_id = string.rep("2", 64)
-		local independent_id = string.rep("3", 64)
-		local multiple = vim.deepcopy(workspace.session)
-		multiple.revision = multiple.revision + 1
-		multiple.items = {
-			publishable_item(parent_id, 1, "parent", nil),
-			publishable_item(reply_id, 2, "reply", parent_id),
-			publishable_item(independent_id, 3, "independent", nil),
-		}
-		persisted = vim.deepcopy(multiple)
-		workspace.session = vim.deepcopy(multiple)
-		workspace.scope = workspace.session.scope
-		local operations = {}
-		local function complete_operation(action)
-			return function(_, _, values, options, callback)
-				local operation_allowed, operation_err = options.preflight()
-				assert(operation_allowed, operation_err)
-				local receipt = "receipt-" .. tostring(#operations + 1)
-				operations[#operations + 1] = {
-					action = action,
-					values = vim.deepcopy(values),
-					receipt = receipt,
-				}
-				remote_writes = remote_writes + 1
-				callback({ id = receipt })
-			end
-		end
-		tuicr.add = complete_operation("add")
-		tuicr.respond = complete_operation("respond")
-		assert(review.publish(false), "multi-item TUICR publication did not start")
-		assert(#operations == 3, "multi-item publication did not serialize all items")
-		assert(operations[1].action == "add" and operations[2].action == "respond" and operations[3].action == "add")
-		assert(operations[2].values.reply_to == operations[1].receipt, "reply did not use the delivered parent receipt")
-		local delivery_keys = {}
-		for index, operation in ipairs(operations) do
-			assert(
-				not delivery_keys[operation.values.delivery_key],
-				"two distinct remote effects shared a delivery key"
-			)
-			delivery_keys[operation.values.delivery_key] = true
-			assert(#operation.values.delivery_key <= 256, "multi-item delivery key exceeds TUICR's contract")
-			assert(persisted.items[index].deliveries[1].receipt == operation.receipt)
-		end
-
-		store.load = controller_load
-		store.save = controller_save
-		store.mark_tuicr_delivered = controller_mark
-		store.save_recovery = controller_save_recovery
-		store.verify_recovery = controller_verify_recovery
-		exporter.render_recovery = controller_render_recovery
-		changes.build = controller_build
-		tuicr.add = controller_add
-		tuicr.respond = controller_respond
-		workspace.session = live_reference
-		workspace.scope = live_reference.scope
-		workspace.unsaved_error = nil
-		workspace.recovery = nil
-
-		store.load = function()
-			calls.loaded = calls.loaded + 1
-			return nil, "session.bridge.trusted_scope_id must match session.id"
-		end
-		assert_persistence_blocked("persisted link load error", function()
-			return review.publish(false)
-		end)
-
-		local wrong_identity = vim.deepcopy(live_contents)
-		wrong_identity.id = broken_scope.id
-		store.load = function()
-			calls.loaded = calls.loaded + 1
-			return vim.deepcopy(wrong_identity)
-		end
-		assert_persistence_blocked("persisted identity mismatch", function()
-			return review.export(false)
-		end)
-
-		local wrong_link = vim.deepcopy(live_contents)
-		wrong_link.bridge.round = "22222222-2222-2222-2222-222222222222"
-		store.load = function()
-			calls.loaded = calls.loaded + 1
-			return vim.deepcopy(wrong_link)
-		end
-		assert_persistence_blocked("persisted link mismatch", function()
-			return review.publish(true)
-		end)
-
-		local wrong_content = vim.deepcopy(live_contents)
-		wrong_content.items[1].body = "same revision, different persisted content"
-		store.load = function()
-			calls.loaded = calls.loaded + 1
-			return vim.deepcopy(wrong_content)
-		end
-		assert_persistence_blocked("same-revision content mismatch", function()
-			return review.export(false)
-		end)
-		assert(calls.tuicr == 0, "a persistence conflict caused a TUICR side effect")
-
-		workspace.unsaved_error = nil
-		workspace.recovery = nil
-		workspace.session.items = {}
-		workspace.session.bridge = vim.NIL
-		store.load = load_live
-		calls.verified = 0
-		workspace.scope.kind = "working"
-		workspace.session.scope.kind = "working"
-		scope_module.detect_drift = function()
-			return { stale = true }
-		end
-		assert(review.export(false) == nil and calls.delivered == 1, "normal stale export was delivered")
-		local forced = assert(review.export(true))
-		assert(calls.delivered == 2 and forced.recovery.path == "/tmp/review-recovery.md")
-		assert(calls.verified == 1, "forced stale export did not verify its recovery")
-		assert(not workspace.session.stale, "forced export mutated live review state")
-		workspace.scope.kind = "commit"
-		workspace.session.scope.kind = "commit"
-		workspace.session.items = { { anchor = { stale = true } } }
-		workspace.session.bridge = { backend = "tuicr" }
-		assert(review.export(false) == nil, "normal export ignored a stale comment anchor")
-		assert(review.publish(false) == nil, "normal TUICR publication ignored a stale comment anchor")
-		local anchor_forced = assert(review.export(true))
-		assert(anchor_forced.recovery.path == "/tmp/review-recovery.md" and calls.verified == 2)
-		assert(review.publish(true), "forced TUICR publication did not accept a verified stale-anchor recovery")
-		assert(calls.verified == 3, "forced TUICR publication did not verify its recovery")
 		local live_comment_id = string.rep("d", 64)
 		workspace.session.items = {
 			{
@@ -2051,7 +1703,6 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 			or name == "save"
 			or name == "edit"
 			or name == "delete"
-			or name == "mark_tuicr_delivered"
 			or name == "save_recovery"
 			or name == "verify_recovery"
 		then
@@ -2082,10 +1733,6 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 			or name == "restore_preview"
 		then
 			exporter[name] = value
-		elseif name == "tuicr_add" then
-			tuicr.add = value
-		elseif name == "tuicr_respond" then
-			tuicr.respond = value
 		elseif name == "editor_compose" or name == "editor_has_active" then
 			editor_module[name:sub(8)] = value
 		end

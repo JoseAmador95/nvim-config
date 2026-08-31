@@ -33,14 +33,11 @@ local function supports_diagrams(context)
 	return context.filetype == "markdown" or context.filetype == "plantuml"
 end
 
-local function descriptor(dispatch, id, label, hint, when, metadata)
+local function descriptor(id, label, hint, when, metadata)
 	metadata = metadata or {}
 	local item = {
 		id = id,
 		label = label,
-		run = function()
-			return dispatch(id)
-		end,
 		surfaces = metadata.surfaces,
 		palette_label = metadata.palette_label,
 		keywords = metadata.keywords,
@@ -66,20 +63,14 @@ local function section(id, label, items, when, metadata)
 	}
 end
 
-local function supports_surface(candidate, surface)
-	return not surface or candidate.surfaces == nil or candidate.surfaces[surface] == true
-end
-
----Return every menu descriptor before context filtering.
----@param dispatch fun(id: string): any
+---Return every explicit action descriptor before registry filtering.
 ---@return table[]
-function M.definitions(dispatch)
-	assert(type(dispatch) == "function", "menu dispatch must be a function")
+function M.definitions()
 	local item = function(id, label, hint, when, metadata)
-		return descriptor(dispatch, id, label, hint, when, metadata)
+		return descriptor(id, label, hint, when, metadata)
 	end
 	local palette_item = function(id, label, hint, when, keywords)
-		return descriptor(dispatch, id, label, hint, when, {
+		return descriptor(id, label, hint, when, {
 			surfaces = palette_only,
 			keywords = keywords,
 		})
@@ -375,12 +366,12 @@ function M.definitions(dispatch)
 			item("log.highlight_regex", "Add Highlight (regex)"),
 			item("command.log_highlight_clear", "Clear All Highlights"),
 		}),
-		section("devpod", "DevPod", {
-			item("command.devpod_up", "Open Container Editor"),
-			item("command.devpod_recreate", "Recreate Container Editor"),
-			item("command.devpod_status", "Show Status"),
-			item("command.devpod_host", "Return to Host Editor"),
-			palette_item("command.devpod_log", "Open Bootstrap Log"),
+		section("devcontainer", "Dev Container", {
+			item("command.devcontainer_up", "Open Container Editor"),
+			item("command.devcontainer_recreate", "Recreate Container Editor"),
+			item("command.devcontainer_status", "Show Status"),
+			item("command.devcontainer_host", "Return to Host Editor"),
+			palette_item("command.devcontainer_log", "Open Lifecycle Log"),
 		}),
 		section("problems", "Problems", {
 			palette_item("diagnostic.float", "Show Diagnostic at Cursor", "<leader>ld"),
@@ -459,16 +450,10 @@ function M.definitions(dispatch)
 			palette_item("command.review_toggle_resolve", "Resolve or Reopen Review Comment", "<leader>rt"),
 			palette_item("command.review_reanchor", "Reanchor Review Comment"),
 			palette_item("command.review_export", "Export Complete Review", "<leader>rE"),
-			palette_item("command.review_publish", "Publish Open Comments to TUICR"),
 			palette_item("command.review_refresh", "Refresh Review", "<leader>ru"),
 			palette_item("command.review_next", "Next Review Comment", "]r"),
 			palette_item("command.review_prev", "Previous Review Comment", "[r"),
-			palette_item("command.review_link_tuicr", "Link Review to TUICR..."),
 			palette_item("command.review_close", "Close Review", "<leader>rq"),
-			palette_item("command.review_start", "Start TUICR Round"),
-			palette_item("review.open", "Open TUICR TUI..."),
-			palette_item("agent.context", "Copy Agent Context"),
-			palette_item("agent.results", "Import Agent Results..."),
 		}),
 		section("tools", "Tools", {
 			palette_item("command.theme", "Select Theme..."),
@@ -528,42 +513,6 @@ function M.definitions(dispatch)
 			item("command.mason", "Mason"),
 		}, nil, { palette_label = "View" }),
 	}
-end
-
----Filter descriptors without mutating the catalogue or context.
----@param sections table[]
----@param context table
----@param surface? "palette"|"context"
----@return table[]
-function M.filter(sections, context, surface)
-	local visible = {}
-	for _, candidate in ipairs(sections) do
-		if supports_surface(candidate, surface) and (not candidate.when or candidate.when(context)) then
-			local items = {}
-			for _, item in ipairs(candidate.items) do
-				if supports_surface(item, surface) and (not item.when or item.when(context)) then
-					table.insert(items, item)
-				end
-			end
-			if #items > 0 then
-				table.insert(visible, {
-					id = candidate.id,
-					label = candidate.label,
-					palette_label = candidate.palette_label,
-					items = items,
-				})
-			end
-		end
-	end
-	return visible
-end
-
----@param context table
----@param dispatch fun(id: string): any
----@param surface? "palette"|"context"
----@return table[]
-function M.build(context, dispatch, surface)
-	return M.filter(M.definitions(dispatch), context, surface)
 end
 
 return M

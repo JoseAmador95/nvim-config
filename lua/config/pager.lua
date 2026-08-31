@@ -50,10 +50,10 @@ function M.specs()
 			"nvim-treesitter/nvim-treesitter",
 			version = false,
 			lazy = false,
-			build = ":TSUpdate",
 			config = function()
 				require("nvim-treesitter").setup()
 				require("config.treesitter_runtime").setup({
+					profile = "pager",
 					parsers = M.parsers,
 					highlight = true,
 					indent = false,

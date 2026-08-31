@@ -3,8 +3,16 @@ vim.o.swapfile = false
 vim.o.hidden = true
 
 local repo = vim.fn.getcwd()
+local plugin = repo .. "/local-plugins/tab-first.nvim"
 vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+vim.opt.runtimepath:prepend(plugin)
+package.path = table.concat({
+	plugin .. "/lua/?.lua",
+	plugin .. "/lua/?/init.lua",
+	repo .. "/lua/?.lua",
+	repo .. "/lua/?/init.lua",
+	package.path,
+}, ";")
 vim.g.mapleader = " "
 
 local failures = {}

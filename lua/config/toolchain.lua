@@ -11,6 +11,7 @@ M.versions = {
 	tree_sitter = "0.26.11",
 	mmdflux = "2.6.0",
 	plantuml = "1.2026.6",
+	["markdown-preview"] = "0.0.10",
 }
 
 local function release(repository, tag, executable, assets)
@@ -126,7 +127,7 @@ M.validation_tools = {
 	}),
 }
 
-M.managed_order = { "mmdflux", "plantuml" }
+M.managed_order = { "mmdflux", "plantuml", "markdown-preview" }
 M.managed_tools = {
 	mmdflux = release("kevinswiber/mmdflux", "mmdflux-v2.6.0", "mmdflux", {
 		["darwin-arm64"] = {
@@ -174,6 +175,26 @@ M.managed_tools = {
 			kind = "zip",
 			member = "plantuml",
 			sha256 = "835c238634ed1b8638c3fdcfe4f94d005fc9664df3da2c88f80d0aaf4471b04b",
+		},
+	}),
+	["markdown-preview"] = release("iamcco/markdown-preview.nvim", "v0.0.10", "markdown-preview", {
+		["darwin-arm64"] = {
+			archive = "markdown-preview-macos-arm64.tar.gz",
+			kind = "tar.gz",
+			member = "markdown-preview-macos-arm64",
+			sha256 = "339f9a968fbbc4197259f811dd3f9780459f9d903532a29befcf16679b97babd",
+		},
+		["darwin-x86_64"] = {
+			archive = "markdown-preview-macos.tar.gz",
+			kind = "tar.gz",
+			member = "markdown-preview-macos",
+			sha256 = "580552e6506f858d9e7b2215888d62edbf5511e3201dd62c91afe502c3142204",
+		},
+		["linux-x86_64"] = {
+			archive = "markdown-preview-linux.tar.gz",
+			kind = "tar.gz",
+			member = "markdown-preview-linux",
+			sha256 = "95eb4d2774c62e93998c41361fe2276a5134ef173dddab29026d34ef80ad44ef",
 		},
 	}),
 }

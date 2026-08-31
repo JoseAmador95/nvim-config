@@ -5,9 +5,11 @@ local background = assert(vim.env.NVIM_CONFIG_THEME_BACKGROUND, "theme backgroun
 assert(background == "light" or background == "dark", "invalid theme background fixture")
 vim.o.background = background
 
-package.preload["localconfig.theme"] = function()
-	return { colorscheme = "catppuccin" }
-end
+local active_state = vim.fs.normalize(vim.fn.stdpath("state"))
+local state_path = vim.fs.joinpath(vim.fs.dirname(active_state), "nvim", "theme.yaml")
+assert(vim.fn.mkdir(vim.fs.dirname(state_path), "p", 448) == 1)
+assert(vim.fn.writefile({ "# profile fixture", "version: 1", 'colorscheme: "catppuccin"' }, state_path) == 0)
+assert(vim.uv.fs_chmod(state_path, 384))
 
 local function fail(message)
 	vim.api.nvim_err_writeln("theme_profile_spec: " .. message)
@@ -51,6 +53,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 
 				assert(theme.selection().colorscheme == "catppuccin", "Catppuccin selection was not loaded")
+				assert(theme.state_path() == state_path, "profile did not use the canonical shared theme path")
 				assert(vim.g.colors_name == expected(background), "wrong Catppuccin startup flavour")
 				assert(has_plugin("catppuccin"), "Catppuccin is absent from the active profile")
 				assert(has_plugin("vscode.nvim"), "VSCode fallback is absent from the active profile")
@@ -72,16 +75,23 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				vim.cmd("Theme catppuccin")
 				assert(theme.selection().colorscheme == "catppuccin", ":Theme catppuccin did not persist selection")
 				assert(vim.g.colors_name == expected(other), ":Theme catppuccin did not repaint")
-				local state_path = vim.fs.joinpath(vim.fn.stdpath("config"), "lua", "localconfig", "theme.lua")
-				local persisted = assert(loadfile(state_path))()
-				assert(persisted.colorscheme == "catppuccin", "machine-local Catppuccin choice was not written")
+				local persisted = table.concat(vim.fn.readfile(state_path), "\n")
+				assert(persisted:find("version: 1", 1, true), "shared state version was not written")
+				assert(
+					persisted:find('colorscheme: "catppuccin"', 1, true),
+					"machine-local Catppuccin choice was not written"
+				)
+				assert(vim.fn.getfperm(vim.fs.dirname(state_path)) == "rwx------", "theme state directory is not 0700")
+				assert(vim.fn.getfperm(state_path) == "rw-------", "theme state file is not 0600")
 
-				package.preload["localconfig.theme"] = nil
-				package.loaded["localconfig.theme"] = nil
 				vim.cmd("ThemeReset")
-				assert(vim.fn.filereadable(state_path) == 0, ":ThemeReset left machine-local state behind")
 				assert(theme.selection().colorscheme == "vscode", ":ThemeReset did not restore the versioned default")
 				assert(vim.g.colors_name == "vscode", ":ThemeReset did not repaint VSCode")
+				persisted = table.concat(vim.fn.readfile(state_path), "\n")
+				assert(
+					persisted:find('colorscheme: "vscode"', 1, true),
+					":ThemeReset did not persist the versioned default"
+				)
 			end, debug.traceback)
 
 			if not ok then

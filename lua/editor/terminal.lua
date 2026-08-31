@@ -55,6 +55,7 @@ if not pager.active then
 	require("config.tabs").setup()
 	require("config.just").setup()
 	require("config.scratch").setup()
+	require("config.coverage").setup()
 else
 	vim.keymap.set("n", "<leader>q", ":q<CR>", {
 		noremap = true,

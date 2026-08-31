@@ -62,6 +62,10 @@ function M.mason_bin()
 	return join(M.mason_root(), "bin")
 end
 
+function M.verified_shim_bin()
+	return join(M.primary_state_root(), "verified-tools", "shims", "bin")
+end
+
 local function within(path, root)
 	path = expand(path)
 	root = expand(root)
@@ -78,6 +82,10 @@ end
 
 function M.is_mason_path(path)
 	return within(path, M.mason_root())
+end
+
+function M.is_verified_shim_path(path)
+	return within(path, M.verified_shim_bin())
 end
 
 local function split_path(path)
@@ -105,9 +113,10 @@ function M.compose_segments(local_paths, inherited)
 		append_unique(parts, seen, path)
 	end
 	append_unique(parts, seen, "~/.local/bin")
+	append_unique(parts, seen, M.verified_shim_bin())
 
 	for _, path in ipairs(split_path(inherited)) do
-		if not M.is_managed_path(path) and not M.is_mason_path(path) then
+		if not M.is_managed_path(path) and not M.is_mason_path(path) and not M.is_verified_shim_path(path) then
 			append_unique(parts, seen, path)
 		end
 	end
@@ -127,11 +136,11 @@ function M.apply(local_paths)
 end
 
 local function acceptable_external(path)
-	if not path or M.is_managed_path(path) or M.is_mason_path(path) then
+	if not path or M.is_managed_path(path) or M.is_mason_path(path) or M.is_verified_shim_path(path) then
 		return nil
 	end
 	local realpath = vim.uv.fs_realpath(path)
-	if realpath and (M.is_managed_path(realpath) or M.is_mason_path(realpath)) then
+	if realpath and (M.is_managed_path(realpath) or M.is_mason_path(realpath) or M.is_verified_shim_path(realpath)) then
 		return nil
 	end
 	return vim.fn.executable(path) == 1 and path or nil

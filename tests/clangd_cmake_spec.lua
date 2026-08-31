@@ -3,6 +3,7 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
+vim.opt.runtimepath:prepend(repo .. "/local-plugins/clangd-compile-db.nvim")
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
 local fixture = vim.fn.tempname()
@@ -54,6 +55,7 @@ end
 vim.lsp.config = { clangd = { name = "clangd" } }
 vim.lsp.start = function(config, options)
 	started[#started + 1] = { config = config, options = options }
+	return 41
 end
 vim.defer_fn = function(callback)
 	callback()
@@ -79,6 +81,8 @@ test("CMake build directory restarts only clangd clients for the same root", fun
 	assert(#stopped == 1 and stopped[1] == clients[1])
 	assert(#started == 1 and started[1].options.bufnr == buf_one)
 	assert(vim.tbl_contains(started[1].config.cmd, "--compile-commands-dir=" .. fixture .. "/one/build"))
+	local state = clangd.status(fixture .. "/one")
+	assert(state.state == "active" and state.validity == "structural" and state.source == "cmake")
 	assert(clangd.status(fixture .. "/two").directory == nil)
 	assert(
 		vim.fn.filereadable(fixture .. "/one/compile_commands.json") == 0,
@@ -91,7 +95,7 @@ test("manual compile database override wins without touching other roots", funct
 	started = {}
 	assert(clangd.set_manual(fixture .. "/one", fixture .. "/one/manual"))
 	local state = clangd.status(fixture .. "/one")
-	assert(state.source == "manual" and state.directory == fixture .. "/one/manual")
+	assert(state.state == "active" and state.source == "manual" and state.directory == fixture .. "/one/manual")
 	assert(vim.tbl_contains(clangd.command(fixture .. "/one"), "--compile-commands-dir=" .. fixture .. "/one/manual"))
 	assert(#stopped == 1 and stopped[1] == clients[1] and #started == 1)
 end)
@@ -156,6 +160,7 @@ test("source/header switch uses clangd and shared tab navigation", function()
 	}
 	vim.fn.writefile({ "#pragma once" }, fixture .. "/one/header.hpp")
 	require("config.clangd_commands").switch_source_header()
+	assert(vim.api.nvim_get_commands({}).ClangdSetCompileCommands.bang == true)
 	vim.wait(100, function()
 		return opened ~= nil
 	end)

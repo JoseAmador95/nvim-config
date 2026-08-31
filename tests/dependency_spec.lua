@@ -193,14 +193,21 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					lock["diffview-plus.nvim"].commit == "460b96c8285fbf0cd411bddfd9322408f37f81a5",
 					"diffview-plus cached-hunk seam is not pinned to the tested commit"
 				)
-				for _, name in ipairs({ "nvim-coverage", "nvim-navic", "venv-selector.nvim" }) do
+				for _, name in ipairs({ "nvim-navic", "venv-selector.nvim" }) do
 					assert(plugins[name] ~= nil, "Phase 2 dependency is missing: " .. name)
 				end
+				assert(plugins["nvim-coverage"] == nil, "retired nvim-coverage dependency remains")
 				assert(package.loaded["nvim-navic"] == nil, "nvim-navic loaded before LspAttach")
 				assert(package.loaded.coverage == nil, "nvim-coverage loaded without a coverage command")
 				assert(vim.fn.exists(":LazyGit") == 2, "LazyGit command is missing")
-				for _, name in ipairs({ "DevPodUp", "DevPodRecreate", "DevPodStatus", "DevPodLog", "HostEditor" }) do
-					assert(vim.fn.exists(":" .. name) == 2, "DevPod command is missing: " .. name)
+				for _, name in ipairs({
+					"DevContainerUp",
+					"DevContainerRecreate",
+					"DevContainerStatus",
+					"DevContainerLog",
+					"DevContainerHostEditor",
+				}) do
+					assert(vim.fn.exists(":" .. name) == 2, "Dev Container command is missing: " .. name)
 				end
 				assert(vim.fn.exists(":DevcontainerShell") == 0, "retired devcontainer shell remains")
 				for _, name in ipairs({

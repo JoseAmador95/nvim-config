@@ -4,6 +4,7 @@ vim.o.swapfile = false
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+require("config.local_plugins").setup()
 
 local failures = {}
 local count = 0
@@ -40,6 +41,7 @@ test("toolchain manifest is pinned and independent of Neovim", function()
 		tree_sitter = "0.26.11",
 		mmdflux = "2.6.0",
 		plantuml = "1.2026.6",
+		["markdown-preview"] = "0.0.10",
 	}
 	assert(original_vim.deep_equal(toolchain.versions, expected_versions), "version manifest drifted")
 	assert(toolchain.target_key("Darwin", "aarch64") == "darwin-arm64")
@@ -68,7 +70,7 @@ end)
 
 test("managed releases are prebuilt and target-aware", function()
 	local toolchain = require("config.toolchain")
-	assert(vim.deep_equal(toolchain.managed_order, { "mmdflux", "plantuml" }))
+	assert(vim.deep_equal(toolchain.managed_order, { "mmdflux", "plantuml", "markdown-preview" }))
 	for _, name in ipairs(toolchain.managed_order) do
 		local entry = assert(toolchain.managed_tools[name], name)
 		assert(entry.version == toolchain.versions[name])
@@ -78,6 +80,13 @@ test("managed releases are prebuilt and target-aware", function()
 		end
 	end
 	assert(toolchain.managed_tools.mmdflux.assets["linux-arm64"] == nil, "unsupported binary was invented")
+	local markdown = toolchain.managed_tools["markdown-preview"]
+	assert(markdown.assets["linux-arm64"] == nil, "unsupported markdown-preview binary was invented")
+	assert(markdown.assets["darwin-arm64"].sha256 == "339f9a968fbbc4197259f811dd3f9780459f9d903532a29befcf16679b97babd")
+	assert(
+		markdown.assets["darwin-x86_64"].sha256 == "580552e6506f858d9e7b2215888d62edbf5511e3201dd62c91afe502c3142204"
+	)
+	assert(markdown.assets["linux-x86_64"].sha256 == "95eb4d2774c62e93998c41361fe2276a5134ef173dddab29026d34ef80ad44ef")
 	local jar = assert(toolchain.managed_tools.plantuml.assets["darwin-x86_64"])
 	assert(jar.kind == "jar")
 	assert(vim.deep_equal(jar.requires_all, { "java" }))
@@ -157,43 +166,14 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 	assert(toolchain.mason_entry("debugpy").requires_python_venv == true)
 end)
 
-test("manual Mason sync receives every exact pin without startup automation", function()
-	local original_offline = vim.env.NVIM_CONFIG_OFFLINE
-	local original_installer = package.loaded["mason-tool-installer"]
-	local captured
-	vim.env.NVIM_CONFIG_OFFLINE = nil
+test("Mason tool installer is removed and verified-tools retains manual authority", function()
 	package.loaded["plugins.lsp"] = nil
-	package.loaded["mason-tool-installer"] = {
-		setup = function(options)
-			captured = options
-		end,
-	}
 	local specs = require("plugins.lsp")
-	local installer_spec
 	for _, spec in ipairs(specs) do
-		if spec[1] == "WhoIsSethDaniel/mason-tool-installer.nvim" then
-			installer_spec = spec
-		end
+		assert(spec[1] ~= "WhoIsSethDaniel/mason-tool-installer.nvim")
 	end
-	assert(installer_spec and vim.tbl_contains(installer_spec.cmd, "MasonToolsInstallSync"))
-	installer_spec.config()
-	local toolchain = require("config.toolchain")
-	assert(#captured.ensure_installed == #toolchain.mason_order)
-	for index, item in ipairs(captured.ensure_installed) do
-		local name = toolchain.mason_order[index]
-		assert(item[1] == name)
-		assert(item.version == toolchain.mason_entry(name).version)
-		assert(type(item.condition) == "function")
-	end
-	assert(captured.run_on_start == false)
-	assert(captured.auto_update == false)
-	for _, enabled in pairs(captured.integrations) do
-		assert(enabled == false)
-	end
-
-	package.loaded["mason-tool-installer"] = original_installer
+	assert(type(require("config.tool_bootstrap").install) == "function")
 	package.loaded["plugins.lsp"] = nil
-	vim.env.NVIM_CONFIG_OFFLINE = original_offline
 end)
 
 test("LSP catalog separates the exact server set from external Rust eligibility", function()
@@ -290,7 +270,8 @@ test("clangd has one argv builder and rejects invalid databases before stop", fu
 	assert(vim.fn.writefile({ "[]" }, root .. "/compile_commands.json") == 0)
 	root = vim.uv.fs_realpath(root) or vim.fs.normalize(root)
 	assert(clangd.validate_compile_commands(root) == root, "valid database was rejected")
-	clangd._roots[root] = { manual = root }
+	clangd._router.setup({ defer = function() end })
+	assert(clangd.set_manual(root, root), "valid manual database was not applied")
 	command = clangd.command(root)
 	assert(command[2] == "--compile-commands-dir=" .. root, "root-scoped compile database flag is misplaced")
 	assert(vim.fn.writefile({ "{" }, root .. "/compile_commands.json") == 0)

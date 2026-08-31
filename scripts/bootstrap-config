@@ -172,6 +172,7 @@ export NVIM_LSP_LOG_FILE="$xdg_root/log/lsp.log"
 export NVIM_CONFIG_FILE="$local_config"
 export NVIM_CONFIG_ROOT="$repo_root"
 export NVIM_CONFIG_OFFLINE=1
+export NVIM_CONFIG_BOOTSTRAP=1
 export NVIM_CONFIG_XDG_ROOT="$xdg_root"
 export NVIM_CONFIG_LAZY_LOCKFILE="$lock_working"
 export TMPDIR="$xdg_root/tmp"

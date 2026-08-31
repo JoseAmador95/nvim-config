@@ -16,25 +16,22 @@ local source = read_file(repo .. "/lua/nvimconfig/health.lua")
 
 for _, required in ipairs({
 	"PATH precedence contract",
-	"local_config.path > ~/.local/bin > inherited host PATH > managed tools > Mason",
-	'state_summary("Managed"',
-	'state_summary("Mason"',
+	"local_config.path > ~/.local/bin > verified shims > host PATH > managed > Mason",
+	"state_summary()",
 	"Mason receipts",
 	"Managed release platform/prerequisites",
 	"record.detail",
-	"automatic failures will not retry",
-	"mason.auto_install=false",
+	"Tool failures never auto-retry",
+	"Startup is probe/plan only",
 	":NvimConfigToolsInstall",
-	":MasonToolsInstallSync",
 	"tree-sitter",
 	"Tree-sitter parser compilation",
 	"Rust language intelligence (host/user only)",
 	"managed and Mason copies are intentionally ignored",
 	"CMake language intelligence",
 	"Git terminal UI",
-	"latest-stable DevPod container editor",
-	"verifies it against GitHub's latest stable release",
-	"scripts/devpod-nvim up",
+	"Dev Containers CLI editor lifecycle",
+	"Install @devcontainers/cli explicitly",
 }) do
 	assert(source:find(required, 1, true), "health contract is missing: " .. required)
 end
@@ -52,6 +49,9 @@ local health = require("nvimconfig.health")
 assert(type(health.check) == "function", "health module is not loadable")
 assert(select(1, health._path_origin("/tmp/custom/bin/tool", { ["/tmp/custom/bin"] = true })) == "local_config")
 assert(select(1, health._path_origin(vim.fn.expand("~/.local/bin/tool"), {})) == "user-local")
+assert(
+	select(1, health._path_origin(require("config.tool_paths").verified_shim_bin() .. "/tool", {})) == "verified-shim"
+)
 assert(select(1, health._path_origin(require("config.tool_paths").managed_bin() .. "/tool", {})) == "managed")
 assert(select(1, health._path_origin(require("config.tool_paths").mason_bin() .. "/tool", {})) == "mason")
 

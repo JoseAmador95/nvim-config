@@ -19,6 +19,10 @@ local init_source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could
 local config_root = vim.fs.dirname(vim.uv.fs_realpath(init_source) or vim.fs.normalize(init_source))
 vim.opt.runtimepath:prepend(config_root)
 
+-- Local products are ordinary runtimepath entries, not remotely managed Lazy
+-- plugins. Register every boundary before host configuration can require one.
+require("config.local_plugins").setup()
+
 -- Core Settings ------------------------------------------------------------
 
 -- Disable netrw
@@ -211,19 +215,13 @@ end
 -- filetype detection see the first argv buffer. VSCode deliberately keeps only
 -- its action bridge; the pager gets viewer/diagram commands but no IDE tools.
 if is_editor then
-	local devpod = require("config.devpod")
-	devpod.setup()
+	local devcontainer = require("config.devcontainer")
+	devcontainer.setup()
 	require("config.navigation_history").setup()
-	require("config.review").setup()
 	require("config.code_review").setup()
-	require("config.agent_context").setup()
-	require("config.agent_results").setup()
-	-- A container editor is reached through the launcher's registered path
-	-- mapping. Registering it as a host editor would publish container-only
-	-- paths to nvim-review-open.
-	if not devpod.in_workspace() then
-		require("config.editor_rpc").setup_deferred()
-	end
+	-- exact-editor registers the runtime-specific WorkspaceKey. Container roots
+	-- use their host repository identity and remain separate from host records.
+	require("config.exact_editor").setup_deferred()
 	require("config.indent")
 	require("config.lsp_helpers")
 	require("config.lsp_commands")

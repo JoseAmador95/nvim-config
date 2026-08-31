@@ -61,7 +61,8 @@ return {
 			-- Theme painter (repaint-guarded).
 			--------------------------------------------------------------
 			-- This file no longer decides WHICH colorscheme runs: that is
-			-- config.theme's job, chosen with :Theme and persisted per machine.
+			-- config.theme's job, chosen with :Theme and persisted in the shared
+			-- editor/pager YAML state.
 			-- What stays here is the vscode-specific painter (a setup() call plus
 			-- a light/dark variant) and OSC 11 detection, which is generic — it
 			-- only sets 'background' and asks config.theme to repaint whatever is

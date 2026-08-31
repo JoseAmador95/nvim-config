@@ -4,6 +4,7 @@ vim.o.swapfile = false
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+require("config.local_plugins").setup()
 
 local failures = {}
 local count = 0
@@ -44,6 +45,34 @@ end
 
 local catalog = require("config.menu.catalog")
 local context = require("config.menu.context")
+local action_palette = require("config.action_palette")
+
+-- Catalog definitions remain pure host data; filtering, availability and bound
+-- execution belong to action-palette.nvim.
+catalog.build = function(menu_context, dispatch, surface)
+	menu_context = vim.deepcopy(menu_context)
+	menu_context.target = menu_context.target or action_palette.capture_target()
+	if dispatch == nil then
+		return action_palette.sections(menu_context, surface)
+	end
+	local registry = action_palette.new({
+		target = {
+			revalidate = function(target)
+				return target
+			end,
+		},
+		notify = function() end,
+	})
+	registry:register_catalog(catalog.definitions(), {
+		supports = function()
+			return true
+		end,
+		execute = function(id)
+			return dispatch(id)
+		end,
+	})
+	return registry:sections(menu_context, surface)
+end
 
 test("context is pure and derives visual modes", function()
 	local values = { filetype = "json", mode = "V" }
@@ -71,6 +100,10 @@ test("context capture records the origin editor target", function()
 	equal(vim.api.nvim_get_current_win(), captured.target.winid, "captured window")
 	equal(vim.api.nvim_get_current_tabpage(), captured.target.tabpage, "captured tab")
 	equal(vim.api.nvim_win_get_cursor(0)[1], captured.target.cursor.line, "captured cursor line")
+	equal(vim.api.nvim_buf_get_changedtick(0), captured.target.changedtick, "captured changedtick")
+	assert(captured.target.mode == nil, "mode leaked into ActionTarget")
+	assert(captured.target.selection == nil, "selection leaked into ActionTarget")
+	assert(captured.target.buftype == nil, "buffer metadata leaked into ActionTarget")
 	equal(vim.bo.buftype, captured.buftype, "captured buffer type")
 	equal(vim.bo.modifiable, captured.modifiable, "captured modifiable state")
 end)
@@ -124,10 +157,60 @@ end)
 
 test("every curated definition has an executable action", function()
 	local actions = require("config.menu.actions")
-	for _, section in ipairs(catalog.definitions(function() end)) do
+	local definitions = catalog.definitions()
+	local descriptor_count = 0
+	local inventory = {}
+	local function record(value)
+		inventory[#inventory + 1] = value or ""
+	end
+	for _, section in ipairs(definitions) do
+		record("S")
+		record(section.id)
+		record(section.label)
+		record(section.palette_label)
+		record(section.when and "1" or "0")
+		record(section.surfaces and tostring(section.surfaces.palette) or "")
+		record(section.surfaces and tostring(section.surfaces.context) or "")
 		for _, item in ipairs(section.items) do
+			descriptor_count = descriptor_count + 1
 			assert(actions.supports(item.id), "definition has no action: " .. item.id)
+			record("I")
+			record(item.id)
+			record(item.label)
+			record(item.hint)
+			record(item.palette_label)
+			record(item.when and "1" or "0")
+			record(item.surfaces and tostring(item.surfaces.palette) or "")
+			record(item.surfaces and tostring(item.surfaces.context) or "")
+			for _, keyword in ipairs(item.keywords or {}) do
+				record("K")
+				record(keyword)
+			end
 		end
+	end
+	assert(descriptor_count == 292, "post-retirement catalog must retain exactly 292 explicit descriptors")
+	equal(
+		"29e6f0178b8bcd4b5cac741d0a71155fdfa36fabe7270ecd7234bc0c718c4ce4",
+		vim.fn.sha256(table.concat(inventory, "\0")),
+		"descriptor labels, order, availability or search metadata drifted"
+	)
+
+	local contextual = catalog.build(context.new({ filetype = "lua", mode = "n" }), function() end, "context")
+	local contextual_count = 0
+	for _, section in ipairs(contextual) do
+		contextual_count = contextual_count + #section.items
+	end
+	assert(contextual_count == 89, "context menu must retain exactly 89 exposures")
+	for _, id in ipairs({
+		"command.review_publish",
+		"command.review_link_tuicr",
+		"command.review_start",
+		"review.open",
+		"agent.context",
+		"agent.results",
+	}) do
+		assert(not actions.supports(id), "retired callback survived: " .. id)
+		assert(not action_palette.supports(id), "retired registry entry survived: " .. id)
 	end
 end)
 
@@ -179,9 +262,19 @@ test("review presentation and comment actions are palette-only namespaced comman
 		equal(expected[2], descriptor.hint, id .. " mapping hint")
 		assert(not find_item(compact, id), id .. " leaked into the context menu")
 	end
-	for _, id in ipairs({ "command.review_reanchor", "command.review_publish" }) do
+	for _, id in ipairs({ "command.review_reanchor" }) do
 		assert(find_item(palette, id), id .. " descriptor is missing")
 		assert(not find_item(compact, id), id .. " leaked into the context menu")
+	end
+	for _, id in ipairs({
+		"command.review_publish",
+		"command.review_link_tuicr",
+		"command.review_start",
+		"review.open",
+		"agent.context",
+		"agent.results",
+	}) do
+		assert(not find_item(palette, id), id .. " survived retirement")
 	end
 	assert(not find_item(palette, "command.review_threads"), "duplicate ReviewThreads action survived")
 end)
@@ -247,25 +340,30 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 end)
 
 test("catalog filters palette-only descriptors by surface", function()
-	local run = function() end
 	local sections = {
 		{
 			id = "shared",
 			label = "Shared",
 			items = {
-				{ id = "shared.item", label = "Shared item", run = run },
+				{ id = "shared.item", label = "Shared item" },
 				{
 					id = "palette.item",
 					label = "Palette item",
-					run = run,
 					surfaces = { palette = true, context = false },
 				},
 			},
 		},
 	}
+	local registry = action_palette.new({ notify = function() end })
+	registry:register_catalog(sections, {
+		supports = function()
+			return true
+		end,
+		execute = function() end,
+	})
 
-	local palette = catalog.filter(sections, context.new(), "palette")
-	local menu = catalog.filter(sections, context.new(), "context")
+	local palette = registry:sections(context.new(), "palette")
+	local menu = registry:sections(context.new(), "context")
 	assert(find_item(palette, "shared.item") and find_item(palette, "palette.item"), "palette surface lost items")
 	assert(find_item(menu, "shared.item"), "context surface lost a shared item")
 	assert(not find_item(menu, "palette.item"), "palette-only item leaked into context menu")
@@ -463,8 +561,8 @@ test("user text reaches Ex commands as structured argv without concatenation", f
 			callback(table.remove(inputs, 1))
 		end
 
-		actions.run("log.highlight_regex")
-		actions.run("json.jqx_query")
+		actions.execute("log.highlight_regex")
+		actions.execute("json.jqx_query")
 
 		equal({
 			cmd = "LogHlRegex",
@@ -487,13 +585,11 @@ test("user text reaches Ex commands as structured argv without concatenation", f
 end)
 
 test("high-impact palette actions require confirmation", function()
-	local actions = require("config.menu.actions")
 	local original_cmd = vim.api.nvim_cmd
 	local original_select = vim.ui.select
 	local calls = {}
 	local choice = "Cancel"
-	local target = context.capture().target
-	target.surface = "palette"
+	local menu_context = context.capture()
 
 	local ok, err = xpcall(function()
 		vim.api.nvim_cmd = function(specification, options)
@@ -505,10 +601,10 @@ test("high-impact palette actions require confirmation", function()
 			callback(choice)
 		end
 
-		actions.run("file.revert", target)
+		find_item(action_palette.sections(menu_context, "palette"), "file.revert").run()
 		equal(0, #calls, "cancelled destructive action executed")
 		choice = "Continue"
-		actions.run("file.revert", target)
+		find_item(action_palette.sections(menu_context, "palette"), "file.revert").run()
 		equal({ cmd = "edit", args = {}, bang = true }, calls[1].specification, "confirmed revert command")
 	end, debug.traceback)
 
@@ -518,13 +614,11 @@ test("high-impact palette actions require confirmation", function()
 end)
 
 test("tmux refresh confirmation is explicit and honors Cancel and Continue", function()
-	local actions = require("config.menu.actions")
 	local original_refresh = package.loaded["config.dev_session_refresh"]
 	local original_select = vim.ui.select
 	local calls = 0
 	local choice = "Cancel"
-	local target = context.capture().target
-	target.surface = "palette"
+	local menu_context = context.capture()
 
 	local ok, err = xpcall(function()
 		package.loaded["config.dev_session_refresh"] = {
@@ -542,10 +636,10 @@ test("tmux refresh confirmation is explicit and honors Cancel and Continue", fun
 			callback(choice)
 		end
 
-		actions.run("tmux.refresh_dev_session", target)
+		find_item(action_palette.sections(menu_context, "palette"), "tmux.refresh_dev_session").run()
 		equal(0, calls, "cancelled refresh executed")
 		choice = "Continue"
-		actions.run("tmux.refresh_dev_session", target)
+		find_item(action_palette.sections(menu_context, "palette"), "tmux.refresh_dev_session").run()
 		equal(1, calls, "confirmed refresh did not execute exactly once")
 	end, debug.traceback)
 
@@ -556,7 +650,7 @@ end)
 
 test("host dev-session refresh checks, saves, schedules, then exits without bang", function()
 	local refresh = require("config.dev_session_refresh")
-	local original_devpod = package.loaded["config.devpod"]
+	local original_devcontainer = package.loaded["config.devcontainer"]
 	local original_auto_session = package.loaded["auto-session"]
 	local original_executable = vim.fn.executable
 	local original_system = vim.system
@@ -574,7 +668,7 @@ test("host dev-session refresh checks, saves, schedules, then exits without bang
 				vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 			end
 		end
-		package.loaded["config.devpod"] = {
+		package.loaded["config.devcontainer"] = {
 			in_workspace = function()
 				return false
 			end,
@@ -614,7 +708,7 @@ test("host dev-session refresh checks, saves, schedules, then exits without bang
 		equal({ specification = { cmd = "quitall" }, options = {} }, quit, "safe Neovim exit")
 	end, debug.traceback)
 
-	package.loaded["config.devpod"] = original_devpod
+	package.loaded["config.devcontainer"] = original_devcontainer
 	package.loaded["auto-session"] = original_auto_session
 	vim.fn.executable = original_executable
 	vim.system = original_system
@@ -627,7 +721,7 @@ end)
 
 test("dev-session refresh aborts for modified buffers and save failures", function()
 	local refresh = require("config.dev_session_refresh")
-	local original_devpod = package.loaded["config.devpod"]
+	local original_devcontainer = package.loaded["config.devcontainer"]
 	local original_auto_session = package.loaded["auto-session"]
 	local original_executable = vim.fn.executable
 	local original_system = vim.system
@@ -649,7 +743,7 @@ test("dev-session refresh aborts for modified buffers and save failures", functi
 				vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 			end
 		end
-		package.loaded["config.devpod"] = {
+		package.loaded["config.devcontainer"] = {
 			in_workspace = function()
 				return false
 			end,
@@ -725,7 +819,7 @@ test("dev-session refresh aborts for modified buffers and save failures", functi
 	if buffer and vim.api.nvim_buf_is_valid(buffer) then
 		vim.api.nvim_buf_delete(buffer, { force = true })
 	end
-	package.loaded["config.devpod"] = original_devpod
+	package.loaded["config.devcontainer"] = original_devcontainer
 	package.loaded["auto-session"] = original_auto_session
 	vim.fn.executable = original_executable
 	vim.system = original_system
@@ -736,9 +830,9 @@ test("dev-session refresh aborts for modified buffers and save failures", functi
 	assert(ok, err)
 end)
 
-test("DevPod dev-session refresh waits for both authenticated acknowledgements", function()
+test("Dev Container dev-session refresh waits for both authenticated acknowledgements", function()
 	local refresh = require("config.dev_session_refresh")
-	local original_devpod = package.loaded["config.devpod"]
+	local original_devcontainer = package.loaded["config.devcontainer"]
 	local original_auto_session = package.loaded["auto-session"]
 	local original_cmd = vim.api.nvim_cmd
 	local original_pane = vim.env.TMUX_PANE
@@ -753,7 +847,7 @@ test("DevPod dev-session refresh waits for both authenticated acknowledgements",
 				vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 			end
 		end
-		package.loaded["config.devpod"] = {
+		package.loaded["config.devcontainer"] = {
 			in_workspace = function()
 				return true
 			end,
@@ -766,30 +860,30 @@ test("DevPod dev-session refresh waits for both authenticated acknowledgements",
 		package.loaded["auto-session"] = {
 			save_session = function(_, options)
 				saves = saves + 1
-				equal({ show_message = false, is_autosave = true }, options, "DevPod session save options")
+				equal({ show_message = false, is_autosave = true }, options, "Dev Container session save options")
 				return true
 			end,
 		}
-		-- Existing DevPod editors created before this feature do not receive
+		-- Existing Dev Container editors do not necessarily receive
 		-- TMUX_PANE. The authenticated host controller owns the exact pane.
 		vim.env.TMUX_PANE = nil
 		vim.api.nvim_cmd = function(specification)
-			equal({ cmd = "quitall" }, specification, "DevPod exit command")
+			equal({ cmd = "quitall" }, specification, "Dev Container exit command")
 			quits = quits + 1
 		end
 
 		assert(refresh.refresh())
-		equal({ "tmux_dev_refresh_check" }, requests, "DevPod preflight request")
-		equal(0, saves, "DevPod saved before preflight acknowledgement")
+		equal({ "tmux_dev_refresh_check" }, requests, "Dev Container preflight request")
+		equal(0, saves, "Dev Container saved before preflight acknowledgement")
 		callbacks.tmux_dev_refresh_check({ ok = true })
-		equal(1, saves, "DevPod did not save after preflight acknowledgement")
-		equal({ "tmux_dev_refresh_check", "tmux_dev_refresh" }, requests, "DevPod schedule request")
-		equal(0, quits, "DevPod exited before schedule acknowledgement")
+		equal(1, saves, "Dev Container did not save after preflight acknowledgement")
+		equal({ "tmux_dev_refresh_check", "tmux_dev_refresh" }, requests, "Dev Container schedule request")
+		equal(0, quits, "Dev Container exited before schedule acknowledgement")
 		callbacks.tmux_dev_refresh({ ok = true })
-		equal(1, quits, "DevPod did not exit after schedule acknowledgement")
+		equal(1, quits, "Dev Container did not exit after schedule acknowledgement")
 	end, debug.traceback)
 
-	package.loaded["config.devpod"] = original_devpod
+	package.loaded["config.devcontainer"] = original_devcontainer
 	package.loaded["auto-session"] = original_auto_session
 	vim.api.nvim_cmd = original_cmd
 	vim.env.TMUX_PANE = original_pane
@@ -806,16 +900,16 @@ test("command wrappers preserve structured plugin arguments", function()
 		vim.api.nvim_cmd = function(specification, options)
 			calls[#calls + 1] = { specification = specification, options = options }
 		end
-		actions.run("command.trouble_buffer", target)
+		actions.execute("command.trouble_buffer", target)
 		equal({
 			cmd = "Trouble",
 			args = { "diagnostics", "toggle", "filter.buf=0" },
 			bang = false,
 		}, calls[1].specification, "Trouble wrapper arguments")
 		equal({}, calls[1].options, "Trouble wrapper options")
-		actions.run("command.diagram_show_svg", target)
+		actions.execute("command.diagram_show_svg", target)
 		equal({ cmd = "DiagramShow", args = { "svg" }, bang = false }, calls[2].specification, "SVG wrapper")
-		actions.run("command.markdown_render_enable", target)
+		actions.execute("command.markdown_render_enable", target)
 		equal(
 			{ cmd = "MarkdownRender", args = { "enable" }, bang = false },
 			calls[3].specification,
@@ -877,15 +971,15 @@ test("selected LSP, Flash, window, and multicursor actions dispatch exact APIs",
 			warnings[#warnings + 1] = message
 		end
 
-		actions.run("lsp.hover", target)
-		actions.run("lsp.signature_help", target)
-		actions.run("flash.jump", target)
-		actions.run("flash.treesitter", target)
+		actions.execute("lsp.hover", target)
+		actions.execute("lsp.signature_help", target)
+		actions.execute("flash.jump", target)
+		actions.execute("flash.treesitter", target)
 		for _, name in ipairs({ "resize_left", "resize_down", "resize_up", "resize_right" }) do
-			actions.run("window." .. name, target)
+			actions.execute("window." .. name, target)
 		end
-		actions.run("multicursor.flash_cursor", target)
-		actions.run("multicursor.flash_word_selection", target)
+		actions.execute("multicursor.flash_cursor", target)
+		actions.execute("multicursor.flash_word_selection", target)
 
 		equal({ "clients", 0, "textDocument/hover" }, calls[1], "hover client method")
 		equal({ "hover", { border = "rounded" } }, calls[2], "hover API and border")
@@ -901,7 +995,7 @@ test("selected LSP, Flash, window, and multicursor actions dispatch exact APIs",
 		equal({ "multicursor.flash_word_selection" }, calls[12], "multicursor selection helper")
 
 		package.loaded["smart-splits"].resize_left = nil
-		actions.run("window.resize_left", target)
+		actions.execute("window.resize_left", target)
 		assert(
 			warnings[#warnings]:find("smart-splits action not available", 1, true),
 			"missing smart-splits method did not notify"
@@ -930,13 +1024,16 @@ test("Git selection actions use the captured normalized range and confirm reset"
 	local ok, err = xpcall(function()
 		vim.api.nvim_set_current_buf(origin)
 		vim.api.nvim_buf_set_lines(origin, 0, -1, false, { "one", "two", "three", "four" })
-		local target = context.capture().target
-		target.surface = "palette"
-		target.selection = {
+		local menu_context = context.capture()
+		menu_context.mode = "v"
+		menu_context.visual = true
+		menu_context.selection = {
 			mode = "v",
 			anchor = { line = 4, col = 2 },
 			cursor = { line = 2, col = 0 },
 		}
+		local target = vim.deepcopy(menu_context.target)
+		target.selection = vim.deepcopy(menu_context.selection)
 		vim.cmd("new")
 		local picker_buf = vim.api.nvim_get_current_buf()
 		package.loaded.gitsigns = {
@@ -953,12 +1050,14 @@ test("Git selection actions use the captured normalized range and confirm reset"
 			callback(choice)
 		end
 
-		actions.run("gitsigns.stage_selection", target)
+		actions.execute("gitsigns.stage_selection", target)
 		equal({ action = "stage", range = { 2, 4 }, bufnr = origin }, calls[1], "captured Git stage range")
-		actions.run("gitsigns.reset_selection", target)
+		local reset = assert(find_item(action_palette.sections(menu_context, "palette"), "gitsigns.reset_selection"))
+		reset.run()
 		equal(1, #calls, "cancelled Git reset executed")
 		choice = "Continue"
-		actions.run("gitsigns.reset_selection", target)
+		reset = assert(find_item(action_palette.sections(menu_context, "palette"), "gitsigns.reset_selection"))
+		reset.run()
 		equal({ action = "reset", range = { 2, 4 }, bufnr = origin }, calls[2], "confirmed Git reset range")
 
 		vim.cmd("close")
@@ -992,9 +1091,9 @@ test("coverage and log actions preserve structured arguments", function()
 			callback(path)
 		end
 
-		actions.run("coverage.load_report", target)
-		actions.run("command.log_watch_enable", target)
-		actions.run("command.log_watch_disable", target)
+		actions.execute("coverage.load_report", target)
+		actions.execute("command.log_watch_enable", target)
+		actions.execute("command.log_watch_disable", target)
 		equal({ prompt = "Coverage report: ", completion = "file" }, input_options, "coverage file prompt")
 		equal(
 			{ cmd = "CoverageLoad", args = { path }, bang = false },
@@ -1129,17 +1228,16 @@ test("selection actions restore the captured range in the origin buffer", functi
 			commands[#commands + 1] = specification
 		end
 
-		actions.run("python.send_selection", target)
+		actions.execute("python.send_selection", target)
 		assert(sent_selection == true, "Python action did not send a selection")
 		equal({ 1, 1 }, vim.api.nvim_buf_get_mark(buf, "<"), "selection start mark")
 		equal({ 3, 2 }, vim.api.nvim_buf_get_mark(buf, ">"), "selection end mark")
 		vim.api.nvim_buf_set_mark(buf, "<", 2, 0, {})
 		vim.api.nvim_buf_set_mark(buf, ">", 2, 1, {})
-		actions.run("search.selection", target)
+		actions.execute("search.selection", target)
 		assert(searched_selection, "search action did not use the visual selection")
 
-		actions.run("agent.context", target)
-		equal({ cmd = "AgentContext", args = {}, bang = false, range = { 1, 3 } }, commands[1], "agent range")
+		assert(not actions.supports("agent.context"), "retired agent context action remains registered")
 	end, debug.traceback)
 
 	vim.api.nvim_cmd = original_cmd
@@ -1406,7 +1504,7 @@ end)
 
 test("Snacks palette flattens the shared catalog and confirms once", function()
 	local original_menu = package.loaded["config.menu"]
-	local original_actions = package.loaded["config.menu.actions"]
+	local original_palette = package.loaded["config.action_palette"]
 	local original_snacks = package.loaded.snacks
 	local original_pager = package.loaded["config.pager"]
 	local captured
@@ -1415,9 +1513,19 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 	local original_filetype = vim.bo.filetype
 
 	local ok, err = xpcall(function()
-		package.loaded["config.menu.actions"] = {
-			run = function(id, target)
-				dispatched[#dispatched + 1] = { id = id, target = target }
+		local registry = action_palette.new({ notify = function() end })
+		registry:register_catalog(catalog.definitions(), {
+			supports = function()
+				return true
+			end,
+			execute = function(id, invocation)
+				dispatched[#dispatched + 1] = { id = id, target = invocation.target }
+			end,
+		})
+		package.loaded["config.action_palette"] = {
+			capture_target = action_palette.capture_target,
+			sections = function(menu_context, surface)
+				return registry:sections(menu_context, surface)
 			end,
 		}
 		package.loaded.snacks = {
@@ -1472,7 +1580,9 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 				closes = closes + 1
 			end,
 		}
-		vim.api.nvim_set_current_buf(vim.api.nvim_create_buf(false, true))
+		vim.cmd("new")
+		local picker_win = vim.api.nvim_get_current_win()
+		local picker_buf = vim.api.nvim_get_current_buf()
 		captured.confirm(picker, session_item)
 		captured.confirm(picker, session_item)
 		vim.wait(500, function()
@@ -1481,10 +1591,14 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 		equal("session.search", dispatched[1].id, "palette dispatched the wrong action")
 		equal(origin, dispatched[1].target.bufnr, "palette lost the origin buffer")
 		equal(1, closes, "palette closed more than once")
+		vim.api.nvim_win_close(picker_win, true)
+		if vim.api.nvim_buf_is_valid(picker_buf) then
+			vim.api.nvim_buf_delete(picker_buf, { force = true })
+		end
 	end, debug.traceback)
 
 	package.loaded["config.menu"] = original_menu
-	package.loaded["config.menu.actions"] = original_actions
+	package.loaded["config.action_palette"] = original_palette
 	package.loaded.snacks = original_snacks
 	package.loaded["config.pager"] = original_pager
 	vim.bo.filetype = original_filetype

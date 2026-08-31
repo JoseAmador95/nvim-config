@@ -8,11 +8,9 @@ This is a Neovim 0.12+ configuration with a full editor profile and a small
 ## Setup and optional features
 
 Clone the repository as `~/.config/nvim` and start Neovim. Lazy restores locked
-plugins; the full terminal profile then considers every eligible exact tool pin
-once. A persistent `name@version` record is created before an automatic
-attempt, so a failed package-manager install is not retried or announced on
-every startup. Use `mason = { auto_install = false }` in `~/.nvim-local.lua` to
-disable automatic attempts entirely.
+plugins; startup only plans and attests exact tool pins. Installation, retry and
+repair are explicit through `:NvimConfigToolsInstall[!]`, and offline startup
+never consumes an attempt.
 
 For a reproducible install or validation run, download the four pinned,
 precompiled validators and restore the committed plugin/parser pins into an
@@ -74,15 +72,14 @@ order. External tools are optional unless their feature is used:
 | Inline diagram images | A terminal with the Kitty graphics protocol, such as Ghostty |
 | Pager profile | `nvimpager` plus the config symlink below |
 | Git terminal UI | Host `lazygit` |
-| Container editor | Latest stable DevPod/Neovim, local Podman/Docker provider and host `cc`; see [the focused workflow](docs/devpod-neovim.md) |
+| Container editor | An already-installed `@devcontainers/cli` and project `devcontainer.json`; see [the focused workflow](docs/devcontainer-neovim.md) |
 | Just recipes | Host `just`; it is never installed automatically |
 
-`mmdflux` and PlantUML are installed from pinned official precompiled releases
-with `:NvimConfigToolsInstall [all|mmdflux|plantuml]`;
-append `!` to install the managed pin even when an external executable exists
-(the host-first `PATH` order is unchanged). Retry exact
-Mason pins explicitly with `:MasonToolsInstallSync`. Mason's install backends
-and their host prerequisites are:
+`mmdflux`, PlantUML, release tools and exact Mason packages share
+`:NvimConfigToolsInstall [all|name]`; append `!` for explicit repair or to
+install the managed pin when an external probe is incompatible. Mason's UI is
+read-only: its install, update and uninstall commands and mappings are removed.
+The managed backends and their host prerequisites are:
 
 | Backend | Packages | Host prerequisite |
 | --- | --- | --- |
@@ -119,7 +116,7 @@ right click opens the hierarchical menu. Closing the final work tab preserves
 user buffers, creates a pristine home tab, and opens the Snacks dashboard;
 `<leader>Q` remains the explicit close-all flow.
 
-## Review rounds and agent interchange
+## Native review
 
 The full terminal editor has a native, repository-scoped review mode that stays
 in the current ordinary tab. `:ReviewOpen` (or `<leader>ro`) freezes a working,
@@ -193,10 +190,10 @@ export refuses working-tree drift, session drift, or stale anchors. The bang
 form first writes and verifies an owner-only recovery; global drift labels the
 saved snapshot stale, while anchor drift remains attached to the affected
 comment.
-`:ReviewLinkTuicr` and `:ReviewPublish[!]` are separate, explicit operations;
-only open, undelivered comments are published through `tuicr-round`. Ordinary
-`:DiffviewOpen` and `:DiffviewFileHistory` remain independent raw Diffview
-workflows.
+Legacy bridge and delivery fields in existing review stores remain validated
+and round-trip unchanged, but are inert: Neovim no longer links or publishes
+review sessions. Ordinary `:DiffviewOpen` and `:DiffviewFileHistory` remain
+independent raw Diffview workflows.
 
 The review mappings use the lower-case `<leader>r` namespace: `rr` panel, `ro`
 open, `rm` mode, `rs` scope, `rb` parent scope, `rf/rh/rl` panel panes, `rv`
@@ -206,45 +203,12 @@ reply, `rt` resolve, `rE` export, `ru` refresh, and `rq` close. `]r` and `[r`
 navigate comments. Tests use `<leader>Tn` / `<leader>Td`, Python uses
 `<leader>pr` / `<leader>ps`, and LSP rename uses `<leader>lr`.
 
-The terminal-only TUICR and agent interchange commands are intentionally absent
-from VSCode and `nvimpager`:
-
-- `:ReviewRoundStart` resolves the current canonical Git root, starts
-  `~/.config/tuicr/tuicr-round` asynchronously, caches the returned
-  round UUID for that root, and opens that exact round in a reusable 95% Snacks
-  terminal. `:TuicrReview` reopens the cached UUID; after an editor restart it
-  queries the launcher and, when several rounds match, requires an explicit
-  selection before opening one. `:TuicrReview {uuid}` validates that the exact
-  round belongs to the current repository before opening it. The launcher, not
-  Neovim, owns the private tmux session that prevents duplicate TUIs across
-  surfaces. Inside the review float, `<C-t>` hides the terminal without stopping
-  tuicr; `:TuicrReview` shows the same live round again. `<leader>t` is
-  intentionally unavailable there because `Space` is passed immediately to
-  tuicr's commit selector. A normal tuicr `q` closes the private tmux server and
-  returns to Neovim, while a failed process keeps its pane and output for
-  diagnosis.
-- `:[range]AgentContext` copies version-1 UTF-8 JSON through OSC52's `+`
-  register even on a local host. It includes the canonical root, relative file,
-  one-based range, selected text, current-buffer diagnostics, and an optional
-  `symbol` navigation hint taken from the current word under the cursor. That
-  hint is deliberately lexical, not an LSP semantic-symbol claim.
-- `:[range]AgentContext!` additionally includes separate staged and unstaged
-  diffs plus the untracked path list. This can disclose all uncommitted work in
-  the repository to the clipboard recipient. Both forms refuse payloads larger
-  than 1 MiB; the non-bang form never reads or emits diffs.
-- `:AgentResultsImport {json}` accepts only the version-1 contract in
-  `~/.config/tuicr/schemas/agent-results.schema.json`. The importer
-  enforces the 1 MiB and 2,000-item limits, exact canonical root, strict keys,
-  bounded strings, contained existing files, positions, and protocol severity.
-  Accepted findings replace the quickfix list and open Trouble's `qflist` mode.
-  The importer cannot carry executable actions, callbacks, or shell commands.
-
 Each interactive full editor also registers, just after its UI enters, a private
-Unix RPC socket and an owner-only JSON record under the review state root. This
+Unix RPC socket and an owner-only JSON record under the exact-editor state root. This
 keeps socket and Git discovery off the startup critical path; headless validators
 are not editor targets. The root is
-`$NVIM_REVIEW_STATE_HOME`, otherwise `$XDG_STATE_HOME/nvim-review`, otherwise
-`~/.local/state/nvim-review`; its `editors`, `requests`, `waits`, and `sockets`
+`$NVIM_EXACT_EDITOR_STATE_HOME`, otherwise `$XDG_STATE_HOME/exact-editor`, otherwise
+`~/.local/state/exact-editor`; its `editors`, `requests`, `waits`, and `sockets`
 directories are mode 0700 and JSON files are mode 0600. Registry roots update
 only on `BufEnter` and `DirChanged`, and the editor removes its record and socket
 on exit.
@@ -252,7 +216,7 @@ on exit.
 External tools may request an already-open file with:
 
 ```sh
-~/.config/nvim/scripts/nvim-review-open \
+~/.config/nvim/scripts/exact-editor-open \
   --cwd /absolute/repository \
   --file relative/or/absolute/file \
   --line 12 \
@@ -273,7 +237,7 @@ The same helper has an explicit blocking mode for tools such as `gh` whose
 temporary editor file lives outside the repository:
 
 ```sh
-~/.config/nvim/scripts/nvim-review-open --wait-editor /absolute/temporary-file
+~/.config/nvim/scripts/exact-editor-open --wait-editor /absolute/temporary-file
 ```
 
 This mode derives the repository used for editor selection from its working
@@ -286,11 +250,11 @@ closing a modified window aborts the caller while preserving the buffer.
 
 ## Development workflows
 
-`<leader>t` opens a host shell in a lower split. Shells, Python REPLs, LazyGit,
-tuicr and Just share one Snacks terminal
+`<leader>t` opens a host shell in a lower split. Shells, Python REPLs, LazyGit
+and Just share one Snacks terminal
 lifecycle keyed by runtime, repository and purpose. Hiding a terminal preserves
-its process; a failed process keeps its output. LazyGit and tuicr use 95% floats,
-while shells, REPLs and recipe output use the lower split. `gf` on a contained
+its process; a failed process keeps its output. LazyGit uses a 95% float, while
+shells, REPLs and recipe output use the lower split. `gf` on a contained
 `file:line[:column]` location opens or reuses the corresponding editor tab.
 Embedded LazyGit also sets a process-local `GH_EDITOR` to the blocking helper,
 so `gh pr create` keeps its interactive questions in the LazyGit terminal while
@@ -331,16 +295,15 @@ imports contained `file:line[:column]` output into quickfix and Trouble. The
 project/branch `:Scratch` (`<leader>.`) is private under `stdpath("state")`,
 saved atomically and prunes only inactive files older than 30 days when opened.
 
-`Alt-Space` in tmux exposes stable `editor: DevPod` and `editor: host` actions.
-The former replaces only the dev session's `editor` pane, using a private
-host-first bridge that verifies the latest stable DevPod release;
-agent/Git/LazyGit/tuicr stay on the host. `:DevPodUp[!]`, `:DevPodRecreate[!]`,
-`:DevPodStatus`, `:DevPodLog` and
-`:HostEditor` provide the editor surfaces. A commit-backed read-only config
-snapshot and the latest stable Neovim runtime are provisioned outside the
-project. See
-[Neovim inside DevPod](docs/devpod-neovim.md) for provider setup, network
-confirmation, path mapping, structured `exec --` and the security boundary.
+`Alt-Space` in tmux exposes stable container/host editor actions. The container
+action replaces only the dev session's single `editor` pane through the
+already-installed `@devcontainers/cli`; agent/Git/LazyGit remain on the host.
+`:DevContainerUp[!]`, `:DevContainerRecreate[!]`, `:DevContainerStatus`,
+`:DevContainerLog`, and `:DevContainerHostEditor` provide the editor surfaces.
+`!` authorizes network-dependent managed tools in the container; without it
+verified-tools remains `blocked/offline` and does not consume an attempt. See
+[Neovim inside a Dev Container](docs/devcontainer-neovim.md) for lifecycle,
+path mapping, structured `exec --`, authenticated spool, and security limits.
 
 Enable the lightweight pager profile with:
 

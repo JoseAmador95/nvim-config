@@ -69,7 +69,7 @@ return {
 					},
 					lualine_x = {
 						statusline.review,
-						statusline.devpod,
+						statusline.devcontainer,
 						statusline.python,
 						statusline.cmake,
 						statusline.clangd,

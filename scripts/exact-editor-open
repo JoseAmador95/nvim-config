@@ -1,0 +1,871 @@
+#!/usr/bin/env python3
+"""Open one file in exactly one registered editor instance."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import posixpath
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+MAX_RECORD_BYTES = 64 * 1024
+RECORD_MAX_AGE = 7 * 24 * 60 * 60
+REQUEST_MAX_AGE = 10 * 60
+WAIT_MAX_AGE = 7 * 24 * 60 * 60
+PROBE_ATTEMPTS = 3
+PROBE_RETRY_DELAY = 0.05
+RPC_TIMEOUT = 1.0
+WAIT_POLL_DELAY = 0.05
+DEFAULT_WAIT_TIMEOUT = 24 * 60 * 60
+TEXT_CHUNK_BYTES = 64 * 1024
+LEGACY_RECORD_KEYS = {
+    "version",
+    "instance_id",
+    "pid",
+    "socket",
+    "repo_roots",
+    "TMUX_PANE",
+    "updated_at",
+}
+RECORD_KEYS = {
+    "version",
+    "instance_id",
+    "pid",
+    "socket",
+    "workspaces",
+    "TMUX_PANE",
+    "updated_at",
+}
+GIT_ROUTING_ENV = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_WORK_TREE",
+}
+WAIT_KEYS = {
+    "version",
+    "request_id",
+    "instance_id",
+    "status",
+    "updated_at",
+}
+WAIT_STATUSES = {"waiting", "completed", "aborted"}
+
+
+class OpenError(Exception):
+    """Report a fail-closed editor routing error."""
+
+
+class NoMatchingEditor(OpenError):
+    """Report that fallback is safe because no matching editor is active."""
+
+
+@dataclass(frozen=True)
+class WorkspaceKey:
+    """Identify one exact editor workspace.
+
+    :param runtime: Runtime class, such as ``host`` or ``container``.
+    :param root: Root path as observed by the selected editor.
+    :param repo_identity: Stable logical repository identity.
+    """
+
+    runtime: str
+    root: str
+    repo_identity: str
+
+    def to_json(self) -> dict[str, str]:
+        """Return the persisted workspace projection."""
+        return {
+            "runtime": self.runtime,
+            "root": self.root,
+            "repo_identity": self.repo_identity,
+        }
+
+
+def state_root() -> pathlib.Path:
+    """Resolve the private exact-editor state root."""
+    configured = os.environ.get("NVIM_EXACT_EDITOR_STATE_HOME")
+    if configured:
+        root = pathlib.Path(configured)
+    elif os.environ.get("XDG_STATE_HOME"):
+        root = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "exact-editor"
+    else:
+        root = pathlib.Path.home() / ".local" / "state" / "exact-editor"
+    return pathlib.Path(os.path.abspath(os.fspath(root.expanduser())))
+
+
+def ensure_dir(path: pathlib.Path) -> pathlib.Path:
+    """Create or validate one owner-only real state directory."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not path.is_dir() or path.is_symlink():
+        raise OpenError("state path is not a real directory: " + str(path))
+    path.chmod(0o700)
+    return path
+
+
+def prepare_state(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Prepare exact-editor state directories."""
+    ensure_dir(root)
+    editors = ensure_dir(root / "editors")
+    requests = ensure_dir(root / "requests")
+    waits = ensure_dir(root / "waits")
+    sockets = ensure_dir(root / "sockets")
+    return editors, requests, waits, sockets
+
+
+def regular_nonsymlink(path: pathlib.Path) -> bool:
+    """Return whether a path is a regular non-symlink file."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and not stat.S_ISLNK(mode)
+
+
+def unlink_regular(path: pathlib.Path) -> None:
+    """Remove only a regular non-symlink file."""
+    if regular_nonsymlink(path):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def positive_integer(value: object) -> bool:
+    """Return whether a value is a positive non-boolean integer."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def parse_timestamp(value: object) -> float | None:
+    """Parse one UTC protocol timestamp."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=dt.timezone.utc
+        ).timestamp()
+    except ValueError:
+        return None
+
+
+def canonical_uuid(value: object) -> str | None:
+    """Return a canonical lowercase UUID string."""
+    try:
+        parsed = str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return parsed if parsed == value else None
+
+
+def canonical_runtime_root(value: object) -> bool:
+    """Return whether a root is absolute and lexically canonical for a Unix runtime."""
+    return (
+        isinstance(value, str)
+        and value.startswith("/")
+        and not value.startswith("//")
+        and "\0" not in value
+        and posixpath.normpath(value) == value
+    )
+
+
+def validate_workspace(value: object) -> WorkspaceKey | None:
+    """Validate one serialized workspace key."""
+    if not isinstance(value, dict) or set(value) != {"runtime", "root", "repo_identity"}:
+        return None
+    fields = [value.get("runtime"), value.get("root"), value.get("repo_identity")]
+    if any(not isinstance(item, str) or not item or "\0" in item for item in fields):
+        return None
+    if not canonical_runtime_root(fields[1]):
+        return None
+    return WorkspaceKey(fields[0], fields[1], fields[2])
+
+
+def legacy_workspaces(value: Mapping[str, object]) -> list[dict[str, str]] | None:
+    """Normalize version-1 repository roots as host workspace keys."""
+    roots = value.get("repo_roots")
+    if not isinstance(roots, list) or any(not canonical_runtime_root(root) for root in roots):
+        return None
+    return [WorkspaceKey("host", root, root).to_json() for root in roots]
+
+
+def current_workspaces(value: Mapping[str, object]) -> list[dict[str, str]] | None:
+    """Validate version-2 exact workspace keys."""
+    raw_workspaces = value.get("workspaces")
+    if not isinstance(raw_workspaces, list):
+        return None
+    normalized = [validate_workspace(item) for item in raw_workspaces]
+    if any(item is None for item in normalized):
+        return None
+    return [item.to_json() for item in normalized if item is not None]
+
+
+def record_workspaces(value: Mapping[str, object]) -> list[dict[str, str]] | None:
+    """Dispatch current and legacy registry workspace validation."""
+    if value.get("version") == 1 and set(value) == LEGACY_RECORD_KEYS:
+        return legacy_workspaces(value)
+    if value.get("version") == 2 and set(value) == RECORD_KEYS:
+        return current_workspaces(value)
+    return None
+
+
+def validate_record(value: object, path: pathlib.Path, now: float) -> dict[str, object] | None:
+    """Validate and normalize a current or legacy editor record."""
+    if not isinstance(value, dict):
+        return None
+    workspaces = record_workspaces(value)
+    if workspaces is None:
+        return None
+    instance_id = canonical_uuid(value.get("instance_id"))
+    if instance_id is None or path.name != instance_id + ".json":
+        return None
+    if not positive_integer(value.get("pid")):
+        return None
+    socket = value.get("socket")
+    if not isinstance(socket, str) or not socket.startswith("/") or "\0" in socket:
+        return None
+    pane = value.get("TMUX_PANE")
+    if pane is not None and not isinstance(pane, str):
+        return None
+    updated = parse_timestamp(value.get("updated_at"))
+    if updated is None or updated > now + 300 or now - updated > RECORD_MAX_AGE:
+        return None
+    normalized_record = dict(value)
+    normalized_record["workspaces"] = workspaces
+    return normalized_record
+
+
+def pid_alive(pid: int) -> bool:
+    """Return whether a process identifier is still owned by a live process."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def run_nvim(nvim: str, socket: str, expression: str) -> subprocess.CompletedProcess[str]:
+    """Run one bounded Neovim RPC expression."""
+    command = [nvim, "--headless", "--server", socket, "--remote-expr", expression]
+    try:
+        return subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=RPC_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout="",
+            stderr="nvim RPC timed out after " + str(RPC_TIMEOUT) + " seconds",
+        )
+
+
+def read_exact(descriptor: int, size: int) -> bytes:
+    """Read exactly the bounded current contents of one regular file descriptor."""
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def opened_file_unchanged(before: os.stat_result, opened: os.stat_result) -> bool:
+    """Compare the security-relevant identity of two file observations."""
+    return (before.st_dev, before.st_ino, before.st_size, before.st_mode) == (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_size,
+        opened.st_mode,
+    )
+
+
+def read_private_json(path: pathlib.Path, label: str) -> object:
+    """Read one owner-only JSON file without following links or racing replacement."""
+    descriptor = None
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+            raise OpenError(label + " is not a regular non-symlink file: " + str(path))
+        if stat.S_IMODE(before.st_mode) != 0o600:
+            raise OpenError(label + " is not owner-only: " + str(path))
+        if before.st_size > MAX_RECORD_BYTES:
+            raise OpenError(label + " exceeds 64 KiB: " + str(path))
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(str(path), flags)
+        opened = os.fstat(descriptor)
+        if not opened_file_unchanged(before, opened):
+            raise OpenError(label + " changed while opening: " + str(path))
+        encoded = read_exact(descriptor, opened.st_size)
+        if len(encoded) != opened.st_size:
+            raise OpenError(label + " changed while reading: " + str(path))
+        if not opened_file_unchanged(path.lstat(), opened):
+            raise OpenError(label + " changed while validating: " + str(path))
+        return json.loads(encoded.decode("utf-8"))
+    except OpenError:
+        raise
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        raise OpenError(label + " is malformed: " + str(error)) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def private_socket(path_text: object, sockets: pathlib.Path) -> pathlib.Path | None:
+    """Validate an owner-only Unix socket contained in the registry socket directory."""
+    if not isinstance(path_text, str) or "\0" in path_text:
+        return None
+    path = pathlib.Path(path_text)
+    try:
+        if path.parent != sockets or not path.is_absolute():
+            return None
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISSOCK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+        return None
+    return path
+
+
+def record_socket(record: Mapping[str, object], sockets: pathlib.Path) -> pathlib.Path | None:
+    """Validate that a private socket name belongs to its registry instance."""
+    socket_path = private_socket(record.get("socket"), sockets)
+    instance_id = record.get("instance_id")
+    if socket_path is None or not isinstance(instance_id, str):
+        return None
+    compact_id = instance_id.replace("-", "")
+    stem = socket_path.stem
+    if len(stem) < 8 or len(stem) > 32 or not compact_id.startswith(stem):
+        return None
+    return socket_path
+
+
+def cleanup_record(path: pathlib.Path, record: Mapping[str, object], sockets: pathlib.Path) -> None:
+    """Remove one stale record and only its verified private Unix socket."""
+    unlink_regular(path)
+    socket_path = record_socket(record, sockets)
+    if socket_path is not None:
+        try:
+            socket_path.unlink()
+        except OSError:
+            pass
+
+
+def load_live_records(
+    editors: pathlib.Path,
+    sockets: pathlib.Path,
+    nvim: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Load live registry entries, retaining live-but-unreachable editors."""
+    now = time.time()
+    records: list[dict[str, object]] = []
+    unreachable: list[dict[str, object]] = []
+    for path in sorted(editors.iterdir(), key=lambda item: item.name):
+        if not regular_nonsymlink(path):
+            raise OpenError("editor registry contains an unsafe entry: " + str(path))
+        try:
+            value = read_private_json(path, "editor record")
+        except OpenError:
+            unlink_regular(path)
+            continue
+        record = validate_record(value, path, now)
+        if record is None:
+            unlink_regular(path)
+            continue
+        pid = record["pid"]
+        assert isinstance(pid, int)
+        if not pid_alive(pid):
+            cleanup_record(path, record, sockets)
+            continue
+        socket_path = record_socket(record, sockets)
+        if socket_path is None:
+            unreachable.append(record)
+            continue
+        probe = run_nvim(nvim, record["socket"], "1")
+        if probe.returncode != 0 or probe.stdout.strip() != "1":
+            # A live PID plus a transiently unreachable socket is not stale
+            # state. Keep the record so the editor can recover without a
+            # buffer/dir event having to recreate its registration.
+            unreachable.append(record)
+            continue
+        records.append(record)
+    return records, unreachable
+
+
+def record_matches(
+    record: Mapping[str, object],
+    workspace: WorkspaceKey,
+    expected_pane: str | None,
+) -> bool:
+    """Return whether a record owns an exact workspace and optional pane."""
+    return workspace.to_json() in record["workspaces"] and (
+        expected_pane is None or record["TMUX_PANE"] == expected_pane
+    )
+
+
+def matching_live_records(
+    editors: pathlib.Path,
+    sockets: pathlib.Path,
+    nvim: str,
+    workspace: WorkspaceKey,
+    expected_pane: str | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Probe and select all records matching one exact workspace key."""
+    matching: list[dict[str, object]] = []
+    unreachable: list[dict[str, object]] = []
+    for attempt in range(PROBE_ATTEMPTS):
+        records, unavailable = load_live_records(editors, sockets, nvim)
+        matching = [record for record in records if record_matches(record, workspace, expected_pane)]
+        unreachable = [record for record in unavailable if record_matches(record, workspace, expected_pane)]
+        if not unreachable and matching:
+            break
+        if attempt + 1 < PROBE_ATTEMPTS:
+            time.sleep(PROBE_RETRY_DELAY)
+    return matching, unreachable
+
+
+def prune_old_files(directory: pathlib.Path, max_age: float) -> None:
+    """Remove old regular files without following hostile directory entries."""
+    cutoff = time.time() - max_age
+    for path in directory.iterdir():
+        if not regular_nonsymlink(path):
+            raise OpenError("protocol directory contains an unsafe entry: " + str(path))
+        try:
+            stale = path.stat().st_mtime < cutoff
+        except OSError:
+            stale = False
+        if stale:
+            unlink_regular(path)
+
+
+def referenced_sockets(editors: pathlib.Path) -> set[object]:
+    """Collect socket paths still named by structurally valid registry records."""
+    now = time.time()
+    result: set[object] = set()
+    for path in editors.iterdir():
+        if not regular_nonsymlink(path):
+            continue
+        try:
+            value = read_private_json(path, "editor record")
+        except OpenError:
+            continue
+        record = validate_record(value, path, now)
+        if record is not None:
+            result.add(record["socket"])
+    return result
+
+
+def prune_orphan_sockets(sockets: pathlib.Path, editors: pathlib.Path) -> None:
+    """Remove only old, unreferenced Unix sockets; reject hostile entries."""
+    referenced = referenced_sockets(editors)
+    cutoff = time.time() - RECORD_MAX_AGE
+    for path in sockets.iterdir():
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISSOCK(info.st_mode):
+            raise OpenError("socket registry contains an unsafe entry: " + str(path))
+        if str(path) not in referenced and info.st_mtime < cutoff:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def prune_state(requests: pathlib.Path, waits: pathlib.Path) -> None:
+    """Prune stale ephemeral request and wait files."""
+    prune_old_files(requests, REQUEST_MAX_AGE)
+    prune_old_files(waits, WAIT_MAX_AGE)
+
+
+def git_root(path: pathlib.Path) -> pathlib.Path:
+    """Resolve a canonical Git root without inheriting routing overrides."""
+    environment = os.environ.copy()
+    for name in GIT_ROUTING_ENV:
+        environment.pop(name, None)
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        check=False,
+        text=True,
+        env=environment,
+    )
+    if result.returncode != 0:
+        raise OpenError("not inside a Git repository: " + result.stderr.strip())
+    output = result.stdout.strip()
+    if not output or "\0" in output or "\n" in output:
+        raise OpenError("Git returned an invalid repository root")
+    root = pathlib.Path(output).resolve(strict=True)
+    if not root.is_dir():
+        raise OpenError("Git repository root is not a directory")
+    return root
+
+
+def resolve_inputs(arguments: argparse.Namespace) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """Resolve and contain a normal open request."""
+    try:
+        cwd = pathlib.Path(arguments.cwd).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise OpenError("cwd does not exist: " + str(error))
+    if not cwd.is_dir():
+        raise OpenError("cwd is not a directory")
+    repo = git_root(cwd)
+    requested = pathlib.Path(arguments.file).expanduser()
+    if not requested.is_absolute():
+        requested = cwd / requested
+    try:
+        target = requested.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise OpenError("target file does not exist: " + str(error))
+    if not target.is_file():
+        raise OpenError("target is not a regular file")
+    try:
+        relative = target.relative_to(repo)
+    except ValueError:
+        raise OpenError("target resolves outside the repository")
+    if git_root(target.parent) != repo:
+        raise OpenError("target belongs to a different Git repository")
+    return repo, target, relative.as_posix()
+
+
+def validate_text_file(path: pathlib.Path) -> None:
+    """Reject symlinked, special, or binary blocking editor targets."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise OpenError("editor target is not a regular file")
+        while True:
+            chunk = os.read(descriptor, TEXT_CHUNK_BYTES)
+            if not chunk:
+                break
+            if b"\0" in chunk:
+                raise OpenError("editor target is not a text file")
+    finally:
+        os.close(descriptor)
+
+
+def resolve_editor_input(filename: str) -> tuple[pathlib.Path, pathlib.Path]:
+    """Resolve a blocking editor target without following its final link."""
+    try:
+        cwd = pathlib.Path.cwd().resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise OpenError("cwd does not exist: " + str(error))
+    if not cwd.is_dir():
+        raise OpenError("cwd is not a directory")
+    repo = git_root(cwd)
+    requested = pathlib.Path(filename).expanduser()
+    if not requested.is_absolute():
+        requested = cwd / requested
+    try:
+        requested_stat = requested.lstat()
+    except OSError as error:
+        raise OpenError("editor target does not exist: " + str(error))
+    if stat.S_ISLNK(requested_stat.st_mode):
+        raise OpenError("editor target must not be a symlink")
+    if not stat.S_ISREG(requested_stat.st_mode):
+        raise OpenError("editor target is not a regular file")
+    try:
+        target = requested.resolve(strict=True)
+        validate_text_file(target)
+    except (OSError, RuntimeError) as error:
+        raise OpenError("could not validate editor target: " + str(error))
+    return repo, target
+
+
+def atomic_json(path: pathlib.Path, value: Mapping[str, object]) -> None:
+    """Atomically create one owner-only JSON protocol file."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise OpenError("could not inspect protocol target: " + str(error)) from error
+    else:
+        raise OpenError("refusing an existing protocol target: " + str(path))
+    encoded = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    temporary = path.with_name(path.name + ".tmp." + str(os.getpid()) + "." + uuid.uuid4().hex)
+    descriptor = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(str(temporary), 0o600)
+        os.link(str(temporary), str(path), follow_symlinks=False)
+        temporary.unlink()
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def validate_wait_state(
+    value: object,
+    path: pathlib.Path,
+    selected: Mapping[str, object],
+    now: float,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Validate one blocking wait-state transition."""
+    if not isinstance(value, dict) or set(value) != WAIT_KEYS:
+        return None, "wait state must contain the exact version-1 fields"
+    request_id = canonical_uuid(value.get("request_id"))
+    if request_id is None or path.name != request_id + ".json":
+        return None, "wait state request identity is invalid"
+    if value.get("version") != 1 or value.get("instance_id") != selected["instance_id"]:
+        return None, "wait state does not belong to the selected editor"
+    if value.get("status") not in WAIT_STATUSES:
+        return None, "wait state status is invalid"
+    updated = parse_timestamp(value.get("updated_at"))
+    if updated is None or updated > now + 300 or now - updated > WAIT_MAX_AGE:
+        return None, "wait state timestamp is invalid or stale"
+    return value, None
+
+
+def load_wait_state(path: pathlib.Path, selected: Mapping[str, object]) -> dict[str, object]:
+    """Read and validate one private blocking wait-state file."""
+    value = read_private_json(path, "editor wait state")
+    state, state_error = validate_wait_state(value, path, selected, time.time())
+    if state is None:
+        raise OpenError(state_error)
+    return state
+
+
+def wait_for_editor(
+    wait_path: pathlib.Path,
+    selected: Mapping[str, object],
+    signal_ready: bool,
+    timeout: float,
+) -> None:
+    """Block until the selected editor completes, aborts, exits, or times out."""
+    deadline = time.monotonic() + timeout
+    try:
+        state = load_wait_state(wait_path, selected)
+        if signal_ready:
+            print("READY", flush=True)
+        while True:
+            if state["status"] == "completed":
+                return
+            if state["status"] == "aborted":
+                raise OpenError("editor closed without saving the temporary file")
+            if not pid_alive(selected["pid"]):
+                raise OpenError("registered editor exited before editing completed")
+            if time.monotonic() >= deadline:
+                raise OpenError("timed out waiting for the registered editor")
+            time.sleep(WAIT_POLL_DELAY)
+            state = load_wait_state(wait_path, selected)
+    finally:
+        unlink_regular(wait_path)
+
+
+def workspace_key(arguments: argparse.Namespace, repo: pathlib.Path) -> WorkspaceKey:
+    """Build the exact workspace key requested by the caller."""
+    runtime = arguments.runtime
+    repo_identity = arguments.repo_identity or str(repo)
+    root = arguments.workspace_root or str(repo)
+    if any(not value or "\0" in value for value in (runtime, repo_identity, root)):
+        raise OpenError("workspace identity fields must be non-empty and contain no NUL")
+    if not canonical_runtime_root(root):
+        raise OpenError("workspace root must be absolute and lexically canonical")
+    return WorkspaceKey(runtime=runtime, root=root, repo_identity=repo_identity)
+
+
+def rpc_expression(request_id: str) -> str:
+    """Build the fixed RPC expression for one canonical request identifier."""
+    function = os.environ.get("NVIM_EXACT_EDITOR_RPC_FUNCTION", "ExactEditorRequest")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", function):
+        raise OpenError("RPC function name is invalid")
+    return 'v:lua.' + function + '("' + request_id + '")'
+
+
+def parser() -> argparse.ArgumentParser:
+    """Build the exact-editor command-line parser."""
+    value = argparse.ArgumentParser(description=__doc__)
+    value.add_argument("--cwd")
+    value.add_argument("--file")
+    value.add_argument("--line", type=int, default=1)
+    value.add_argument("--column", type=int, default=1)
+    value.add_argument("--wait-editor", action="store_true")
+    value.add_argument("--signal-ready", action="store_true")
+    value.add_argument("--tmux-pane")
+    value.add_argument("--runtime", default="host")
+    value.add_argument("--workspace-root")
+    value.add_argument("--repo-identity")
+    value.add_argument("--wait-timeout", type=float, default=DEFAULT_WAIT_TIMEOUT)
+    value.add_argument("editor_file", nargs="?")
+    return value
+
+
+def validate_arguments(argument_parser: argparse.ArgumentParser, arguments: argparse.Namespace) -> None:
+    """Validate mutually dependent command-line arguments."""
+    editor_mode = arguments.wait_editor
+    if editor_mode:
+        if arguments.cwd is not None or arguments.file is not None:
+            argument_parser.error("--wait-editor cannot be combined with --cwd or --file")
+        if arguments.editor_file is None:
+            argument_parser.error("--wait-editor requires exactly one FILE")
+    elif arguments.cwd is None or arguments.file is None:
+        argument_parser.error("--cwd and --file are required unless --wait-editor is used")
+    elif arguments.editor_file is not None:
+        argument_parser.error("unexpected FILE without --wait-editor")
+    elif arguments.signal_ready:
+        argument_parser.error("--signal-ready requires --wait-editor")
+    validate_pane(argument_parser, arguments)
+    if arguments.wait_timeout <= 0:
+        argument_parser.error("--wait-timeout must be positive")
+
+
+def validate_pane(argument_parser: argparse.ArgumentParser, arguments: argparse.Namespace) -> None:
+    """Validate the optional exact tmux pane selector."""
+    if arguments.tmux_pane is None:
+        return
+    if not arguments.wait_editor:
+        argument_parser.error("--tmux-pane requires --wait-editor")
+    if not arguments.tmux_pane.startswith("%") or not arguments.tmux_pane[1:].isdigit():
+        argument_parser.error("--tmux-pane must be an exact tmux pane id")
+
+
+def resolve_request(arguments: argparse.Namespace) -> tuple[pathlib.Path, pathlib.Path, str | None]:
+    """Resolve the local repository, target, and optional normal relative path."""
+    if arguments.wait_editor:
+        repo, target = resolve_editor_input(arguments.editor_file)
+        return repo, target, None
+    repo, target, relative = resolve_inputs(arguments)
+    return repo, target, relative
+
+
+def select_editor(
+    arguments: argparse.Namespace,
+    editors: pathlib.Path,
+    sockets: pathlib.Path,
+    nvim: str,
+    workspace: WorkspaceKey,
+) -> dict[str, object]:
+    """Select exactly one reachable editor or report the precise fallback state."""
+    matching, unreachable = matching_live_records(
+        editors,
+        sockets,
+        nvim,
+        workspace,
+        arguments.tmux_pane,
+    )
+    prune_orphan_sockets(sockets, editors)
+    workspace_label = repr(workspace.to_json())
+    if unreachable:
+        raise OpenError("registered editor for workspace " + workspace_label + " is temporarily unreachable; retry")
+    if not matching:
+        raise NoMatchingEditor("no live registered editor owns workspace " + workspace_label)
+    if len(matching) != 1:
+        raise OpenError("multiple live registered editors own workspace " + workspace_label + "; close extras and retry")
+    return matching[0]
+
+
+def request_payload(
+    arguments: argparse.Namespace,
+    selected: Mapping[str, object],
+    workspace: WorkspaceKey,
+    target: pathlib.Path,
+    relative: str | None,
+    request_id: str,
+) -> dict[str, object]:
+    """Build an exact version-1 normal or version-2 blocking request."""
+    common: dict[str, object] = {
+        "request_id": request_id,
+        "instance_id": selected["instance_id"],
+        "repo_root": workspace.root,
+        "created_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if arguments.wait_editor:
+        return {**common, "version": 2, "path": str(target)}
+    assert relative is not None
+    return {
+        **common,
+        "version": 1,
+        "path": relative,
+        "line": arguments.line,
+        "column": arguments.column,
+    }
+
+
+def route(arguments: argparse.Namespace) -> None:
+    """Resolve, select, deliver, and optionally wait for one exact request."""
+    if not positive_integer(arguments.line) or not positive_integer(arguments.column):
+        raise OpenError("line and column must be positive integers")
+    repo, target, relative = resolve_request(arguments)
+    workspace = workspace_key(arguments, repo)
+    editors, requests, waits, sockets = prepare_state(state_root())
+    prune_state(requests, waits)
+    nvim = shutil.which("nvim")
+    if nvim is None:
+        raise OpenError("nvim was not found in PATH")
+    selected = select_editor(arguments, editors, sockets, nvim, workspace)
+    request_id = str(uuid.uuid4())
+    request = request_payload(arguments, selected, workspace, target, relative, request_id)
+    request_file = requests / (request_id + ".json")
+    wait_file = waits / (request_id + ".json")
+    atomic_json(request_file, request)
+    result = run_nvim(nvim, str(selected["socket"]), rpc_expression(request_id))
+    if result.returncode != 0 or result.stdout.strip() != "1":
+        unlink_regular(request_file)
+        unlink_regular(wait_file)
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise OpenError("registered editor rejected the request: " + detail)
+    if arguments.wait_editor:
+        wait_for_editor(wait_file, selected, arguments.signal_ready, arguments.wait_timeout)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the exact editor router."""
+    os.umask(0o077)
+    argument_parser = parser()
+    arguments = argument_parser.parse_args(argv)
+    validate_arguments(argument_parser, arguments)
+    try:
+        route(arguments)
+        return 0
+    except NoMatchingEditor as error:
+        print("exact-editor-open: " + str(error), file=sys.stderr)
+        return 3
+    except OpenError as error:
+        print("exact-editor-open: " + str(error), file=sys.stderr)
+        return 2
+    except (OSError, UnicodeError, ValueError) as error:
+        print("exact-editor-open: workflow failed: " + str(error), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

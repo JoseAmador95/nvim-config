@@ -1,96 +1,12 @@
 local M = {}
 
-local SPECIAL_FILETYPES = {
-	["oil"] = true,
-	["grug-far"] = true,
-	["snacks_terminal"] = true,
-	["terminal"] = true,
-	["quickfix"] = true,
-	["help"] = true,
-	["qf"] = true,
-	["NvimTree"] = true,
-	["aerial"] = true,
-}
-
-local function is_special_buffer(buf)
-	local ft = vim.bo[buf].filetype
-	local name = vim.api.nvim_buf_get_name(buf)
-	return SPECIAL_FILETYPES[ft] or name == ""
-end
-
-local function set_cursor_position(buf, win, lnum, col)
-	local line_count = vim.api.nvim_buf_line_count(buf)
-	local target_line = math.max(1, math.min(lnum, line_count))
-	local line = vim.api.nvim_buf_get_lines(buf, target_line - 1, target_line, false)[1] or ""
-	local target_col = math.max(0, math.min(col - 1, #line))
-	vim.api.nvim_win_set_cursor(win, { target_line, target_col })
-end
-
-local function normalized_path(path)
-	local absolute = vim.fn.fnamemodify(path, ":p")
-	return vim.uv.fs_realpath(absolute) or absolute
-end
-
 function M.open_file_in_tab(filepath, opts)
 	opts = opts or {}
-	local review_source = require("config.review_source")
-	local tabs = require("config.tabs")
-	local lnum = tonumber(opts.lnum) or 1
-	local col = tonumber(opts.col) or 1
-	local origin_tab = vim.api.nvim_get_current_tabpage()
-	local source_link = review_source.get(origin_tab)
-	local history
-	if opts.record_history ~= false then
-		history = require("config.navigation_history")
-	end
-	local origin = history and history.capture() or nil
-	local function finish_navigation()
-		local destination_tab = vim.api.nvim_get_current_tabpage()
-		if source_link then
-			review_source.set(destination_tab, source_link.workspace, source_link.target)
-		end
-		if history then
-			history.record_transition(origin, history.capture())
-		end
-	end
 
-	filepath = vim.fn.fnamemodify(filepath, ":p")
-	local target_path = normalized_path(filepath)
-
-	for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
-		if not tabs.is_transient(tabpage) then
-			for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
-				local win_config = vim.api.nvim_win_get_config(win)
-				if not win_config.relative or win_config.relative == "" then
-					local buf = vim.api.nvim_win_get_buf(win)
-					if not is_special_buffer(buf) then
-						local name = normalized_path(vim.api.nvim_buf_get_name(buf))
-						if name == target_path then
-							vim.api.nvim_set_current_tabpage(tabpage)
-							vim.api.nvim_set_current_win(win)
-							set_cursor_position(buf, win, lnum, col)
-							finish_navigation()
-							return
-						end
-					end
-				end
-			end
-		end
-	end
-
-	local home = tabs.find_home()
-	if home then
-		vim.api.nvim_set_current_tabpage(home)
-		vim.api.nvim_cmd({ cmd = "edit", args = { filepath } }, {})
-		tabs.unmark_home(home)
-		set_cursor_position(0, 0, lnum, col)
-		finish_navigation()
-		return
-	end
-
-	vim.cmd("tabedit " .. vim.fn.fnameescape(filepath))
-	set_cursor_position(0, 0, lnum, col)
-	finish_navigation()
+	-- Loading the tab adapter configures the host policies used by the standalone
+	-- runtime.
+	require("config.tabs")
+	return require("tab_first").open(filepath, opts)
 end
 
 return M

@@ -1,6 +1,5 @@
-local actions = require("config.menu.actions")
+local action_palette = require("config.action_palette")
 local backend = require("config.menu.backend").default()
-local catalog = require("config.menu.catalog")
 local context = require("config.menu.context")
 
 local M = {}
@@ -10,11 +9,7 @@ local function current_context()
 end
 
 local function descriptors(menu_context, surface)
-	local target = vim.deepcopy(menu_context.target or {})
-	target.surface = surface
-	return catalog.build(menu_context, function(id)
-		return actions.run(id, target)
-	end, surface)
+	return action_palette.sections(menu_context, surface)
 end
 
 local function palette_items(sections)

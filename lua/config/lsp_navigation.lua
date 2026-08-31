@@ -1,7 +1,7 @@
 local M = {}
 
 local editor = require("config.editor")
-local review_lsp = require("config.review_lsp")
+local review_lsp = require("config.native_review").lsp
 
 local NATIVE_DEFAULT_KEYMAPS = {
 	{ "n", "K", "vim.lsp.buf.hover()" },
