@@ -3,6 +3,9 @@
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
+local config_root = assert(vim.env.NVIM_CONFIG_ROOT, "NVIM_CONFIG_ROOT is missing")
+vim.opt.runtimepath:prepend(vim.fs.joinpath(config_root, "local-plugins", "native-review.nvim"))
+
 local existing_path = vim.fn.tempname() .. ".md"
 local new_path = vim.fn.tempname() .. ".md"
 assert(vim.fn.writefile({ "# second argument", "", "startup fixture" }, existing_path) == 0)
@@ -52,9 +55,16 @@ vim.api.nvim_create_autocmd("VimEnter", {
 		vim.schedule(function()
 			local ok, err = xpcall(function()
 				assert(require("config.theme_default").colorscheme == "vscode", "versioned theme default changed")
-				assert(require("config.theme").selection().colorscheme == "vscode", "startup theme is not VSCode")
+				local theme = require("config.theme")
+				assert(theme.selection().colorscheme == "vscode", "startup theme is not VSCode")
+				assert(
+					vim.fs.basename(vim.fs.dirname(theme.state_path())) == "nvim",
+					"startup theme state is profile-local instead of shared"
+				)
+				assert(package.loaded["localconfig.theme"] == nil, "startup executed legacy theme Lua")
 				assert(vim.g.colors_name == "vscode", "VSCode colorscheme was not applied at startup")
 				assert(require("config.dap_ui").selected() == "dap-ui", "startup did not select the default DAP UI")
+				assert(package.loaded.tab_first ~= nil, "full editor did not load the tab-first runtime")
 				assert(package.loaded.dapui == nil, "dap-ui loaded eagerly during startup")
 				assert(package.loaded["dap-view"] == nil, "dap-view loaded eagerly during startup")
 				assert(vim.fn.exists(":CloseTab") == 2, "full editor CloseTab command is missing")
@@ -62,10 +72,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"NavigationBack",
 					"NavigationForward",
 					"NavigationHistory",
-					"ReviewRoundStart",
-					"TuicrReview",
-					"AgentContext",
-					"AgentResultsImport",
+					"ReviewOpen",
+					"ReviewPanel",
+					"ReviewComment",
+					"ReviewReanchor",
+					"ReviewExport",
+					"ReviewClose",
 					"ClangdSwitchSourceHeader",
 					"ToggleInlineDiagnostics",
 					"CoverageLoad",
@@ -76,6 +88,16 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"Scratch",
 				}) do
 					assert(vim.fn.exists(":" .. command) == 2, "full editor " .. command .. " command is missing")
+				end
+				for _, command in ipairs({
+					"ReviewRoundStart",
+					"TuicrReview",
+					"ReviewPublish",
+					"ReviewLinkTuicr",
+					"AgentContext",
+					"AgentResultsImport",
+				}) do
+					assert(vim.fn.exists(":" .. command) == 0, "retired " .. command .. " command survived")
 				end
 				assert(not vim.tbl_isempty(vim.fn.maparg("<leader>t", "n", false, true)), "terminal toggle is missing")
 				assert(

@@ -56,13 +56,13 @@ function M.clangd()
 	return ""
 end
 
-function M.devpod()
-	local state = vim.b.nvim_devpod_status or vim.g.nvim_devpod_status
+function M.devcontainer()
+	local state = vim.b.nvim_devcontainer_status or vim.g.nvim_devcontainer_status
 	if type(state) == "string" then
 		return state ~= "" and state or ""
 	end
-	if type(state) == "table" and state.provider and state.project then
-		return table.concat({ "DevPod", state.provider, state.project }, " · ")
+	if type(state) == "table" and state.project then
+		return table.concat({ "Dev Container", state.project, state.network or "offline" }, " · ")
 	end
 	return ""
 end
@@ -98,7 +98,7 @@ function M.setup_refresh()
 		pattern = {
 			"NvimConfigPythonChanged",
 			"NvimConfigCMakeChanged",
-			"NvimConfigDevPodChanged",
+			"NvimConfigDevContainerChanged",
 			"NvimConfigReviewChanged",
 		},
 		callback = function()

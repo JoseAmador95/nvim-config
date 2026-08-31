@@ -5,15 +5,14 @@
 
 ## Context
 
-TUICR is useful for human review rounds, but its TUI cannot expose Neovim LSP
-diagnostics and source navigation. Diffview is a good standalone Git viewer,
-but a dedicated Diffview tab interrupts the normal editing workspace and makes
-review state, current source, and historical content difficult to distinguish.
+Diffview is a good standalone Git viewer, but a dedicated Diffview tab interrupts
+the normal editing workspace and makes review state, current source, and
+historical content difficult to distinguish.
 
 The reviewer must support working trees, commits, contiguous commit spans, and
 whole branches; file/range/review-level comments; repeatable export; optional
-TUICR publication; inline and side-by-side views; and both hunk-only and
-complete-file context without taking ownership of a tab.
+inline and side-by-side views; and both hunk-only and complete-file context
+without taking ownership of a tab.
 
 ## Decision
 
@@ -68,8 +67,9 @@ Neovim owns a repository/session review controller in `config.code_review`:
   command/palette action outside that float. The panel never creates a tab and
   is suspended during normal session serialization.
 - Store version 2 represents internal `general`, `file`, and `range` anchors
-  explicitly. Resolution and delivery are independent. Version-1 state migrates
-  under the existing owner lock with a backup and rollback. Range anchors persist
+  explicitly. Legacy bridge and delivery fields remain strictly validated and
+  round-trip unchanged, but cannot initiate linking or publication. Version-1
+  state remains readable. Range anchors persist
   canonical source path, OLD/NEW side, layer, and source line coordinates, never
   unified display rows. A selection spanning both OLD-exclusive and NEW-exclusive
   rows is rejected; OLD comments can be created, edited, and jumped to directly
@@ -94,9 +94,8 @@ Neovim owns a repository/session review controller in `config.code_review`:
   export refuses working-tree drift, session drift, and stale anchors;
   `ReviewExport!` exports only after writing and verifying owner-only recovery
   Markdown. Global drift labels the saved snapshot stale, while anchor drift is
-  recorded on the affected comment.
-  `ReviewPublish[!]` is a separate explicit TUICR operation and sends only open,
-  undelivered items through `tuicr-round`, persisting each receipt.
+  recorded on the affected comment. Linking and publication are outside the
+  native reviewer boundary.
 - The public key namespace is lower-case `<leader>r`. The main entries are `rr`
   panel, `ro` open, `rm` mode, `rs` scope, `rb` parent scope, `rf/rh/rl` panes,
   `rv` layout, `rw` context, `ri` inline previews, `rg` code, `ra/rA` line-or-file
@@ -121,7 +120,8 @@ anchors remain tied to exact source coordinates. The mixed projection itself
 never becomes an LSP document; conservative CURRENT bridges preserve useful
 read-only navigation, hover, and diagnostics without exposing OLD rows or
 mutation operations. The panel can be opened only when needed, and exported text
-is always available in chat-oriented workflows without requiring a TUICR UUID.
+is always available in chat-oriented workflows without requiring an external
+review-round identifier.
 
 Working scopes become stale instead of silently remapping anchors. An OLD or
 unmappable NEW row cannot use the LSP bridge, and a mixed-side range cannot become

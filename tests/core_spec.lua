@@ -3,7 +3,15 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+local plugin = repo .. "/local-plugins/log-workbench.nvim"
+vim.opt.runtimepath:prepend(plugin)
+package.path = table.concat({
+	plugin .. "/lua/?.lua",
+	plugin .. "/lua/?/init.lua",
+	repo .. "/lua/?.lua",
+	repo .. "/lua/?/init.lua",
+	package.path,
+}, ";")
 
 local failures = {}
 
@@ -110,10 +118,15 @@ test("LogWatch restores exact state and ignores a late callback", function()
 	poll_callback = nil
 
 	log_watch.command({ args = "on" })
-	equal("log", vim.bo[buf].filetype, "watch mode did not set log filetype")
+	local tail = vim.api.nvim_get_current_buf()
+	assert(tail ~= buf, "watch mode reused the source buffer")
+	equal("log", vim.bo[tail].filetype, "tail did not set log filetype")
+	equal("text", vim.bo[buf].filetype, "source filetype changed")
 	assert(poll_callback, "watch callback was not registered")
 
 	log_watch.command({ args = "off" })
+	equal(buf, vim.api.nvim_get_current_buf(), "source buffer was not restored")
+	equal(false, vim.api.nvim_buf_is_valid(tail), "tail buffer survived stop")
 	equal("text", vim.bo[buf].filetype, "filetype was not restored")
 	equal(false, vim.bo[buf].modifiable, "modifiable was not restored")
 	equal(true, vim.bo[buf].readonly, "readonly was not restored")

@@ -141,7 +141,14 @@ run_check() {
 
 run_pure_test() {
 	test_name=$1
-	run_check "$test_name" "$NVIM_BIN" --headless -u NONE -i NONE -l "$repo_root/tests/$test_name.lua"
+	if [ "$test_name" = "local_plugins_spec" ]; then
+		run_check "$test_name" "$NVIM_BIN" --headless -u NONE -i NONE -l "$repo_root/tests/$test_name.lua"
+		return
+	fi
+	run_check "$test_name" "$NVIM_BIN" --headless -u NONE -i NONE \
+		--cmd "set runtimepath^=$repo_root" \
+		--cmd 'lua require("config.local_plugins").setup()' \
+		-l "$repo_root/tests/$test_name.lua"
 }
 
 run_config_test() {
@@ -202,11 +209,62 @@ run_vscode_test() {
 run_pure_test lock_spec
 run_pure_test core_spec
 run_pure_test ci_spec
-run_pure_test diagram_spec
 run_pure_test security_spec
-run_check "devpod_nvim_spec" python3 "$repo_root/tests/devpod_nvim_spec.py"
+run_check "trusted_workspace_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/trusted-workspace.nvim/tests/trusted_workspace_spec.lua"
+run_check "theme_router_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/theme-router.nvim/tests/theme_router_spec.lua"
+run_check "terminal_lifecycle_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/terminal-lifecycle.nvim/tests/terminal_lifecycle_spec.lua"
+run_check "exact_editor_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/exact-editor.nvim/tests/exact_editor_spec.lua"
+run_check "treesitter_runtime_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/treesitter-runtime.nvim/tests/treesitter_runtime_spec.lua"
+run_check "coverage_workbench_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/coverage-workbench.nvim/tests/coverage_workbench_spec.lua"
+run_check "repo_scratch_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/repo-scratch.nvim/tests/repo_scratch_spec.lua"
+run_check "tab_first_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/tab-first.nvim/tests/tab_first_spec.lua"
+run_check "diagram_view_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/diagram-view.nvim/tests/diagram_view_spec.lua"
+run_check "verified_tools_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/verified-tools.nvim/tests/verified_tools_spec.lua"
+run_check "project_python_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/project-python.nvim/tests/project_python_spec.lua"
+run_check "log_workbench_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/log-workbench.nvim/tests/log_workbench_spec.lua"
+run_check "clangd_compile_db_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/clangd-compile-db.nvim/tests/clangd_compile_db_spec.lua"
+run_check "just_workbench_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/just-workbench.nvim/tests/just_workbench_spec.lua"
+run_check "native_review_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/native-review.nvim/tests/native_review_spec.lua"
+run_check "native_review_changes_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_changes_spec.lua"
+run_check "native_review_projection_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_projection_spec.lua"
+run_check "native_review_scope_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_scope_spec.lua"
+run_check "native_review_store_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_store_spec.lua"
+run_check "native_review_export_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_export_spec.lua"
+run_check "native_review_lsp_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_lsp_spec.lua"
+run_check "native_review_mode_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_mode_spec.lua"
+run_check "native_review_panel_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_panel_spec.lua"
+run_check "native_review_presenter_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_presenter_spec.lua"
+run_check "action_palette_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/action-palette.nvim/tests/action_palette_spec.lua"
+run_check "devcontainer_editor_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/local-plugins/devcontainer-editor.nvim/tests/devcontainer_editor_spec.lua"
+run_check "devcontainer_editor_cli_spec" python3 "$repo_root/tests/devcontainer_editor_cli_spec.py"
 
-for pure_spec in lazy_lock_spec log_watch_spec runtime_spec treesitter_spec lint_spec menu_spec tabs_spec editor_spec navigation_history_spec auto_session_spec notification_spec ux_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec review_spec review_scope_spec review_store_spec review_tuicr_spec review_changes_spec review_projection_spec review_lsp_spec review_mode_spec review_panel_spec review_presenter_spec review_export_spec code_review_spec agent_context_spec agent_results_spec editor_rpc_spec nvim_review_open_spec devpod_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec; do
+for pure_spec in lazy_lock_spec local_plugins_spec trusted_workspace_spec theme_router_spec diagram_view_spec verified_tools_host_spec log_watch_spec log_workbench_spec treesitter_spec lint_spec menu_spec tabs_spec editor_spec navigation_history_spec auto_session_spec notification_spec ux_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec; do
 	run_pure_test "$pure_spec"
 done
 
@@ -231,7 +289,7 @@ run_vscode_test
 run_check "startup smoke" "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua" \
 	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
 	"+quitall"
-run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests
+run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests local-plugins
 run_check "ShellCheck" "$SHELLCHECK_BIN" \
 	scripts/check-config scripts/bootstrap-config scripts/install-ci-tools
 if [ -n "${ACTIONLINT_BIN:-}" ]; then

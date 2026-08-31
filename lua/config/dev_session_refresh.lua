@@ -79,8 +79,8 @@ local function run_helper(action, pane, callback)
 	return true
 end
 
-local function request_host(devpod, action, callback)
-	local ok, err = devpod.request_host(action, callback)
+local function request_host(devcontainer, action, callback)
+	local ok, err = devcontainer.request_host(action, callback)
 	if not ok then
 		notify(err, vim.log.levels.ERROR)
 		return false
@@ -88,12 +88,12 @@ local function request_host(devpod, action, callback)
 	return true
 end
 
-local function refresh_devpod(devpod)
-	return request_host(devpod, "tmux_dev_refresh_check", function()
+local function refresh_devcontainer(devcontainer)
+	return request_host(devcontainer, "tmux_dev_refresh_check", function()
 		if not prepare_refresh() then
 			return
 		end
-		request_host(devpod, "tmux_dev_refresh", quit_neovim)
+		request_host(devcontainer, "tmux_dev_refresh", quit_neovim)
 	end)
 end
 
@@ -111,9 +111,9 @@ local function refresh_host(pane)
 end
 
 function M.refresh()
-	local loaded, devpod = pcall(require, "config.devpod")
-	if loaded and devpod.in_workspace() then
-		return refresh_devpod(devpod)
+	local loaded, devcontainer = pcall(require, "config.devcontainer")
+	if loaded and devcontainer.in_workspace() then
+		return refresh_devcontainer(devcontainer)
 	end
 
 	local pane = vim.env.TMUX_PANE

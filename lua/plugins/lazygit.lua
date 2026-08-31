@@ -10,10 +10,10 @@
 -- its default "press ENTER to return" prompt after the edit command.
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve lazygit config source")
 local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
-local review_open = vim.fs.joinpath(config_root, "scripts", "nvim-review-open")
+local devcontainer_editor = vim.fs.joinpath(config_root, "scripts", "devcontainer-editor")
 
 local function gh_editor()
-	return vim.fn.shellescape(review_open) .. " --wait-editor"
+	return vim.fn.shellescape(devcontainer_editor) .. " editor-open --wait-editor"
 end
 
 local function ensure_config()
@@ -50,8 +50,8 @@ local function config_files()
 end
 
 local function toggle_lazygit()
-	if require("config.devpod").in_workspace() then
-		local ok, err = require("config.devpod").request_host("lazygit")
+	if require("config.devcontainer").in_workspace() then
+		local ok, err = require("config.devcontainer").request_host("lazygit")
 		if not ok then
 			vim.notify(err, vim.log.levels.ERROR, { title = "lazygit" })
 		end
@@ -62,16 +62,18 @@ local function toggle_lazygit()
 		return
 	end
 	local root = require("config.repo").current_root(0) or vim.uv.cwd()
+	local canonical_root = vim.uv.fs_realpath(root) or vim.fs.normalize(root)
+	local key = vim.json.encode({ "host", canonical_root, "lazygit" })
 	local record, err = require("config.terminal").toggle({
-		runtime = "host",
-		root = root,
-		id = "lazygit",
-		argv = { "lazygit" },
-		cwd = root,
-		env = { LG_CONFIG_FILE = config_files(), GH_EDITOR = gh_editor() },
-		layout = "float",
-		title = "LazyGit",
-		passthrough = { "j", "<space>" },
+		key = key,
+		launch = {
+			argv = { "lazygit" },
+			cwd = root,
+			env = { LG_CONFIG_FILE = config_files(), GH_EDITOR = gh_editor() },
+		},
+		policy = { dispose_on_success = true, dispose_on_stop = false },
+		view = { layout = "float", title = "LazyGit", passthrough = { "j", "<space>" } },
+		metadata = { runtime = "host", root = canonical_root, id = "lazygit" },
 	})
 	if not record then
 		vim.notify(err, vim.log.levels.ERROR, { title = "lazygit" })

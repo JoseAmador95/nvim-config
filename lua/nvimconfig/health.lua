@@ -42,13 +42,16 @@ local function path_origin(path, configured)
 	if within(normalized("~/.local/bin")) then
 		return "user-local", 2
 	end
+	if tool_paths.is_verified_shim_path(path) then
+		return "verified-shim", 3
+	end
 	if tool_paths.is_managed_path(path) then
-		return "managed", 4
+		return "managed", 5
 	end
 	if tool_paths.is_mason_path(path) then
-		return "mason", 5
+		return "mason", 6
 	end
-	return "host", 3
+	return "host", 4
 end
 
 local function check_path_order()
@@ -56,7 +59,7 @@ local function check_path_order()
 	local previous_rank = 0
 	local ordered = true
 	health.info(
-		"PATH precedence contract: local_config.path > ~/.local/bin > inherited host PATH > managed tools > Mason"
+		"PATH precedence contract: local_config.path > ~/.local/bin > verified shims > host PATH > managed > Mason"
 	)
 	for index, path in ipairs(split_path(vim.env.PATH)) do
 		local origin, rank = path_origin(path, configured)
@@ -193,14 +196,12 @@ local function joined_pins(order, entries)
 	return table.concat(pins, ", ")
 end
 
-local function state_summary(label, order, entries)
-	local tool_state = require("config.tool_state")
+local function state_summary()
+	local bootstrap = require("config.tool_bootstrap")
 	local grouped = {}
-	for _, name in ipairs(order) do
-		local entry = entries[name]
-		local record, reason = tool_state.inspect(name, entry.version)
-		local status = record and record.status or reason
-		local identity = toolchain.identity(name, entry)
+	for _, record in ipairs(bootstrap.engine().status() or {}) do
+		local status = record.status
+		local identity = record.identity.backend .. ":" .. record.identity.name .. "@" .. record.identity.version
 		if record and type(record.detail) == "string" and record.detail ~= "" then
 			local detail = record.detail:gsub("[%c]", " "):sub(1, 160)
 			identity = identity .. " (" .. detail .. ")"
@@ -212,28 +213,23 @@ local function state_summary(label, order, entries)
 	for _, status in ipairs({
 		"succeeded",
 		"failed",
-		"installing",
+		"drift",
+		"repair-required",
+		"running",
+		"queued",
 		"claimed",
-		"locked",
-		"corrupt",
-		"unreadable",
-		"absent",
+		"cancelled",
 	}) do
 		if grouped[status] then
 			parts[#parts + 1] = status .. "=[" .. table.concat(grouped[status], ", ") .. "]"
 		end
 	end
-	health.info(label .. " one-shot state: " .. table.concat(parts, "; "))
+	health.info("Verified tool state: " .. (#parts > 0 and table.concat(parts, "; ") or "no attempts"))
 	if grouped.failed then
-		health.warn(
-			label
-				.. " automatic failures will not retry; inspect the reason above, then use the documented manual command"
-		)
+		health.warn("Tool failures never auto-retry; inspect the reason, then use :NvimConfigToolsInstall[!]")
 	end
-	if grouped.corrupt or grouped.unreadable then
-		health.warn(
-			label .. " has unsafe one-shot records; use a manual command only after inspecting " .. tool_state.root()
-		)
+	if grouped.drift or grouped["repair-required"] then
+		health.warn("Drift and legacy failures require explicit :NvimConfigToolsInstall! repair")
 	end
 end
 
@@ -431,18 +427,11 @@ function M.check()
 	health.start("Pinned tool bootstrap")
 	health.info("Managed release pins: " .. joined_pins(toolchain.managed_order, toolchain.managed_tools))
 	health.info("Mason exact pins: " .. joined_pins(toolchain.mason_order, toolchain.mason_tools))
-	local auto_install = require("config.local_config").get("mason", {}).auto_install ~= false
-	if auto_install then
-		health.ok("Automatic exact-pin bootstrap is enabled; every name@version is attempted at most once")
-	else
-		health.info("Automatic exact-pin bootstrap is disabled by mason.auto_install=false")
-	end
-	state_summary("Managed", toolchain.managed_order, toolchain.managed_tools)
-	state_summary("Mason", toolchain.mason_order, toolchain.mason_tools)
+	health.ok("Startup is probe/plan only; installation and repair are always explicit")
+	state_summary()
 	check_managed_release_eligibility()
 	check_mason_receipts()
-	health.info("Retry managed releases with :NvimConfigToolsInstall[!] [all|mmdflux|plantuml]")
-	health.info("Retry exact Mason pins with :MasonToolsInstallSync")
+	health.info("Install or repair release and Mason pins with :NvimConfigToolsInstall[!] [all|name]")
 	check_mason_inventory()
 
 	health.start("Optional feature dependencies")
@@ -463,7 +452,7 @@ function M.check()
 	check_tool(
 		"cmake-language-server",
 		"CMake language intelligence",
-		"Retry the exact Mason manifest with :MasonToolsInstallSync.",
+		"Run :NvimConfigToolsInstall cmake-language-server.",
 		false,
 		configured
 	)
@@ -477,9 +466,9 @@ function M.check()
 	check_tool("nvimpager", "pager profile", "Install nvimpager with the host package manager.", false, configured)
 	check_tool("lazygit", "Git terminal UI", "Install lazygit with the host package manager.", false, configured)
 	check_tool(
-		"devpod",
-		"latest-stable DevPod container editor",
-		"Install or update host DevPod; scripts/devpod-nvim up verifies it against GitHub's latest stable release.",
+		"devcontainer",
+		"Dev Containers CLI editor lifecycle",
+		"Install @devcontainers/cli explicitly; startup never downloads or refreshes it.",
 		false,
 		configured
 	)

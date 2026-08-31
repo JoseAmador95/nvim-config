@@ -1,36 +1,21 @@
--- Own the nvim-treesitter runtime lifecycle without relying on the plugin's
--- legacy module configuration or on Lazy replaying startup events.
+-- Host adapter for the installed-only treesitter-runtime.nvim lifecycle. Parser
+-- manifests and the explicit installation command remain configuration policy.
 local M = {}
 
-local MAX_FILESIZE = 200 * 1024
-
-local state = {
-	parsers = {},
-	allowed = {},
-	highlight = false,
-	indent = false,
-}
-local attached = {}
+local runtime = require("treesitter_runtime")
+local parsers = {}
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.ERROR, { title = "Tree-sitter" })
 end
 
-local function as_list(parsers)
-	if type(parsers) == "string" then
-		return { parsers }
+local function as_list(value)
+	if type(value) == "string" then
+		return { value }
 	end
 	local result = {}
-	for _, parser in ipairs(parsers or {}) do
+	for _, parser in ipairs(value or {}) do
 		result[#result + 1] = parser
-	end
-	return result
-end
-
-local function as_set(items)
-	local result = {}
-	for _, item in ipairs(items) do
-		result[item] = true
 	end
 	return result
 end
@@ -40,75 +25,22 @@ local function installed_parsers()
 	if not loaded then
 		return {}
 	end
-	local ok, parsers = pcall(treesitter.get_installed, "parsers")
-	if not ok or type(parsers) ~= "table" then
-		return {}
-	end
-	return as_set(parsers)
+	local ok, installed = pcall(treesitter.get_installed, "parsers")
+	return ok and type(installed) == "table" and installed or {}
 end
 
-local function buffer_size(buf)
-	local name = vim.api.nvim_buf_get_name(buf)
-	if name ~= "" then
-		local stat = vim.uv.fs_stat(name)
-		if stat and stat.type == "file" then
-			return stat.size
-		end
-	end
-
-	local ok, size = pcall(vim.api.nvim_buf_get_offset, buf, vim.api.nvim_buf_line_count(buf))
-	return ok and size or 0
+---Retry automatic attachment after an explicit install or recoverable failure.
+---@param buf? integer
+---@return boolean
+function M.retry(buf)
+	return runtime.retry(buf)
 end
 
-local function buffer_language(buf)
-	local ft = vim.bo[buf].filetype
-	if ft == "" then
-		return nil
-	end
-	local ok, lang = pcall(vim.treesitter.language.get_lang, ft)
-	return (ok and lang) or ft
-end
-
-local function set_indent(buf)
-	if state.indent then
-		vim.bo[buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
-	end
-end
-
-local function start_buffer(buf, installed)
-	if not state.highlight or not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then
-		return false
-	end
-
-	local lang = buffer_language(buf)
-	if not lang or not state.allowed[lang] or not installed[lang] or buffer_size(buf) > MAX_FILESIZE then
-		return false
-	end
-
-	if attached[buf] == lang then
-		set_indent(buf)
-		return true
-	end
-
-	local ok = pcall(vim.treesitter.start, buf, lang)
-	if not ok then
-		return false
-	end
-
-	attached[buf] = lang
-	set_indent(buf)
-	return true
-end
-
----Retry Tree-sitter highlighting for every eligible loaded buffer.
-function M.retry()
-	if not state.highlight then
-		return
-	end
-	local installed = installed_parsers()
-	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		start_buffer(buf, installed)
-	end
+---Release runtime-owned parser and indentation state.
+---@param buf? integer
+---@return boolean
+function M.teardown(buf)
+	return runtime.teardown(buf)
 end
 
 ---@class NvimConfigTreesitterInstallOpts
@@ -116,15 +48,15 @@ end
 ---@field timeout? integer Maximum wait in milliseconds (default 300000).
 ---@field summary? boolean Show nvim-treesitter's installation summary.
 
----Install configured parsers explicitly.
----@param parsers? string|string[] Defaults to the parsers passed to setup().
+---Install configured parsers explicitly through the host plugin API.
+---@param requested? string|string[] Defaults to the parsers passed to setup().
 ---@param opts? NvimConfigTreesitterInstallOpts
 ---@return boolean success
 ---@return any task_or_error
-function M.install(parsers, opts)
+function M.install(requested, opts)
 	opts = opts or {}
-	local requested = as_list(parsers or state.parsers)
-	if #requested == 0 then
+	local selected = as_list(requested or parsers)
+	if #selected == 0 then
 		return false, "No Tree-sitter parsers are configured"
 	end
 
@@ -132,7 +64,7 @@ function M.install(parsers, opts)
 	if not loaded then
 		return false, tostring(treesitter)
 	end
-	local ok, task = pcall(treesitter.install, requested, {
+	local ok, task = pcall(treesitter.install, selected, {
 		summary = opts.summary ~= false,
 	})
 	if not ok then
@@ -169,38 +101,29 @@ function M.install(parsers, opts)
 end
 
 ---@class NvimConfigTreesitterRuntimeOpts
----@field parsers string[] Parsers this profile is allowed to start or install.
----@field highlight? boolean Enable Neovim's Tree-sitter highlighter.
----@field indent? boolean Enable nvim-treesitter's experimental indentation.
+---@field parsers string[] Parsers this profile may start or explicitly install.
+---@field profile? string Runtime profile name.
+---@field max_bytes? integer Maximum current buffer content size.
+---@field highlight? boolean Enable installed-only highlighting.
+---@field indent? boolean Enable nvim-treesitter indentation while eligible.
 
----Configure one runtime profile and cover buffers whose FileType already ran.
+---Configure one host-owned runtime profile and explicit install command.
 ---@param opts NvimConfigTreesitterRuntimeOpts
 function M.setup(opts)
-	state.parsers = as_list(assert(opts.parsers, "Tree-sitter parsers are required"))
-	state.allowed = as_set(state.parsers)
-	state.highlight = opts.highlight == true
-	state.indent = opts.indent == true
-	attached = {}
-
-	local group = vim.api.nvim_create_augroup("NvimConfigTreesitter", { clear = true })
-	if state.highlight then
-		vim.api.nvim_create_autocmd("FileType", {
-			group = group,
-			callback = function(args)
-				start_buffer(args.buf, installed_parsers())
-			end,
-		})
-		vim.api.nvim_create_autocmd("BufWipeout", {
-			group = group,
-			callback = function(args)
-				attached[args.buf] = nil
-			end,
-		})
-	end
+	opts = opts or {}
+	parsers = as_list(assert(opts.parsers, "Tree-sitter parsers are required"))
+	runtime.setup({
+		profile = opts.profile or "full",
+		allowlist = parsers,
+		max_bytes = opts.max_bytes,
+		highlight = opts.highlight == true,
+		indent = opts.indent == true,
+		installed = installed_parsers,
+	})
 
 	vim.api.nvim_create_user_command("NvimConfigParsersInstall", function(command)
-		local parsers = #command.fargs > 0 and command.fargs or nil
-		local install_ok, err = M.install(parsers)
+		local requested = #command.fargs > 0 and command.fargs or nil
+		local install_ok, err = M.install(requested)
 		if not install_ok then
 			notify("Could not start parser installation: " .. tostring(err))
 		end
@@ -209,8 +132,6 @@ function M.setup(opts)
 		force = true,
 		desc = "Install the configured Tree-sitter parsers",
 	})
-
-	M.retry()
 end
 
 return M

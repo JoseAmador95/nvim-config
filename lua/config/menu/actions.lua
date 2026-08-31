@@ -119,11 +119,11 @@ local commands = {
 	coverage_clear = { "CoverageClear" },
 	coverage_load = { "CoverageLoad" },
 	coverage_summary = { "CoverageSummary" },
-	devpod_host = { "HostEditor" },
-	devpod_log = { "DevPodLog" },
-	devpod_recreate = { "DevPodRecreate" },
-	devpod_status = { "DevPodStatus" },
-	devpod_up = { "DevPodUp" },
+	devcontainer_host = { "DevContainerHostEditor" },
+	devcontainer_log = { "DevContainerLog" },
+	devcontainer_recreate = { "DevContainerRecreate" },
+	devcontainer_status = { "DevContainerStatus" },
+	devcontainer_up = { "DevContainerUp" },
 	diffview_file_history = { "DiffviewFileHistory" },
 	diffview_close = { "DiffviewClose" },
 	diffview_open = { "DiffviewOpen" },
@@ -178,21 +178,18 @@ local commands = {
 	review_general_comment = { "ReviewGeneralComment" },
 	review_files = { "ReviewFiles" },
 	review_inline_comments = { "ReviewInlineComments" },
-	review_link_tuicr = { "ReviewLinkTuicr" },
 	review_layout = { "ReviewLayout" },
 	review_mode = { "ReviewMode" },
 	review_next = { "ReviewNext" },
 	review_open = { "ReviewOpen" },
 	review_panel = { "ReviewPanel" },
 	review_prev = { "ReviewPrev" },
-	review_publish = { "ReviewPublish" },
 	review_reanchor = { "ReviewReanchor" },
 	review_refresh = { "ReviewRefresh" },
 	review_reply = { "ReviewReply" },
 	review_scope = { "ReviewScope" },
 	review_scope_back = { "ReviewScopeBack" },
 	review_sessions = { "ReviewSessions" },
-	review_start = { "ReviewRoundStart" },
 	review_toggle_resolve = { "ReviewToggleResolve" },
 	scratch = { "Scratch" },
 	theme = { "Theme" },
@@ -742,21 +739,13 @@ local confirmation_prompts = {
 	["gitsigns.reset_hunk"] = "Discard the current Git hunk?",
 	["gitsigns.reset_selection"] = "Discard Git changes in the selected lines?",
 	["gitsigns.reset_buffer"] = "Discard all Git hunks in this buffer?",
-	["command.devpod_recreate"] = "Recreate the DevPod workspace editor?",
+	["command.devcontainer_recreate"] = "Recreate the Dev Container workspace editor?",
 	["command.hex_assemble"] = "Assemble the current hex buffer?",
 	["command.nvim_config_init"] = "Create the local Neovim config template?",
 	["command.tools_install"] = "Install the configured managed tools?",
 	["command.parsers_install"] = "Install the configured Tree-sitter parsers?",
 	["tmux.refresh_dev_session"] = "Refresh the tmux dev session? This restarts agent/editor/git, Neovim exits, and term keeps running.",
 }
-
-local function confirm(prompt, callback)
-	vim.ui.select({ "Cancel", "Continue" }, { prompt = prompt }, function(choice)
-		if choice == "Continue" then
-			callback()
-		end
-	end)
-end
 
 local handlers = {
 	["navigation.back"] = function()
@@ -948,20 +937,6 @@ local handlers = {
 			snacks.notifier.show_history()
 		end
 	end,
-	["review.open"] = function(target)
-		target_command(target, "TuicrReview")
-	end,
-	["agent.context"] = function(target)
-		local first, last = ordered_selection(target)
-		target_command(target, "AgentContext", nil, false, first and { first.line, last.line } or nil)
-	end,
-	["agent.results"] = function(target)
-		vim.ui.input({ prompt = "Agent results JSON: ", completion = "file" }, function(path)
-			if path and path ~= "" then
-				target_command(target, "AgentResultsImport", { path })
-			end
-		end)
-	end,
 	["clangd.compile_commands"] = function(target)
 		vim.ui.input({ prompt = "compile_commands.json directory: ", completion = "dir" }, function(path)
 			if path and path ~= "" then
@@ -1068,17 +1043,17 @@ local function execute(id, target)
 	notify("Unknown menu action: " .. id, vim.log.levels.ERROR)
 end
 
----Run a menu action by its stable descriptor id.
+---Return the intrinsic confirmation prompt for a stable action id.
+---@param id string
+---@return string?
+function M.confirmation(id)
+	return confirmation_prompts[id]
+end
+
+---Run one already-validated action callback by its stable descriptor id.
 ---@param id string
 ---@param target? table
-function M.run(id, target)
-	local prompt = target and target.surface == "palette" and confirmation_prompts[id] or nil
-	if prompt then
-		confirm(prompt, function()
-			execute(id, target)
-		end)
-		return
-	end
+function M.execute(id, target)
 	return execute(id, target)
 end
 

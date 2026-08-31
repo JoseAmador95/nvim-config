@@ -1,6 +1,6 @@
 local M = {}
 
-local review_lsp = require("config.review_lsp")
+local review_lsp = require("config.native_review").lsp
 
 local function register(name, config)
 	vim.lsp.config(name, config)

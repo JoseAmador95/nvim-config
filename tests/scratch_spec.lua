@@ -4,41 +4,57 @@ vim.o.swapfile = false
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+require("config.local_plugins").setup()
 
-local fixture = vim.fn.tempname()
-vim.fn.mkdir(fixture, "p", tonumber("700", 8))
-fixture = vim.uv.fs_realpath(fixture) or fixture
-local old = fixture .. "/old.md"
-local active = fixture .. "/active.md"
-local recent = fixture .. "/recent.md"
-local version = fixture .. "/.version"
-for _, path in ipairs({ old, active, recent, version }) do
-	vim.fn.writefile({ path }, path)
-	vim.uv.fs_chmod(path, tonumber("644", 8))
+local branch = "refs/heads/feature/complete-name"
+local oid = string.rep("a", 40)
+local detached = false
+package.loaded["config.repo"] = {
+	git = function(_, arguments)
+		if arguments[1] == "symbolic-ref" then
+			if detached then
+				return nil
+			end
+			return branch
+		end
+		if arguments[1] == "rev-parse" then
+			return oid
+		end
+	end,
+}
+
+local host = require("config.scratch")
+local branch_identity = assert(host._identity("/repo"))
+assert(branch_identity.key.ref == branch)
+assert(branch_identity.label == "feature/complete-name")
+assert(branch_identity.legacy_ids[1] == vim.fn.sha256("/repo\0feature/complete-name"))
+
+detached = true
+local detached_identity = assert(host._identity("/repo"))
+assert(detached_identity.key.ref == oid, "detached identity did not retain the full OID")
+assert(detached_identity.label == "detached-" .. oid:sub(1, 12), "legacy detached label changed")
+
+local original_command = vim.api.nvim_create_user_command
+local original_keymap = vim.keymap.set
+local scratch = require("repo_scratch")
+local original_setup = scratch.setup
+local commands = {}
+local mappings = {}
+vim.api.nvim_create_user_command = function(name)
+	commands[name] = true
 end
-local stale = os.time() - (31 * 24 * 60 * 60)
-vim.uv.fs_utime(old, stale, stale)
-vim.uv.fs_utime(active, stale, stale)
-vim.uv.fs_utime(version, stale, stale)
-local buf = vim.fn.bufadd(active)
-vim.fn.bufload(buf)
-
-require("config.scratch")._prune(fixture)
-assert(vim.uv.fs_stat(old) == nil, "inactive scratch older than 30 days was retained")
-assert(vim.uv.fs_stat(active), "open scratch was pruned")
-assert(vim.uv.fs_stat(version), "scratch state version was pruned")
-assert(vim.uv.fs_stat(recent), "recent scratch was pruned")
-for _, path in ipairs({ active, recent, version }) do
-	assert(bit.band(vim.uv.fs_stat(path).mode, 511) == tonumber("600", 8), path .. " is not private")
+vim.keymap.set = function(mode, lhs)
+	mappings[mode .. lhs] = true
 end
+scratch.setup = function()
+	return true
+end
+host.setup()
+scratch.setup = original_setup
+vim.api.nvim_create_user_command = original_command
+vim.keymap.set = original_keymap
+assert(commands.Scratch, "host adapter did not retain :Scratch")
+assert(mappings["n<leader>."], "host adapter did not retain the scratch mapping")
 
-local linked = fixture .. "/linked.md"
-assert(vim.uv.fs_symlink(active, linked))
-local ok, err = require("config.scratch")._prune(fixture)
-assert(ok == nil and err:find("symlinked", 1, true), "symlinked scratch state did not fail closed")
-assert(require("config.scratch")._private_file(linked, "scratch file") == nil, "symlinked target was accepted")
-
-vim.api.nvim_buf_delete(buf, { force = true })
-vim.fn.delete(fixture, "rf")
-print("scratch_spec: private modes and 30-day inactive pruning passed")
+print("scratch_spec: full refs, full detached OIDs, and host surfaces passed")
 vim.cmd("quitall!")

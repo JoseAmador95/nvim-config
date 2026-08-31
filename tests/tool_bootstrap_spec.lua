@@ -3,11 +3,17 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+vim.opt.runtimepath:prepend(repo .. "/local-plugins/verified-tools.nvim")
+package.path = table.concat({
+	repo .. "/lua/?.lua",
+	repo .. "/lua/?/init.lua",
+	repo .. "/local-plugins/verified-tools.nvim/lua/?.lua",
+	repo .. "/local-plugins/verified-tools.nvim/lua/?/init.lua",
+	package.path,
+}, ";")
 
 local failures = {}
 local count = 0
-
 local function test(name, callback)
 	count = count + 1
 	local ok, err = xpcall(callback, debug.traceback)
@@ -18,399 +24,161 @@ local function test(name, callback)
 	end
 end
 
-local manifest = require("config.toolchain")
-local records = {}
-local claims = {}
-local notifications = {}
-local external = {}
-local release_plans = {}
-local release_force
-local release_failure = false
+local fixture = vim.fn.tempname()
+assert(vim.fn.mkdir(fixture, "p") == 1)
+fixture = assert(vim.uv.fs_realpath(fixture))
+local managed = fixture .. "/managed"
+local mason = fixture .. "/mason"
+local state = fixture .. "/state"
 local release_install_count = 0
-local transition_failure = false
-local finish_count = 0
+local registry_refresh_count = 0
+local mason_install_count = 0
+local toolchain = require("config.toolchain")
 
-local fake_state = {}
-function fake_state.inspect(name, version)
-	local value = records[name .. "@" .. version]
-	return value, value and nil or "absent"
-end
-function fake_state.claim_auto(name, version)
-	local key = name .. "@" .. version
-	if records[key] then
-		return nil, "consumed"
-	end
-	local claim = { identity = key, name = name, version = version, mode = "auto" }
-	records[key] = { status = "claimed" }
-	claims[#claims + 1] = claim
-	return claim
-end
-function fake_state.claim_manual(name, version)
-	local claim = { identity = name .. "@" .. version, name = name, version = version, mode = "manual" }
-	records[claim.identity] = { status = "claimed" }
-	claims[#claims + 1] = claim
-	return claim
-end
-function fake_state.transition(claim, status)
-	if transition_failure then
-		return nil, "injected"
-	end
-	records[claim.identity] = { status = status }
-	return true
-end
-function fake_state.finish(claim, ok, detail)
-	finish_count = finish_count + 1
-	records[claim.identity] = { status = ok and "succeeded" or "failed", detail = detail }
-	return true
-end
+local legacy_root = state .. "/tool-bootstrap"
+assert(vim.fn.mkdir(legacy_root, "p") == 1)
+assert(vim.fn.mkdir(managed .. "/bin", "p") == 1)
+local legacy_plantuml = managed .. "/bin/plantuml"
+assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, legacy_plantuml) == 0)
+assert(vim.uv.fs_chmod(legacy_plantuml, tonumber("700", 8)))
+assert(vim.fn.writefile({
+	vim.json.encode({
+		schema = 1,
+		name = "plantuml",
+		version = toolchain.managed_tools.plantuml.version,
+		identity = "plantuml@1.2026.6",
+		status = "succeeded",
+		updated_at = os.time(),
+		pid = vim.uv.os_getpid(),
+	}),
+}, legacy_root .. "/plantuml@1.2026.6.json") == 0)
 
 local fake_paths = {
-	external_executable = function(name)
-		return external[name]
+	primary_state_root = function()
+		return state
+	end,
+	managed_root = function()
+		return managed
+	end,
+	mason_root = function()
+		return mason
+	end,
+	external_executable = function()
+		return nil
 	end,
 }
 
 local fake_release = {}
-function fake_release.plan(name, options)
-	release_force = options and options.force or false
-	local value = release_plans[name]
-	if value == "external" and not release_force then
-		return nil, "external"
+function fake_release.plan(name)
+	local entry = toolchain.managed_tools[name]
+	if not entry then
+		return nil, "unknown"
 	end
-	return value ~= nil and { name = name, entry = manifest.managed_tools[name], asset = {} } or nil,
-		value == nil and "missing-prerequisite" or nil
+	return {
+		name = name,
+		entry = entry,
+		asset = { sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+		target = "test-x86_64",
+	}
 end
-function fake_release.install(_, callback)
+function fake_release.install(plan, callback)
 	release_install_count = release_install_count + 1
-	callback(not release_failure, release_failure and "mkdir-failed" or nil)
-	return not release_failure
+	assert(vim.fn.mkdir(managed .. "/bin", "p") >= 0)
+	local path = managed .. "/bin/" .. plan.entry.executable
+	assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, path) == 0)
+	assert(vim.uv.fs_chmod(path, tonumber("700", 8)))
+	callback(true)
+	return true
 end
 
 package.loaded["config.tool_paths"] = fake_paths
-package.loaded["config.tool_state"] = fake_state
 package.loaded["config.release_installer"] = fake_release
-package.loaded["config.pager"] = { active = false }
-package.loaded["config.local_config"] = {
-	get = function()
-		return { auto_install = true }
-	end,
-}
 package.loaded["config.tool_bootstrap"] = nil
 local bootstrap = require("config.tool_bootstrap")
-bootstrap._notify = function(message, level)
-	notifications[#notifications + 1] = { message = message, level = level }
+bootstrap._network_authorized = function()
+	return true
+end
+bootstrap._notify = function() end
+
+local fake_package = {}
+function fake_package:install(options, callback)
+	mason_install_count = mason_install_count + 1
+	assert(options.version == toolchain.mason_entry("clangd").version)
+	assert(vim.fn.mkdir(mason .. "/bin", "p") >= 0)
+	local path = mason .. "/bin/clangd"
+	assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, path) == 0)
+	assert(vim.uv.fs_chmod(path, tonumber("700", 8)))
+	callback(true)
+end
+function fake_package:is_installed()
+	return mason_install_count > 0
+end
+function fake_package:get_installed_version()
+	return toolchain.mason_entry("clangd").version
 end
 
-local original_offline = vim.env.NVIM_CONFIG_OFFLINE
-local original_vscode = vim.g.vscode
-
-local function consume_all_except(...)
-	records = {}
-	claims = {}
-	notifications = {}
-	release_plans = {}
-	external = {}
-	release_failure = false
-	release_install_count = 0
-	transition_failure = false
-	finish_count = 0
-	local keep = {}
-	for _, name in ipairs({ ... }) do
-		keep[name] = true
-	end
-	for _, name in ipairs(manifest.managed_order) do
-		if not keep[name] then
-			records[manifest.identity(name, manifest.managed_tools[name])] = { status = "succeeded" }
-		end
-	end
-	for _, name in ipairs(manifest.mason_order) do
-		if not keep[name] then
-			records[manifest.identity(name, manifest.mason_entry(name))] = { status = "succeeded" }
-		end
-	end
-	bootstrap._reset_for_tests()
-	bootstrap._ui_count = function()
-		return 1
-	end
-	vim.env.NVIM_CONFIG_OFFLINE = nil
-	vim.g.vscode = nil
+local registry = {}
+function registry.refresh(callback)
+	registry_refresh_count = registry_refresh_count + 1
+	callback(true)
 end
-
-local function package_fixture(options)
-	options = options or {}
-	local pkg = {}
-	function pkg:is_installed()
-		return options.installed == true
-	end
-	function pkg:get_installed_version()
-		return options.installed_version
-	end
-	function pkg:is_installing()
-		return false
-	end
-	function pkg:is_installable()
-		return options.installable ~= false
-	end
-	function pkg:install(opts, callback)
-		options.install_count = (options.install_count or 0) + 1
-		options.install_options = opts
-		if options.hold then
-			options.callback = callback
-		else
-			callback(options.success ~= false)
-		end
-	end
-	return pkg, options
+function registry.has_package(name)
+	return name == "clangd"
 end
-
-local function registry_for(packages, refresh_success)
-	local registry = { refresh_count = 0 }
-	function registry.refresh(callback)
-		registry.refresh_count = registry.refresh_count + 1
-		callback(refresh_success ~= false)
-	end
-	function registry.has_package(name)
-		return packages[name] ~= nil
-	end
-	function registry.get_package(name)
-		return assert(packages[name])
-	end
+function registry.get_package(name)
+	assert(name == "clangd")
+	return fake_package
+end
+bootstrap._registry = function()
 	return registry
 end
 
-local function run_auto()
-	bootstrap.mason_ready()
-	vim.wait(20, function()
-		return false
-	end)
-	assert(
-		vim.wait(500, function()
-			return not bootstrap.mason_busy()
-		end),
-		"automatic bootstrap did not settle"
-	)
-end
-
-test("automatic guards have zero state or registry side effects", function()
-	consume_all_except("clangd")
-	local pkg = package_fixture({ installed = true, installed_version = "22.1.6" })
-	local registry = registry_for({ clangd = pkg })
-	bootstrap._registry = function()
-		return registry
-	end
-	bootstrap._ui_count = function()
-		return 0
-	end
-	bootstrap.mason_ready()
-	vim.wait(30)
-	assert(#claims == 0 and registry.refresh_count == 0)
-	assert(next(release_plans) == nil)
-
-	bootstrap._reset_for_tests()
-	bootstrap._ui_count = function()
-		return 1
-	end
-	vim.env.NVIM_CONFIG_OFFLINE = "1"
-	bootstrap.mason_ready()
-	vim.wait(30)
-	assert(#claims == 0 and registry.refresh_count == 0)
-end)
-
-test("missing package-manager prerequisites stay pending without a claim", function()
-	consume_all_except("bash-language-server")
-	local registry = registry_for({})
-	bootstrap._registry = function()
-		return registry
-	end
-	run_auto()
-	assert(#claims == 0 and registry.refresh_count == 0)
-	assert(#notifications == 0)
-end)
-
-test("external satisfaction requires the primary runtime executable", function()
-	consume_all_except()
-	external.node = "/host/node"
-	external.npm = "/host/npm"
-	external.pyright = "/host/pyright"
-	assert(bootstrap.mason_condition(manifest.mason_entry("pyright"))() == true)
-	external["pyright-langserver"] = "/host/pyright-langserver"
-	assert(bootstrap.mason_condition(manifest.mason_entry("pyright"))() == false)
-
-	external.prettier = "/host/prettier"
-	assert(bootstrap.mason_condition(manifest.mason_entry("prettierd"))() == false)
-end)
-
-test("Python venv capability is cached per resolved interpreter", function()
-	consume_all_except("cmake-language-server", "clang-format", "debugpy")
-	external.python3 = "/host/python3"
-	local checks = 0
-	bootstrap._python_venv = function(path)
-		assert(path == "/host/python3")
-		checks = checks + 1
-		return true
-	end
-	local registry = registry_for({})
-	bootstrap._registry = function()
-		return registry
-	end
-	run_auto()
-	assert(checks == 1, "venv was probed more than once for one interpreter")
-	assert(registry.refresh_count == 1)
-end)
-
-test("managed start failure finishes one claim exactly once", function()
-	consume_all_except("mmdflux")
-	release_plans.mmdflux = true
-	release_failure = true
-	run_auto()
-	assert(#claims == 1 and finish_count == 1)
-	assert(records["mmdflux@2.6.0"].status == "failed")
-	assert(#notifications == 1 and notifications[1].message:find("1 failure", 1, true))
-	assert(notifications[1].message:find(":checkhealth nvimconfig", 1, true))
-end)
-
-test("one refresh records exact installs and installs wrong pins", function()
-	consume_all_except("clangd", "lemminx")
-	local exact = package_fixture({ installed = true, installed_version = "22.1.6" })
-	local wrong, wrong_options = package_fixture({ installed = true, installed_version = "0", success = true })
-	local registry = registry_for({ clangd = exact, lemminx = wrong })
-	bootstrap._registry = function()
-		return registry
-	end
-	run_auto()
-	assert(registry.refresh_count == 1)
-	assert(#claims == 2)
-	assert(records["clangd@22.1.6"].status == "succeeded")
-	assert(records["lemminx@0.29.3"].status == "succeeded")
-	assert(wrong_options.install_count == 1)
-	assert(wrong_options.install_options.version == "0.29.3")
-	assert(#notifications == 0, "successful automatic bootstrap emitted a toast")
-end)
-
-test("managed and Mason failures produce one aggregate toast", function()
-	consume_all_except("mmdflux", "clangd")
-	release_plans.mmdflux = true
-	release_failure = true
-	local pkg = package_fixture({ installed = false, success = false })
-	local registry = registry_for({ clangd = pkg })
-	bootstrap._registry = function()
-		return registry
-	end
-	run_auto()
-	assert(records["mmdflux@2.6.0"].status == "failed")
-	assert(records["clangd@22.1.6"].status == "failed")
-	assert(#notifications == 1, "automatic failures did not aggregate into exactly one toast")
-	assert(notifications[1].message:find("2 failures", 1, true))
-	assert(notifications[1].message:find(":checkhealth nvimconfig", 1, true))
-end)
-
-test("failed installs are silent on the second boot", function()
-	consume_all_except("clangd")
-	local pkg, options = package_fixture({ installed = false, success = false })
-	local registry = registry_for({ clangd = pkg })
-	bootstrap._registry = function()
-		return registry
-	end
-	run_auto()
-	assert(options.install_count == 1)
-	assert(records["clangd@22.1.6"].status == "failed")
-	assert(#notifications == 1)
-
-	bootstrap._reset_for_tests()
-	notifications = {}
-	run_auto()
-	assert(options.install_count == 1, "failed exact pin retried")
-	assert(registry.refresh_count == 1, "second boot refreshed despite consumed pin")
-	assert(#notifications == 0, "second boot repeated the failure notification")
-end)
-
-test("registry refresh failure creates no Mason claims", function()
-	consume_all_except("clangd")
-	local pkg = package_fixture({ installed = false })
-	local registry = registry_for({ clangd = pkg }, false)
-	bootstrap._registry = function()
-		return registry
-	end
-	run_auto()
-	assert(registry.refresh_count == 1 and #claims == 0)
-	assert(records["clangd@22.1.6"] == nil)
-	assert(#notifications == 1 and notifications[1].message:find(":checkhealth nvimconfig", 1, true))
-end)
-
-test("registry-confirmed unavailable pins are consumed once", function()
-	consume_all_except("clangd", "lemminx")
-	local unavailable = package_fixture({ installed = false, installable = false })
-	local registry = registry_for({ clangd = unavailable })
-	bootstrap._registry = function()
-		return registry
-	end
-	run_auto()
-	assert(records["clangd@22.1.6"].status == "failed")
-	assert(records["clangd@22.1.6"].detail == "mason-package-uninstallable")
-	assert(records["lemminx@0.29.3"].status == "failed")
-	assert(records["lemminx@0.29.3"].detail == "mason-package-unavailable")
-	assert(#notifications == 1 and notifications[1].message:find("2 failures", 1, true))
-
-	bootstrap._reset_for_tests()
-	notifications = {}
-	run_auto()
-	assert(registry.refresh_count == 1, "unavailable pins caused another registry refresh")
-	assert(#notifications == 0, "unavailable pins notified again")
-end)
-
-test("manual Mason conditions stop before package work while auto is busy", function()
-	consume_all_except("clangd")
-	local pkg, options = package_fixture({ installed = false, hold = true })
-	local registry = registry_for({ clangd = pkg })
-	bootstrap._registry = function()
-		return registry
-	end
-	bootstrap.mason_ready()
-	assert(vim.wait(500, function()
-		return options.callback ~= nil and bootstrap.mason_busy()
-	end))
-	local condition = bootstrap.mason_condition(manifest.mason_entry("clangd"))
-	assert(condition() == false and condition() == false)
-	assert(#notifications == 1, "busy Mason warning was repeated")
-	options.callback(true)
-	assert(vim.wait(500, function()
-		return not bootstrap.mason_busy()
-	end))
-end)
-
-test("managed manual command honors external tools unless forced", function()
-	consume_all_except()
-	vim.env.NVIM_CONFIG_OFFLINE = "1"
+test("setup and Mason readiness only plan and probe", function()
 	bootstrap.setup()
-	assert(vim.fn.exists(":NvimConfigToolsInstall") == 2, "manual command is absent offline")
-	vim.env.NVIM_CONFIG_OFFLINE = nil
-	release_plans.mmdflux = "external"
-	vim.cmd("NvimConfigToolsInstall mmdflux")
-	assert(#claims == 0 and release_force == false)
-	vim.cmd("NvimConfigToolsInstall! mmdflux")
-	assert(release_force == true and #claims == 1)
-	assert(records["mmdflux@2.6.0"].status == "succeeded")
-
-	consume_all_except()
-	release_plans.mmdflux = true
-	transition_failure = true
-	vim.cmd("NvimConfigToolsInstall! mmdflux")
-	assert(release_install_count == 0, "manual download started after state transition failed")
-	assert(finish_count == 1 and records["mmdflux@2.6.0"].status == "failed")
+	local plans = bootstrap.plan_all()
+	assert(plans.mmdflux and plans.clangd)
+	assert(release_install_count == 0 and registry_refresh_count == 0 and mason_install_count == 0)
+	bootstrap.mason_ready()
+	assert(release_install_count == 0 and registry_refresh_count == 0 and mason_install_count == 0)
+	local migrated = assert(bootstrap.engine().status(assert(bootstrap.spec("plantuml")).identity))
+	assert(migrated.status == "succeeded" and migrated.attestation.path == legacy_plantuml)
+	assert(vim.fn.exists(":NvimConfigToolsInstall") == 2)
+	assert(vim.fn.exists(":MasonToolsInstallSync") == 0)
 end)
 
-vim.env.NVIM_CONFIG_OFFLINE = original_offline
-vim.g.vscode = original_vscode
-for _, name in ipairs({
-	"config.tool_paths",
-	"config.tool_state",
-	"config.release_installer",
-	"config.pager",
-	"config.local_config",
-	"config.tool_bootstrap",
-}) do
-	package.loaded[name] = nil
-end
+test("manual release and Mason installs route through the shared engine", function()
+	assert(bootstrap.install("mmdflux", false))
+	assert(release_install_count == 1)
+	assert(bootstrap.install("clangd", false))
+	assert(registry_refresh_count == 1 and mason_install_count == 1)
+	local statuses = bootstrap.engine().status()
+	local seen = {}
+	for _, value in ipairs(statuses) do
+		seen[value.identity.backend .. ":" .. value.identity.name] = value.status
+	end
+	assert(seen["release:mmdflux"] == "succeeded")
+	assert(seen["mason:clangd"] == "succeeded")
+end)
+
+test("offline manual denial consumes no attempt", function()
+	bootstrap._network_authorized = function()
+		return false
+	end
+	-- Reconfigure the injected authorization callback without starting work.
+	local engine = bootstrap.engine()
+	engine.setup({
+		state_root = state .. "/offline",
+		backends = {},
+		network_authorized = bootstrap._network_authorized,
+	})
+	local spec = assert(bootstrap.spec("plantuml"))
+	local plan = assert(engine.plan(spec))
+	local claim, reason = engine.claim(plan)
+	assert(claim == nil and reason == "blocked/offline")
+	assert(engine.status(plan.identity) == nil)
+end)
+
+vim.fn.delete(fixture, "rf")
 
 if #failures > 0 then
 	for _, failure in ipairs(failures) do

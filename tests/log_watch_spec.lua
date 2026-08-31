@@ -3,7 +3,15 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+local plugin = repo .. "/local-plugins/log-workbench.nvim"
+vim.opt.runtimepath:prepend(plugin)
+package.path = table.concat({
+	plugin .. "/lua/?.lua",
+	plugin .. "/lua/?/init.lua",
+	repo .. "/lua/?.lua",
+	repo .. "/lua/?/init.lua",
+	package.path,
+}, ";")
 
 local failures = {}
 local count = 0
@@ -118,18 +126,23 @@ test("LogWatch tails incrementally, carries partial lines, and pins every tail w
 	local path = vim.fn.tempname()
 	write_raw(path, "one\ntwo\nthree\nfour\nfive")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
-	local buf = vim.api.nvim_get_current_buf()
-	vim.bo[buf].filetype = "text"
-	vim.bo[buf].readonly = false
-	vim.bo[buf].modifiable = true
+	local source = vim.api.nvim_get_current_buf()
+	vim.bo[source].filetype = "text"
+	vim.bo[source].readonly = false
+	vim.bo[source].modifiable = true
 
 	log_watch.command({ args = "on" })
+	local buf = vim.api.nvim_get_current_buf()
+	assert(buf ~= source, "follow reused the source buffer")
 	wait_for(function()
 		return vim.deep_equal(buffer_lines(buf), { "three", "four", "five" })
 	end, "initial bounded tail did not load")
 	equal("log", vim.bo[buf].filetype, "watch filetype")
 	equal(false, vim.bo[buf].modifiable, "watch modifiable")
 	equal(true, vim.bo[buf].readonly, "watch readonly")
+	equal("text", vim.bo[source].filetype, "source filetype changed")
+	equal(true, vim.bo[source].modifiable, "source modifiable changed")
+	equal(false, vim.bo[source].readonly, "source readonly changed")
 
 	local stationary_win = vim.api.nvim_get_current_win()
 	vim.cmd("vsplit")
@@ -159,12 +172,11 @@ test("LogWatch tails incrementally, carries partial lines, and pins every tail w
 	equal(1, maximum_active_reads, "more than one file read was active")
 
 	log_watch.command({ args = "off" })
-	equal("text", vim.bo[buf].filetype, "original filetype was not restored")
-	equal(true, vim.bo[buf].modifiable, "original modifiable state was not restored")
-	equal(false, vim.bo[buf].readonly, "original readonly state was not restored")
+	equal(source, vim.api.nvim_get_current_buf(), "source buffer was not restored")
+	equal(false, vim.api.nvim_buf_is_valid(buf), "ephemeral tail buffer survived stop")
 
 	vim.cmd("silent! only!")
-	vim.api.nvim_buf_delete(buf, { force = true })
+	vim.api.nvim_buf_delete(source, { force = true })
 	vim.fn.delete(path)
 end)
 
@@ -173,8 +185,10 @@ test("LogWatch reloads bounded content after rotation and delete/recreate", func
 	local rotated = path .. ".old"
 	write_raw(path, "before-a\nbefore-b")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
-	local buf = vim.api.nvim_get_current_buf()
+	local source = vim.api.nvim_get_current_buf()
 	log_watch.command({ args = "on" })
+	local buf = vim.api.nvim_get_current_buf()
+	assert(buf ~= source, "follow reused the source buffer")
 	wait_for(function()
 		return vim.deep_equal(buffer_lines(buf), { "before-a", "before-b" })
 	end, "initial file did not load")
@@ -217,9 +231,10 @@ test("LogWatch reloads bounded content after rotation and delete/recreate", func
 	vim.wait(100, function()
 		return false
 	end, 10)
-	equal({ "recreated" }, buffer_lines(buf), "stale poll callback changed a stopped watcher")
+	equal(false, vim.api.nvim_buf_is_valid(buf), "stale poll callback recreated a stopped tail")
+	equal({}, log_watch.status(), "stale poll callback recreated a watcher")
 
-	vim.api.nvim_buf_delete(buf, { force = true })
+	vim.api.nvim_buf_delete(source, { force = true })
 	vim.fn.delete(path)
 	vim.fn.delete(rotated)
 end)

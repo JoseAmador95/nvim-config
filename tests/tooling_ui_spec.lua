@@ -129,8 +129,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(save_options.lsp_format == "never", "format-on-save permits LSP fallback")
 				formatting.format({ async = true })
 				vim.cmd("FormatFile")
-				require("config.menu.actions").run("format.buffer")
-				require("config.menu.actions").run("lsp.format")
+				require("config.menu.actions").execute("format.buffer")
+				require("config.menu.actions").execute("lsp.format")
 				assert(#format_calls == 4, "format entry points did not share the external formatter helper")
 				for _, options in ipairs(format_calls) do
 					assert(options.lsp_format == "never", "format entry point permits LSP fallback")

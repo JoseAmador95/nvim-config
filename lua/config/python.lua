@@ -1,88 +1,101 @@
--- Per-project Python selection shared by LSP, Neotest, DAP, and the REPL.
--- Local environments are discovered without running a manager; venv-selector
--- provides explicit overrides. Neither path mutates vim.env.
+-- Host adapters for project-python.nvim. Commands, mappings, prompts, LSP
+-- restarts, and upstream plugin integration remain configuration policy.
 local M = {}
-
+local engine = require("project_python")
+local repo = require("config.repo")
+local terminal = require("config.terminal")
 local uv = vim.uv
-local selected = {}
-local runners = {}
 local repl_interpreters = {}
-local ROOT_MARKERS = {
-	"pyrightconfig.json",
-	"pyproject.toml",
-	"setup.py",
-	"setup.cfg",
-	"requirements.txt",
-	"Pipfile",
-}
+local dap_python_module
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Python" })
 end
 
-local function canonical_root(path)
-	local value = path and vim.fn.fnamemodify(path, ":p") or nil
-	return value and (uv.fs_realpath(value) or vim.fs.normalize(value)) or nil
+local function canonical(path)
+	local value = type(path) == "string" and vim.fs.normalize(vim.fn.fnamemodify(path, ":p")) or nil
+	return value and (uv.fs_realpath(value) or value) or nil
 end
 
-local function lexical_path(path)
-	if type(path) ~= "string" or path == "" then
-		return nil
-	end
-	return vim.fs.normalize(vim.fn.fnamemodify(path, ":p"))
-end
-
-local function executable(path)
-	local value = lexical_path(path)
-	local stat = value and uv.fs_stat(value) or nil
-	return stat and stat.type == "file" and uv.fs_access(value, "X") and value or nil
-end
-
-local function environment_python(path)
-	local environment = lexical_path(path)
-	if not environment then
-		return nil
-	end
-	for _, relative in ipairs({ "bin/python", "bin/python3", "Scripts/python.exe", "python.exe" }) do
-		local python = executable(vim.fs.joinpath(environment, relative))
-		if python then
-			return python
-		end
-	end
-end
-
-local function root_contains(root, path)
-	root = canonical_root(root)
-	path = lexical_path(path)
-	if not root or not path then
-		return false
-	end
-	return path == root or vim.fs.relpath(root, path) ~= nil
-end
-
-local function environment_from_value(root, value)
-	if type(value) ~= "string" or value == "" then
-		return nil
-	end
-	local path = value
-	if vim.fs.abspath(path) ~= vim.fs.normalize(path) then
-		path = vim.fs.joinpath(root, path)
-	end
-	path = lexical_path(path)
-	return root_contains(root, path) and path or nil
+local function contained(root, path)
+	root = canonical(root)
+	path = type(path) == "string" and vim.fs.normalize(vim.fn.fnamemodify(path, ":p")) or nil
+	return root ~= nil and path ~= nil and (path == root or vim.fs.relpath(root, path) ~= nil)
 end
 
 local function attached_pyright_root(buf, start)
 	local best
 	for _, client in ipairs(vim.lsp.get_clients({ bufnr = buf, name = "pyright" })) do
 		local candidate = client.name == "pyright" and client.config and client.config.root_dir or nil
-		candidate = type(candidate) == "string" and canonical_root(candidate) or nil
-		if candidate and root_contains(candidate, start) and (not best or #candidate > #best) then
+		candidate = canonical(candidate)
+		if candidate and contained(candidate, start) and (not best or #candidate > #best) then
 			best = candidate
 		end
 	end
 	return best
 end
+
+local function explicit_from_neoconf(root)
+	local neoconf = package.loaded.neoconf
+	if type(neoconf) ~= "table" or type(neoconf.get) ~= "function" then
+		return nil
+	end
+	for _, key in ipairs({ "vscode", "lspconfig.pyright" }) do
+		local ok, settings = pcall(neoconf.get, key, {}, { file = root })
+		if ok and type(settings) == "table" then
+			local direct = type(settings.python) == "table" and settings.python or nil
+			local nested = type(settings.settings) == "table" and settings.settings.python or nil
+			for _, python in pairs({ direct = direct, nested = nested }) do
+				if type(python) == "table" then
+					for _, field in ipairs({ "pythonPath", "venvPath", "venv" }) do
+						if type(python[field]) == "string" and python[field] ~= "" then
+							return vim.deepcopy(python)
+						end
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function fallback_python()
+	for _, name in ipairs({ "python3", "python" }) do
+		local path = vim.fn.exepath(name)
+		if path ~= "" then
+			return path
+		end
+	end
+	return nil
+end
+
+local terminal_bridge = {
+	status = function(identity)
+		return terminal.status(identity)
+	end,
+	open = function(spec)
+		return terminal.open(spec)
+	end,
+	toggle = function(spec)
+		return terminal.toggle(spec)
+	end,
+	focus = function(spec)
+		return terminal.focus(spec)
+	end,
+	restart = function(spec)
+		return terminal.restart(spec)
+	end,
+	send = function(identity, text)
+		return terminal.send(identity, text)
+	end,
+}
+
+engine.setup({
+	explicit = explicit_from_neoconf,
+	fallback = fallback_python,
+	terminal = terminal_bridge,
+	neotest_runner = "pytest",
+})
 
 function M.root(buf)
 	buf = buf or 0
@@ -91,91 +104,20 @@ function M.root(buf)
 	end
 	local name = vim.api.nvim_buf_get_name(buf)
 	local start = name ~= "" and name or (uv.cwd() or vim.fn.getcwd())
-	local lsp_root = attached_pyright_root(buf, start)
-	if lsp_root then
-		return lsp_root
-	end
-
-	local git_root = require("config.repo").root(start)
-	local marker_root = canonical_root(vim.fs.root(start, ROOT_MARKERS))
-	if marker_root and (not git_root or root_contains(git_root, marker_root)) then
-		return marker_root
-	end
-	if git_root then
-		return git_root
-	end
-	return canonical_root(
-		marker_root or (uv.fs_stat(start) and uv.fs_stat(start).type == "directory" and start or vim.fs.dirname(start))
-	) or canonical_root(uv.cwd())
+	return engine.resolve_root({
+		start = start,
+		attached_root = attached_pyright_root(buf, start),
+		repo_root = repo.root(start),
+	})
 end
 
-local function fallback_python()
-	for _, name in ipairs({ "python3", "python" }) do
-		local path = vim.fn.exepath(name)
-		local python = path ~= "" and executable(path) or nil
-		if python then
-			return python
-		end
-	end
-	return "python3"
-end
-
-local function public_python()
-	local ok, selector = pcall(require, "venv-selector")
-	if not ok or type(selector.python) ~= "function" then
-		return nil
-	end
-	local call_ok, path = pcall(selector.python)
-	if not call_ok or type(path) ~= "string" or path == "" then
-		return nil
-	end
-	return executable(path)
-end
-
-local function automatic_python(root)
-	local uv_environment = environment_from_value(root, vim.env.UV_PROJECT_ENVIRONMENT)
-	if uv_environment then
-		local python = environment_python(uv_environment)
-		if python then
-			return python
-		end
-	end
-
-	for _, relative in ipairs({ ".venv", ".pixi/envs/default", "venv", "env", ".conda" }) do
-		local python = environment_python(vim.fs.joinpath(root, relative))
-		if python then
-			return python
-		end
-	end
-
-	for _, name in ipairs({ "VIRTUAL_ENV", "CONDA_PREFIX" }) do
-		local value = vim.env[name]
-		local environment = environment_from_value(root, value)
-		if environment then
-			local python = environment_python(environment)
-			if python then
-				return python
-			end
-		end
-	end
-
-	return fallback_python()
+function M.snapshot(root)
+	return engine.snapshot(root or M.root(0))
 end
 
 function M.for_root(root)
-	root = canonical_root(root)
-	if not root then
-		return fallback_python()
-	end
-	if selected[root] then
-		local python = executable(selected[root])
-		if python then
-			selected[root] = python
-			return python
-		end
-		selected[root] = nil
-	end
-	return automatic_python(root)
+	local snapshot = engine.snapshot(root)
+	return snapshot.value.interpreter, snapshot
 end
 
 function M.current()
@@ -183,9 +125,7 @@ function M.current()
 end
 
 local function root_matches(client, root)
-	local client_root = client.config and client.config.root_dir
-	client_root = type(client_root) == "string" and canonical_root(client_root) or nil
-	return client_root == root
+	return canonical(client.config and client.config.root_dir) == canonical(root)
 end
 
 local function restart_pyright(root)
@@ -217,41 +157,27 @@ local function restart_pyright(root)
 	end, 100)
 end
 
-local function repl_identity(root)
-	return { runtime = "host", root = root, id = "python-repl" }
-end
-
-local function has_module(python, module)
-	local result = vim.system({
-		python,
-		"-c",
-		("import importlib.util,sys;sys.exit(0 if importlib.util.find_spec(%q) else 1)"):format(module),
-	}, { text = true }):wait()
-	return result.code == 0
-end
-
-local function repl_spec(root, python)
-	local argv
-	if has_module(python, "IPython") then
-		argv = { python, "-m", "IPython", "--no-autoindent" }
-	else
-		argv = { python, "-i" }
+local function install_dap_resolver()
+	if type(dap_python_module) == "table" then
+		dap_python_module.resolve_python = M.current
 	end
-	return {
-		runtime = "host",
-		root = root,
-		id = "python-repl",
-		argv = argv,
-		cwd = root,
-		env = {},
-		layout = "bottom",
-		title = "Python REPL",
-		close_on_success = true,
-	}
+end
+
+local function public_python()
+	local selector = package.loaded["venv-selector"]
+	if type(selector) ~= "table" or type(selector.python) ~= "function" then
+		return nil
+	end
+	local ok, path = pcall(selector.python)
+	return ok and path or nil
+end
+
+local function repl_status(root)
+	return engine.repl("status", root) or { exists = false, running = false }
 end
 
 local function restart_repl(root, python)
-	local record, err = require("config.terminal").restart(repl_spec(root, python))
+	local record, err = engine.repl("restart", root, { interpreter = python })
 	if not record then
 		notify("Could not restart REPL: " .. tostring(err), vim.log.levels.ERROR)
 		return
@@ -260,7 +186,7 @@ local function restart_repl(root, python)
 end
 
 local function confirm_repl_restart(root, python)
-	local status = require("config.terminal").status(repl_identity(root))
+	local status = repl_status(root)
 	if not status.running or repl_interpreters[root] == python then
 		return
 	end
@@ -273,126 +199,58 @@ local function confirm_repl_restart(root, python)
 	end)
 end
 
-local function install_dap_resolver()
-	local ok, dap_python = pcall(require, "dap-python")
-	if ok then
-		dap_python.resolve_python = M.current
-	end
-end
-
 function M.refresh_current(buf, python)
 	local root = M.root(buf or 0)
-	if python ~= nil then
-		python = executable(python)
-	else
-		python = public_python()
+	python = python or public_python()
+	if not root or type(python) ~= "string" then
+		return nil, "Python selection is unavailable"
 	end
-	if not root or not python then
-		return
+	local before = engine.snapshot(root)
+	local snapshot, err = engine.select(root, python)
+	if not snapshot then
+		return nil, err
 	end
-	local changed = selected[root] ~= python
-	selected[root] = python
-	if changed then
-		runners[python] = nil
+	if before.value.interpreter ~= snapshot.value.interpreter or before.source ~= snapshot.source then
 		install_dap_resolver()
 		restart_pyright(root)
-		confirm_repl_restart(root, python)
+		confirm_repl_restart(root, snapshot.value.interpreter)
 		vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigPythonChanged", modeline = false })
 	end
-end
-
-local function has_explicit_environment(settings)
-	local python = type(settings) == "table" and settings.python or nil
-	if type(python) ~= "table" then
-		return false
-	end
-	for _, key in ipairs({ "pythonPath", "venvPath", "venv" }) do
-		if type(python[key]) == "string" and python[key] ~= "" then
-			return true
-		end
-	end
-	return false
-end
-
-local function project_has_explicit_environment(root)
-	local ok, neoconf = pcall(require, "neoconf")
-	if not ok or type(neoconf.get) ~= "function" then
-		return false
-	end
-	for _, key in ipairs({ "vscode", "lspconfig.pyright" }) do
-		local success, settings = pcall(neoconf.get, key, {}, { file = root })
-		local nested = type(settings) == "table" and settings.settings or nil
-		if success and (has_explicit_environment(settings) or has_explicit_environment(nested)) then
-			return true
-		end
-	end
-	return false
-end
-
-local function apply_lsp_python(config, root)
-	if not config or has_explicit_environment(config.settings) then
-		return
-	end
-	root = canonical_root(root)
-	if not root then
-		return
-	end
-	local settings = config.settings or {}
-	local merged = vim.tbl_deep_extend("force", {}, settings, {
-		python = { pythonPath = M.for_root(root) },
-	})
-	for key in pairs(settings) do
-		settings[key] = nil
-	end
-	for key, value in pairs(merged) do
-		settings[key] = value
-	end
-	config.settings = settings
+	return snapshot
 end
 
 function M.before_init(_, config)
-	apply_lsp_python(config, config and config.root_dir or M.root(0))
+	return engine.apply_pyright(config, config and config.root_dir or M.root(0))
 end
 
 function M.on_new_config(config, root)
-	root = root or (config and config.root_dir) or M.root(0)
-	if project_has_explicit_environment(root) then
-		return
-	end
-	apply_lsp_python(config, root)
+	return engine.apply_pyright(config, root or (config and config.root_dir) or M.root(0))
 end
 
 function M.neotest_python(root)
-	return { M.for_root(root) }
+	return engine.neotest_python(root)
 end
 
-function M.neotest_runner(python_command)
-	local python = type(python_command) == "table" and python_command[1] or python_command
-	if type(python) ~= "string" or python == "" then
-		python = fallback_python()
-	end
-	if runners[python] == nil then
-		runners[python] = has_module(python, "pytest") and "pytest" or "unittest"
-	end
-	return runners[python]
+function M.neotest_runner()
+	return engine.neotest_runner()
 end
 
-function M.setup_dap(dap)
+function M.setup_dap(dap, dap_python)
+	dap_python_module = dap_python or package.loaded["dap-python"]
 	install_dap_resolver()
-	dap.listeners.on_config["nvim_config_python"] = function(config)
-		if config.type ~= "python" then
-			return config
-		end
-		local resolved = vim.deepcopy(config)
-		resolved.pythonPath = M.current()
-		return resolved
+	dap.listeners.on_config.nvim_config_python = function(config)
+		return engine.apply_dap(config, M.root(0))
 	end
 end
 
 function M.open_repl()
 	local root = M.root(0)
 	local python = M.for_root(root)
-	local status = require("config.terminal").status(repl_identity(root))
+	if not root or not python then
+		notify("Could not open REPL: project Python is unavailable", vim.log.levels.ERROR)
+		return
+	end
+	local status = repl_status(root)
 	if status.running and repl_interpreters[root] and repl_interpreters[root] ~= python then
 		vim.ui.select({ "Restart REPL", "Keep current REPL" }, {
 			prompt = "The selected Python differs from the live REPL",
@@ -400,12 +258,12 @@ function M.open_repl()
 			if choice == "Restart REPL" then
 				restart_repl(root, python)
 			elseif choice == "Keep current REPL" then
-				require("config.terminal").focus(repl_spec(root, repl_interpreters[root]))
+				engine.repl("focus", root, { interpreter = repl_interpreters[root] })
 			end
 		end)
 		return
 	end
-	local record, err = require("config.terminal").toggle(repl_spec(root, python))
+	local record, err = engine.repl("toggle", root, { interpreter = python })
 	if not record then
 		notify("Could not open REPL: " .. tostring(err), vim.log.levels.ERROR)
 		return
@@ -425,55 +283,35 @@ end
 
 function M.send(selection)
 	local root = M.root(0)
-	local source = selection and visual_text() or vim.api.nvim_get_current_line()
-	if not source or source == "" then
+	local text = selection and visual_text() or vim.api.nvim_get_current_line()
+	if not root or not text or text == "" then
 		return
 	end
-	local terminal = require("config.terminal")
-	local status = terminal.status(repl_identity(root))
+	local status = repl_status(root)
+	local python = repl_interpreters[root] or M.for_root(root)
+	local record, err
 	if not status.running then
-		local python = M.for_root(root)
-		local spec = repl_spec(root, python)
-		local record, open_err
 		if status.exists then
-			record, open_err = terminal.restart(spec)
+			record, err = engine.repl("restart", root, { interpreter = python })
 		else
-			record, open_err = terminal.open(spec)
-		end
-		if not record then
-			notify("Could not open REPL: " .. tostring(open_err), vim.log.levels.ERROR)
-			return
+			record, err = engine.repl("open", root, { interpreter = python })
 		end
 		repl_interpreters[root] = python
 	else
-		local python = repl_interpreters[root] or M.for_root(root)
-		local record, focus_err = terminal.focus(repl_spec(root, python))
-		if not record then
-			notify("Could not focus REPL: " .. tostring(focus_err), vim.log.levels.ERROR)
-			return
-		end
+		record, err = engine.repl("focus", root, { interpreter = python })
 	end
-	local ok, err = terminal.send(repl_identity(root), "exec(" .. vim.json.encode(source) .. ")")
+	if not record then
+		notify("Could not prepare REPL: " .. tostring(err), vim.log.levels.ERROR)
+		return
+	end
+	local ok, send_err = engine.repl("send", root, { text = "exec(" .. vim.json.encode(text) .. ")" })
 	if not ok then
-		notify(err, vim.log.levels.ERROR)
+		notify(send_err, vim.log.levels.ERROR)
 	end
 end
 
 function M.venv_name(root)
-	root = canonical_root(root) or M.root(0)
-	local python = root and executable(selected[root]) or nil
-	local manually_selected = python ~= nil
-	python = python or (root and automatic_python(root) or nil)
-	if not python then
-		return ""
-	end
-	if not manually_selected and not root_contains(root, python) then
-		return ""
-	end
-	local directory = vim.fs.dirname(python)
-	local leaf = vim.fs.basename(directory)
-	local env_root = (leaf == "bin" or leaf == "Scripts") and vim.fs.dirname(directory) or directory
-	return vim.fs.basename(env_root)
+	return engine.venv_name(root or M.root(0))
 end
 
 function M.setup()
@@ -486,7 +324,6 @@ function M.setup()
 	end, { desc = "Send selection to Python REPL" })
 end
 
-M._selected = selected
-M._has_module = has_module
+M._engine = engine
 
 return M

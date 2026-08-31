@@ -53,4 +53,14 @@ assert(gate:find("command -v cc", 1, true), "canonical gate does not require cc"
 assert(gate:find("tool_paths_spec", 1, true), "canonical gate omits tool_paths_spec")
 assert(gate:find("menu_lifecycle_spec", 1, true), "canonical gate omits the real menu lifecycle regression")
 
+local lazy_config = read_file(repo .. "/lua/config/lazy.lua")
+assert(lazy_config:find('NVIM_CONFIG_BOOTSTRAP ~= "1"', 1, true), "ordinary startup can bootstrap Lazy")
+assert(
+	lazy_config:find('install = { missing = vim.env.NVIM_CONFIG_BOOTSTRAP == "1" }', 1, true),
+	"missing plugins are not restricted to the explicit bootstrap"
+)
+for _, path in ipairs({ "/lua/plugins/treesitter.lua", "/lua/config/pager.lua" }) do
+	assert(not read_file(repo .. path):find(":TSUpdate", 1, true), path .. " installs parsers implicitly")
+end
+
 print("ci_spec: workflow, prebuilt validators, parser preflight, and offline gate match the manifest")

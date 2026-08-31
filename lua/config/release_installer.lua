@@ -89,18 +89,29 @@ end
 -- Tests replace this runner with a deterministic fake. The production runner
 -- always schedules completion back onto Neovim's main loop.
 M._run = function(command, options, callback)
-	local ok, err = pcall(vim.system, command, options, vim.schedule_wrap(callback))
+	local ok, process = pcall(vim.system, command, options, vim.schedule_wrap(callback))
 	if not ok then
 		vim.schedule(function()
-			callback({ code = -1, stderr = tostring(err) })
+			callback({ code = -1, stderr = tostring(process) })
 		end)
+		return nil
 	end
+	return process
 end
 
 M._replace_atomic = fs.replace_atomic
 
-local function run(command, options, callback)
-	M._run(command, options or { text = true }, callback)
+local function run(command, options, callback, controller)
+	local function completed(result)
+		if not controller or not controller.cancelled then
+			callback(result)
+		end
+	end
+	local process = M._run(command, options or { text = true }, completed)
+	if controller then
+		controller.process = process
+	end
+	return process
 end
 
 local function shell_quote(value)
@@ -170,7 +181,7 @@ local function promote_jar(plan, archive, callback)
 	end
 end
 
-local function extract(plan, archive, stage, callback)
+local function extract(plan, archive, stage, callback, controller)
 	local asset = plan.asset
 	if asset.kind == "file" or asset.kind == "jar" then
 		callback(true, archive)
@@ -191,7 +202,7 @@ local function extract(plan, archive, stage, callback)
 			local candidate = vim.fs.joinpath(extract_root, plan.entry.executable)
 			local wrote = fs.write_binary_atomic(candidate, result.stdout)
 			callback(wrote == true, wrote and candidate or "extract-write-failed")
-		end)
+		end, controller)
 		return
 	end
 
@@ -209,10 +220,10 @@ local function extract(plan, archive, stage, callback)
 		local candidate = vim.fs.joinpath(extract_root, asset.member)
 		local stat = uv.fs_stat(candidate)
 		callback(stat and stat.type == "file", stat and candidate or "archive-member-missing")
-	end)
+	end, controller)
 end
 
-local function verify(plan, archive, callback)
+local function verify(plan, archive, callback, controller)
 	local command
 	if plan.commands.sha256sum then
 		command = { plan.commands.sha256sum, archive }
@@ -226,7 +237,7 @@ local function verify(plan, archive, callback)
 			return
 		end
 		callback(true)
-	end)
+	end, controller)
 end
 
 -- Install a previously checked plan. The callback receives only stable reason
@@ -251,6 +262,17 @@ function M.install(plan, callback)
 		return false
 	end
 	local archive = vim.fs.joinpath(stage, plan.asset.archive)
+	local controller = { cancelled = false }
+	function controller.cancel()
+		if controller.cancelled then
+			return
+		end
+		controller.cancelled = true
+		if controller.process and type(controller.process.kill) == "function" then
+			pcall(controller.process.kill, controller.process, 15)
+		end
+		cleanup(stage)
+	end
 	local function finish(success, reason)
 		cleanup(stage)
 		callback(success, reason)
@@ -285,10 +307,10 @@ function M.install(plan, callback)
 				end
 				local promote = plan.asset.kind == "jar" and promote_jar or promote_native
 				promote(plan, candidate, finish)
-			end)
-		end)
-	end)
-	return true
+			end, controller)
+		end, controller)
+	end, controller)
+	return controller
 end
 
 return M

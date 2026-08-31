@@ -24,6 +24,21 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"Mason is not rooted in the primary editor data directory"
 				)
 				assert(mason_options.PATH == "append", "Mason still prepends itself ahead of host tools")
+				assert(
+					mason_options.ui.check_outdated_packages_on_open == false,
+					"Mason UI still performs registry checks when opened"
+				)
+				for _, key in ipairs({
+					"install_package",
+					"update_package",
+					"check_package_version",
+					"update_all_packages",
+					"check_outdated_packages",
+					"uninstall_package",
+					"cancel_installation",
+				}) do
+					assert(mason_options.ui.keymaps[key] == "<Nop>", "Mason mutation key remains: " .. key)
+				end
 				local mason_settings = require("mason-lspconfig.settings").current
 				assert(mason_settings.automatic_enable == false, "Mason automatic LSP enablement is not disabled")
 				assert(vim.tbl_isempty(mason_settings.ensure_installed), "mason-lspconfig still schedules installs")
@@ -32,7 +47,10 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(vim.lsp.config["*"].before_init == nil, "wildcard before_init hook is still configured")
 				assert(type(vim.lsp.config.pyright.root_dir) == "function", "native LSP startup gate is missing")
 				assert(vim.fn.exists(":NvimConfigToolsInstall") == 2, "pinned tool installer command is missing")
-				assert(vim.fn.exists(":MasonToolsInstallSync") == 2, "manual Mason sync command is missing")
+				assert(vim.fn.exists(":MasonToolsInstallSync") == 0, "retired Mason sync command remains")
+				for _, name in ipairs({ "MasonInstall", "MasonUninstall", "MasonUninstallAll", "MasonUpdate" }) do
+					assert(vim.fn.exists(":" .. name) == 0, "Mason mutation command remains: " .. name)
+				end
 
 				local neoconf = require("neoconf")
 				local rust_path = require("config.rust_tools").rust_analyzer()
@@ -253,7 +271,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				navigation.definition = function()
 					menu_route_count = menu_route_count + 1
 				end
-				require("config.menu.actions").run("lsp.definition")
+				require("config.menu.actions").execute("lsp.definition")
 				navigation.definition = original_navigation_definition
 				assert(menu_route_count == 1, "menu definition bypassed shared LSP navigation")
 

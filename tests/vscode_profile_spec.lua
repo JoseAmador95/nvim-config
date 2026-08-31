@@ -2,6 +2,7 @@ vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
 local repo = vim.env.NVIM_CONFIG_ROOT or vim.fn.getcwd()
+vim.opt.runtimepath:prepend(vim.fs.joinpath(repo, "local-plugins", "tab-first.nvim"))
 local vscode_stub = dofile(vim.fs.joinpath(repo, "tests", "support", "vscode_stub.lua"))
 
 local function fail(message)
@@ -28,16 +29,19 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"CoverageLoad",
 					"CoverageSummary",
 					"CoverageClear",
-					"DevPodUp",
-					"DevPodRecreate",
-					"DevPodStatus",
-					"DevPodLog",
-					"HostEditor",
+					"DevContainerUp",
+					"DevContainerRecreate",
+					"DevContainerStatus",
+					"DevContainerLog",
+					"DevContainerHostEditor",
 					"JustRun",
 					"JustImportLast",
 					"NvimConfigToolsInstall",
 					"LogWatchCurrentFile",
 					"Mason",
+					"ReviewOpen",
+					"ReviewPanel",
+					"ReviewExport",
 					"ReviewRoundStart",
 					"Scratch",
 					"TuicrReview",
@@ -46,7 +50,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				}) do
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into VSCode")
 				end
-				assert(package.loaded["config.editor_rpc"] == nil, "editor RPC module loaded in VSCode")
+				assert(package.loaded["config.exact_editor"] == nil, "exact editor adapter loaded in VSCode")
+				assert(package.loaded.tab_first == nil, "tab-first runtime loaded in VSCode")
 				assert(
 					vim.tbl_isempty(vim.fn.maparg("<leader><leader>", "n", false, true)),
 					"palette mapping leaked into VSCode"
@@ -55,7 +60,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					vim.tbl_isempty(vim.fn.maparg("<leader><leader>", "x", false, true)),
 					"visual palette mapping leaked into VSCode"
 				)
-				assert(_G.NvimReviewOpenRequest == nil, "editor RPC function leaked into VSCode")
+				assert(_G.ExactEditorRequest == nil, "exact editor RPC function leaked into VSCode")
 
 				require("lazy").load({ plugins = { "vscode-multi-cursor.nvim" } })
 				local runtime_paths = vim.api.nvim_list_runtime_paths()

@@ -190,6 +190,33 @@ test("JAR wrapper promotion failure leaves the previous stable command intact", 
 	assert(table.concat(vim.fn.readfile(wrapper_path), "\n") == vim.trim(old_wrapper))
 end)
 
+test("explicit cancellation stops the active release process and cleans staging", function()
+	installer._platform = function()
+		return "Darwin", "arm64"
+	end
+	fake_external()
+	local plan = assert(installer.plan("mmdflux"))
+	local killed = false
+	local callback_called = false
+	installer._run = function(command)
+		assert(vim.fs.basename(command[1]) == "curl")
+		return {
+			kill = function(_, signal)
+				assert(signal == 15)
+				killed = true
+			end,
+		}
+	end
+	local controller = assert(installer.install(plan, function()
+		callback_called = true
+	end))
+	assert(type(controller.cancel) == "function")
+	controller.cancel()
+	assert(killed and not callback_called)
+	local staging = vim.fs.joinpath(paths.managed_root(), "staging")
+	assert(#vim.fn.glob(staging .. "/*", false, true) == 0)
+end)
+
 vim.env.NVIM_CONFIG_TOOLS_ROOT = original_tools_root
 package.loaded["config.tool_paths"] = nil
 package.loaded["config.release_installer"] = nil

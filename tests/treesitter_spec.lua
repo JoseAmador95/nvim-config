@@ -2,8 +2,16 @@ vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
+local treesitter_plugin = repo .. "/local-plugins/treesitter-runtime.nvim"
+vim.opt.runtimepath:prepend(treesitter_plugin)
 vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+package.path = table.concat({
+	treesitter_plugin .. "/lua/?.lua",
+	treesitter_plugin .. "/lua/?/init.lua",
+	repo .. "/lua/?.lua",
+	repo .. "/lua/?/init.lua",
+	package.path,
+}, ";")
 
 local failures = {}
 local paths = {}
@@ -64,10 +72,12 @@ package.loaded["nvim-treesitter"] = {
 }
 
 local original_start = vim.treesitter.start
+local original_stop = vim.treesitter.stop
 local original_get_lang = vim.treesitter.language.get_lang
 vim.treesitter.start = function(buf, lang)
 	starts[#starts + 1] = { buf = buf, lang = lang }
 end
+vim.treesitter.stop = function() end
 vim.treesitter.language.get_lang = function(ft)
 	return ft
 end
@@ -146,7 +156,7 @@ test("VSCode-style profile exposes parsers without starting highlighting", funct
 	equal({}, starts_for(buf), "VSCode-style profile started Tree-sitter highlighting")
 	equal(
 		{},
-		vim.api.nvim_get_autocmds({ group = "NvimConfigTreesitter", event = "FileType" }),
+		vim.api.nvim_get_autocmds({ group = "TreesitterRuntime", event = "FileType" }),
 		"VSCode-style profile registered a highlighting lifecycle"
 	)
 	assert(vim.fn.exists(":NvimConfigParsersInstall") == 2, "explicit parser install command is missing")
@@ -206,7 +216,7 @@ test("editor parser manifest is exactly 19 languages and keeps Rust", function()
 	reset_runtime()
 	installed = {}
 	local specs = require("plugins.treesitter")
-	assert(specs[1].build == ":TSUpdate", "Tree-sitter build hook drifted")
+	assert(specs[1].build == nil, "Tree-sitter regained an implicit parser install hook")
 	specs[1].config()
 	local ok = runtime.install(nil, { wait = true, summary = false })
 	assert(ok, "configured parser manifest could not be inspected")
@@ -260,7 +270,9 @@ test("editor and pager plugin specs never install parsers implicitly", function(
 	vim.g.vscode = previous_vscode
 end)
 
+runtime.teardown()
 vim.treesitter.start = original_start
+vim.treesitter.stop = original_stop
 vim.treesitter.language.get_lang = original_get_lang
 package.loaded["nvim-treesitter"] = nil
 

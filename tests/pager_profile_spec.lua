@@ -1,6 +1,9 @@
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
+local repo = assert(vim.env.NVIM_CONFIG_ROOT, "NVIM_CONFIG_ROOT is missing")
+vim.opt.runtimepath:prepend(vim.fs.joinpath(repo, "local-plugins", "tab-first.nvim"))
+
 local function fail(message)
 	vim.api.nvim_err_writeln("pager_profile_spec: " .. message)
 	vim.cmd("cquit")
@@ -28,11 +31,11 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"CoverageLoad",
 					"CoverageSummary",
 					"CoverageClear",
-					"DevPodUp",
-					"DevPodRecreate",
-					"DevPodStatus",
-					"DevPodLog",
-					"HostEditor",
+					"DevContainerUp",
+					"DevContainerRecreate",
+					"DevContainerStatus",
+					"DevContainerLog",
+					"DevContainerHostEditor",
 					"JustRun",
 					"JustImportLast",
 					"MermaidPreview",
@@ -40,6 +43,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"Mason",
 					"PlantumlAscii",
 					"PlantumlPreview",
+					"ReviewOpen",
+					"ReviewPanel",
+					"ReviewExport",
 					"ReviewRoundStart",
 					"Scratch",
 					"TuicrReview",
@@ -48,8 +54,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				}) do
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into the pager profile")
 				end
-				assert(package.loaded["config.editor_rpc"] == nil, "editor RPC module loaded in the pager")
-				assert(_G.NvimReviewOpenRequest == nil, "editor RPC function leaked into the pager")
+				assert(package.loaded["config.exact_editor"] == nil, "exact editor adapter loaded in the pager")
+				assert(package.loaded.tab_first == nil, "tab-first runtime loaded in the pager")
+				assert(_G.ExactEditorRequest == nil, "exact editor RPC function leaked into the pager")
 				assert(
 					vim.fn.exists(":NvimConfigParsersInstall") == 2,
 					"explicit parser installer is missing from the pager"

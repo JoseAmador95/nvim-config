@@ -213,6 +213,47 @@ test("manual save wrapper preserves upstream options", function()
 	equal({ name = "named", options = options }, captured, "wrapped save changed upstream options")
 end)
 
+test("session serialization cannot resurrect tagged ephemeral terminals", function()
+	reset_editor()
+	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-durable-session.lua")
+	package.loaded["auto-session"] = {
+		save_session = function()
+			return true
+		end,
+		setup = function() end,
+	}
+	session.config(nil, session.opts)
+	local configured = vim.opt.sessionoptions:get()
+	assert(not vim.tbl_contains(configured, "terminal"), "sessionoptions still permits terminal resurrection")
+
+	vim.cmd("botright new")
+	local terminal_buf = vim.api.nvim_get_current_buf()
+	local job = vim.fn.jobstart({ vim.o.shell, "-c", "sleep 30" }, { term = true })
+	assert(job > 0 and vim.bo[terminal_buf].buftype == "terminal", "terminal fixture did not start")
+	vim.b[terminal_buf].terminal_lifecycle = { key = "fixture", ephemeral = true }
+	vim.b[terminal_buf].terminal_lifecycle_ephemeral = true
+	local terminal_name = vim.api.nvim_buf_get_name(terminal_buf)
+	assert(terminal_name ~= "", "terminal fixture has no session identity")
+
+	local session_path = vim.fn.tempname() .. ".vim"
+	vim.cmd("silent! mksession! " .. vim.fn.fnameescape(session_path))
+	local serialized = table.concat(vim.fn.readfile(session_path), "\n")
+	assert(not serialized:find(terminal_name, 1, true), "ephemeral terminal was serialized into the session")
+	vim.fn.jobstop(job)
+	vim.bo[terminal_buf].modified = false
+	vim.api.nvim_buf_delete(terminal_buf, { force = true })
+
+	vim.cmd("silent! tabonly!")
+	vim.cmd("silent! only!")
+	vim.cmd("silent! source " .. vim.fn.fnameescape(session_path))
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_valid(buf) then
+			assert(vim.bo[buf].buftype ~= "terminal", "session restore resurrected a terminal process buffer")
+		end
+	end
+	vim.fn.delete(session_path)
+end)
+
 package.loaded["config.code_review"] = original_code_review
 package.preload["config.code_review"] = original_code_review_preload
 package.loaded["auto-session"] = original_auto_session

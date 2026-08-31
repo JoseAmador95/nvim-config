@@ -9,7 +9,7 @@ return {
 		vim.api.nvim_create_autocmd("LspAttach", {
 			group = vim.api.nvim_create_augroup("NvimConfigNavic", { clear = true }),
 			callback = function(event)
-				if require("config.review_lsp").blocked(event.buf) then
+				if require("config.native_review").lsp.blocked(event.buf) then
 					return
 				end
 				local client = vim.lsp.get_client_by_id(event.data.client_id)

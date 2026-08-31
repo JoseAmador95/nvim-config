@@ -1,0 +1,15 @@
+# shellcheck shell=bash disable=SC1091
+# Dev Container terminal initialization owned by this config. Keep the image's
+# own interactive setup, then make distro-provided completions available even
+# when its default .bashrc leaves them disabled.
+if [[ -r "$HOME/.bashrc" ]]; then
+    . "$HOME/.bashrc"
+fi
+
+if ! declare -F _completion_loader >/dev/null 2>&1; then
+    if [[ -r /usr/share/bash-completion/bash_completion ]]; then
+        . /usr/share/bash-completion/bash_completion
+    elif [[ -r /etc/bash_completion ]]; then
+        . /etc/bash_completion
+    fi
+fi

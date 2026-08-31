@@ -1,21 +1,35 @@
--- Host-only Just integration. Recipes are discovered from trusted justfiles,
--- parameters become argv entries, and execution uses the terminal factory.
+-- Host adapter for just-workbench.nvim. Commands, prompts, picker presentation,
+-- terminal UI, repository resolution, and quickfix integration remain here.
 local M = {}
 
-local last = nil
+local workbench = require("just_workbench")
+local last_identity
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Just" })
 end
 
 local function find_justfile(root)
-	for _, name in ipairs({ "justfile", "Justfile", ".justfile" }) do
-		local path = vim.fs.joinpath(root, name)
-		if vim.fn.filereadable(path) == 1 then
-			return path
+	local preferred = { justfile = 1, Justfile = 2, [".justfile"] = 3 }
+	local found = {}
+	local handle = vim.uv.fs_scandir(root)
+	if handle then
+		while true do
+			local name, kind = vim.uv.fs_scandir_next(handle)
+			if not name then
+				break
+			end
+			if kind == "file" and (name:lower() == "justfile" or name:lower() == ".justfile") then
+				found[#found + 1] = name
+			end
 		end
 	end
-	return nil
+	table.sort(found, function(left, right)
+		local left_rank = preferred[left] or 4
+		local right_rank = preferred[right] or 4
+		return left_rank == right_rank and left < right or left_rank < right_rank
+	end)
+	return found[1] and vim.fs.joinpath(root, found[1]) or nil
 end
 
 local function context()
@@ -30,94 +44,85 @@ local function context()
 	if not justfile then
 		return nil, "no justfile exists at the repository root"
 	end
-	-- vim.secure.read persists the user's trust decision by content hash.
-	if not vim.secure.read(justfile) then
-		return nil, "justfile was not trusted"
-	end
-	return { root = root, justfile = justfile }
+	return { runtime = "host", task_root = root, justfile = justfile, just_bin = "just" }
 end
 
-local function decode_dump(result)
-	if not result or result.code ~= 0 then
-		local detail = result and vim.trim(result.stderr or "") or "could not start just"
-		return nil, detail ~= "" and detail or "just --dump failed"
-	end
-	local ok, decoded = pcall(vim.json.decode, result.stdout or "")
-	if not ok or type(decoded) ~= "table" or type(decoded.recipes) ~= "table" then
-		return nil, "just --dump returned invalid JSON"
-	end
-	local recipes = {}
-	for name, recipe in pairs(decoded.recipes) do
-		if type(name) ~= "string" or name == "" or type(recipe) ~= "table" then
-			return nil, "just --dump contains an invalid recipe"
-		end
-		local parameters = recipe.parameters or {}
-		if type(parameters) ~= "table" or not vim.islist(parameters) then
-			return nil, "recipe parameters are not an array: " .. name
-		end
-		for _, parameter in ipairs(parameters) do
-			if type(parameter) ~= "table" or type(parameter.name) ~= "string" or parameter.name == "" then
-				return nil, "recipe contains an invalid parameter: " .. name
-			end
-		end
-		recipes[#recipes + 1] = {
-			name = name,
-			text = name,
-			description = type(recipe.doc) == "string" and recipe.doc or "",
-			parameters = parameters,
-		}
-	end
-	table.sort(recipes, function(a, b)
-		return a.name < b.name
-	end)
-	return recipes
-end
-
-local function terminal_spec(ctx, argv)
+local function terminal_adapter()
 	return {
-		runtime = "host",
-		root = ctx.root,
-		id = "just",
-		argv = argv,
-		cwd = ctx.root,
-		env = {},
-		layout = "bottom",
-		title = "just",
-		close_on_success = false,
+		status = function(key)
+			return require("config.terminal").status(key)
+		end,
+		open = function(spec)
+			return require("config.terminal").open(spec)
+		end,
+		focus = function(spec)
+			return require("config.terminal").focus(spec)
+		end,
+		replace = function(spec)
+			return require("config.terminal").restart(spec)
+		end,
+		lines = function(key)
+			return require("config.terminal").lines(key)
+		end,
 	}
 end
 
-local function execute(ctx, recipe, values)
-	local argv = {
-		"just",
-		"--justfile",
-		ctx.justfile,
-		"--working-directory",
-		ctx.root,
-		recipe.name,
-	}
-	vim.list_extend(argv, values)
-	local spec = terminal_spec(ctx, argv)
-	local record, err = require("config.terminal").restart(spec)
-	if not record then
+local function configure(overrides)
+	overrides = overrides or {}
+	workbench.setup({
+		system = overrides.system or vim.system,
+		trust = overrides.trust or function(path, contents)
+			local approved = vim.secure.read(path)
+			return approved == contents, "source was not trusted: " .. path
+		end,
+		hash = overrides.hash or vim.fn.sha256,
+		home = overrides.home or vim.env.HOME,
+		now = overrides.now,
+		schedule = overrides.schedule or vim.schedule,
+		terminal = overrides.terminal or terminal_adapter(),
+	})
+end
+
+local function execute(catalog, action, values, decision)
+	local result, err = workbench.run(catalog, action.name, values, decision and { decision = decision } or nil)
+	if result then
+		if result.outcome == "started" or result.outcome == "replaced" then
+			last_identity = { runtime = catalog.runtime, task_root = catalog.task_root }
+		end
+		return
+	end
+	if type(err) ~= "table" or err.kind ~= "conflict" then
 		notify("Could not run recipe: " .. tostring(err), vim.log.levels.ERROR)
 		return
 	end
-	last = { root = ctx.root, spec = spec }
+	local choices = {
+		{ value = "focus", label = "Focus existing run" },
+		{ value = "replace", label = "Replace existing run" },
+		{ value = "cancel", label = "Cancel" },
+	}
+	vim.ui.select(choices, {
+		prompt = ("Just is already active for %s"):format(catalog.task_root),
+		format_item = function(item)
+			return item.label
+		end,
+	}, function(choice)
+		local selected = choice and choice.value or "cancel"
+		execute(catalog, action, values, selected)
+	end)
 end
 
-local function prompt_parameters(ctx, recipe, index, values)
+local function prompt_parameters(catalog, action, index, values)
 	index = index or 1
 	values = values or {}
-	local parameter = recipe.parameters[index]
+	local parameter = action.parameters[index]
 	if not parameter then
-		execute(ctx, recipe, values)
+		execute(catalog, action, values)
 		return
 	end
 	local variadic = parameter.kind == "plus" or parameter.kind == "star" or parameter.kind == "variadic"
 	local default = type(parameter.default) == "string" and parameter.default or ""
 	vim.ui.input({
-		prompt = ("just %s: %s%s: "):format(recipe.name, parameter.name, variadic and " (space-separated)" or ""),
+		prompt = ("just %s: %s%s: "):format(action.name, parameter.name, variadic and " (space-separated)" or ""),
 		default = default,
 	}, function(value)
 		if value == nil then
@@ -129,26 +134,26 @@ local function prompt_parameters(ctx, recipe, index, values)
 			return
 		end
 		if value == "" then
-			prompt_parameters(ctx, recipe, index + 1, values)
-			return
+			prompt_parameters(catalog, action, index + 1, values)
 		elseif variadic then
 			vim.list_extend(values, vim.split(value, "%s+", { trimempty = true }))
+			prompt_parameters(catalog, action, index + 1, values)
 		else
 			values[#values + 1] = value
+			prompt_parameters(catalog, action, index + 1, values)
 		end
-		prompt_parameters(ctx, recipe, index + 1, values)
 	end)
 end
 
-local function choose(ctx, recipes, requested)
+local function choose(catalog, requested)
 	if requested and requested ~= "" then
-		for _, recipe in ipairs(recipes) do
-			if recipe.name == requested then
-				prompt_parameters(ctx, recipe)
+		for _, action in ipairs(catalog.actions) do
+			if action.name == requested then
+				prompt_parameters(catalog, action)
 				return
 			end
 		end
-		notify("Unknown recipe: " .. requested, vim.log.levels.ERROR)
+		notify("Unknown recipe or alias: " .. requested, vim.log.levels.ERROR)
 		return
 	end
 	local ok, snacks = pcall(require, "snacks")
@@ -159,7 +164,7 @@ local function choose(ctx, recipes, requested)
 	snacks.picker.pick({
 		source = "just_recipes",
 		title = "Just recipes",
-		items = recipes,
+		items = catalog.actions,
 		format = "text",
 		preview = false,
 		layout = { preset = "select" },
@@ -167,40 +172,32 @@ local function choose(ctx, recipes, requested)
 			picker:close()
 			if item then
 				vim.schedule(function()
-					prompt_parameters(ctx, item)
+					prompt_parameters(catalog, item)
 				end)
 			end
 		end,
 	})
 end
 
-function M.run(requested, dependencies)
+function M.run(requested, overrides)
 	local ctx, ctx_err = context()
 	if not ctx then
 		notify(ctx_err, vim.log.levels.ERROR)
 		return
 	end
-	local argv = {
-		"just",
-		"--dump",
-		"--dump-format",
-		"json",
-		"--justfile",
-		ctx.justfile,
-		"--working-directory",
-		ctx.root,
-	}
-	local system = dependencies and dependencies.system or vim.system
-	system(argv, { text = true }, function(result)
+	configure(overrides)
+	local handle, catalog_err = workbench.catalog(ctx, function(catalog, err)
 		vim.schedule(function()
-			local recipes, err = decode_dump(result)
-			if not recipes then
+			if not catalog then
 				notify("Could not list recipes: " .. tostring(err), vim.log.levels.ERROR)
 				return
 			end
-			choose(ctx, recipes, requested)
+			choose(catalog, requested)
 		end)
 	end)
+	if not handle then
+		notify("Could not list recipes: " .. tostring(catalog_err), vim.log.levels.ERROR)
+	end
 end
 
 local function strip_ansi(line)
@@ -246,16 +243,16 @@ function M.parse_locations(root, lines)
 end
 
 function M.import_last()
-	if not last then
+	if not last_identity then
 		notify("No Just run exists in this Neovim instance", vim.log.levels.WARN)
 		return
 	end
-	local lines, err = require("config.terminal").lines(last.spec)
-	if not lines then
+	local transcript, err = workbench.transcript(last_identity)
+	if not transcript then
 		notify(err, vim.log.levels.ERROR)
 		return
 	end
-	local items = M.parse_locations(last.root, lines)
+	local items = M.parse_locations(last_identity.task_root, transcript.lines)
 	if #items == 0 then
 		notify("No conservative file:line[:col] locations found", vim.log.levels.WARN)
 		return
@@ -265,6 +262,7 @@ function M.import_last()
 end
 
 function M.setup()
+	configure()
 	vim.api.nvim_create_user_command("JustRun", function(opts)
 		M.run(opts.args)
 	end, { nargs = "?", desc = "Choose and run a trusted Just recipe" })
@@ -274,7 +272,8 @@ function M.setup()
 	})
 end
 
-M._decode_dump = decode_dump
+M._decode_dump = workbench._decode_dump
 M._find_justfile = find_justfile
+M._workbench = workbench
 
 return M

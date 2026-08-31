@@ -64,11 +64,12 @@ return {
 			-- Python debugging. Keep Mason's deterministic path even before the
 			-- first install completes, so the adapter works later without a reload.
 			local debugpy_path, has_debugpy = executables.resolve("debugpy-adapter")
-			require("dap-python").setup(debugpy_path)
-			require("config.python").setup_dap(dap)
+			local dap_python = require("dap-python")
+			dap_python.setup(debugpy_path)
+			require("config.python").setup_dap(dap, dap_python)
 			if not has_debugpy then
 				vim.notify(
-					"debugpy-adapter not found. Retry the exact tool manifest with :MasonToolsInstallSync",
+					"debugpy-adapter not found. Retry the exact tool manifest with :NvimConfigToolsInstall debugpy",
 					vim.log.levels.WARN,
 					{ title = "DAP" }
 				)
@@ -107,7 +108,7 @@ return {
 
 			if not has_codelldb then
 				vim.notify(
-					"codelldb not found. Retry the exact tool manifest with :MasonToolsInstallSync",
+					"codelldb not found. Retry the exact tool manifest with :NvimConfigToolsInstall codelldb",
 					vim.log.levels.WARN,
 					{ title = "DAP" }
 				)

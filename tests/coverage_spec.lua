@@ -12,35 +12,27 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			local lcov_report = fixture .. "/coverage/lcov.info"
 			vim.fn.mkdir(fixture .. "/coverage", "p")
 			vim.fn.writefile({ "value = 1", "print(value)" }, source)
-			local summary = {
-				covered_lines = 1,
-				missing_lines = 1,
-				excluded_lines = 0,
-				num_branches = 0,
-				num_partial_branches = 0,
-				num_statements = 2,
-				percent_covered = 50,
-			}
 			vim.fn.writefile({
 				vim.json.encode({
-					meta = { version = "test" },
+					meta = { format = 3, version = "fixture" },
 					files = {
 						["src/probe.py"] = {
 							executed_lines = { 1 },
 							missing_lines = { 2 },
 							excluded_lines = {},
-							summary = summary,
 						},
 					},
-					totals = summary,
+					totals = {},
 				}),
 			}, json_report)
 			vim.fn.writefile({ "TN:", "SF:src/probe.py", "DA:1,1", "DA:2,0", "end_of_record" }, lcov_report)
 
 			vim.cmd.edit(vim.fn.fnameescape(source))
 			vim.bo.filetype = "python"
-			require("lazy").load({ plugins = { "nvim-coverage" } })
-			local coverage = require("config.coverage")
+			assert(vim.fn.exists(":CoverageLoad") == 2, "host did not register CoverageLoad")
+			assert(vim.fn.exists(":CoverageSummary") == 2, "host did not register CoverageSummary")
+			assert(vim.fn.exists(":CoverageClear") == 2, "host did not register CoverageClear")
+			assert(package.loaded.coverage == nil, "retired nvim-coverage module was loaded")
 
 			local original_system = vim.system
 			local original_jobstart = vim.fn.jobstart
@@ -61,34 +53,25 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			end
 
 			local ok, err = xpcall(function()
-				assert(coverage.load(json_report), "Python JSON report was not loaded")
-				local cached = require("coverage.report").get()
-				assert(cached and cached.files[source], "Python paths were not sanitized to contained absolute paths")
-				assert(require("coverage.report").language() == "python")
+				local coverage = require("config.coverage")
+				assert(coverage.load(json_report), "Coverage.py JSON report was not loaded")
+				local snapshot = coverage._workbench.snapshot(fixture)
+				assert(snapshot and snapshot.model.files[source], "JSON paths were not canonicalized")
+				assert(snapshot.model.kind == "coverage.py-json")
 				assert(coverage.load(lcov_report), "LCOV report was not loaded")
-				assert(require("coverage.report").language() == "common")
-				assert(require("coverage.report").get().files[source], "relative LCOV source was not canonicalized")
-				assert(#forbidden == 0, "coverage import executed a report/test command")
-
-				local outside = vim.fn.tempname()
-				vim.fn.writefile({ "value = 2" }, outside)
-				local rejected = coverage._sanitize_python(fixture, {
-					files = { [outside] = { executed_lines = {}, missing_lines = {}, excluded_lines = {} } },
-					totals = {},
-				})
-				assert(rejected == nil, "outside JSON source was accepted")
-				vim.fn.writefile({ "SF:" .. outside, "DA:1,1", "end_of_record" }, lcov_report)
-				assert(coverage._validate_lcov(fixture, lcov_report) == nil, "outside LCOV source was accepted")
-				vim.fn.delete(outside)
-				coverage.clear()
-				assert(require("coverage.report").get() == nil, "CoverageClear retained the report")
+				assert(coverage._workbench.snapshot(fixture).model.kind == "lcov")
+				assert(#forbidden == 0, "coverage import executed a generator")
+				local summary = coverage.summary()
+				assert(summary and summary.percent_covered == 50)
+				assert(coverage.clear())
+				assert(coverage._workbench.snapshot(fixture) == nil)
 			end, debug.traceback)
 
 			vim.system = original_system
 			vim.fn.jobstart = original_jobstart
 			vim.fn.delete(fixture, "rf")
 			assert(ok, err)
-			print("coverage_spec: read-only Python JSON and LCOV imports passed")
+			print("coverage_spec: host imports Coverage.py JSON and LCOV without generators")
 			vim.cmd("quitall!")
 		end)
 	end,

@@ -1,419 +1,301 @@
--- One lifecycle for pinned Mason packages and the small set of official
--- release binaries. Automatic attempts are persistent one-shots; explicit
--- commands may retry without turning startup into a package-manager loop.
+-- Host adapter for verified-tools.nvim. Commands live here; lifecycle state,
+-- locking, scheduling, retries, and attestation live in the local plugin.
 local M = {}
-
 local manifest = require("config.toolchain")
 local paths = require("config.tool_paths")
 local release = require("config.release_installer")
-local state = require("config.tool_state")
+local engine = require("verified_tools")
 
 local setup_done = false
-local mason_configured = false
-local auto_started = false
-local auto_scheduled = false
-local mason_active = false
-local busy_warning_sent = false
-local python_venv_cache = {}
+local command_done = false
+local plans = {}
 
 M._notify = function(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Tools" })
 end
-
-M._ui_count = function()
-	return #vim.api.nvim_list_uis()
-end
-
-M._python_venv = function(python)
-	local ok, process = pcall(vim.system, { python, "-c", "import venv" }, { text = true })
-	if not ok then
-		return false
-	end
-	return process:wait(10000).code == 0
-end
-
 M._registry = function()
 	return require("mason-registry")
 end
-
-local function full_profile()
-	return not vim.g.vscode and not require("config.pager").active
+M._network_authorized = function()
+	return vim.env.NVIM_CONFIG_OFFLINE ~= "1"
 end
 
-local function automatic_allowed()
-	if not full_profile() or M._ui_count() == 0 or vim.env.NVIM_CONFIG_OFFLINE == "1" then
+local function platform_target()
+	local uname = vim.uv.os_uname()
+	return manifest.target_key(uname.sysname, uname.machine) or (uname.sysname .. "-" .. uname.machine):lower()
+end
+
+local function external_probe(identity, spec)
+	local entry = spec.manifest and spec.manifest.entry
+	local executables = entry and (entry.satisfies_any or entry.executables or { entry.executable }) or {}
+	for _, executable in ipairs(executables) do
+		local path = paths.external_executable(executable)
+		if path then
+			local ok, process = pcall(vim.system, { path, "--version" }, { text = true })
+			local result = ok and process:wait(2000) or nil
+			local output = result and ((result.stdout or "") .. "\n" .. (result.stderr or "")) or ""
+			return {
+				path = path,
+				compatible = result ~= nil and result.code == 0 and output:find(identity.version, 1, true) ~= nil,
+				observed = output:gsub("[%c]+", " "):sub(1, 160),
+			}
+		end
+	end
+	return nil
+end
+
+local release_backend = {}
+function release_backend.run(plan, done, control)
+	local controller = release.install(plan.manifest.release_plan, done)
+	if type(controller) == "table" and type(controller.cancel) == "function" then
+		control.set_cancel(controller.cancel)
+	end
+	return nil
+end
+function release_backend.attest(plan, done)
+	local path = vim.fs.joinpath(plan.identity.install_root, "bin", plan.manifest.entry.executable)
+	local stat = vim.uv.fs_lstat(path)
+	local ok = stat and stat.type == "file" and vim.fn.executable(path) == 1
+	done(ok == true, ok and { path = path, digest = plan.identity.digest } or "managed-executable-missing")
+end
+
+local mason_backend = {}
+function mason_backend.run(plan, done, control)
+	local available, registry = pcall(M._registry)
+	if not available or type(registry) ~= "table" then
+		done(false, "mason-registry-unavailable")
 		return false
-	end
-	local mason = require("config.local_config").get("mason", {})
-	return mason.auto_install ~= false
-end
-
-local function externally_satisfied(entry)
-	local probes = entry.satisfies_any or { entry.executables and entry.executables[1] }
-	for _, executable in ipairs(probes) do
-		if paths.external_executable(executable) then
-			return true
-		end
-	end
-	return false
-end
-
-local function requirements_available(entry)
-	for _, executable in ipairs(entry.requires_all or {}) do
-		if not paths.external_executable(executable) then
-			return false
-		end
-	end
-
-	local selected
-	if entry.requires_any and #entry.requires_any > 0 then
-		for _, executable in ipairs(entry.requires_any) do
-			selected = paths.external_executable(executable)
-			if selected then
-				break
-			end
-		end
-		if not selected then
-			return false
-		end
-	end
-
-	if not entry.requires_python_venv then
-		return true
-	end
-	if python_venv_cache[selected] == nil then
-		python_venv_cache[selected] = M._python_venv(selected)
-	end
-	return python_venv_cache[selected]
-end
-
-local function unconsumed(name, entry)
-	local record, reason = state.inspect(name, entry.version)
-	return record == nil and reason == "absent"
-end
-
-local function tracker()
-	local batch = {
-		claimed = 0,
-		pending = 0,
-		succeeded = 0,
-		failed = 0,
-		errors = 0,
-		sealed = false,
-		finished = false,
-	}
-
-	function batch:add()
-		self.claimed = self.claimed + 1
-		self.pending = self.pending + 1
-	end
-
-	function batch:done(ok)
-		self.pending = self.pending - 1
-		self[ok and "succeeded" or "failed"] = self[ok and "succeeded" or "failed"] + 1
-		self:finish_if_ready()
-	end
-
-	function batch:seal()
-		self.sealed = true
-		self:finish_if_ready()
-	end
-
-	function batch:error()
-		self.errors = self.errors + 1
-		self:finish_if_ready()
-	end
-
-	function batch:finish_if_ready()
-		if self.finished or not self.sealed or self.pending ~= 0 then
-			return
-		end
-		self.finished = true
-		mason_active = false
-		local failures = self.failed + self.errors
-		if failures > 0 then
-			M._notify(
-				("Automatic tool bootstrap had %d failure%s; run :checkhealth nvimconfig for details"):format(
-					failures,
-					failures == 1 and "" or "s"
-				),
-				vim.log.levels.WARN
-			)
-		end
-	end
-
-	return batch
-end
-
-local function finish_claim(batch, claim, ok, reason)
-	local persisted = state.finish(claim, ok, reason)
-	batch:done(ok and persisted == true)
-end
-
-local function fail_candidate(batch, candidate, reason)
-	local claim = state.claim_auto(candidate.name, candidate.entry.version)
-	if claim then
-		batch:add()
-		finish_claim(batch, claim, false, reason)
-	end
-end
-
-local function start_managed(batch)
-	for _, name in ipairs(manifest.managed_order) do
-		local entry = manifest.managed_tools[name]
-		if unconsumed(name, entry) then
-			local plan = release.plan(name)
-			if plan then
-				local claim = state.claim_auto(name, entry.version)
-				if claim then
-					batch:add()
-					if not state.transition(claim, "installing") then
-						finish_claim(batch, claim, false, "state-transition-failed")
-					else
-						release.install(plan, function(ok, reason)
-							finish_claim(batch, claim, ok, reason)
-						end)
-					end
-				end
-			end
-		end
-	end
-end
-
-local function mason_candidates()
-	local candidates = {}
-	for _, name in ipairs(manifest.mason_order) do
-		local entry = assert(manifest.mason_entry(name))
-		if unconsumed(name, entry) and not externally_satisfied(entry) and requirements_available(entry) then
-			candidates[#candidates + 1] = { name = name, entry = entry }
-		end
-	end
-	return candidates
-end
-
-local function safe_call(object, method, ...)
-	if type(object) ~= "table" or type(object[method]) ~= "function" then
-		return false
-	end
-	return pcall(object[method], object, ...)
-end
-
-local function start_mason(batch)
-	local candidates = mason_candidates()
-	if #candidates == 0 then
-		batch:seal()
-		return
-	end
-
-	local ok, registry = pcall(M._registry)
-	if not ok or type(registry) ~= "table" or type(registry.refresh) ~= "function" then
-		batch:error()
-		batch:seal()
-		return
 	end
 	local refresh_ok = pcall(registry.refresh, function(success)
-		if not success then
-			batch:error()
-			batch:seal()
+		if not success or not registry.has_package(plan.identity.name) then
+			done(false, success and "mason-package-unavailable" or "mason-refresh-failed")
 			return
 		end
-		for _, candidate in ipairs(candidates) do
-			local has_ok, has_package = pcall(registry.has_package, candidate.name)
-			if not has_ok then
-				fail_candidate(batch, candidate, "mason-registry-query-failed")
-			elseif not has_package then
-				fail_candidate(batch, candidate, "mason-package-unavailable")
-			else
-				local package_ok, pkg = pcall(registry.get_package, candidate.name)
-				if package_ok then
-					local installed_ok, installed = safe_call(pkg, "is_installed")
-					local version_ok, installed_version = safe_call(pkg, "get_installed_version")
-					if installed_ok and installed and version_ok and installed_version == candidate.entry.version then
-						local claim = state.claim_auto(candidate.name, candidate.entry.version)
-						if claim then
-							batch:add()
-							finish_claim(batch, claim, true)
-						end
-					else
-						local installing_ok, installing = safe_call(pkg, "is_installing")
-						local installable_ok, installable =
-							safe_call(pkg, "is_installable", { version = candidate.entry.version })
-						if installing_ok and not installing and installable_ok and not installable then
-							fail_candidate(batch, candidate, "mason-package-uninstallable")
-						elseif installing_ok and not installing and installable_ok and installable then
-							local claim = state.claim_auto(candidate.name, candidate.entry.version)
-							if claim then
-								batch:add()
-								if not state.transition(claim, "installing") then
-									finish_claim(batch, claim, false, "state-transition-failed")
-								else
-									local install_ok = pcall(
-										pkg.install,
-										pkg,
-										{ version = candidate.entry.version },
-										function(done)
-											vim.schedule(function()
-												finish_claim(
-													batch,
-													claim,
-													done == true,
-													done and nil or "mason-install-failed"
-												)
-											end)
-										end
-									)
-									if not install_ok then
-										finish_claim(batch, claim, false, "mason-install-start-failed")
-									end
-								end
-							end
-						end
-					end
-				else
-					fail_candidate(batch, candidate, "mason-package-query-failed")
-				end
-			end
-		end
-		batch:seal()
-	end)
-	if not refresh_ok then
-		batch:error()
-		batch:seal()
-	end
-end
-
-local function run_automatic()
-	auto_scheduled = false
-	if auto_started or not mason_configured or not automatic_allowed() then
-		return
-	end
-	auto_started = true
-	mason_active = true
-	local batch = tracker()
-	start_managed(batch)
-	start_mason(batch)
-end
-
-local function schedule_automatic()
-	if auto_scheduled then
-		return
-	end
-	auto_scheduled = true
-	vim.schedule(run_automatic)
-end
-
-local function manual_reason(name, reason)
-	if reason == "external" then
-		return name .. " is already provided by the host (use ! to install the managed pin)"
-	elseif reason == "unsupported" then
-		return name .. " has no pinned release asset for this platform"
-	elseif reason == "missing-prerequisite" then
-		return name .. " is waiting for a required host command"
-	end
-	return name .. " cannot be installed (" .. tostring(reason) .. ")"
-end
-
-local function manual_managed(target, force)
-	if vim.env.NVIM_CONFIG_OFFLINE == "1" then
-		M._notify("Tool installation is disabled by NVIM_CONFIG_OFFLINE=1", vim.log.levels.WARN)
-		return false
-	end
-	local names = target == "all" and manifest.managed_order or { target }
-	if target ~= "all" and not manifest.managed_tools[target] then
-		M._notify("Unknown tool '" .. target .. "'. Choose all, mmdflux, or plantuml.", vim.log.levels.ERROR)
-		return false
-	end
-	for _, name in ipairs(names) do
-		local entry = manifest.managed_tools[name]
-		local plan, reason = release.plan(name, { force = force })
-		if not plan then
-			M._notify(manual_reason(name, reason), reason == "external" and vim.log.levels.INFO or vim.log.levels.WARN)
-		else
-			local claim, claim_err = state.claim_manual(name, entry.version)
-			if not claim then
-				M._notify(
-					name .. " installation is busy or its state is unsafe (" .. tostring(claim_err) .. ")",
-					vim.log.levels.WARN
-				)
-			else
-				if not state.transition(claim, "installing") then
-					state.finish(claim, false, "state-transition-failed")
-					M._notify("Failed to secure installation state for " .. claim.identity, vim.log.levels.ERROR)
-					return false
-				end
-				M._notify("Installing " .. claim.identity .. " from its verified release")
-				release.install(plan, function(ok, install_err)
-					state.finish(claim, ok, install_err)
-					M._notify(
-						(ok and "Installed " or "Failed to install ") .. claim.identity,
-						ok and vim.log.levels.INFO or vim.log.levels.ERROR
-					)
+		local pkg = registry.get_package(plan.identity.name)
+		local ok, handle = pcall(pkg.install, pkg, { version = plan.identity.version }, function(installed)
+			done(installed == true, installed and nil or "mason-install-failed")
+		end)
+		if not ok then
+			done(false, "mason-install-start-failed:" .. tostring(handle))
+		elseif type(handle) == "table" then
+			local cancel = handle.cancel or handle.terminate
+			if type(cancel) == "function" then
+				control.set_cancel(function()
+					pcall(cancel, handle)
 				end)
 			end
 		end
+	end)
+	if not refresh_ok then
+		done(false, "mason-refresh-start-failed")
+		return false
 	end
-	return true
+	return nil
+end
+function mason_backend.attest(plan, done)
+	local available, registry = pcall(M._registry)
+	if not available or not registry.has_package(plan.identity.name) then
+		done(false, "mason-package-unavailable")
+		return
+	end
+	local pkg = registry.get_package(plan.identity.name)
+	local installed = pkg:is_installed()
+	local version = installed and pkg:get_installed_version() or nil
+	local executable = plan.manifest.entry.executables[1]
+	local path = vim.fs.joinpath(plan.identity.install_root, "bin", executable)
+	local stat = vim.uv.fs_lstat(path)
+	local ok = installed and version == plan.identity.version and stat and stat.type == "file"
+	done(ok == true, ok and { path = path, digest = plan.identity.digest } or "mason-attestation-failed")
 end
 
-function M.mason_busy()
-	return mason_active
+local function release_spec(name)
+	local plan, reason = release.plan(name, { force = true })
+	if not plan then
+		return nil, reason
+	end
+	return {
+		identity = {
+			backend = "release",
+			name = name,
+			version = plan.entry.version,
+			target = plan.target,
+			digest = plan.asset.sha256:lower(),
+			install_root = paths.managed_root(),
+		},
+		manifest = { entry = plan.entry, release_plan = plan },
+		requires_network = true,
+	}
 end
 
--- Public condition used by mason-tool-installer. It exits before that plugin
--- touches a package while the one-shot Mason batch owns the registry.
-function M.mason_condition(entry)
-	return function()
-		if mason_active then
-			if not busy_warning_sent then
-				busy_warning_sent = true
-				M._notify(
-					"MasonToolsInstallSync is unavailable while automatic Mason installation is running",
-					vim.log.levels.WARN
-				)
+local function mason_spec(name)
+	local entry = manifest.mason_entry(name)
+	if not entry then
+		return nil, "unknown"
+	end
+	return {
+		identity = {
+			backend = "mason",
+			name = name,
+			version = entry.version,
+			target = platform_target(),
+			digest = "manifest:" .. vim.fn.sha256(name .. "@" .. entry.version),
+			install_root = paths.mason_root(),
+		},
+		manifest = { entry = entry },
+		requires_network = true,
+	}
+end
+
+function M.spec(name)
+	if manifest.managed_tools[name] then
+		return release_spec(name)
+	end
+	return mason_spec(name)
+end
+
+local function catalog_names()
+	local names = vim.deepcopy(manifest.managed_order)
+	vim.list_extend(names, manifest.mason_order)
+	return names
+end
+
+function M.plan_all()
+	plans = {}
+	for _, name in ipairs(catalog_names()) do
+		local spec = M.spec(name)
+		if spec then
+			local plan = engine.plan(spec)
+			if plan then
+				plans[name] = plan
 			end
+		end
+	end
+	return vim.deepcopy(plans)
+end
+
+function M.import_legacy()
+	local legacy = require("config.tool_state")
+	for _, name in ipairs(catalog_names()) do
+		local spec = M.spec(name)
+		if spec and engine.status(spec.identity) == nil then
+			local record, reason = legacy.inspect(name, spec.identity.version)
+			if record then
+				engine.import_legacy(spec, record)
+			elseif reason ~= "absent" then
+				engine.import_legacy(spec, { status = reason })
+			end
+		end
+	end
+end
+
+local function report(prefix, name, ok, reason)
+	M._notify((ok and prefix or "Failed to " .. prefix:lower()) .. name .. (reason and ": " .. reason or ""))
+end
+
+local function start(name, force_repair)
+	local spec, spec_err = M.spec(name)
+	if not spec then
+		M._notify(name .. " cannot be planned (" .. tostring(spec_err) .. ")", vim.log.levels.WARN)
+		return false
+	end
+	local plan = assert(engine.plan(spec))
+	if plan.strategy == "external" and not force_repair then
+		M._notify(name .. " is supplied by a compatible external executable")
+		return true
+	end
+	local current = engine.status(plan.identity)
+	if current and current.status == "failed" and not force_repair then
+		return engine.retry(spec, function(ok, reason)
+			report("Installed ", name, ok, reason)
+		end) ~= nil
+	end
+	if current then
+		if not force_repair then
+			M._notify(name .. " requires :NvimConfigToolsInstall! " .. name, vim.log.levels.WARN)
 			return false
 		end
-		return vim.env.NVIM_CONFIG_OFFLINE ~= "1" and not externally_satisfied(entry) and requirements_available(entry)
+		return engine.repair(spec, function(ok, reason)
+			report("Repaired ", name, ok, reason)
+		end) ~= nil
+	end
+	local claim, claim_err = engine.claim(plan, { mode = "auto" })
+	if not claim then
+		M._notify(name .. " was not started (" .. tostring(claim_err) .. ")", vim.log.levels.WARN)
+		return false
+	end
+	return engine.run(claim, function(ok, reason)
+		report("Installed ", name, ok, reason)
+	end) ~= nil
+end
+
+function M.install(target, force)
+	local names = target == "all" and catalog_names() or { target }
+	if target ~= "all" and not manifest.managed_tools[target] and not manifest.mason_entry(target) then
+		M._notify("Unknown tool '" .. target .. "'", vim.log.levels.ERROR)
+		return false
+	end
+	local ok = true
+	for _, name in ipairs(names) do
+		ok = start(name, force) and ok
+	end
+	return ok
+end
+
+function M.setup()
+	if setup_done then
+		return
+	end
+	setup_done = true
+	engine.setup({
+		state_root = function()
+			return vim.fs.joinpath(paths.primary_state_root(), "verified-tools")
+		end,
+		backends = { release = release_backend, mason = mason_backend },
+		probe_external = external_probe,
+		network_authorized = M._network_authorized,
+		notify = M._notify,
+	})
+	M.plan_all()
+	if not command_done then
+		command_done = true
+		vim.api.nvim_create_user_command("NvimConfigToolsInstall", function(options)
+			M.install(options.args == "" and "all" or options.args, options.bang)
+		end, {
+			nargs = "?",
+			bang = true,
+			complete = catalog_names,
+			desc = "Install or repair exact verified tools",
+		})
 	end
 end
 
 function M.mason_ready()
-	mason_configured = true
-	schedule_automatic()
+	-- Mason is ready for explicit commands. Never refresh/install at startup.
+	M.plan_all()
+	M.import_legacy()
 end
 
-function M.setup()
-	if setup_done or not full_profile() then
-		return
+function M.mason_busy()
+	local _, active = engine._queue_size()
+	return active > 0
+end
+
+function M.mason_condition()
+	return function()
+		return false
 	end
-	setup_done = true
-	vim.api.nvim_create_user_command("NvimConfigToolsInstall", function(options)
-		manual_managed(options.args == "" and "all" or options.args, options.bang)
-	end, {
-		nargs = "?",
-		bang = true,
-		complete = function()
-			return { "all", "mmdflux", "plantuml" }
-		end,
-		desc = "Install exact managed Neovim release tools",
-	})
-	vim.api.nvim_create_autocmd("UIEnter", {
-		group = vim.api.nvim_create_augroup("NvimConfigToolBootstrap", { clear = true }),
-		callback = schedule_automatic,
-		desc = "Attempt each eligible exact tool pin once",
-	})
 end
 
--- Dependency-free specs reload scenarios in one Neovim process. Production
--- code never calls this; persistent records remain the actual cross-startup
--- boundary.
+function M.engine()
+	if not setup_done then
+		M.setup()
+	end
+	return engine
+end
+
 function M._reset_for_tests()
-	mason_configured = false
-	auto_started = false
-	auto_scheduled = false
-	mason_active = false
-	busy_warning_sent = false
-	python_venv_cache = {}
+	plans = {}
+	engine._reset_for_tests()
 end
 
 return M

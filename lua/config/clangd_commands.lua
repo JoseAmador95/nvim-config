@@ -4,13 +4,13 @@ local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "LSP" })
 end
 
-function M.set_compile_commands(argument)
+function M.set_compile_commands(argument, unchecked)
 	local root, root_err = require("config.repo").current_root(0)
 	if not root then
 		notify(root_err, vim.log.levels.ERROR)
 		return false
 	end
-	local ok, err = require("config.clangd").set_manual(root, argument)
+	local ok, err = require("config.clangd").set_manual(root, argument, { unchecked = unchecked == true })
 	if not ok then
 		notify("clangd compile database rejected: " .. err, vim.log.levels.ERROR)
 		return false
@@ -44,9 +44,10 @@ end
 
 function M.setup()
 	vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
-		M.set_compile_commands(opts.args)
+		M.set_compile_commands(opts.args, opts.bang)
 	end, {
 		nargs = 1,
+		bang = true,
 		complete = "dir",
 		desc = "Point clangd at a validated compile_commands.json directory for this root",
 	})

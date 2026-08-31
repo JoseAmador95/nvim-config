@@ -1,0 +1,323 @@
+vim.o.shadafile = "NONE"
+vim.o.swapfile = false
+
+local script = assert(debug.getinfo(1, "S").source:match("^@(.+)$"))
+local plugin_root = vim.fs.dirname(vim.fs.dirname(script))
+vim.opt.runtimepath:prepend(plugin_root)
+package.path = table.concat({ plugin_root .. "/lua/?.lua", plugin_root .. "/lua/?/init.lua", package.path }, ";")
+
+local failures = {}
+local count = 0
+local function test(name, callback)
+	count = count + 1
+	local ok, err = xpcall(callback, debug.traceback)
+	if ok then
+		print("ok - " .. name)
+	else
+		failures[#failures + 1] = name .. "\n" .. err
+	end
+end
+
+local function write(path, lines)
+	vim.fn.mkdir(vim.fs.dirname(path), "p")
+	assert(vim.fn.writefile(lines, path) == 0)
+end
+
+local fixture = vim.fn.tempname()
+local root = fixture .. "/repo"
+local external = fixture .. "/shared/external.just"
+local module = root .. "/modules/jobs.just"
+vim.fn.mkdir(root, "p")
+write(root .. "/justfile", {
+	"import '../shared/external.just'",
+	"mod jobs 'modules/jobs.just'",
+	"build target:",
+	"  echo {{target}}",
+})
+write(external, { "shared:", "  echo shared" })
+write(module, { "lint:", "  echo lint" })
+root = assert(vim.uv.fs_realpath(root))
+external = assert(vim.uv.fs_realpath(external))
+module = assert(vim.uv.fs_realpath(module))
+local justfile = root .. "/justfile"
+
+local workbench = require("just_workbench")
+local dump = {
+	code = 0,
+	stderr = "",
+	stdout = vim.json.encode({
+		recipes = {
+			build = { doc = "Build target", parameters = { { name = "target", kind = "singular" } } },
+			shared = { parameters = {} },
+		},
+		aliases = { b = { target = "build", doc = "Build alias" } },
+		modules = {
+			jobs = {
+				doc = "Job recipes",
+				recipes = { lint = { parameters = { { name = "flags", kind = "star" } } } },
+				aliases = { check = { target = "lint" } },
+				modules = {},
+			},
+		},
+	}),
+}
+
+local trusted = {}
+local calls = {}
+local states = {}
+local opened = {}
+local focused = 0
+local replaced = 0
+local transcript_lines = { "src/main.c:3:2: failure" }
+
+local function setup(overrides)
+	overrides = overrides or {}
+	workbench._reset()
+	trusted = {}
+	calls = {}
+	states = {}
+	opened = {}
+	focused = 0
+	replaced = 0
+	workbench.setup({
+		system = overrides.system or function(argv, opts, callback)
+			calls[#calls + 1] = vim.deepcopy(argv)
+			assert(opts.text == true)
+			callback(vim.deepcopy(dump))
+			return { pid = 1 }
+		end,
+		trust = overrides.trust or function(path, contents, digest)
+			trusted[path] = { contents = contents, digest = digest }
+			return true
+		end,
+		hash = vim.fn.sha256,
+		home = fixture,
+		now = function()
+			return 42
+		end,
+		schedule = overrides.schedule or function(callback)
+			callback()
+		end,
+		terminal = {
+			status = function(key)
+				return vim.deepcopy(states[key] or { state = "disposed", exists = false })
+			end,
+			open = function(spec)
+				opened[#opened + 1] = vim.deepcopy(spec)
+				states[spec.key] = { state = "running", exists = true }
+				return { key = spec.key }
+			end,
+			focus = function(spec)
+				focused = focused + 1
+				return { key = spec.key }
+			end,
+			replace = function(spec)
+				replaced = replaced + 1
+				opened[#opened + 1] = vim.deepcopy(spec)
+				states[spec.key] = { state = "running", exists = true }
+				return { key = spec.key }
+			end,
+			lines = function()
+				return vim.deepcopy(transcript_lines)
+			end,
+		},
+	})
+end
+
+local function catalog_sync()
+	local result
+	local err
+	local handle, start_err = workbench.catalog({
+		runtime = "host",
+		task_root = root,
+		justfile = justfile,
+		just_bin = "/usr/bin/just",
+	}, function(value, callback_err)
+		result = value
+		err = callback_err
+	end)
+	assert(handle, start_err)
+	return assert(result, err)
+end
+
+test("closure authorizes root, external import, and explicit module by content", function()
+	setup()
+	local catalog = catalog_sync()
+	assert(trusted[justfile] and trusted[external] and trusted[module])
+	assert(#catalog.closure.entries == 3)
+	assert(#catalog.closure.imports == 1 and catalog.closure.imports[1].path == external)
+	assert(#catalog.closure.modules == 1 and catalog.closure.modules[1].path == module)
+	assert(vim.deep_equal(calls[1], {
+		"/usr/bin/just",
+		"--dump",
+		"--dump-format",
+		"json",
+		"--justfile",
+		justfile,
+		"--working-directory",
+		root,
+	}))
+end)
+
+test("catalog includes recipes aliases modules and parameters as caller-owned copies", function()
+	setup()
+	local catalog = catalog_sync()
+	local names = {}
+	for _, action in ipairs(catalog.actions) do
+		names[#names + 1] = action.name
+	end
+	assert(vim.deep_equal(names, { "b", "build", "jobs::check", "jobs::lint", "shared" }))
+	assert(catalog.actions[1].parameters[1].name == "target")
+	assert(catalog.actions[2].parameters[1].name == "target")
+	assert(catalog.actions[3].parameters[1].name == "flags")
+	assert(catalog.modules[1].name == "jobs")
+	catalog.actions[2].parameters[1].name = "mutated"
+	local result = assert(workbench.run(catalog, "build", { "safe" }))
+	assert(result.outcome == "started")
+	assert(opened[1].metadata.recipe == "build")
+end)
+
+test("changed closure fails closed between authorization and execution", function()
+	setup()
+	local catalog = catalog_sync()
+	write(external, { "shared:", "  echo changed" })
+	local result, err = workbench.run(catalog, "build", { "target" })
+	assert(result == nil and tostring(err):find("closure changed", 1, true))
+	assert(#opened == 0, "TOCTOU failure launched a terminal")
+	write(external, { "shared:", "  echo shared" })
+end)
+
+test("existing execution requires focus replace or cancel and transcript is workspace keyed", function()
+	setup()
+	local catalog = catalog_sync()
+	local unsafe = "name; touch /tmp/never"
+	local first = assert(workbench.run(catalog, "build", { unsafe }))
+	assert(first.outcome == "started")
+	assert(opened[1].launch.argv[#opened[1].launch.argv] == unsafe)
+
+	local second, conflict = workbench.run(catalog, "build", { "other" })
+	assert(second == nil and conflict.kind == "conflict")
+	assert(vim.deep_equal(conflict.choices, { "focus", "replace", "cancel" }))
+	assert(replaced == 0, "second run killed the first silently")
+	assert(workbench.run(catalog, "build", {}, { decision = "cancel" }).outcome == "cancelled")
+	assert(replaced == 0)
+	assert(workbench.run(catalog, "build", {}, { decision = "focus" }).outcome == "focused")
+	assert(focused == 1 and replaced == 0)
+	assert(workbench.run(catalog, "build", { "new" }, { decision = "replace" }).outcome == "replaced")
+	assert(replaced == 1)
+
+	local transcript = assert(workbench.transcript({ runtime = "host", task_root = root }))
+	assert(transcript.recipe == "build" and transcript.started_at == 42)
+	assert(vim.deep_equal(transcript.lines, transcript_lines))
+	transcript.lines[1] = "mutated"
+	assert(workbench.transcript({ runtime = "host", task_root = root }).lines[1] == transcript_lines[1])
+	assert(not workbench.transcript({ runtime = "container", task_root = root }))
+end)
+
+test("catalog concurrency rejects stale completion and format operations are non-mutating", function()
+	local pending = {}
+	setup({
+		system = function(argv, _, callback)
+			pending[#pending + 1] = { argv = vim.deepcopy(argv), callback = callback }
+			return { pid = #pending }
+		end,
+	})
+	local first_error
+	local second_catalog
+	assert(workbench.catalog({
+		runtime = "host",
+		task_root = root,
+		justfile = justfile,
+		just_bin = "/usr/bin/just",
+	}, function(_, err)
+		first_error = err
+	end))
+	assert(workbench.catalog({
+		runtime = "host",
+		task_root = root,
+		justfile = justfile,
+		just_bin = "/usr/bin/just",
+	}, function(value)
+		second_catalog = value
+	end))
+	pending[1].callback(vim.deepcopy(dump))
+	assert(first_error == "catalog request was superseded")
+	pending[2].callback(vim.deepcopy(dump))
+	assert(second_catalog)
+
+	local checked
+	assert(workbench.format(second_catalog, "check", function(result)
+		checked = result
+	end))
+	local format_argv = pending[3].argv
+	assert(format_argv[#format_argv - 1] == "--fmt" and format_argv[#format_argv] == "--check")
+	pending[3].callback({ code = 0, stdout = "", stderr = "" })
+	assert(checked and checked.code == 0)
+	assert(not workbench.format(second_catalog, "write", function() end))
+end)
+
+test("system completion is scheduled out of fast-event context", function()
+	local scheduled
+	setup({
+		schedule = function(callback)
+			scheduled = callback
+		end,
+	})
+	local catalog
+	assert(workbench.catalog({
+		runtime = "host",
+		task_root = root,
+		justfile = justfile,
+		just_bin = "/usr/bin/just",
+	}, function(value)
+		catalog = value
+	end))
+	assert(catalog == nil and type(scheduled) == "function")
+	scheduled()
+	assert(catalog and #catalog.actions == 5)
+end)
+
+test("untrusted and symlinked closure sources are rejected before dump", function()
+	setup({
+		trust = function(path)
+			return path ~= external, "external source rejected"
+		end,
+	})
+	local result, err = workbench.catalog({
+		runtime = "host",
+		task_root = root,
+		justfile = justfile,
+		just_bin = "/usr/bin/just",
+	}, function() end)
+	assert(result == nil and tostring(err):find("external source rejected", 1, true))
+	assert(#calls == 0)
+
+	setup()
+	local symlink = fixture .. "/linked.just"
+	assert(vim.uv.fs_symlink(external, symlink))
+	write(root .. "/justfile", { "import '../linked.just'", "build:" })
+	local linked, linked_err = workbench.catalog({
+		runtime = "host",
+		task_root = root,
+		justfile = justfile,
+		just_bin = "/usr/bin/just",
+	}, function() end)
+	assert(linked == nil and tostring(linked_err):find("non%-symlink"))
+	write(root .. "/justfile", {
+		"import '../shared/external.just'",
+		"mod jobs 'modules/jobs.just'",
+		"build target:",
+	})
+end)
+
+vim.fn.delete(fixture, "rf")
+
+if #failures > 0 then
+	for _, failure in ipairs(failures) do
+		vim.api.nvim_err_writeln(failure)
+	end
+	vim.cmd("cquit")
+end
+
+print(string.format("just_workbench_spec: %d tests passed", count))
+vim.cmd("quitall!")
