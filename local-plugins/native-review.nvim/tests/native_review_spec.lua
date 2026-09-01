@@ -48,19 +48,47 @@ local repo = {
 	end,
 }
 
-local native_review = require("native_review").setup({
-	repo = repo,
-	fs = {},
-	editor = {
-		open_file_in_tab = function() end,
-	},
-	local_config = {
-		get = function(_, defaults)
-			return vim.deepcopy(defaults)
-		end,
-	},
-	lsp_navigation = {},
-})
+local native_review = require("native_review")
+
+local function setup(overrides)
+	overrides = overrides or {}
+	return native_review.setup(vim.tbl_extend("force", {
+		repo = repo,
+		fs = {
+			read_binary = function()
+				return nil, "fixture"
+			end,
+			write_binary_atomic = function()
+				return nil, "fixture"
+			end,
+		},
+		editor = {
+			open_file_in_tab = function() end,
+		},
+		lsp_navigation = {},
+	}, overrides))
+end
+
+test("lifecycle defaults are copied and unknown setup options do not mutate state", function()
+	local defaults = native_review.effective_config()
+	equal({
+		hunk_context = 3,
+		layout = "inline",
+		context = "hunks",
+		inline_comments = true,
+		panel = { max_width = 200, max_height = 48 },
+	}, defaults, "pre-setup defaults")
+	assert(native_review.status().configured == false)
+	defaults.panel.max_width = 1
+	equal(200, native_review.effective_config().panel.max_width, "effective config leaked mutable state")
+
+	local before = native_review.status()
+	local ok, err = pcall(native_review.setup, { unknown = true })
+	assert(not ok and tostring(err):find("unknown option", 1, true), tostring(err))
+	equal(before, native_review.status(), "rejected setup mutated status")
+end)
+
+setup()
 
 test("plugin setup creates no global commands or mappings and imports no host module", function()
 	native_review.controller.setup()
@@ -165,6 +193,45 @@ test("legacy bridge and delivery metadata stay renderable but never drive the co
 	assert(native_review.controller.publish == nil and native_review.controller.link_tuicr == nil)
 	assert(native_review.store.link_tuicr == nil and native_review.store.mark_tuicr_delivered == nil)
 	assert(native_review.store.mark_exported == nil and native_review.store.item_status(session.items[1]) == "draft")
+end)
+
+test("session preferences override normalized defaults", function()
+	equal(
+		{ layout = "inline", context = "hunks", inline_comments = true },
+		native_review.controller._workspace_preferences(nil, nil),
+		"normalized defaults"
+	)
+	equal(
+		{ layout = "split", context = "full", inline_comments = false },
+		native_review.controller._workspace_preferences(nil, {
+			layout = "split",
+			context = "full",
+			inline_comments = false,
+		}),
+		"session preference override"
+	)
+end)
+
+test("repeated setup replaces adapters, copied status is pure, and teardown is repeatable", function()
+	local first = require("native_review.dependencies").get("repo")
+	equal("first", first.root("first"), "initial adapter")
+	local replacement_repo = vim.tbl_extend("force", {}, repo)
+	replacement_repo.root = function()
+		return "replacement"
+	end
+	setup({ repo = replacement_repo, layout = "split" })
+	equal("replacement", first.root("ignored"), "stable adapter proxy did not observe replacement")
+
+	local status = native_review.status()
+	assert(status.configured and status.config.layout == "split")
+	status.config.layout = "changed"
+	equal("split", native_review.status().config.layout, "status leaked mutable config")
+	assert(native_review.teardown())
+	assert(native_review.teardown())
+	assert(not native_review.status().configured)
+	equal("inline", native_review.effective_config().layout, "teardown did not restore defaults")
+	setup()
+	assert(native_review.status().configured)
 end)
 
 if #failures > 0 then

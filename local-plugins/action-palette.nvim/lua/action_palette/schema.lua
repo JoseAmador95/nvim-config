@@ -17,7 +17,12 @@ local DESCRIPTOR_KEYS = {
 	surfaces = true,
 	palette_label = true,
 	keywords = true,
+	target = true,
+	unavailable = true,
 }
+
+local TARGETS = { exact = true, buffer = true, window = true, none = true }
+local UNAVAILABLE = { hide = true, show = true }
 
 local function object(value)
 	return type(value) == "table" and (next(value) == nil or not vim.islist(value))
@@ -109,6 +114,12 @@ local function validate_descriptor(value, seen, section_index, item_index)
 	local surfaces_ok, surfaces_err = surfaces(value.surfaces, label .. ".surfaces")
 	if not surfaces_ok then
 		return nil, surfaces_err
+	end
+	if value.target ~= nil and not TARGETS[value.target] then
+		return nil, label .. ".target must be exact, buffer, window, or none"
+	end
+	if value.unavailable ~= nil and not UNAVAILABLE[value.unavailable] then
+		return nil, label .. ".unavailable must be hide or show"
 	end
 	if value.keywords ~= nil then
 		if type(value.keywords) ~= "table" or not vim.islist(value.keywords) then

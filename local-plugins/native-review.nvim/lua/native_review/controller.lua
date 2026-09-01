@@ -2,6 +2,7 @@
 local M = {}
 
 local repo = require("native_review.dependencies").get("repo")
+local config = require("native_review.dependencies").get("config")
 local review_changes = require("native_review.changes")
 local review_editor = require("native_review.editor")
 local review_export = require("native_review.export")
@@ -248,11 +249,8 @@ function M.status()
 end
 
 local function emit_changed()
-	vim.api.nvim_exec_autocmds("User", {
-		pattern = "NvimConfigReviewChanged",
-		data = vim.deepcopy(M.status()),
-		modeline = false,
-	})
+	local event = require("native_review.dependencies").get("event")
+	pcall(event, vim.deepcopy(M.status()))
 end
 
 local function root_for_command()
@@ -638,6 +636,22 @@ local function restore_ui(workspace, snapshot)
 	return true
 end
 
+local function workspace_preferences(existing, preferences)
+	preferences = preferences or {}
+	local inline_comments = preferences.inline_comments
+	if inline_comments == nil then
+		inline_comments = existing and existing.inline_comments
+	end
+	if inline_comments == nil then
+		inline_comments = config.inline_comments
+	end
+	return {
+		layout = preferences.layout or (existing and existing.layout) or config.layout,
+		context = preferences.context or (existing and existing.context) or config.context,
+		inline_comments = inline_comments,
+	}
+end
+
 local function activate(root, session, model, options)
 	local blocked = unsaved_transition_error("replace it") or composer_transition_error("replace the active review")
 	if blocked then
@@ -653,15 +667,12 @@ local function activate(root, session, model, options)
 	end
 	restore_activation_origin(previous, opening_focus)
 	local preferences = options and options.preferences or nil
-	local inline_comments = preferences and preferences.inline_comments
-	if inline_comments == nil then
-		inline_comments = not existing or existing.inline_comments ~= false
-	end
+	local resolved_preferences = workspace_preferences(existing, preferences)
 	local workspace = {
 		root = root,
-		layout = preferences and preferences.layout or (existing and existing.layout or "inline"),
-		context = preferences and preferences.context or (existing and existing.context or "hunks"),
-		inline_comments = inline_comments,
+		layout = resolved_preferences.layout,
+		context = resolved_preferences.context,
+		inline_comments = resolved_preferences.inline_comments,
 		scope = session.scope,
 		session = session,
 		model = model,
@@ -2864,6 +2875,29 @@ function M.setup()
 	setup_autocmds()
 end
 
+function M.teardown()
+	clear_inline_preview()
+	for key, workspace in pairs(workspaces) do
+		if workspace.panel then
+			review_panel.close(workspace.panel)
+		end
+		if workspace.mode_state then
+			review_mode.disable(workspace.mode_state)
+		end
+		workspaces[key] = nil
+	end
+	active = nil
+	suspended = nil
+	clear_scope_history()
+	pcall(vim.api.nvim_del_augroup_by_name, "NvimConfigCodeReview")
+	if review_lsp.teardown then
+		review_lsp.teardown()
+	end
+	setup_done = false
+	M.refresh_marks(nil)
+	return true
+end
+
 M._parse_open = parse_open
 M._workspaces = workspaces
 M._scope_history = scope_history
@@ -2872,6 +2906,7 @@ M._open_scope_picker = scope_picker
 M._choose_saved = choose_saved
 M._root_for_command = root_for_command
 M._contains_line = contains_line
+M._workspace_preferences = workspace_preferences
 M._inline_preview_text = inline_preview_text
 M._show_inline_preview = show_inline_preview
 M._clear_inline_preview = clear_inline_preview
