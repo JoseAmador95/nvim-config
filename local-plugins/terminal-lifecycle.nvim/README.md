@@ -39,8 +39,10 @@ absolute directory, `launch.argv` is always an argv array, and `launch.env` is a
 explicit string map.
 
 The public API is `open`, `toggle`, `focus`, `restart`, `stop`, `dispose`,
-`status`, and `lines`. A changed launch is rejected until the caller chooses
-`restart` explicitly.
+`dispose_all`, `list`, `status`, and `lines`. `list()` is deterministic and
+caller-owned; `dispose_all([filter])` can select records by key, state, or
+metadata. A changed launch is rejected until the caller chooses `restart`
+explicitly.
 
 Every record is in exactly one of these states:
 
@@ -60,6 +62,17 @@ After the confirmed exit, `stop` keeps the buffer unless
 and `dispose` closes the view. Synchronous exit callbacks during `backend.open`
 or `backend.stop` settle by the same rules, so quick exits cannot leave
 `starting` or a pending request behind.
+
+The default `stop_timeout_ms` is 5000. Expiry is observable in status and state
+events only: it never fabricates exit, disposes the view, or starts a queued
+replacement before the backend reports `on_exit`. Buffer mappings are host
+policy via `buffer_mappings = { close = "q", open_location = "gf" }`; either
+mapping can be changed or disabled with `false`.
+
+Zero-argument `status()` is a pure aggregate available before setup, and
+`effective_config()` always returns copied non-callback defaults or active
+policy. Unknown setup options are rejected before mutation, teardown is
+repeatable, and `on_state_change(event)` observer failures are isolated.
 
 Plugin buffers are tagged with `b:terminal_lifecycle.ephemeral = true` and
 `b:terminal_lifecycle_ephemeral = true`. Host session adapters must exclude

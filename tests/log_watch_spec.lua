@@ -63,9 +63,9 @@ vim.notify = function(message, level, options)
 end
 
 package.loaded["config.local_config"] = {
-	get = function(key, default)
-		if key == "log_watch" then
-			return { max_lines = 3, max_bytes = 64 }
+	plugin = function(key, default)
+		if key == "log_workbench" then
+			return { poll_interval_ms = 500, max_lines = 3, max_bytes = 64 }
 		end
 		return default
 	end,

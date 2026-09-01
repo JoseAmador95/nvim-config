@@ -46,22 +46,26 @@ terminal.send = function(identity, text)
 	return true
 end
 
-local function configure()
+local function configure(overrides)
+	overrides = overrides or {}
 	project_python._reset_for_tests()
 	env = {}
 	explicit = {}
 	terminal_calls = {}
 	project_python.setup({
-		environment = function()
+		environment = overrides.environment or function()
 			return env
 		end,
-		explicit = function(root)
+		event = overrides.event,
+		explicit = overrides.explicit or function(root)
 			return explicit[root]
 		end,
-		fallback = function()
+		fallback = overrides.fallback or function()
 			return fallback
 		end,
 		terminal = terminal,
+		test_runner = overrides.test_runner,
+		repl = overrides.repl,
 	})
 end
 
@@ -76,6 +80,22 @@ local function test(name, callback)
 		failures[#failures + 1] = name .. "\n" .. err
 	end
 end
+
+test("pre-setup public defaults and aggregate status are copied", function()
+	local first = project_python.effective_config()
+	assert(first.test_runner == "pytest")
+	assert(first.repl.readiness_timeout_ms == 5000 and first.repl.poll_interval_ms == 50)
+	first.repl.poll_interval_ms = 1
+	first.root_markers[1] = "mutated"
+	local second = project_python.effective_config()
+	assert(second.repl.poll_interval_ms == 50 and second.root_markers[1] == "pyrightconfig.json")
+	assert(pcall(vim.json.encode, second))
+
+	local status = project_python.status()
+	assert(status.configured == false and vim.tbl_isempty(status.snapshots))
+	status.configured = true
+	assert(project_python.status().configured == false)
+end)
 
 test("root precedence is attached, nearest marker, repository, then directory", function()
 	configure()
@@ -181,6 +201,67 @@ test("discovery never executes Python and REPL uses only the injected lifecycle"
 	end, debug.traceback)
 	vim.system = original_system
 	assert(ok, err)
+end)
+
+test("defaultInterpreterPath is approved and diagnostics enumerate without executing", function()
+	configure()
+	local approved = executable(service .. "/.approved/bin/python")
+	explicit[service] = { defaultInterpreterPath = approved }
+	local snapshot = project_python.snapshot(service)
+	assert(snapshot.source == "explicit" and snapshot.value.interpreter == approved)
+	local original_system = vim.system
+	vim.system = function()
+		error("diagnostics executed Python")
+	end
+	local ok, diagnostics = pcall(project_python.diagnostics, service)
+	vim.system = original_system
+	assert(ok and diagnostics.root == service and #diagnostics.candidates > 0)
+	assert(diagnostics.candidates[1].source == "explicit")
+end)
+
+test("setup contracts are transactional and snapshots are immutable", function()
+	local events = {}
+	configure({
+		event = function(event)
+			events[#events + 1] = event
+		end,
+		repl = { readiness_timeout_ms = 5000, poll_interval_ms = 50 },
+		test_runner = "pytest",
+	})
+	local before = assert(project_python.effective_config())
+	assert(before.test_runner == "pytest" and before.repl.readiness_timeout_ms == 5000)
+	assert(before.environment == nil and before.event == nil and before.terminal == nil)
+	assert(pcall(vim.json.encode, before))
+	before.repl.poll_interval_ms = 1
+	assert(assert(project_python.effective_config()).repl.poll_interval_ms == 50)
+	local snapshot = project_python.snapshot(service)
+	local first = project_python.status(service)
+	first.snapshot.value.interpreter = "mutated"
+	assert(project_python.status(service).snapshot.value.interpreter == snapshot.value.interpreter)
+	local ok, err = pcall(project_python.setup, { injected = true })
+	assert(not ok and tostring(err):find("unknown key", 1, true))
+	ok, err = pcall(project_python.setup, false)
+	assert(not ok, "false setup options were accepted")
+	ok, err = pcall(project_python.setup, { repl = false })
+	assert(not ok, "false repl options were accepted")
+	ok, err = pcall(project_python.setup, { test_runner = "nose" })
+	assert(not ok and tostring(err):find("pytest or unittest", 1, true))
+	assert(project_python.effective_config().test_runner == "pytest")
+	assert(project_python.status(service).snapshot.value.interpreter == snapshot.value.interpreter)
+	local aggregate = project_python.status()
+	assert(aggregate.configured == true and aggregate.snapshots[service] ~= nil)
+	aggregate.snapshots[service].value.interpreter = "mutated"
+	assert(project_python.status().snapshots[service].value.interpreter == snapshot.value.interpreter)
+	assert(events[1].kind == "setup" and events[1].config.terminal == nil)
+	assert(pcall(vim.json.encode, events[1].config))
+	for _, event in ipairs(events) do
+		assert(not (event.status and event.status._fingerprint), "private fingerprint escaped in an event")
+	end
+	assert(project_python.teardown())
+	local defaults = project_python.effective_config()
+	assert(defaults.test_runner == "pytest" and defaults.repl.poll_interval_ms == 50)
+	assert(project_python.status().configured == false)
+	assert(project_python.status(service).configured == false)
 end)
 
 vim.fn.delete(fixture, "rf")

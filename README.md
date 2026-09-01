@@ -33,12 +33,21 @@ Parser bootstrap requires the exact pinned `tree-sitter` CLI and a host `cc`;
 mutates plugins, parsers, or the committed lock.
 
 Host-specific settings belong in `~/.nvim-local.lua`; create a documented
-template with `:NvimConfigInit`. `:NvimConfigDump` recursively redacts
-environment values. Native review hunk views show three unchanged lines on
-either side by default; set `review = { hunk_context = 0 }` (or another
-non-negative integer) to change that review-local context. Split view keeps one
-structural context line when configured to zero so native old/new filler stays
-aligned.
+owner-only template with `:NvimConfigInit`. Plugin settings live exclusively
+under `plugins.<plugin_name>`; `dap`, `path`, `env`, and `plugins_dir` remain
+host-level settings. The retired root names `theme`, `clangd`, `review`,
+`log_watch`, `diagram_cache`, and `mason` are rejected rather than treated as
+aliases. `:NvimConfigDump` recursively redacts environment values. For example,
+native review hunk views show three unchanged lines on either side by default;
+set `plugins = { native_review = { hunk_context = 0 } }` to change that
+review-local context. Split view keeps one structural context line when
+configured to zero so native old/new filler stays aligned.
+
+Every local product exposes a strict setup contract plus copied `status()` and
+`effective_config()` snapshots. `:checkhealth nvimconfig` aggregates those 17
+surfaces without refreshing state, starting processes, installing tools, or
+downloading parsers. Workflow commands remain in the host configuration rather
+than inside the plugins.
 
 The debug UI defaults to `dap-ui`. Select the pinned `nvim-dap-view`
 alternative with `dap = { ui = "dap-view" }` in local config, or for one

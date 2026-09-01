@@ -11,3 +11,11 @@ with `setup()` and retain every global surface.
 
 When semantic history is disabled or exhausted, the injected native fallback
 receives `-1` for back and `1` for forward.
+
+The default semantic history is workspace-scoped, enabled, and bounded to 200
+entries. Home-buffer classification is entirely injected; the plugin contains
+no Snacks dashboard knowledge. `setup()` validates the complete object before
+replacement, coalesced callbacks are generation-bound, and `teardown()` safely
+invalidates pending work. `effective_config()`, `status()`, and history
+snapshots are copied. Opening and history events are copied before reaching the
+optional event adapter.

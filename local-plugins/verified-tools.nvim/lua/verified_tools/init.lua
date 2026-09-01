@@ -144,6 +144,11 @@ local function emit(name, value)
 	if type(configured.events) == "function" then
 		pcall(configured.events, name, copy(value))
 	end
+	if type(configured.on_state_change) == "function" then
+		local event = copy(value)
+		event.kind = name
+		pcall(configured.on_state_change, event)
+	end
 end
 
 local function bounded_reason(value, fallback)
@@ -298,8 +303,8 @@ local function resolve_state_root(value)
 		end
 		value = resolved
 	end
-	if type(value) ~= "string" or value == "" then
-		return nil, "state_root must resolve to a non-empty string"
+	if type(value) ~= "string" or value == "" or value:find("\0", 1, true) then
+		return nil, "state_root must resolve to a non-empty string without NUL bytes"
 	end
 	local expanded_ok, expanded = pcall(vim.fn.fnamemodify, value, ":p")
 	if not expanded_ok or type(expanded) ~= "string" then
@@ -3127,9 +3132,6 @@ function M.setup(opts)
 	if type(opts) ~= "table" then
 		error("verified_tools.setup requires options")
 	end
-	if pinned_state_root ~= nil then
-		error("verified_tools.setup cannot reconfigure a pinned state root")
-	end
 	local allowed = {
 		state_root = true,
 		backends = true,
@@ -3146,6 +3148,7 @@ function M.setup(opts)
 		clock = true,
 		notify = true,
 		events = true,
+		on_state_change = true,
 		interleave = true,
 	}
 	if not exact_keys(opts, allowed) then
@@ -3183,6 +3186,7 @@ function M.setup(opts)
 		"clock",
 		"notify",
 		"events",
+		"on_state_change",
 		"interleave",
 	}) do
 		if opts[name] ~= nil and type(opts[name]) ~= "function" then
@@ -3199,6 +3203,10 @@ function M.setup(opts)
 	if supplied ~= nil and (type(supplied) ~= "string" or not supplied:match("^[0-9a-f]+$") or #supplied ~= 64) then
 		error("instance_token must be 64 lowercase hexadecimal characters")
 	end
+	local resolved_root, root_guard_or_err = resolve_state_root(opts.state_root)
+	if not resolved_root then
+		error(root_guard_or_err)
+	end
 	local owner_pid
 	if type(opts.pid) == "function" then
 		local pid_ok, value = pcall(opts.pid)
@@ -3209,16 +3217,22 @@ function M.setup(opts)
 	if not finite_number(owner_pid) or owner_pid < 1 or owner_pid % 1 ~= 0 then
 		error("verified_tools.setup requires a stable positive integer PID")
 	end
-	local resolved_root, root_guard_or_err = resolve_state_root(opts.state_root)
-	if not resolved_root then
-		error(root_guard_or_err)
-	end
 	local copied_ok, next_config = pcall(vim.tbl_extend, "force", {}, opts)
 	if not copied_ok then
 		error("verified_tools.setup options cannot be copied")
 	end
 	if next_backends ~= nil then
 		next_config.backends = next_backends
+	end
+	if pinned_state_root ~= nil then
+		if
+			resolved_root ~= pinned_state_root
+			or owner_pid ~= pinned_pid
+			or not vim.deep_equal(configured, next_config)
+		then
+			error("verified_tools.setup cannot reconfigure a pinned engine; call teardown() first")
+		end
+		return M
 	end
 	local next_token = supplied
 	if next_token == nil then
@@ -3243,6 +3257,26 @@ function M.setup(opts)
 	pinned_pid = owner_pid
 	instance_token = next_token
 	return M
+end
+
+function M.effective_config()
+	if not pinned_state_root then
+		return {
+			backends = {},
+			lock_wait_ms = LOCK_WAIT_MILLISECONDS,
+			lock_retry_ms = 25,
+			watchdog_ms = 300000,
+		}
+	end
+	local backends = vim.tbl_keys(configured.backends or {})
+	table.sort(backends)
+	return copy({
+		state_root = pinned_state_root,
+		backends = backends,
+		lock_wait_ms = tonumber(configured.lock_wait_ms) or LOCK_WAIT_MILLISECONDS,
+		lock_retry_ms = tonumber(configured.lock_retry_ms) or 25,
+		watchdog_ms = tonumber(configured.watchdog_ms) or 300000,
+	})
 end
 
 function M.identity(value)
@@ -3809,19 +3843,36 @@ local function normalize_identity_request(request, label)
 end
 
 function M.status(identity)
-	local normalized, identity_err
-	if identity ~= nil then
-		normalized, identity_err = normalize_identity_request(identity, "status")
-		if not normalized then
-			return nil, identity_err
-		end
+	if identity == nil then
+		return copy({
+			configured = pinned_state_root ~= nil,
+			jobs = M.jobs(),
+		})
+	end
+	if not pinned_state_root then
+		return nil, "verified_tools.setup must be called first"
+	end
+	local normalized, identity_err = normalize_identity_request(identity, "status")
+	if not normalized then
+		return nil, identity_err
 	end
 	local prepared, prepare_err = prepare_state()
 	if not prepared then
 		return nil, prepare_err
 	end
-	if normalized then
-		return decode_record(normalized)
+	return decode_record(normalized)
+end
+
+---Enumerate durable tool records. Unlike status(), this explicitly performs I/O.
+---@return table[]|nil
+---@return string|nil
+function M.records()
+	if not pinned_state_root then
+		return {}
+	end
+	local prepared, prepare_err = prepare_state()
+	if not prepared then
+		return nil, prepare_err
 	end
 	local values, identities = {}, {}
 	local directory = vim.fs.joinpath(root(), "records")
@@ -5677,6 +5728,62 @@ function M.import_legacy(spec, legacy, callback)
 			settle(job, false, value)
 		end
 	end)
+	return true
+end
+
+---Return a deterministic, caller-owned snapshot of process-local jobs.
+---This function performs no filesystem reads and invokes no callbacks.
+---@return table[]
+function M.jobs()
+	local result = {}
+	for index, job in ipairs(queue) do
+		result[#result + 1] = {
+			identity = copy(job.identity),
+			key = job.key,
+			status = "queued",
+			queue_position = index,
+			stage = "queued",
+			resources = copy(job.resources),
+		}
+	end
+	local keys = vim.tbl_keys(running)
+	table.sort(keys)
+	for _, key in ipairs(keys) do
+		local job = running[key]
+		local stage = "running"
+		if job.persistence_blocked then
+			stage = "persistence-blocked"
+		elseif job.cancel_requested then
+			stage = "cancelling"
+		elseif job.attesting then
+			stage = "attesting"
+		end
+		result[#result + 1] = {
+			identity = copy(job.identity),
+			key = job.key,
+			status = "running",
+			queue_position = nil,
+			stage = stage,
+			resources = copy(job.resources),
+		}
+	end
+	return copy(result)
+end
+
+---Release process-local configuration only when no lifecycle work is active.
+---@return boolean|nil
+---@return string|nil
+function M.teardown()
+	if #queue > 0 or running_count > 0 or next(running) ~= nil then
+		return nil, "verified tools still has active jobs"
+	end
+	drain_scheduled = false
+	configured = {}
+	instance_token = nil
+	pinned_pid = nil
+	pinned_state_root = nil
+	state_root_guard = nil
+	state_directory_guards = {}
 	return true
 end
 

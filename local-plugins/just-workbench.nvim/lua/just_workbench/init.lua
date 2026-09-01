@@ -3,16 +3,69 @@ local closure = require("just_workbench.closure")
 local M = {}
 
 local dependencies
+local is_configured = false
 local catalogs = {}
 local requests = {}
 local executions = {}
+local one_capabilities = {}
+local lifecycle_generation = 0
+local request_sequence = 0
+
+local SETUP_KEYS = {
+	event = true,
+	hash = true,
+	home = true,
+	now = true,
+	schedule = true,
+	supports_one = true,
+	system = true,
+	terminal = true,
+	trust = true,
+}
+
+local TERMINAL_KEYS = {
+	focus = true,
+	lines = true,
+	open = true,
+	replace = true,
+	status = true,
+	stop = true,
+}
 
 local function copy(value)
 	return vim.deepcopy(value)
 end
 
+local function reject_unknown(value, allowed, label)
+	if type(value) ~= "table" then
+		return nil, label .. " must be a table"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" or not allowed[key] then
+			return nil, label .. " contains unknown key: " .. tostring(key)
+		end
+	end
+	return true
+end
+
+local function emit(kind, details)
+	if not dependencies or type(dependencies.event) ~= "function" then
+		return
+	end
+	local event = copy(details or {})
+	event.kind = kind
+	pcall(dependencies.event, event)
+end
+
 local function valid_string(value)
 	return type(value) == "string" and value ~= "" and not value:find("\0", 1, true)
+end
+
+local function optional(value)
+	if value == vim.NIL then
+		return nil
+	end
+	return value
 end
 
 local function canonical_directory(path, label)
@@ -39,6 +92,19 @@ local function canonical_file(path, label)
 	return vim.uv.fs_realpath(normalized) or normalized
 end
 
+local function canonical_executable(path, label)
+	if not valid_string(path) or path:sub(1, 1) ~= "/" then
+		return nil, label .. " must be an absolute path"
+	end
+	local normalized = vim.fs.normalize(path)
+	local canonical = vim.uv.fs_realpath(normalized)
+	local stat = canonical and vim.uv.fs_stat(canonical) or nil
+	if not stat or stat.type ~= "file" or not vim.uv.fs_access(canonical, "X") then
+		return nil, label .. " must resolve to an executable file"
+	end
+	return canonical
+end
+
 local function normalize_context(spec)
 	if type(spec) ~= "table" then
 		return nil, "catalog specification must be a table"
@@ -54,10 +120,11 @@ local function normalize_context(spec)
 	if not justfile then
 		return nil, file_err
 	end
-	if not valid_string(spec.just_bin) then
-		return nil, "just_bin must be a non-empty argv entry"
+	local just_bin, binary_err = canonical_executable(spec.just_bin, "just_bin")
+	if not just_bin then
+		return nil, binary_err
 	end
-	return { runtime = spec.runtime, task_root = task_root, justfile = justfile, just_bin = spec.just_bin }
+	return { runtime = spec.runtime, task_root = task_root, justfile = justfile, just_bin = just_bin }
 end
 
 local function workspace_key(context)
@@ -68,8 +135,8 @@ local function action_name(prefix, name)
 	return prefix == "" and name or (prefix .. "::" .. name)
 end
 
-local function private_item(value)
-	if value.private == true then
+local function private_item(value, name)
+	if (name and name:sub(1, 1) == "_") or value.private == true then
 		return true
 	end
 	for _, attribute in ipairs(type(value.attributes) == "table" and value.attributes or {}) do
@@ -94,13 +161,66 @@ local function normalize_parameters(parameters, action)
 		if kind ~= "singular" and kind ~= "plus" and kind ~= "star" and kind ~= "variadic" then
 			return nil, ("unsupported parameter kind %s: %s"):format(tostring(kind), action)
 		end
+		for _, key in ipairs({ "export", "flag", "multiple" }) do
+			local value = optional(parameter[key])
+			if value ~= nil and type(value) ~= "boolean" then
+				return nil, ("parameter %s.%s must be boolean: %s"):format(parameter.name, key, action)
+			end
+		end
+		for _, key in ipairs({ "help", "long", "short" }) do
+			local value = optional(parameter[key])
+			if value ~= nil and type(value) ~= "string" then
+				return nil, ("parameter %s.%s must be a string: %s"):format(parameter.name, key, action)
+			end
+		end
+		for _, key in ipairs({ "min", "max" }) do
+			local value = optional(parameter[key])
+			if value ~= nil and (type(value) ~= "number" or value < 0 or value % 1 ~= 0) then
+				return nil, ("parameter %s.%s must be a non-negative integer: %s"):format(parameter.name, key, action)
+			end
+		end
+		local minimum = optional(parameter.min)
+		local maximum = optional(parameter.max)
+		if minimum and maximum and minimum > maximum then
+			return nil, "parameter min exceeds max: " .. action
+		end
 		result[index] = {
 			name = parameter.name,
 			kind = kind,
-			default = copy(parameter.default),
+			default = copy(optional(parameter.default)),
+			export = optional(parameter.export) == true,
+			flag = optional(parameter.flag) == true,
+			help = optional(parameter.help),
+			long = optional(parameter.long),
+			max = maximum,
+			min = minimum,
+			multiple = optional(parameter.multiple) == true,
+			pattern = copy(optional(parameter.pattern)),
+			short = optional(parameter.short),
+			value = copy(optional(parameter.value)),
 		}
 	end
 	return result
+end
+
+local function cardinality(parameters)
+	local minimum = 0
+	local maximum = 0
+	for _, parameter in ipairs(parameters) do
+		local variadic = parameter.kind ~= "singular" or parameter.multiple
+		local implicit_minimum = parameter.default == nil and not parameter.flag and parameter.kind ~= "star" and 1 or 0
+		minimum = minimum + (parameter.min or implicit_minimum)
+		if maximum ~= math.huge then
+			if parameter.max ~= nil then
+				maximum = maximum + parameter.max
+			elseif variadic then
+				maximum = math.huge
+			else
+				maximum = maximum + 1
+			end
+		end
+	end
+	return minimum, maximum
 end
 
 local function alias_target(alias)
@@ -152,23 +272,26 @@ local function decode_dump(result)
 			if not valid_string(name) or type(recipe) ~= "table" then
 				return nil, "just --dump contains an invalid recipe"
 			end
-			if not private_item(recipe) then
+			if not private_item(recipe, name) then
 				local invocation = action_name(prefix, name)
 				local parameters, parameters_err = normalize_parameters(recipe.parameters, invocation)
 				if not parameters then
 					return nil, parameters_err
 				end
+				local minimum, maximum = cardinality(parameters)
 				actions[#actions + 1] = {
 					kind = "recipe",
 					name = invocation,
 					text = invocation,
 					description = type(recipe.doc) == "string" and recipe.doc or "",
 					parameters = parameters,
+					min_arguments = minimum,
+					max_arguments = maximum,
 				}
 			end
 		end
 		for name, alias in pairs(node.aliases or {}) do
-			if not valid_string(name) or private_item(type(alias) == "table" and alias or {}) then
+			if not valid_string(name) or private_item(type(alias) == "table" and alias or {}, name) then
 				if not valid_string(name) then
 					return nil, "just --dump contains an invalid alias"
 				end
@@ -185,6 +308,8 @@ local function decode_dump(result)
 					description = type(alias) == "table" and type(alias.doc) == "string" and alias.doc or "",
 					target = target,
 					parameters = {},
+					min_arguments = 0,
+					max_arguments = 0,
 					module_prefix = prefix,
 				}
 			end
@@ -193,14 +318,16 @@ local function decode_dump(result)
 			if not valid_string(name) or type(child) ~= "table" then
 				return nil, "just --dump contains an invalid module"
 			end
-			local path = action_name(prefix, name)
-			modules[#modules + 1] = {
-				name = path,
-				description = type(child.doc) == "string" and child.doc or "",
-			}
-			local walked, walk_err = walk(child, path)
-			if not walked then
-				return nil, walk_err
+			if not private_item(child, name) then
+				local path = action_name(prefix, name)
+				modules[#modules + 1] = {
+					name = path,
+					description = type(child.doc) == "string" and child.doc or "",
+				}
+				local walked, walk_err = walk(child, path)
+				if not walked then
+					return nil, walk_err
+				end
 			end
 		end
 		return true
@@ -236,6 +363,7 @@ local function decode_dump(result)
 			local parameters = resolve_parameters(action)
 			if parameters then
 				action.parameters = copy(parameters)
+				action.min_arguments, action.max_arguments = cardinality(parameters)
 			end
 			action.module_prefix = nil
 		end
@@ -297,7 +425,24 @@ local function public_catalog(record)
 end
 
 function M.setup(opts)
-	opts = opts or {}
+	if opts == nil then
+		opts = {}
+	end
+	local valid, setup_err = reject_unknown(opts, SETUP_KEYS, "just_workbench.setup options")
+	if not valid then
+		error(setup_err)
+	end
+	if
+		opts.home ~= nil
+		and (
+			type(opts.home) ~= "string"
+			or opts.home == ""
+			or opts.home:sub(1, 1) ~= "/"
+			or opts.home:find("\0", 1, true)
+		)
+	then
+		error("just_workbench.setup home must be an absolute non-empty string without NUL bytes")
+	end
 	if type(opts.system) ~= "function" then
 		error("just_workbench.setup requires system(argv, opts, callback)")
 	end
@@ -313,24 +458,68 @@ function M.setup(opts)
 	if opts.schedule ~= nil and type(opts.schedule) ~= "function" then
 		error("just_workbench.setup schedule must be a function")
 	end
+	if opts.supports_one ~= nil and type(opts.supports_one) ~= "function" then
+		error("just_workbench.setup supports_one must be a function")
+	end
+	if opts.event ~= nil and type(opts.event) ~= "function" then
+		error("just_workbench.setup event must be a function")
+	end
 	if type(opts.terminal) ~= "table" then
 		error("just_workbench.setup requires terminal callbacks")
+	end
+	valid, setup_err = reject_unknown(opts.terminal, TERMINAL_KEYS, "just_workbench.setup terminal")
+	if not valid then
+		error(setup_err)
 	end
 	for _, name in ipairs({ "status", "open", "focus", "replace", "lines" }) do
 		if type(opts.terminal[name]) ~= "function" then
 			error("just_workbench.setup terminal." .. name .. " must be a function")
 		end
 	end
+	if opts.terminal.stop ~= nil and type(opts.terminal.stop) ~= "function" then
+		error("just_workbench.setup terminal.stop must be a function")
+	end
+	if is_configured then
+		M.teardown()
+	end
+	lifecycle_generation = lifecycle_generation + 1
 	dependencies = {
+		event = opts.event,
 		system = opts.system,
 		trust = opts.trust,
 		hash = opts.hash or vim.fn.sha256,
 		home = opts.home,
 		now = opts.now or os.time,
 		schedule = opts.schedule or vim.schedule,
+		supports_one = opts.supports_one,
 		terminal = opts.terminal,
 	}
+	catalogs = {}
+	requests = {}
+	executions = {}
+	one_capabilities = {}
+	is_configured = true
+	emit("setup", { config = M.effective_config() })
 	return M
+end
+
+function M.effective_config()
+	return {}
+end
+
+function M.teardown()
+	if not is_configured then
+		return true
+	end
+	lifecycle_generation = lifecycle_generation + 1
+	emit("teardown", {})
+	dependencies = nil
+	catalogs = {}
+	requests = {}
+	executions = {}
+	one_capabilities = {}
+	is_configured = false
+	return true
 end
 
 function M.catalog(spec, callback)
@@ -350,10 +539,12 @@ function M.catalog(spec, callback)
 		return nil, closure_err
 	end
 	local key = workspace_key(context)
-	requests[key] = (requests[key] or 0) + 1
-	local request = requests[key]
+	request_sequence = request_sequence + 1
+	local request = request_sequence
+	local generation = lifecycle_generation
+	requests[key] = request
 	return system(deps, dump_argv(context), function(result)
-		if requests[key] ~= request then
+		if dependencies ~= deps or lifecycle_generation ~= generation or requests[key] ~= request then
 			callback(nil, "catalog request was superseded")
 			return
 		end
@@ -378,6 +569,7 @@ function M.catalog(spec, callback)
 			dependencies = deps,
 		}
 		catalogs[id] = record
+		emit("catalog", { catalog = public_catalog(record) })
 		callback(public_catalog(record))
 	end)
 end
@@ -427,6 +619,10 @@ local function normalize_values(values)
 	return result
 end
 
+local function terminal_key(record)
+	return "just-workbench:" .. record.dependencies.hash(workspace_key(record.context))
+end
+
 local function terminal_spec(record, action, values)
 	local context = record.context
 	local deps = record.dependencies
@@ -438,8 +634,23 @@ local function terminal_spec(record, action, values)
 		context.task_root,
 		action.name,
 	}
+	local supported = one_capabilities[context.just_bin]
+	if supported == nil and type(deps.supports_one) == "function" then
+		local ok, result = pcall(deps.supports_one, context.just_bin)
+		if not ok then
+			return nil, "could not probe just --one support: " .. tostring(result)
+		end
+		if result ~= true and result ~= false then
+			return nil, "just --one capability probe returned an invalid result"
+		end
+		supported = result
+		one_capabilities[context.just_bin] = supported
+	end
+	if supported == true then
+		table.insert(argv, 2, "--one")
+	end
 	vim.list_extend(argv, values)
-	local key = "just-workbench:" .. deps.hash(workspace_key(context))
+	local key = terminal_key(record)
 	return {
 		key = key,
 		launch = { argv = argv, cwd = context.task_root, env = {} },
@@ -484,9 +695,8 @@ function M.run(catalog, name, values, opts)
 	if not normalized_values then
 		return nil, values_err
 	end
-	local spec = terminal_spec(record, action, normalized_values)
 	local deps = record.dependencies
-	local key = spec.key
+	local key = terminal_key(record)
 	local terminal_status = deps.terminal.status(key) or {}
 	local existing = terminal_status.exists == true
 		or terminal_status.state == "starting"
@@ -507,9 +717,19 @@ function M.run(catalog, name, values, opts)
 	elseif decision ~= nil and decision ~= "replace" then
 		return nil, "there is no existing execution to " .. tostring(decision)
 	end
+	if #normalized_values < action.min_arguments then
+		return nil, ("recipe %s requires at least %d argument(s)"):format(action.name, action.min_arguments)
+	end
+	if action.max_arguments ~= math.huge and #normalized_values > action.max_arguments then
+		return nil, ("recipe %s accepts at most %d argument(s)"):format(action.name, action.max_arguments)
+	end
 	local valid, valid_err = revalidate(record)
 	if not valid then
 		return nil, valid_err
+	end
+	local spec, spec_err = terminal_spec(record, action, normalized_values)
+	if not spec then
+		return nil, spec_err
 	end
 
 	local launched, launch_err
@@ -530,6 +750,10 @@ function M.run(catalog, name, values, opts)
 		spec = copy(spec),
 		dependencies = deps,
 	}
+	emit(
+		"execution",
+		{ outcome = existing and "replaced" or "started", execution = executions[workspace_key(record.context)] }
+	)
 	return { outcome = existing and "replaced" or "started", key = key, spec = copy(spec) }
 end
 
@@ -602,6 +826,30 @@ function M.format(catalog, mode, callback)
 end
 
 function M.status(identity)
+	if identity == nil then
+		local public_catalogs = {}
+		for id, record in pairs(catalogs) do
+			public_catalogs[id] = public_catalog(record)
+		end
+		local public_executions = {}
+		for workspace, execution in pairs(executions) do
+			public_executions[workspace] = copy({
+				argv = execution.argv,
+				context = execution.context,
+				key = execution.key,
+				recipe = execution.recipe,
+				spec = execution.spec,
+				started_at = execution.started_at,
+			})
+		end
+		return copy({
+			capabilities = one_capabilities,
+			catalogs = public_catalogs,
+			configured = is_configured,
+			executions = public_executions,
+			requests = requests,
+		})
+	end
 	if not dependencies then
 		return nil, "just_workbench.setup must be called first"
 	end
@@ -619,10 +867,38 @@ function M.status(identity)
 	return copy(deps.terminal.status(key) or { state = "disposed", exists = false })
 end
 
+function M.stop(identity)
+	if not dependencies then
+		return nil, "just_workbench.setup must be called first"
+	end
+	if type(identity) ~= "table" or not valid_string(identity.runtime) then
+		return nil, "stop identity requires runtime and task_root"
+	end
+	local root, root_err = canonical_directory(identity.task_root, "task_root")
+	if not root then
+		return nil, root_err
+	end
+	local execution = executions[vim.json.encode({ identity.runtime, root })]
+	if not execution then
+		return nil, "no Just execution exists for this runtime and task root"
+	end
+	if type(execution.dependencies.terminal.stop) ~= "function" then
+		return nil, "terminal stop is unavailable"
+	end
+	local stopped, stop_err = execution.dependencies.terminal.stop(execution.key)
+	if not stopped then
+		return nil, stop_err
+	end
+	emit("execution", { outcome = "stopped", execution = execution })
+	return { outcome = "stopped", key = execution.key }
+end
+
 function M._reset()
+	lifecycle_generation = lifecycle_generation + 1
 	catalogs = {}
 	requests = {}
 	executions = {}
+	one_capabilities = {}
 end
 
 M._decode_dump = decode_dump

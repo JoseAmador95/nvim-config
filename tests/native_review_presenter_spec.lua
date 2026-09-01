@@ -21,11 +21,21 @@ local function test(name, callback)
 	end
 end
 
-local mode = require("config.native_review").mode
+local native_review = require("config.native_review")
+local mode = native_review.mode
 local lsp_navigation = require("config.lsp_navigation")
-local local_config = require("config.local_config")
-local presenter = require("config.native_review").presenter
-local review_lsp = require("config.native_review").lsp
+local presenter = native_review.presenter
+local review_lsp = native_review.lsp
+
+local function configure_hunk_context(value)
+	return require("native_review").setup({
+		repo = require("config.repo"),
+		fs = require("config.fs"),
+		editor = require("config.editor"),
+		lsp_navigation = lsp_navigation,
+		hunk_context = value,
+	})
+end
 
 local BLOCKED_NORMAL_MAPPINGS = {
 	"gd",
@@ -684,16 +694,10 @@ test("inline isolation avoids namespace scoping while split remains fail-closed"
 end)
 
 test("presenter reads the single configured hunk context for its visibility plan", function()
+	configure_hunk_context(1)
 	local state, _, selected = setup_cursor_state()
-	local original_get = local_config.get
-	local_config.get = function(key, default)
-		if key == "review" then
-			return { hunk_context = 1 }
-		end
-		return original_get(key, default)
-	end
 	local called, shown, show_err = pcall(presenter.show, state, selected)
-	local_config.get = original_get
+	configure_hunk_context(3)
 	assert(called and shown, show_err)
 	local guard = assert(state.presentation.cursor_guards[state.origin.win])
 	assert(state.presentation.hunk_context == 1)
@@ -1640,22 +1644,14 @@ end)
 test("split hunk rows stay aligned across insertion and deletion boundaries", function()
 	local state = setup_state()
 	local selected = alignment_entry()
-	local configured_context = 3
-	local original_get = local_config.get
 	local original_laststatus = vim.o.laststatus
 	local original_showtabline = vim.o.showtabline
-	local_config.get = function(key, default)
-		if key == "review" then
-			return { hunk_context = configured_context }
-		end
-		return original_get(key, default)
-	end
 	local ok, err = xpcall(function()
 		vim.o.laststatus = 0
 		vim.o.showtabline = 0
 		assert(#selected.hunks == 2, vim.inspect(selected.hunks))
 		for _, context in ipairs({ 3, 0 }) do
-			configured_context = context
+			configure_hunk_context(context)
 			assert(presenter.show(state, selected, { layout = "split", context = "hunks" }))
 			local presentation = state.presentation
 			assert(presentation.hunk_context == context)
@@ -1670,7 +1666,7 @@ test("split hunk rows stay aligned across insertion and deletion boundaries", fu
 			end
 		end
 	end, debug.traceback)
-	local_config.get = original_get
+	configure_hunk_context(3)
 	vim.o.laststatus = original_laststatus
 	vim.o.showtabline = original_showtabline
 	pcall(presenter.clear, state)
@@ -1681,15 +1677,9 @@ end)
 test("split boundary hunks omit only bands without matching source anchors", function()
 	local state = setup_state()
 	local selected = boundary_entry()
-	local original_get = local_config.get
 	local original_laststatus = vim.o.laststatus
 	local original_showtabline = vim.o.showtabline
-	local_config.get = function(key, default)
-		if key == "review" then
-			return { hunk_context = 1 }
-		end
-		return original_get(key, default)
-	end
+	configure_hunk_context(1)
 	local ok, err = xpcall(function()
 		vim.o.laststatus = 0
 		vim.o.showtabline = 0
@@ -1704,7 +1694,7 @@ test("split boundary hunks omit only bands without matching source anchors", fun
 			assert_same_screen_row(left, right, line)
 		end
 	end, debug.traceback)
-	local_config.get = original_get
+	configure_hunk_context(3)
 	vim.o.laststatus = original_laststatus
 	vim.o.showtabline = original_showtabline
 	pcall(presenter.clear, state)

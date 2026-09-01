@@ -19,13 +19,23 @@ end
 ---@param value table
 ---@return table? target
 ---@return string? error_message
-function M.revalidate(value)
+function M.revalidate(value, mode)
+	mode = mode or "exact"
+	if mode == "none" then
+		return nil
+	end
+	if mode ~= "exact" and mode ~= "buffer" and mode ~= "window" then
+		return nil, "Unknown action target mode: " .. tostring(mode)
+	end
 	local target, target_err = schema.action_target(value)
 	if not target then
 		return nil, target_err
 	end
 	if not vim.api.nvim_buf_is_valid(target.bufnr) then
 		return nil, "Origin buffer is no longer available"
+	end
+	if mode == "buffer" then
+		return target
 	end
 	if not vim.api.nvim_win_is_valid(target.winid) then
 		return nil, "Origin window is no longer available"
@@ -38,6 +48,9 @@ function M.revalidate(value)
 	end
 	if vim.api.nvim_win_get_buf(target.winid) ~= target.bufnr then
 		return nil, "Origin window no longer displays the captured buffer"
+	end
+	if mode == "window" then
+		return target
 	end
 	if vim.api.nvim_buf_get_changedtick(target.bufnr) ~= target.changedtick then
 		return nil, "Origin buffer changed after the action was captured"

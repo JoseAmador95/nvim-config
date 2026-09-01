@@ -3,11 +3,11 @@ local M = {}
 
 local review_lsp = require("native_review.lsp")
 local review_store = require("native_review.store")
+local config = require("native_review.dependencies").get("config")
 
 local PANEL_ORDER = { "files", "commits", "comments" }
 local PANEL_TITLES = { files = " Files ", commits = " Commits ", comments = " Comments " }
 local PANEL_NAMES = { files = "files", commits = "commits", comments = "comments" }
-local MAX_PANEL_WIDTH = 200
 local COMMIT_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_commits")
 local FILE_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_files")
 local SIDE_LABELS = { left = "OLD", right = "CURRENT" }
@@ -153,8 +153,8 @@ end
 local function dimensions()
 	local available_width = math.max(12, vim.o.columns - 4)
 	local available_height = math.max(8, vim.o.lines - 4)
-	local width = math.max(12, math.min(MAX_PANEL_WIDTH, available_width))
-	local height = math.max(8, math.min(48, available_height))
+	local width = math.max(12, math.min(config.panel.max_width, available_width))
+	local height = math.max(8, math.min(config.panel.max_height, available_height))
 	local left = math.max(5, math.floor((width - 1) * 0.42))
 	local right = math.max(6, width - left - 1)
 	if left + right + 1 > width then

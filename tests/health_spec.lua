@@ -47,6 +47,15 @@ end
 package.loaded["nvimconfig.health"] = nil
 local health = require("nvimconfig.health")
 assert(type(health.check) == "function", "health module is not loadable")
+local products = health._local_product_status()
+assert(#products == 17, "health does not aggregate every local product")
+for _, product in ipairs(products) do
+	assert(product.error == nil, product.name .. " health contract failed: " .. tostring(product.error))
+	assert(type(product.status) == "table", product.name .. " status is not a copied table")
+	assert(type(product.effective_config) == "table", product.name .. " effective config is not a copied table")
+end
+products[1].status.__mutation_probe = true
+assert(health._local_product_status()[1].status.__mutation_probe == nil, "health returned shared plugin status")
 assert(select(1, health._path_origin("/tmp/custom/bin/tool", { ["/tmp/custom/bin"] = true })) == "local_config")
 assert(select(1, health._path_origin(vim.fn.expand("~/.local/bin/tool"), {})) == "user-local")
 assert(

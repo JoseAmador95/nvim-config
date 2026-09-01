@@ -14,17 +14,12 @@
 -- Schema (all fields optional; defaults shown):
 --
 --   return {
---     theme = {
---       background = "auto",     -- auto | light | dark
---       transparent = false,
---       italic_comments = true,
+--     plugins = {
+--       native_review = { hunk_context = 3 },
+--       clangd_compile_db = { path = "clangd", profile = "full" },
+--       theme_router = { background = "auto", transparent = false },
 --     },
---     clangd = { path = "clangd", profile = "full" },
 --     dap = { ui = "dap-ui" }, -- dap-ui | dap-view
---     mason = { auto_install = true },
---     review = { hunk_context = 3 }, -- finite non-negative integer
---     log_watch = { max_lines = 100000, max_bytes = 67108864 },
---     diagram_cache = { max_age_seconds = 2592000, max_bytes = 268435456 },
 --     path = { "~/bin" },          -- dirs prepended to $PATH
 --     env = { FOO = "bar" },       -- environment variables to export
 --     plugins_dir = { "~/.nvim-plugins" }, -- dirs of extra lazy.nvim specs
@@ -32,6 +27,7 @@
 --
 -- Override the host path with $NVIM_CONFIG_FILE (for testing).
 
+local fs = require("config.fs")
 local trusted_workspace = require("trusted_workspace")
 
 local M = {}
@@ -39,52 +35,217 @@ local M = {}
 local TITLE = "nvim.config"
 local PROJECT_NAME = ".nvim-local.lua"
 
+local KIBIBYTE = 1024
+local MEBIBYTE = 1024 * KIBIBYTE
+local DAY_SECONDS = 24 * 60 * 60
+
+local function integer(default, minimum, maximum)
+	return { type = "number", default = default, finite = true, integer = true, min = minimum, max = maximum }
+end
+
+local function nonempty_string(default)
+	return { type = "string", default = default, nonempty = true, no_nul = true }
+end
+
 local SCHEMA = {
-	theme = {
+	plugins = {
 		type = "table",
 		fields = {
-			background = { type = "enum", values = { "auto", "light", "dark" }, default = "auto" },
-			transparent = { type = "boolean", default = false },
-			italic_comments = { type = "boolean", default = true },
-		},
-	},
-	clangd = {
-		type = "table",
-		fields = {
-			path = { type = "string", default = "clangd" },
-			profile = { type = "enum", values = { "full", "light" }, default = "full" },
+			native_review = {
+				type = "table",
+				fields = {
+					hunk_context = integer(3, 0, 1000),
+					layout = { type = "enum", values = { "inline", "split" }, default = "inline" },
+					context = { type = "enum", values = { "hunks", "full" }, default = "hunks" },
+					inline_comments = { type = "boolean", default = true },
+					panel = {
+						type = "table",
+						fields = {
+							max_width = integer(200, 20, 1000),
+							max_height = integer(48, 5, 500),
+						},
+					},
+				},
+			},
+			exact_editor = {
+				type = "table",
+				fields = {
+					workspace_retention = { type = "enum", values = { "visited" }, default = "visited" },
+				},
+			},
+			devcontainer_editor = {
+				type = "table",
+				fields = {
+					cli = nonempty_string("devcontainer"),
+					lockfile_policy = { type = "enum", values = { "preserve" }, default = "preserve" },
+					ssh_agent = { type = "enum", values = { "auto", "off" }, default = "auto" },
+					claim_timeout_ms = integer(2000, 100, 60000),
+					ack_timeout_ms = integer(5000, 100, 120000),
+					max_messages_per_tick = integer(32, 1, 256),
+				},
+			},
+			tab_first = {
+				type = "table",
+				fields = {
+					history = {
+						type = "table",
+						fields = {
+							enabled = { type = "boolean", default = true },
+							max_entries = integer(200, 1, 10000),
+							scope = { type = "enum", values = { "workspace" }, default = "workspace" },
+						},
+					},
+				},
+			},
+			terminal_lifecycle = {
+				type = "table",
+				fields = {
+					stop_timeout_ms = integer(5000, 100, 120000),
+					buffer_mappings = {
+						type = "table",
+						fields = {
+							close = { type = "string_or_false", default = "q" },
+							open_location = { type = "string_or_false", default = "gf" },
+						},
+					},
+				},
+			},
+			project_python = {
+				type = "table",
+				fields = {
+					test_runner = { type = "enum", values = { "pytest", "unittest" }, default = "pytest" },
+					repl = {
+						type = "table",
+						fields = {
+							readiness_timeout_ms = integer(5000, 100, 120000),
+							poll_interval_ms = integer(50, 10, 5000),
+						},
+						validate = function(value, path, errors)
+							if value.poll_interval_ms > value.readiness_timeout_ms then
+								errors[#errors + 1] = path
+									.. ".poll_interval_ms: must not exceed "
+									.. path
+									.. ".readiness_timeout_ms (using default)"
+								value.poll_interval_ms = 50
+							end
+						end,
+					},
+				},
+			},
+			action_palette = {
+				type = "table",
+				fields = {
+					target_default = {
+						type = "enum",
+						values = { "exact", "buffer", "window", "none" },
+						default = "exact",
+					},
+					unavailable = { type = "enum", values = { "hide", "show" }, default = "hide" },
+				},
+			},
+			diagram_view = {
+				type = "table",
+				fields = {
+					default_mode = { type = "enum", values = { "svg", "ascii" }, default = "svg" },
+					stage_timeout_ms = integer(30000, 100, 300000),
+					max_stage_output_bytes = integer(16 * MEBIBYTE, KIBIBYTE, 64 * MEBIBYTE),
+					cache = {
+						type = "table",
+						fields = {
+							max_age_seconds = integer(30 * DAY_SECONDS, 1, 365 * DAY_SECONDS),
+							max_bytes = integer(256 * MEBIBYTE, MEBIBYTE, 1024 * MEBIBYTE),
+						},
+					},
+				},
+			},
+			log_workbench = {
+				type = "table",
+				fields = {
+					poll_interval_ms = integer(500, 50, 60000),
+					max_lines = integer(100000, 1, 100000),
+					max_bytes = integer(64 * MEBIBYTE, KIBIBYTE, 64 * MEBIBYTE),
+				},
+			},
+			repo_scratch = {
+				type = "table",
+				fields = {
+					retention_days = integer(30, 1, 3650),
+					lease_seconds = integer(300, 30, 86400),
+					prune_on_open = { type = "boolean", default = true },
+				},
+			},
+			coverage_workbench = {
+				type = "table",
+				fields = {
+					max_report_bytes = integer(50 * MEBIBYTE, KIBIBYTE, 256 * MEBIBYTE),
+					signs = { type = "enum", values = { "all", "covered", "missing", "none" }, default = "all" },
+					stale = { type = "enum", values = { "hide", "show" }, default = "hide" },
+				},
+			},
+			just_workbench = {
+				type = "table",
+				fields = {
+					binary = nonempty_string("just"),
+					root_mode = { type = "enum", values = { "repo", "nearest" }, default = "repo" },
+					justfile_names = {
+						type = "list",
+						default = { "justfile", "Justfile", ".justfile" },
+						item = nonempty_string(nil),
+						min_items = 1,
+					},
+					conflict = {
+						type = "enum",
+						values = { "prompt", "focus", "replace", "cancel" },
+						default = "prompt",
+					},
+				},
+			},
+			clangd_compile_db = {
+				type = "table",
+				fields = {
+					path = nonempty_string("clangd"),
+					profile = { type = "enum", values = { "full", "light" }, default = "full" },
+					restart_timeout_ms = integer(5000, 100, 120000),
+					max_validation_bytes = integer(256 * MEBIBYTE, MEBIBYTE, 256 * MEBIBYTE),
+				},
+			},
+			trusted_workspace = { type = "table", fields = {} },
+			verified_tools = { type = "table", fields = {} },
+			treesitter_runtime = {
+				type = "table",
+				fields = {
+					max_bytes = integer(200 * KIBIBYTE, KIBIBYTE, 16 * MEBIBYTE),
+					reevaluate_debounce_ms = integer(50, 0, 5000),
+					languages = {
+						type = "map",
+						default = {},
+						key_nonempty = true,
+						key_no_nul = true,
+						value = {
+							type = "table",
+							fields = {
+								max_bytes = integer(200 * KIBIBYTE, KIBIBYTE, 16 * MEBIBYTE),
+								indent = { type = "boolean", default = true },
+							},
+						},
+					},
+				},
+			},
+			theme_router = {
+				type = "table",
+				fields = {
+					background = { type = "enum", values = { "auto", "light", "dark" }, default = "auto" },
+					transparent = { type = "boolean", default = false },
+					italic_comments = { type = "boolean", default = true },
+					reload_on_focus = { type = "boolean", default = true },
+				},
+			},
 		},
 	},
 	dap = {
 		type = "table",
 		fields = {
 			ui = { type = "enum", values = { "dap-ui", "dap-view" }, default = "dap-ui" },
-		},
-	},
-	mason = {
-		type = "table",
-		fields = {
-			auto_install = { type = "boolean", default = true },
-		},
-	},
-	review = {
-		type = "table",
-		fields = {
-			hunk_context = { type = "number", default = 3, finite = true, integer = true, min = 0 },
-		},
-	},
-	log_watch = {
-		type = "table",
-		fields = {
-			max_lines = { type = "number", default = 100000 },
-			max_bytes = { type = "number", default = 64 * 1024 * 1024 },
-		},
-	},
-	diagram_cache = {
-		type = "table",
-		fields = {
-			max_age_seconds = { type = "number", default = 30 * 24 * 60 * 60 },
-			max_bytes = { type = "number", default = 256 * 1024 * 1024 },
 		},
 	},
 	path = {
@@ -234,7 +395,11 @@ function validate_value(spec, value, path, errors)
 			errors[#errors + 1] = string.format("%s: expected table, got %s", path, type(v))
 			v = {}
 		end
-		return validate_fields(spec.fields, v, path, errors)
+		local out = validate_fields(spec.fields, v, path, errors)
+		if type(spec.validate) == "function" then
+			spec.validate(out, path, errors)
+		end
+		return out
 	end
 
 	if t == "list" then
@@ -258,6 +423,10 @@ function validate_value(spec, value, path, errors)
 				out[#out + 1] = v
 			end
 		end
+		if spec.min_items and #out < spec.min_items then
+			errors[#errors + 1] = string.format("%s: expected at least %d valid item(s)", path, spec.min_items)
+			return vim.deepcopy(spec.default or {})
+		end
 		return out
 	end
 
@@ -269,7 +438,11 @@ function validate_value(spec, value, path, errors)
 		end
 		local out = {}
 		for key, item in pairs(v) do
-			if type(key) ~= "string" then
+			if
+				type(key) ~= "string"
+				or (spec.key_nonempty and key == "")
+				or (spec.key_no_nul and type(key) == "string" and key:find("\0", 1, true))
+			then
 				errors[#errors + 1] = string.format("%s: keys must be strings", path)
 			else
 				local before = #errors
@@ -303,18 +476,46 @@ function validate_value(spec, value, path, errors)
 		return value
 	end
 
+	if t == "string_or_false" then
+		if value == false then
+			return false
+		end
+		if type(value) ~= "string" or value == "" or value:find("\0", 1, true) then
+			errors[#errors + 1] = string.format("%s: expected false or a non-empty NUL-free string", path)
+			return spec.default
+		end
+		return value
+	end
+
 	-- string | boolean | number
 	if type(value) ~= t then
 		errors[#errors + 1] = string.format("%s: expected %s, got %s", path, t, type(value))
+		return spec.default
+	end
+	if t == "string" and ((spec.nonempty and value == "") or (spec.no_nul and value:find("\0", 1, true))) then
+		errors[#errors + 1] = string.format("%s: expected a non-empty NUL-free string", path)
 		return spec.default
 	end
 	if t == "number" then
 		local invalid = (spec.finite and (value ~= value or value == math.huge or value == -math.huge))
 			or (spec.integer and value % 1 ~= 0)
 			or (spec.min and value < spec.min)
+			or (spec.max and value > spec.max)
 		if invalid then
-			errors[#errors + 1] =
-				string.format("%s: expected a finite non-negative integer, got %s", path, vim.inspect(value))
+			local bounds = {}
+			if spec.min ~= nil then
+				bounds[#bounds + 1] = "minimum " .. tostring(spec.min)
+			end
+			if spec.max ~= nil then
+				bounds[#bounds + 1] = "maximum " .. tostring(spec.max)
+			end
+			errors[#errors + 1] = string.format(
+				"%s: expected a finite%s number%s, got %s",
+				path,
+				spec.integer and " integer" or "",
+				#bounds > 0 and " (" .. table.concat(bounds, ", ") .. ")" or "",
+				vim.inspect(value)
+			)
 			return spec.default
 		end
 	end
@@ -439,6 +640,20 @@ function M.get(key, default)
 	return v
 end
 
+-- Return one canonical plugin configuration as a caller-owned copy. Keeping
+-- this accessor separate makes it impossible for adapters to accidentally
+-- depend on unrelated host-only values such as env or plugins_dir.
+function M.plugin(name, default)
+	if type(name) ~= "string" or name == "" then
+		error("plugin name must be a non-empty string")
+	end
+	local value = M.read().plugins[name]
+	if value == nil then
+		return vim.deepcopy(default)
+	end
+	return vim.deepcopy(value)
+end
+
 function M.reload()
 	cache = nil
 	return M.read()
@@ -522,26 +737,72 @@ local TEMPLATE = [[-- ~/.nvim-local.lua -- per-host Neovim settings (not under v
 -- See lua/config/local_config.lua for the full schema. All fields are optional.
 
 return {
-  theme = {
-    background = "auto", -- auto | light | dark
-    transparent = false,
-    italic_comments = true,
+  plugins = {
+    native_review = {
+      hunk_context = 3,
+      layout = "inline", -- inline | split
+      context = "hunks", -- hunks | full
+      inline_comments = true,
+      panel = { max_width = 200, max_height = 48 },
+    },
+
+    exact_editor = { workspace_retention = "visited" }, -- visited
+    devcontainer_editor = {
+      cli = "devcontainer",
+      lockfile_policy = "preserve", -- lockfile updates require an explicit action
+      ssh_agent = "auto", -- auto | off
+      claim_timeout_ms = 2000,
+      ack_timeout_ms = 5000,
+      max_messages_per_tick = 32,
+    },
+    tab_first = { history = { enabled = true, max_entries = 200, scope = "workspace" } },
+    terminal_lifecycle = {
+      stop_timeout_ms = 5000,
+      buffer_mappings = { close = "q", open_location = "gf" }, -- either may be false
+    },
+    project_python = {
+      test_runner = "pytest", -- pytest | unittest
+      repl = { readiness_timeout_ms = 5000, poll_interval_ms = 50 },
+    },
+    action_palette = { target_default = "exact", unavailable = "hide" },
+    diagram_view = {
+      default_mode = "svg", -- svg | ascii
+      stage_timeout_ms = 30000,
+      max_stage_output_bytes = 16 * 1024 * 1024,
+      cache = { max_age_seconds = 30 * 24 * 60 * 60, max_bytes = 256 * 1024 * 1024 },
+    },
+    log_workbench = { poll_interval_ms = 500, max_lines = 100000, max_bytes = 64 * 1024 * 1024 },
+    repo_scratch = { retention_days = 30, lease_seconds = 300, prune_on_open = true },
+    coverage_workbench = { max_report_bytes = 50 * 1024 * 1024, signs = "all", stale = "hide" }, -- all | covered | missing | none
+    just_workbench = {
+      binary = "just",
+      root_mode = "repo", -- repo | nearest
+      justfile_names = { "justfile", "Justfile", ".justfile" },
+      conflict = "prompt", -- prompt | focus | replace | cancel
+    },
+    clangd_compile_db = {
+      path = "clangd",
+      profile = "full", -- full | light
+      restart_timeout_ms = 5000,
+      max_validation_bytes = 256 * 1024 * 1024,
+    },
+    trusted_workspace = {}, -- security policy is not user-configurable
+    verified_tools = {}, -- concurrency and attestations are not user-configurable
+    treesitter_runtime = {
+      max_bytes = 200 * 1024,
+      reevaluate_debounce_ms = 50,
+      languages = {}, -- e.g. markdown = { max_bytes = 400 * 1024, indent = false }
+    },
+    theme_router = {
+      background = "auto", -- auto | light | dark
+      transparent = false,
+      italic_comments = true,
+      reload_on_focus = true,
+    },
   },
-  -- Override the clangd binary on this host.
-  clangd = { path = "clangd", profile = "full" }, -- full | light
 
   -- Debug UI selected at startup. $NVIM_DAP_UI overrides this value.
   dap = { ui = "dap-ui" }, -- dap-ui | dap-view
-
-  -- Attempt each exact Mason/managed tool pin once on interactive startup.
-  mason = { auto_install = true },
-
-  -- Unchanged lines shown around each native review hunk.
-  review = { hunk_context = 3 },
-
-  -- Safety bounds for incremental log following and rendered-diagram cache.
-  log_watch = { max_lines = 100000, max_bytes = 64 * 1024 * 1024 },
-  diagram_cache = { max_age_seconds = 30 * 24 * 60 * 60, max_bytes = 256 * 1024 * 1024 },
 
   -- Directories prepended to $PATH (expanded).
   path = {
@@ -593,7 +854,7 @@ function M.setup()
 			notify(path .. " already exists (use :NvimConfigInit! to overwrite)")
 			return
 		end
-		local ok, err = pcall(vim.fn.writefile, vim.split(TEMPLATE, "\n", { plain = true }), path)
+		local ok, err = fs.write_binary_atomic(path, TEMPLATE)
 		if not ok then
 			notify("Failed to write " .. path .. ": " .. tostring(err), vim.log.levels.ERROR)
 			return

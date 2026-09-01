@@ -8,7 +8,12 @@ local default_registry
 ---@param opts? table
 ---@return table
 function M.setup(opts)
-	default_registry = registry_module.new(opts)
+	local replacement = registry_module.new(opts)
+	local previous = default_registry
+	default_registry = replacement
+	if previous then
+		previous:teardown()
+	end
 	return M
 end
 
@@ -48,7 +53,30 @@ function M.capture_target()
 end
 
 function M.revalidate_target(value)
-	return target.revalidate(value)
+	return target.revalidate(value, "exact")
+end
+
+function M.effective_config()
+	return default_registry and default_registry:effective_config()
+		or { target_default = "exact", unavailable = "hide" }
+end
+
+function M.status()
+	return default_registry and vim.deepcopy(default_registry:status())
+		or {
+			configured = false,
+			actions = 0,
+			sections = 0,
+			config = M.effective_config(),
+		}
+end
+
+function M.teardown()
+	if default_registry then
+		default_registry:teardown()
+	end
+	default_registry = nil
+	return true
 end
 
 M.new = registry_module.new

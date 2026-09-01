@@ -24,6 +24,21 @@ validates against the newly requested argv. `open` and `replace` still fail clos
 non-mutating canonical dump and `--fmt --check` operations. Host adapters own all
 UI and policy prompts.
 
+Catalogs preserve modern parameter metadata and compute exact minimum/maximum
+argument cardinality, including bounded and variadic parameters. Variadic input
+remains one literal argv value; the plugin never whitespace-splits it. Private
+recipes, aliases, modules, and every descendant of a private module are omitted.
+The catalog and execution both retain the same canonical absolute `just`
+executable. Optional `--one` support is probed only when an invocation is about
+to launch, fails closed on an invalid probe result, and is cached per absolute
+binary for that setup lifetime.
+
 Public API: `setup(opts)`, `catalog(spec, callback)`, `run(catalog, name, values,
-opts)`, `transcript(identity)`, `status(identity)`, and `format(catalog, mode,
-callback)`.
+opts)`, `transcript(identity)`, `status(identity)`, `stop(identity)`, and
+`format(catalog, mode, callback)`. Unknown setup keys are rejected before state
+changes. Because every setup input is an injected adapter, `effective_config()`
+always returns a fresh empty table and setup events carry that safe projection.
+`status()` returns a copied aggregate with `configured`, catalogs, requests,
+capabilities, and callback-free execution summaries; contextual status,
+transcript, and catalog values are also caller-owned. `teardown()`
+deterministically clears all process-local catalogs and executions.

@@ -31,9 +31,19 @@ vim.env.NVIM_DEVCONTAINER = nil
 vim.env.TMUX_PANE = "%7"
 
 local old_repo = package.loaded["config.repo"]
+local old_local_config = package.loaded["config.local_config"]
 package.loaded["config.repo"] = {
 	current_root = function()
 		return root
+	end,
+}
+package.loaded["config.local_config"] = {
+	plugin = function(name, defaults)
+		assert(name == "devcontainer_editor")
+		assert(defaults.cli == "devcontainer" and defaults.lockfile_policy == "preserve")
+		assert(defaults.ssh_agent == "auto" and defaults.claim_timeout_ms == 2000)
+		assert(defaults.ack_timeout_ms == 5000 and defaults.max_messages_per_tick == 32)
+		return vim.deepcopy(defaults)
 	end,
 }
 
@@ -44,6 +54,9 @@ test("host adapter injects plugin callbacks and no config dependency crosses the
 	assert(type(options.state_root) == "function")
 	assert(type(options.open) == "function")
 	assert(type(options.notify) == "function")
+	assert(options.cli == "devcontainer" and options.lockfile_policy == "preserve")
+	assert(options.ssh_agent == "auto" and options.claim_timeout_ms == 2000)
+	assert(options.ack_timeout_ms == 5000 and options.max_messages_per_tick == 32)
 	local plugin_source = table.concat(
 		vim.fn.readfile(repo .. "/local-plugins/devcontainer-editor.nvim/lua/devcontainer_editor/init.lua"),
 		"\n"
@@ -97,6 +110,9 @@ test("recreate and network authorization are explicit launcher argv", function()
 	assert(command:find("--recreate", 1, true) and command:find("--allow-network", 1, true))
 	assert(command:find("--tmux%-pane") and command:find("%%7"))
 	assert(command:find("--claim%-id") and command:find("00000000%-0000%-4000%-8000%-000000000031"))
+	assert(command:find("--cli", 1, true) and command:find("devcontainer", 1, true))
+	assert(command:find("--lockfile%-policy") and command:find("preserve", 1, true))
+	assert(command:find("--ssh%-agent") and command:find("auto", 1, true))
 	assert(not command:find("NVIM_DEVCONTAINER_TOKEN", 1, true))
 	vim.system = old_system
 	devcontainer._core.new_claim_id = old_claim
@@ -160,6 +176,7 @@ test("only final DevContainer commands are registered", function()
 		"DevContainerStatus",
 		"DevContainerLog",
 		"DevContainerHostEditor",
+		"DevContainerDoctor",
 	}) do
 		assert(vim.fn.exists(":" .. name) == 2, "missing command " .. name)
 	end
@@ -176,6 +193,7 @@ test("network denial is exactly the verified-tools offline signal", function()
 end)
 
 package.loaded["config.repo"] = old_repo
+package.loaded["config.local_config"] = old_local_config
 for name, value in pairs(original) do
 	vim.env[name] = value
 end

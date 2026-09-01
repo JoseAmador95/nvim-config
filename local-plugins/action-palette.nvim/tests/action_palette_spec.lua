@@ -32,6 +32,18 @@ end
 
 local action_palette = require("action_palette")
 
+test("lifecycle defaults are copied and rejected setup is non-mutating", function()
+	local defaults = action_palette.effective_config()
+	equal({ target_default = "exact", unavailable = "hide" }, defaults)
+	assert(action_palette.status().configured == false)
+	defaults.target_default = "none"
+	equal("exact", action_palette.effective_config().target_default, "effective config leaked mutable state")
+	local before = action_palette.status()
+	local ok, err = pcall(action_palette.setup, { unknown = true })
+	assert(not ok and tostring(err):find("unknown option", 1, true), tostring(err))
+	equal(before, action_palette.status(), "rejected setup mutated the default registry")
+end)
+
 local function catalog(when)
 	return {
 		{
@@ -112,6 +124,91 @@ test("availability is filtered and revalidated immediately before execution", fu
 	assert(not ok and err:find("no longer available", 1, true))
 	equal(0, executions, "unavailable action executed")
 	assert(not run(), "consumed unavailable action ran twice")
+end)
+
+test("structured availability exposes reasons and callback errors only when configured", function()
+	local registry = action_palette.new({ unavailable = "show" })
+	local current = "reason"
+	registry:register_catalog(catalog(), {
+		supports = function()
+			return true
+		end,
+		available = function(id)
+			if id ~= "sample.run" then
+				return true
+			end
+			if current == "error" then
+				error("availability exploded")
+			end
+			return { available = false, reason = "needs a project" }
+		end,
+		execute = function() end,
+	})
+	local context = { target = action_palette.capture_target() }
+	local shown = registry:sections(context, "palette")[1].items[1]
+	equal({ available = false, reason = "needs a project" }, shown.availability)
+	local availability = registry:is_available("sample.run", context)
+	availability.available = true
+	assert(registry:is_available("sample.run", context).available == false, "availability leaked mutable state")
+
+	current = "error"
+	local failed = registry:is_available("sample.run", context)
+	assert(not failed.available and failed.error:find("availability exploded", 1, true), vim.inspect(failed))
+	local hidden = action_palette.new({ unavailable = "hide" })
+	hidden:register_catalog(
+		catalog(function()
+			return { available = false, reason = "hidden" }
+		end),
+		{
+			supports = function()
+				return true
+			end,
+			execute = function() end,
+		}
+	)
+	equal(1, #hidden:sections(context, "palette")[1].items, "default hide exposed unavailable action")
+end)
+
+test("action target policies exact, buffer, window, and none are enforced independently", function()
+	local executions = {}
+	local registry = action_palette.new()
+	local sections = catalog()
+	sections[1].items = {
+		{ id = "sample.exact", label = "Exact", target = "exact" },
+		{ id = "sample.buffer", label = "Buffer", target = "buffer" },
+		{ id = "sample.window", label = "Window", target = "window" },
+		{ id = "sample.none", label = "None", target = "none" },
+	}
+	registry:register_catalog(sections, {
+		supports = function()
+			return true
+		end,
+		execute = function(id, invocation)
+			executions[#executions + 1] = { id = id, target = invocation.target }
+		end,
+	})
+
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_set_current_buf(buf)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two" })
+	local target = action_palette.capture_target()
+	local exact = registry:bind("sample.exact", { target = target }, "palette")
+	local buffer = registry:bind("sample.buffer", { target = target }, "palette")
+	local window = registry:bind("sample.window", { target = target }, "palette")
+	local none = registry:bind("sample.none", {}, "palette")
+	vim.api.nvim_win_set_cursor(0, { 2, 0 })
+	vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "changed" })
+	assert(not exact(), "exact target accepted changed cursor/content")
+	assert(buffer(), "buffer target rejected its still-live buffer")
+	assert(window(), "window target rejected its still-bound window")
+	assert(none(), "none target required editor state")
+	equal(
+		{ "sample.buffer", "sample.window", "sample.none" },
+		vim.tbl_map(function(item)
+			return item.id
+		end, executions)
+	)
+	assert(executions[3].target == nil, "none target leaked a captured target")
 end)
 
 test("confirmation is intrinsic and a bound callback executes at most once", function()
@@ -211,6 +308,33 @@ test("plugin setup creates no global commands, mappings, or config imports", fun
 	for name in pairs(package.loaded) do
 		assert(not name:match("^config%."), "plugin imported host module " .. name)
 	end
+end)
+
+test("repeated setup replaces state and teardown is deterministic", function()
+	action_palette.setup({ target_default = "buffer", unavailable = "show" })
+	action_palette.register_catalog(catalog(), {
+		supports = function()
+			return true
+		end,
+		execute = function() end,
+	})
+	local before = action_palette.status()
+	local ok = pcall(action_palette.setup, { target_default = "bad" })
+	assert(not ok)
+	equal(before, action_palette.status(), "invalid repeated setup changed registry state")
+	ok = pcall(action_palette.setup, false)
+	assert(not ok, "false setup options were accepted")
+	equal(before, action_palette.status(), "false setup options changed registry state")
+	ok = pcall(action_palette.setup, { target = {} })
+	assert(not ok, "incomplete target adapter was accepted")
+	equal(before, action_palette.status(), "incomplete target adapter changed registry state")
+	action_palette.setup({ target_default = "window" })
+	equal(0, action_palette.status().actions, "repeated setup retained old actions")
+	equal("window", action_palette.effective_config().target_default)
+	assert(action_palette.teardown())
+	assert(action_palette.teardown())
+	assert(action_palette.status().configured == false)
+	equal({ target_default = "exact", unavailable = "hide" }, action_palette.effective_config())
 end)
 
 if #failures > 0 then

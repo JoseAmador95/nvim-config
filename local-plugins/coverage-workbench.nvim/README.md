@@ -17,3 +17,16 @@ accepted. Symlink swaps and concurrent replacement therefore fail closed. A
 successful replacement report immediately removes this plugin's signs for files
 it no longer contains; a rejected refresh preserves the previous registry
 snapshot and its signs.
+
+Every imported file entry is bound to the source descriptor identity and a
+content digest at report-load time. A modified buffer, in-place source edit, or
+path replacement makes that entry stale. The default `stale = "hide"` removes
+owned signs immediately, and a failed refresh re-renders the preserved report
+without ever restoring stale signs. The default report ceiling is 50 MiB and
+`signs = "all"`; covered-only, missing-only, and no-sign modes are also
+available.
+
+`setup()` rejects unknown options before changing configuration. Repeated setup
+replaces its autocmd group and adapters deterministically. `effective_config()`,
+`status()`, reports, summaries, and events are copied; `teardown()` clears owned
+signs and is safe to repeat.

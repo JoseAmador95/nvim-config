@@ -143,60 +143,76 @@ test("sources are deterministic, restricted, provenance-aware, and copy-safe", f
 		id = "host-z",
 		layer = "host",
 		priority = 10,
-		value = { clangd = { path = "host-z" }, theme = { background = "dark" } },
+		value = { plugins = { clangd_compile_db = { path = "host-z" } }, theme = { background = "dark" } },
 	}))
 	assert(trusted_workspace.register_source({
 		id = "host-a",
 		layer = "host",
 		priority = 20,
-		value = { clangd = { path = "host-a", profile = "full" } },
+		value = { plugins = { clangd_compile_db = { path = "host-a", profile = "full" } } },
 	}))
+	local rejected, rejected_err = trusted_workspace.register_source({
+		id = "old-project",
+		layer = "project",
+		repo = "/repo",
+		fingerprint = "old-schema",
+		value = { review = { hunk_context = 7 } },
+	})
+	assert(not rejected and rejected_err:find("unknown option: review", 1, true), "old project schema was not rejected")
 	assert(trusted_workspace.register_source({
 		id = "project",
 		layer = "project",
 		repo = "/repo",
 		fingerprint = "fingerprint-1",
 		value = {
-			clangd = { path = "project-clangd", profile = "light", extra = "discard" },
-			review = { hunk_context = 7 },
-			logs = { max_lines = 42 },
-			theme = { background = "light" },
-			dap = { ui = "dap-view" },
-			mason = { auto_install = false },
-			path = { "/hostile" },
-			env = { HOSTILE = "yes" },
-			plugins_dir = { "/hostile" },
-			diagram_cache = { max_bytes = 1 },
+			plugins = {
+				clangd_compile_db = { path = "project-clangd", profile = "light" },
+				native_review = { hunk_context = 7 },
+				log_workbench = { max_lines = 42 },
+			},
 		},
 	}))
 
 	local pending = assert(trusted_workspace.status())
 	equal("pending", pending.mode, "unapproved project source was not pending")
-	equal("host-a", trusted_workspace.snapshot().value.clangd.path, "pending project value became effective")
-	equal("project-clangd", pending.candidate.value.clangd.path, "candidate omitted an allowed project field")
-	equal(42, pending.candidate.value.log_watch.max_lines, "logs alias was not normalized")
+	equal(
+		"host-a",
+		trusted_workspace.snapshot().value.plugins.clangd_compile_db.path,
+		"pending project value became effective"
+	)
+	equal(
+		"project-clangd",
+		pending.candidate.value.plugins.clangd_compile_db.path,
+		"candidate omitted an allowed project field"
+	)
+	equal(42, pending.candidate.value.plugins.log_workbench.max_lines, "bounded log setting was omitted")
 	equal(
 		{ id = "project", layer = "project" },
-		pending.candidate.validity.provenance["clangd.path"],
+		pending.candidate.validity.provenance["plugins.clangd_compile_db.path"],
 		"candidate provenance is incorrect"
 	)
-	assert(find_error(pending.candidate.validity.errors, "theme: project field is not allowed"))
-	assert(find_error(pending.candidate.validity.errors, "clangd.extra: project field is not allowed"))
 	assert(#trusted_workspace.diff() > 0, "pending candidate has no diff")
 
 	assert(trusted_workspace.approve("/repo", "project", "fingerprint-1"))
 	local snapshot = trusted_workspace.snapshot()
-	equal("project-clangd", snapshot.value.clangd.path, "approved project path did not override the host")
+	equal(
+		"project-clangd",
+		snapshot.value.plugins.clangd_compile_db.path,
+		"approved project path did not override the host"
+	)
 	equal("dark", snapshot.value.theme.background, "forbidden project theme overrode the host")
 	assert(snapshot.value.dap == nil, "forbidden project DAP field became effective")
 	assert(snapshot.value.env == nil, "forbidden project environment became effective")
-	assert(find_error(snapshot.validity.errors, "plugins_dir: project field is not allowed"))
 
-	snapshot.value.clangd.path = "mutated"
-	snapshot.validity.provenance["clangd.path"].id = "mutated"
+	snapshot.value.plugins.clangd_compile_db.path = "mutated"
+	snapshot.validity.provenance["plugins.clangd_compile_db.path"].id = "mutated"
 	local independent = trusted_workspace.snapshot()
-	equal("project-clangd", independent.value.clangd.path, "snapshot value shares nested state")
-	equal("project", independent.validity.provenance["clangd.path"].id, "snapshot validity shares nested state")
+	equal("project-clangd", independent.value.plugins.clangd_compile_db.path, "snapshot value shares nested state")
+	equal(
+		"project",
+		independent.validity.provenance["plugins.clangd_compile_db.path"].id,
+		"snapshot validity shares nested state"
+	)
 
 	equal("rwx------", vim.fn.getfperm(root), "state root is not owner-only")
 	equal("rw-------", vim.fn.getfperm(vim.fs.joinpath(root, "trusted-workspace.json")), "state file is not owner-only")
@@ -206,43 +222,59 @@ end)
 test("changed fingerprints retain the last-known-good snapshot until approval", function()
 	local parent = temp_dir()
 	setup(state_root(parent))
-	assert(trusted_workspace.register_source({ id = "host", layer = "host", value = { clangd = { path = "host" } } }))
+	assert(trusted_workspace.register_source({
+		id = "host",
+		layer = "host",
+		value = { plugins = { clangd_compile_db = { path = "host" } } },
+	}))
 	assert(trusted_workspace.register_source({
 		id = "project",
 		layer = "project",
 		repo = "/repo",
 		fingerprint = "one",
-		value = { clangd = { path = "one" } },
+		value = { plugins = { clangd_compile_db = { path = "one" } } },
 	}))
 	assert(trusted_workspace.approve("/repo", "project", "one"))
-	equal("one", trusted_workspace.snapshot().value.clangd.path, "initial approval did not apply")
+	equal("one", trusted_workspace.snapshot().value.plugins.clangd_compile_db.path, "initial approval did not apply")
 
 	assert(trusted_workspace.register_source({
 		id = "project",
 		layer = "project",
 		repo = "/repo",
 		fingerprint = "two",
-		value = { clangd = { path = "two" } },
+		value = { plugins = { clangd_compile_db = { path = "two" } } },
 	}))
 	local pending = trusted_workspace.status()
 	equal("pending", pending.mode, "changed fingerprint was not pending")
-	equal("two", pending.candidate.value.clangd.path, "changed candidate is stale")
-	equal("one", trusted_workspace.snapshot().value.clangd.path, "pending source displaced last-known-good")
-	equal("one", pending.last_known_good.value.clangd.path, "last-known-good changed before approval")
+	equal("two", pending.candidate.value.plugins.clangd_compile_db.path, "changed candidate is stale")
+	equal(
+		"one",
+		trusted_workspace.snapshot().value.plugins.clangd_compile_db.path,
+		"pending source displaced last-known-good"
+	)
+	equal(
+		"one",
+		pending.last_known_good.value.plugins.clangd_compile_db.path,
+		"last-known-good changed before approval"
+	)
 	assert(trusted_workspace.register_source({
 		id = "host",
 		layer = "host",
-		value = { clangd = { path = "host-updated", profile = "full" } },
+		value = { plugins = { clangd_compile_db = { path = "host-updated", profile = "full" } } },
 	}))
 	local mixed = trusted_workspace.snapshot()
-	equal("one", mixed.value.clangd.path, "pending source lost its previously approved value")
-	equal("full", mixed.value.clangd.profile, "approved host update was blocked by a pending source")
+	equal("one", mixed.value.plugins.clangd_compile_db.path, "pending source lost its previously approved value")
+	equal("full", mixed.value.plugins.clangd_compile_db.profile, "approved host update was blocked by a pending source")
 	assert(trusted_workspace.approve("/repo", "project", "two"))
-	equal("two", trusted_workspace.snapshot().value.clangd.path, "changed fingerprint approval did not apply")
+	equal(
+		"two",
+		trusted_workspace.snapshot().value.plugins.clangd_compile_db.path,
+		"changed fingerprint approval did not apply"
+	)
 	vim.fn.delete(parent, "rf")
 end)
 
-test("appliers receive effective validity while invalid pending data stays candidate-only", function()
+test("appliers receive effective validity while pending data stays candidate-only", function()
 	local parent = temp_dir()
 	setup(state_root(parent))
 	local applied
@@ -259,27 +291,44 @@ test("appliers receive effective validity while invalid pending data stays candi
 			return true
 		end,
 	}))
-	assert(trusted_workspace.register_source({ id = "host", layer = "host", value = { review = { value = 1 } } }))
+	assert(trusted_workspace.register_source({
+		id = "host",
+		layer = "host",
+		value = { plugins = { native_review = { hunk_context = 1 } } },
+	}))
 	assert(trusted_workspace.register_source({
 		id = "project",
 		layer = "project",
 		repo = "/repo",
-		fingerprint = "pending-invalid",
-		value = { theme = { background = "hostile" }, review = { project = true } },
+		fingerprint = "pending",
+		value = { plugins = { native_review = { hunk_context = 5 } } },
 	}))
 	local status = trusted_workspace.status()
-	assert(not status.candidate.validity.valid, "invalid pending candidate was reported valid")
+	assert(not status.candidate.validity.valid, "pending candidate was reported effective")
 	assert(#status.candidate.validity.pending == 1, "candidate omitted pending approval")
-	assert(find_error(status.candidate.validity.errors, "theme: project field is not allowed"))
+	equal({}, status.candidate.validity.errors, "valid pending data produced a schema error")
+	local before_generation = status.generation
+	local rejected, rejected_err = trusted_workspace.register_source({
+		id = "project",
+		layer = "project",
+		repo = "/repo",
+		fingerprint = "rejected",
+		value = { theme = { background = "hostile" } },
+	})
+	assert(not rejected and rejected_err:find("unknown option: theme", 1, true), "old project root was not rejected")
+	equal(before_generation, trusted_workspace.status().generation, "rejected project source mutated its scope")
 
 	applied = nil
-	assert(trusted_workspace.register_source({ id = "host", layer = "host", value = { review = { value = 2 } } }))
+	assert(trusted_workspace.register_source({
+		id = "host",
+		layer = "host",
+		value = { plugins = { native_review = { hunk_context = 2 } } },
+	}))
 	assert(applied, "safe host update did not reach the applier")
 	assert(applied.validity.valid, "candidate errors contaminated the effective snapshot")
 	equal({}, applied.validity.errors, "effective snapshot retained candidate-only errors")
 	equal({}, applied.validity.pending, "effective snapshot retained candidate-only pending state")
-	equal(2, applied.value.review.value, "safe host update did not apply")
-	assert(applied.value.review.project == nil, "pending project value became effective")
+	equal(2, applied.value.plugins.native_review.hunk_context, "safe host update did not apply")
 	local snapshot = trusted_workspace.snapshot()
 	assert(snapshot.validity.valid and #snapshot.validity.errors == 0 and #snapshot.validity.pending == 0)
 	vim.fn.delete(parent, "rf")
@@ -1391,10 +1440,12 @@ test("appliers prepare first and roll back in reverse without advancing LKG", fu
 	equal(1, status.last_known_good.value.version, "failed transaction advanced last-known-good")
 	equal(2, status.candidate.value.version, "failed candidate was discarded")
 	assert(status.apply_error:find("simulated failure", 1, true), "status omitted apply failure")
+	fail_second = false
 	vim.fn.delete(parent, "rf")
 end)
 
 test("corrupt and symlink state fail closed without overwriting targets", function()
+	local prior_config = trusted_workspace.effective_config()
 	local corrupt_parent = temp_dir()
 	local corrupt_root = state_root(corrupt_parent)
 	assert(vim.fn.mkdir(corrupt_root, "p", 448) == 1)
@@ -1402,15 +1453,7 @@ test("corrupt and symlink state fail closed without overwriting targets", functi
 	assert(vim.fn.writefile({ "{broken" }, corrupt_path) == 0)
 	local ok, err = trusted_workspace.setup({ state_root = corrupt_root, reset = true })
 	assert(not ok and err:find("corrupt", 1, true), "corrupt JSON did not fail closed")
-	assert(trusted_workspace.register_source({
-		id = "project",
-		layer = "project",
-		repo = "/repo",
-		fingerprint = "fingerprint",
-		value = {},
-	}))
-	local approved, approval_err = trusted_workspace.approve("/repo", "project", "fingerprint")
-	assert(not approved and approval_err:find("corrupt", 1, true), "corrupt state accepted an approval")
+	equal(prior_config, trusted_workspace.effective_config(), "corrupt candidate replaced the prior registry")
 	equal("{broken", vim.fn.readfile(corrupt_path)[1], "corrupt state was overwritten")
 
 	local symlink_parent = temp_dir()
@@ -1421,8 +1464,7 @@ test("corrupt and symlink state fail closed without overwriting targets", functi
 	assert(vim.uv.fs_symlink(outside, vim.fs.joinpath(symlink_root, "trusted-workspace.json")))
 	ok, err = trusted_workspace.setup({ state_root = symlink_root, reset = true })
 	assert(not ok and err:find("symlinks are rejected", 1, true), "symlink state file was accepted")
-	local authorized = trusted_workspace.authorize("/repo", "test")
-	assert(not authorized, "symlink state accepted a grant")
+	equal(prior_config, trusted_workspace.effective_config(), "symlink candidate replaced the prior registry")
 	equal("outside", vim.fn.readfile(outside)[1], "symlink target was overwritten")
 
 	local root_link_parent = temp_dir()
@@ -1447,14 +1489,211 @@ test("host-only mode never enables or waits for project sources", function()
 		layer = "project",
 		repo = "/repo",
 		fingerprint = "fingerprint",
-		value = { review = { value = "project" } },
+		value = { plugins = { native_review = { hunk_context = 9 } } },
 	}))
 	local status = trusted_workspace.status()
 	equal("host-only", status.profile, "host-only profile was not reported")
 	equal("applied", status.mode, "disabled project source made host-only mode pending")
 	equal(0, #status.pending, "host-only mode exposed a project approval")
 	equal(false, status.sources[2].enabled, "project source was enabled in host-only mode")
-	assert(trusted_workspace.snapshot().value.review == nil, "host-only mode applied a project field")
+	local value = trusted_workspace.snapshot().value
+	assert(not value.plugins or value.plugins.native_review == nil, "host-only mode applied a project field")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("WorkspaceKey scopes isolate sources and project host values into every scope", function()
+	local parent = temp_dir()
+	setup(state_root(parent))
+	local host_workspace = { runtime = "host", root = "/repo", repo_identity = "logical-repo" }
+	local container_workspace = {
+		runtime = "container",
+		root = "/workspaces/repo",
+		repo_identity = "logical-repo",
+	}
+	assert(trusted_workspace.register_source({
+		id = "host",
+		layer = "host",
+		value = {
+			plugins = {
+				clangd_compile_db = { profile = "full" },
+				log_workbench = { max_lines = 1000, max_bytes = 10000 },
+			},
+		},
+	}))
+	assert(trusted_workspace.register_source({
+		id = "project",
+		layer = "project",
+		workspace = host_workspace,
+		fingerprint = "same",
+		value = {
+			plugins = {
+				clangd_compile_db = { path = "/repo/build" },
+				log_workbench = { max_lines = 2000, max_bytes = 5000 },
+			},
+		},
+	}))
+	local host_pending = assert(trusted_workspace.status(host_workspace))
+	local host_generation = host_pending.generation
+	assert(trusted_workspace.register_source({
+		id = "project",
+		layer = "project",
+		workspace = container_workspace,
+		fingerprint = "same",
+		value = {
+			plugins = {
+				clangd_compile_db = { path = "/workspaces/repo/build" },
+				log_workbench = { max_lines = 500, max_bytes = 20000 },
+			},
+		},
+	}))
+	equal(
+		host_generation,
+		trusted_workspace.status(host_workspace).generation,
+		"another scope advanced this generation"
+	)
+	assert(trusted_workspace.approve({
+		workspace = host_workspace,
+		source = "project",
+		fingerprint = "same",
+	}))
+	assert(trusted_workspace.approve({
+		workspace = container_workspace,
+		source = "project",
+		fingerprint = "same",
+	}))
+	local host_snapshot = assert(trusted_workspace.snapshot(host_workspace))
+	local container_snapshot = assert(trusted_workspace.snapshot(container_workspace))
+	equal("/repo/build", host_snapshot.value.plugins.clangd_compile_db.path, "host project path crossed scopes")
+	equal(
+		"/workspaces/repo/build",
+		container_snapshot.value.plugins.clangd_compile_db.path,
+		"container project path crossed scopes"
+	)
+	equal("full", host_snapshot.value.plugins.clangd_compile_db.profile, "host source was not projected")
+	equal("full", container_snapshot.value.plugins.clangd_compile_db.profile, "host source missed a scope")
+	equal(1000, host_snapshot.value.plugins.log_workbench.max_lines, "project expanded a host line limit")
+	equal(500, container_snapshot.value.plugins.log_workbench.max_lines, "project reduction did not apply")
+	equal(5000, host_snapshot.value.plugins.log_workbench.max_bytes, "project byte reduction did not apply")
+	equal(10000, container_snapshot.value.plugins.log_workbench.max_bytes, "project expanded a host byte limit")
+	equal(host_workspace, trusted_workspace.status(host_workspace).sources[2].workspace, "source lost its WorkspaceKey")
+
+	host_snapshot.value.plugins.clangd_compile_db.path = "mutated"
+	equal(
+		"/repo/build",
+		trusted_workspace.snapshot(host_workspace).value.plugins.clangd_compile_db.path,
+		"workspace snapshot shares state"
+	)
+	local approvals = assert(trusted_workspace.approvals(host_workspace))
+	equal("same", approvals.project, "approval was not reported")
+	approvals.project = "mutated"
+	equal("same", trusted_workspace.approvals(host_workspace).project, "approval status shares state")
+	local ambiguous, ambiguous_err = trusted_workspace.status("logical-repo")
+	assert(not ambiguous and ambiguous_err:find("ambiguous", 1, true), "ambiguous legacy selector chose a scope")
+	assert(trusted_workspace.revoke_approval(host_workspace, "project"))
+	equal("pending", trusted_workspace.status(host_workspace).mode, "revoked host approval stayed active")
+	equal("pending", trusted_workspace.status(container_workspace).mode, "shared logical approval stayed active")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("multi-scope setup rolls back external effects before restoring prior state", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	local workspace_a = { runtime = "host", root = "/repo/a", repo_identity = "repo-a" }
+	local workspace_b = { runtime = "host", root = "/repo/b", repo_identity = "repo-b" }
+	local fail_second = false
+	local attempts = 0
+	local external_effects = 0
+	local events = {}
+	assert(trusted_workspace.register_applier({
+		id = "global-transaction",
+		prepare = function()
+			return "token"
+		end,
+		apply = function()
+			attempts = attempts + 1
+			events[#events + 1] = "apply:" .. attempts
+			if fail_second and attempts == 2 then
+				return false, "scope two failed"
+			end
+			external_effects = external_effects + 1
+			return true
+		end,
+		rollback = function()
+			events[#events + 1] = "rollback"
+			external_effects = external_effects - 1
+			return true
+		end,
+	}))
+	for index, workspace in ipairs({ workspace_a, workspace_b }) do
+		assert(trusted_workspace.register_source({
+			id = "project",
+			layer = "project",
+			workspace = workspace,
+			fingerprint = "fingerprint-" .. index,
+			value = { plugins = { native_review = { hunk_context = index + 2 } } },
+		}))
+		assert(trusted_workspace.approve({
+			workspace = workspace,
+			source = "project",
+			fingerprint = "fingerprint-" .. index,
+		}))
+	end
+	local before_a = trusted_workspace.snapshot(workspace_a)
+	local before_b = trusted_workspace.snapshot(workspace_b)
+	attempts = 0
+	external_effects = 0
+	events = {}
+	fail_second = true
+	local configured, err = trusted_workspace.setup({ state_root = root, mode = "host-only" })
+	assert(not configured and tostring(err):find("scope two failed", 1, true), tostring(err))
+	equal({ "apply:1", "apply:2", "rollback" }, events, "multi-scope rollback order is incorrect")
+	equal(0, external_effects, "failed setup retained an external effect from an earlier scope")
+	equal({ state_root = root, mode = "full" }, trusted_workspace.effective_config(), "failed setup published mode")
+	equal(before_a, trusted_workspace.snapshot(workspace_a), "failed setup changed scope A")
+	equal(before_b, trusted_workspace.snapshot(workspace_b), "failed setup changed scope B")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("setup contracts are transactional, copied, repeatable, and callback-isolated", function()
+	trusted_workspace.teardown()
+	equal(false, trusted_workspace.status().configured, "pre-setup status was unavailable")
+	equal({ mode = "full" }, trusted_workspace.effective_config(), "pre-setup config defaults are unavailable")
+	local parent = temp_dir()
+	local root = state_root(parent)
+	assert(trusted_workspace.setup({
+		state_root = root,
+		reset = true,
+		on_state_change = function(event)
+			event.kind = "mutated"
+			error("observer failure")
+		end,
+	}))
+	local config = trusted_workspace.effective_config()
+	local generation = trusted_workspace.status().generation
+	config.mode = "mutated"
+	equal("full", trusted_workspace.effective_config().mode, "effective config shares state")
+	local rejected, rejected_err = trusted_workspace.setup({ state_root = root, injected = true })
+	assert(not rejected and rejected_err:find("unknown option: injected", 1, true), "unknown setup option was accepted")
+	equal(generation, trusted_workspace.status().generation, "rejected setup mutated generation")
+	assert(trusted_workspace.setup({ state_root = root }))
+	equal(generation, trusted_workspace.status().generation, "repeat setup was not idempotent")
+	assert(trusted_workspace.register_source({ id = "host", layer = "host", value = { safe = true } }))
+	equal(true, trusted_workspace.snapshot().value.safe, "observer failure escaped into state mutation")
+	local corrupt_parent = temp_dir()
+	local corrupt_root = state_root(corrupt_parent)
+	assert(vim.fn.mkdir(corrupt_root, "p", 448) == 1)
+	local corrupt_path = vim.fs.joinpath(corrupt_root, "trusted-workspace.json")
+	assert(vim.fn.writefile({ "{broken" }, corrupt_path) == 0)
+	local failed, failed_err = trusted_workspace.setup({ state_root = corrupt_root, reset = true, mode = "host-only" })
+	assert(not failed and failed_err:find("corrupt", 1, true), "corrupt candidate setup was accepted")
+	equal({ state_root = root, mode = "full" }, trusted_workspace.effective_config(), "failed setup replaced config")
+	equal(true, trusted_workspace.snapshot().value.safe, "failed setup discarded the prior source")
+	equal(true, trusted_workspace.status().configured, "failed setup discarded the prior registry")
+	assert(trusted_workspace.teardown())
+	assert(trusted_workspace.teardown())
+	equal(false, trusted_workspace.status().configured, "teardown did not reset status")
+	vim.fn.delete(corrupt_parent, "rf")
 	vim.fn.delete(parent, "rf")
 end)
 

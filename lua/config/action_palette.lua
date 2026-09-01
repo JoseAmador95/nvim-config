@@ -1,7 +1,15 @@
 local actions = require("config.menu.actions")
 local catalog = require("config.menu.catalog")
+local local_config = require("config.local_config")
+
+local configured = local_config.plugin("action_palette", {
+	target_default = "exact",
+	unavailable = "hide",
+})
 
 local palette = require("action_palette").setup({
+	target_default = configured.target_default,
+	unavailable = configured.unavailable,
 	confirm = function(prompt, callback)
 		vim.ui.select({ "Cancel", "Continue" }, { prompt = prompt }, function(choice)
 			callback(choice == "Continue")

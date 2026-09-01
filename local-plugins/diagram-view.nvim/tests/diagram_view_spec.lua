@@ -6,6 +6,7 @@ vim.opt.runtimepath:prepend(plugin)
 package.path = table.concat({ plugin .. "/lua/?.lua", plugin .. "/lua/?/init.lua", package.path }, ";")
 
 local diagram = require("diagram_view")
+local cache = require("diagram_view.cache")
 local failures = {}
 local count = 0
 local temporary = {}
@@ -43,16 +44,38 @@ local function setup(opts)
 	opts = opts or {}
 	local ok, err = diagram.setup({
 		cache_root = opts.cache_root or cache_root(),
+		default_mode = opts.default_mode,
+		stage_timeout_ms = opts.stage_timeout_ms,
+		max_stage_output_bytes = opts.max_stage_output_bytes,
+		cache = opts.cache,
 		spawn = opts.spawn,
 		schedule = opts.schedule or function(callback)
 			callback()
 		end,
+		defer = opts.defer,
 		plantuml_policy = opts.plantuml_policy,
 		notify = opts.notify,
 		event = opts.event,
 	})
 	assert(ok, err)
 end
+
+test("lifecycle defaults are copied and rejected setup is non-mutating", function()
+	local defaults = diagram.effective_config()
+	equal({
+		default_mode = "svg",
+		stage_timeout_ms = 30000,
+		max_stage_output_bytes = 16 * 1024 * 1024,
+		cache = { max_age_seconds = 30 * 24 * 60 * 60, max_bytes = 256 * 1024 * 1024 },
+	}, defaults)
+	assert(diagram.status().configured == false)
+	defaults.cache.max_bytes = 1
+	equal(256 * 1024 * 1024, diagram.effective_config().cache.max_bytes, "effective config leaked state")
+	local before = diagram.status()
+	local ok, err = diagram.setup({ unknown = true })
+	assert(not ok and err:find("unknown option", 1, true), err)
+	equal(before, diagram.status(), "rejected setup mutated state")
+end)
 
 local function renderer(plantuml)
 	assert(diagram.register_renderer("test", {
@@ -204,6 +227,65 @@ test("cancellation kills active work and ignores a late callback", function()
 	equal({}, diagram.status().sessions)
 end)
 
+test("stage timeout kills work and late completion cannot cache or present", function()
+	local callback
+	local timeout
+	local killed = 0
+	local log = {}
+	local root = cache_root()
+	setup({
+		cache_root = root,
+		stage_timeout_ms = 7,
+		defer = function(done, milliseconds)
+			equal(7, milliseconds, "configured timeout was not used")
+			timeout = done
+			return {
+				stop = function() end,
+				is_closing = function()
+					return false
+				end,
+				close = function() end,
+			}
+		end,
+		spawn = function(_, _, done)
+			callback = done
+			return {
+				kill = function()
+					killed = killed + 1
+				end,
+			}
+		end,
+	})
+	renderer(false)
+	presenter(log)
+	local session = assert(diagram.open({ renderer = "test", presenter = "test", kind = "mermaid", source = "late" }))
+	assert(timeout, "timeout callback was not scheduled")
+	timeout()
+	equal(1, killed, "timed out renderer was not killed")
+	equal("error", session:status().state)
+	assert(session:status().error:find("7 ms", 1, true), session:status().error)
+	callback({ code = 0, stdout = "late output", stderr = "" })
+	assert(log.delivered == nil, "late output reached the presenter")
+	equal({}, vim.fn.glob(root .. "/*", false, true), "late output entered the cache")
+end)
+
+test("combined stdout and stderr obey the per-stage output ceiling", function()
+	local log = {}
+	setup({
+		max_stage_output_bytes = 5,
+		spawn = function(_, _, callback)
+			callback({ code = 0, stdout = "123", stderr = "456" })
+			return { kill = function() end }
+		end,
+	})
+	renderer(false)
+	presenter(log)
+	local session = assert(diagram.open({ renderer = "test", presenter = "test", kind = "mermaid", source = "large" }))
+	equal("error", session:status().state)
+	assert(log.error:find("exceeds 5 bytes", 1, true), log.error)
+	assert(log.delivered == nil)
+end)
+
 test("cache is private, reused, and rejects a symlink root", function()
 	local root = cache_root()
 	local runs = 0
@@ -264,6 +346,87 @@ test("cache is private, reused, and rejects a symlink root", function()
 	assert(symlink_log.error:find("real directory", 1, true), symlink_log.error)
 end)
 
+test("conditional cache cleanup never removes a same-key fresh publication", function()
+	local root = cache_root()
+	assert(cache.setup({ root = root, max_age_seconds = 1, max_bytes = 1024 }))
+	local path = assert(cache.write("same-key", "txt", "stale"))
+	local data, read_err, invalid_path, identity = cache.read("same-key", "txt", function()
+		return false
+	end)
+	assert(data == nil and read_err and invalid_path == path and identity, "invalid cache identity was not returned")
+	local published = false
+	cache._set_test_hook(function(event)
+		if event == "after_cleanup_reserve" and not published then
+			published = true
+			assert(cache.write("same-key", "txt", "fresh"))
+		end
+	end)
+	assert(cache.remove(path, identity))
+	cache._set_test_hook(nil)
+	equal("fresh", assert(cache.read("same-key", "txt")), "invalid-hit cleanup removed the fresh publication")
+
+	local stale_path = assert(cache.write("prune-key", "txt", "old"))
+	assert(vim.uv.fs_utime(stale_path, 1, 1))
+	published = false
+	cache._set_test_hook(function(event)
+		if event == "after_cleanup_reserve" and not published then
+			published = true
+			assert(cache.write("prune-key", "txt", "new"))
+		end
+	end)
+	assert(cache.prune())
+	cache._set_test_hook(nil)
+	equal("new", assert(cache.read("prune-key", "txt")), "prune removed the fresh same-key publication")
+end)
+
+test("failed process or presenter shutdown preserves session authority and rejects reconfiguration", function()
+	local kill_fails = true
+	local close_fails = true
+	local root = cache_root()
+	setup({
+		cache_root = root,
+		spawn = function()
+			return {
+				kill = function()
+					if kill_fails then
+						error("fixture kill failure")
+					end
+					return true
+				end,
+			}
+		end,
+	})
+	renderer(false)
+	assert(diagram.register_presenter("fragile", {
+		open = function()
+			return {}
+		end,
+		deliver = function() end,
+		close = function()
+			if close_fails then
+				error("fixture close failure")
+			end
+			return true
+		end,
+	}))
+	local session = assert(diagram.open({ renderer = "test", presenter = "fragile", kind = "text", source = "A" }))
+	local before_config = diagram.effective_config()
+	local configured, err = diagram.setup({ cache_root = cache_root() })
+	assert(not configured and tostring(err):find("could not be stopped", 1, true), tostring(err))
+	equal(before_config, diagram.effective_config(), "failed shutdown published candidate configuration")
+	local status = diagram.status()
+	equal(1, #status.sessions, "failed shutdown discarded session authority")
+	equal({ "fragile" }, status.presenters, "failed shutdown reset presenter registry")
+
+	kill_fails = false
+	local cancelled, cancel_err = diagram.cancel(session, "retry")
+	assert(not cancelled and tostring(cancel_err):find("could not be closed", 1, true), tostring(cancel_err))
+	equal(1, #diagram.status().sessions, "presenter failure discarded session authority")
+	close_fails = false
+	assert(diagram.cancel(session, "retry"))
+	equal(0, #diagram.status().sessions, "successful retry retained cancelled session")
+end)
+
 test("presenters are selected by name and renderer errors stay session-local", function()
 	local logs = { first = {}, second = {} }
 	setup({
@@ -281,6 +444,22 @@ test("presenters are selected by name and renderer errors stay session-local", f
 	equal("bad source", logs.second.error)
 	equal("error", session:status().state)
 	equal({ "first", "second" }, diagram.status().presenters)
+end)
+
+test("repeated setup and teardown reset registries deterministically", function()
+	setup({ default_mode = "ascii" })
+	renderer(false)
+	presenter({})
+	local status = diagram.status()
+	status.config.default_mode = "mutated"
+	equal("ascii", diagram.status().config.default_mode, "status leaked config state")
+	setup()
+	equal({}, diagram.status().renderers, "repeated setup retained renderer registrations")
+	equal({}, diagram.status().presenters, "repeated setup retained presenter registrations")
+	assert(diagram.teardown())
+	assert(diagram.teardown())
+	assert(not diagram.status().configured)
+	equal("svg", diagram.effective_config().default_mode)
 end)
 
 for _, path in ipairs(temporary) do

@@ -7,6 +7,7 @@ local M = {}
 local TITLE = "nvim.theme"
 local FALLBACK = "habamax"
 local initialized = false
+local focus_reload_group = "NvimConfigThemeReload"
 
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve theme adapter")
 local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
@@ -33,6 +34,15 @@ local function default_colorscheme()
 	end
 	notify("Versioned theme default is invalid; using " .. FALLBACK, vim.log.levels.WARN)
 	return FALLBACK
+end
+
+local function policy()
+	return require("config.local_config").plugin("theme_router", {
+		background = "auto",
+		transparent = false,
+		italic_comments = true,
+		reload_on_focus = true,
+	})
 end
 
 local function emit(event)
@@ -62,7 +72,7 @@ local function ensure_setup()
 		default = default_colorscheme(),
 		fallback = FALLBACK,
 		notify = notify,
-		event = emit,
+		on_state_change = emit,
 		paint = paint_default,
 		context = function()
 			return { background = vim.o.background }
@@ -114,14 +124,23 @@ function M.save(name)
 end
 
 function M.select(name)
-	if not M.apply(name) then
-		return false
-	end
-	if not M.save(name) then
+	if not ensure_setup() or not router.select(name) then
 		return false
 	end
 	notify("Theme set to " .. name, vim.log.levels.INFO)
 	return true
+end
+
+function M.reload()
+	return ensure_setup() and router.reload() or false
+end
+
+function M.status()
+	return router.status()
+end
+
+function M.effective_config()
+	return router.effective_config()
 end
 
 function M.reset()
@@ -160,6 +179,16 @@ end
 
 function M.setup()
 	ensure_setup()
+	local configured = policy()
+	local group = vim.api.nvim_create_augroup(focus_reload_group, { clear = true })
+	if configured.reload_on_focus ~= false then
+		vim.api.nvim_create_autocmd("FocusGained", {
+			group = group,
+			callback = function()
+				router.reload()
+			end,
+		})
+	end
 	vim.api.nvim_create_user_command("Theme", function(opts)
 		if opts.args ~= "" then
 			M.select(opts.args)

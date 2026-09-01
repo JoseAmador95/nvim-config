@@ -268,9 +268,11 @@ end)
 test("clangd has one argv builder and rejects invalid databases before stop", function()
 	local original_local_config = package.loaded["config.local_config"]
 	package.loaded["config.local_config"] = {
-		get = function(key)
-			assert(key == "clangd")
-			return { path = "/host/bin/clangd-custom" }
+		plugin = function(name, defaults)
+			assert(name == "clangd_compile_db")
+			local configured = vim.deepcopy(defaults)
+			configured.path = "/host/bin/clangd-custom"
+			return configured
 		end,
 	}
 	package.loaded["config.clangd"] = nil

@@ -6,12 +6,59 @@ local ffi = require("ffi")
 
 local uv = vim.uv
 local configured = {}
+local is_configured = false
 local watcher
+local watcher_failures = 0
+local watcher_generation = 0
+local transport_generation = 0
+local transport_status = {
+	generation = 0,
+	state = "idle",
+	processed = 0,
+	succeeded = 0,
+	failed = 0,
+	remaining = 0,
+	records = {},
+}
 local temp_counter = 0
 local test_hook
 
 local MAX_MESSAGE = 64 * 1024
 local MAX_WARNING = 512
+local DEFAULT_ACK_TIMEOUT_MS = 5000
+local DEFAULT_MAX_MESSAGES_PER_TICK = 32
+local DEFAULT_POLL_INTERVAL_MS = 100
+
+local function public_defaults()
+	return {
+		ack_timeout_ms = DEFAULT_ACK_TIMEOUT_MS,
+		claim_timeout_ms = 2000,
+		cli = "devcontainer",
+		lockfile_policy = "preserve",
+		max_messages_per_tick = DEFAULT_MAX_MESSAGES_PER_TICK,
+		poll_interval_ms = DEFAULT_POLL_INTERVAL_MS,
+		ssh_agent = "auto",
+		watch = true,
+	}
+end
+
+local SETUP_KEYS = {
+	ack_timeout_ms = true,
+	claim_timeout_ms = true,
+	cli = true,
+	event = true,
+	launcher = true,
+	lockfile_policy = true,
+	max_messages_per_tick = true,
+	notify = true,
+	open = true,
+	poll_interval_ms = true,
+	spool_root = true,
+	ssh_agent = true,
+	state_root = true,
+	uuid = true,
+	watch = true,
+}
 
 local declared, declare_err = pcall(
 	ffi.cdef,
@@ -140,6 +187,49 @@ local function copy(value)
 	return vim.deepcopy(value)
 end
 
+local function reject_unknown(value, allowed, label)
+	if type(value) ~= "table" then
+		return nil, label .. " must be a table"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" or not allowed[key] then
+			return nil, label .. " contains unknown key: " .. tostring(key)
+		end
+	end
+	return true
+end
+
+local function positive_integer(value, label)
+	if type(value) ~= "number" or value < 1 or value % 1 ~= 0 then
+		return nil, label .. " must be a positive integer"
+	end
+	return value
+end
+
+local function emit(kind, details)
+	if type(configured.event) ~= "function" then
+		return
+	end
+	local event = copy(details or {})
+	event.kind = kind
+	pcall(configured.event, event)
+end
+
+local function publish_transport(state, fields)
+	transport_generation = transport_generation + 1
+	transport_status = vim.tbl_extend("force", {
+		generation = transport_generation,
+		state = state,
+		processed = 0,
+		succeeded = 0,
+		failed = 0,
+		remaining = 0,
+		records = {},
+	}, copy(fields or {}))
+	emit("transport", { status = transport_status })
+	return copy(transport_status)
+end
+
 local function bounded_warning(value, maximum)
 	local detail = tostring(value):gsub("%c", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
 	if #detail > maximum then
@@ -162,6 +252,71 @@ local function fire_test_hook(event, details)
 	end
 	local ok, err = pcall(test_hook, event, vim.deepcopy(details or {}))
 	return ok and true or nil, ok and nil or tostring(err)
+end
+
+local function validate_setup(opts)
+	local known, known_err = reject_unknown(opts, SETUP_KEYS, "devcontainer_editor setup")
+	if not known then
+		return nil, known_err
+	end
+	local candidate = copy(opts)
+	for field, fallback in pairs({
+		cli = "devcontainer",
+		lockfile_policy = "preserve",
+		ssh_agent = "auto",
+		claim_timeout_ms = 2000,
+		ack_timeout_ms = DEFAULT_ACK_TIMEOUT_MS,
+		max_messages_per_tick = DEFAULT_MAX_MESSAGES_PER_TICK,
+		poll_interval_ms = DEFAULT_POLL_INTERVAL_MS,
+	}) do
+		if candidate[field] == nil then
+			candidate[field] = fallback
+		end
+	end
+	for _, field in ipairs({
+		"claim_timeout_ms",
+		"ack_timeout_ms",
+		"max_messages_per_tick",
+		"poll_interval_ms",
+	}) do
+		local _, value_err = positive_integer(candidate[field], "devcontainer_editor " .. field)
+		if value_err then
+			return nil, value_err
+		end
+	end
+	if type(candidate.cli) ~= "string" or candidate.cli == "" or candidate.cli:find("%z") then
+		return nil, "devcontainer_editor cli must be a non-empty string"
+	end
+	if candidate.lockfile_policy ~= "preserve" then
+		return nil, "devcontainer_editor lockfile_policy must be preserve"
+	end
+	if candidate.ssh_agent ~= "auto" and candidate.ssh_agent ~= "off" then
+		return nil, "devcontainer_editor ssh_agent must be auto or off"
+	end
+	if
+		candidate.launcher ~= nil
+		and (type(candidate.launcher) ~= "string" or candidate.launcher == "" or candidate.launcher:find("\0", 1, true))
+	then
+		return nil, "devcontainer_editor launcher must be a non-empty string without NUL bytes"
+	end
+	for _, field in ipairs({ "event", "notify", "open", "uuid" }) do
+		if candidate[field] ~= nil and type(candidate[field]) ~= "function" then
+			return nil, "devcontainer_editor " .. field .. " must be a function"
+		end
+	end
+	for _, field in ipairs({ "spool_root", "state_root" }) do
+		local value = candidate[field]
+		if value ~= nil and type(value) ~= "string" and type(value) ~= "function" then
+			return nil, "devcontainer_editor " .. field .. " must be a string or function"
+		end
+		if type(value) == "string" and (value == "" or value:find("\0", 1, true)) then
+			return nil, "devcontainer_editor " .. field .. " must be non-empty and without NUL bytes"
+		end
+	end
+	if candidate.watch ~= nil and type(candidate.watch) ~= "boolean" then
+		return nil, "devcontainer_editor watch must be boolean"
+	end
+	return candidate
 end
 
 local function report_warning(dependencies, label, warning)
@@ -214,16 +369,32 @@ end
 local function state_root()
 	local root = configured.state_root
 	if type(root) == "function" then
-		root = root()
+		local ok, resolved = pcall(root)
+		if not ok then
+			return nil, "state_root callback failed: " .. tostring(resolved)
+		end
+		if type(resolved) ~= "string" or resolved == "" or resolved:find("\0", 1, true) then
+			return nil, "state_root callback must return a non-empty string without NUL bytes"
+		end
+		root = resolved
 	end
-	if type(root) ~= "string" or root == "" then
+	if root == nil then
 		root = vim.env.NVIM_DEVCONTAINER_STATE_HOME
 	end
-	if type(root) ~= "string" or root == "" then
+	if root == nil or root == "" then
 		local state = vim.env.XDG_STATE_HOME or (vim.env.HOME and vim.fs.joinpath(vim.env.HOME, ".local", "state"))
 		root = state and vim.fs.joinpath(state, "nvim-devcontainer") or nil
 	end
-	return root and vim.fs.normalize(vim.fn.fnamemodify(root, ":p")) or nil
+	if root == nil then
+		return nil, "state root is unavailable"
+	end
+	if type(root) ~= "string" or root == "" or root:find("\0", 1, true) then
+		return nil, "state root must be a non-empty string without NUL bytes"
+	end
+	local ok, normalized = pcall(function()
+		return vim.fs.normalize(vim.fn.fnamemodify(root, ":p"))
+	end)
+	return ok and normalized or nil, ok and nil or "state root is invalid: " .. tostring(normalized)
 end
 
 local function ensure_directory(path)
@@ -987,17 +1158,30 @@ function M.network_authorized()
 end
 
 local function workspace_record_path(host_root)
-	local root = state_root()
+	if type(host_root) ~= "string" or host_root == "" or host_root:find("%z") then
+		return nil, "host root must be a non-empty string"
+	end
+	local root, root_err = state_root()
 	if not root then
-		return nil
+		return nil, root_err or "state root is unavailable"
 	end
 	return vim.fs.joinpath(root, "workspaces", vim.fn.sha256(host_root) .. ".json")
 end
 
 function M.status(host_root)
-	local path = workspace_record_path(host_root)
+	if host_root == nil then
+		return copy({
+			configured = is_configured,
+			transport = transport_status,
+			watcher = {
+				active = watcher ~= nil,
+				failures = watcher_failures,
+			},
+		})
+	end
+	local path, path_err = workspace_record_path(host_root)
 	if not path then
-		return nil, "state root is unavailable"
+		return nil, path_err
 	end
 	local value, err = decode_secure(path, "workspace record", RECORD_KEYS)
 	if not value then
@@ -1045,12 +1229,26 @@ end
 local function spool_root()
 	local value = configured.spool_root
 	if type(value) == "function" then
-		value = value()
+		local ok, resolved = pcall(value)
+		if not ok then
+			return nil, "spool_root callback failed: " .. tostring(resolved)
+		end
+		if type(resolved) ~= "string" or resolved == "" or resolved:find("\0", 1, true) then
+			return nil, "spool_root callback must return a non-empty string without NUL bytes"
+		end
+		value = resolved
 	end
-	if type(value) ~= "string" or value == "" then
+	if value == nil then
 		value = vim.env.NVIM_DEVCONTAINER_SPOOL_ROOT
 	end
-	return type(value) == "string" and value ~= "" and vim.fs.normalize(value) or nil
+	if value == nil or value == "" then
+		return nil, "spool root is not registered"
+	end
+	if type(value) ~= "string" or value:find("\0", 1, true) then
+		return nil, "spool root must be a non-empty string without NUL bytes"
+	end
+	local ok, normalized = pcall(vim.fs.normalize, value)
+	return ok and normalized or nil, ok and nil or "spool root is invalid: " .. tostring(normalized)
 end
 
 local function auth_token(spool)
@@ -1149,47 +1347,78 @@ end
 
 function M.consume_spool_once()
 	if not M.in_workspace() then
-		return nil, "not running inside a Dev Container editor"
+		local err = "not running inside a Dev Container editor"
+		return nil, err, publish_transport("error", { error = err })
 	end
-	local root = spool_root()
+	local root, root_err = spool_root()
 	if not root then
-		return nil, "spool root is not registered"
+		local err = root_err or "spool root is not registered"
+		return nil, err, publish_transport("error", { error = err })
 	end
 	local spool, prepare_err = prepare_spool_descriptors(root)
 	if not spool then
-		return nil, prepare_err
+		return nil, prepare_err, publish_transport("error", { error = prepare_err })
 	end
 	local token, token_err = auth_token(spool)
 	if not token then
 		local _, close_err = close_spool(spool)
-		return nil, append_cleanup_failure(token_err, close_err)
+		local err = append_cleanup_failure(token_err, close_err)
+		return nil, err, publish_transport("error", { error = err })
 	end
 	local names, scan_err = list_json_at(spool.inbox_fd)
 	if not names then
 		local _, close_err = close_spool(spool)
 		local primary = scan_err or "could not enumerate anchored inbox"
-		return nil, append_cleanup_failure(primary, close_err)
+		local err = append_cleanup_failure(primary, close_err)
+		return nil, err, publish_transport("error", { error = err })
 	end
 	local consumed = 0
 	local first_error
-	for _, name in ipairs(names) do
-		local _, request_err = consume_request(spool, name, token)
+	local records = {}
+	local limit = configured.max_messages_per_tick or DEFAULT_MAX_MESSAGES_PER_TICK
+	for index = 1, math.min(#names, limit) do
+		local name = names[index]
+		local ok, request_err = consume_request(spool, name, token)
 		first_error = first_error or request_err
 		consumed = consumed + 1
+		records[#records + 1] = { name = name, ok = ok == true, error = request_err }
 	end
 	local _, close_err = close_spool(spool)
 	if first_error then
-		return nil, append_cleanup_failure(first_error, close_err)
+		first_error = append_cleanup_failure(first_error, close_err)
+	else
+		report_warning(nil, "Dev Container inbound spool result completed but close failed", close_err)
 	end
-	report_warning(nil, "Dev Container inbound spool result completed but close failed", close_err)
-	return consumed
+	local failed = 0
+	for _, record in ipairs(records) do
+		failed = failed + (record.ok and 0 or 1)
+	end
+	local report = publish_transport(first_error and "partial" or (#names > consumed and "backlog" or "idle"), {
+		processed = consumed,
+		succeeded = consumed - failed,
+		failed = failed,
+		remaining = math.max(#names - consumed, 0),
+		records = records,
+		error = first_error,
+		warning = first_error and nil or close_err,
+	})
+	if first_error then
+		return nil, first_error, report
+	end
+	return consumed, nil, report
 end
 
 local function uuid()
 	if type(configured.uuid) == "function" then
-		return configured.uuid()
+		local ok, value = pcall(configured.uuid)
+		if ok and valid_id(value) then
+			return value
+		end
 	end
-	local bytes = assert(uv.random(16))
+	local random_ok, bytes = pcall(uv.random, 16)
+	if not random_ok or type(bytes) ~= "string" or #bytes ~= 16 then
+		return nil, "could not generate a lifecycle UUID"
+	end
 	local values = { bytes:byte(1, 16) }
 	values[7] = values[7] % 16 + 64
 	values[9] = values[9] % 64 + 128
@@ -1197,9 +1426,9 @@ local function uuid()
 end
 
 function M.new_claim_id()
-	local value = uuid()
+	local value, uuid_err = uuid()
 	if not valid_id(value) then
-		return nil, "lifecycle claim id is not one canonical UUIDv4"
+		return nil, uuid_err or "lifecycle claim id is not one canonical UUIDv4"
 	end
 	return value
 end
@@ -1208,7 +1437,9 @@ local function request_ack(spool, token, request, dependencies, callback)
 	local deps = dependencies or {}
 	local name = request.request_id .. ".json"
 	local attempts = 0
-	local maximum = deps.max_attempts or 100
+	local interval = deps.interval_ms or 50
+	local timeout = deps.ack_timeout_ms or configured.ack_timeout_ms or DEFAULT_ACK_TIMEOUT_MS
+	local maximum = deps.max_attempts or math.max(math.ceil(timeout / interval) + 1, 1)
 	local defer = deps.defer or vim.defer_fn
 	local function poll()
 		attempts = attempts + 1
@@ -1262,7 +1493,7 @@ local function request_ack(spool, token, request, dependencies, callback)
 			callback(nil, append_cleanup_failure("host request timed out", close_err))
 			return
 		end
-		defer(poll, deps.interval_ms or 50)
+		defer(poll, interval)
 	end
 	poll()
 end
@@ -1281,9 +1512,9 @@ function M.request_host(action, dependencies, on_success)
 	if on_success ~= nil and type(on_success) ~= "function" then
 		return nil, "host success callback must be a function"
 	end
-	local root = spool_root()
+	local root, root_err = spool_root()
 	if not root then
-		return nil, "authenticated host spool is not registered"
+		return nil, root_err or "authenticated host spool is not registered"
 	end
 	local spool, prepare_err = prepare_spool_descriptors(root)
 	if not spool then
@@ -1294,10 +1525,10 @@ function M.request_host(action, dependencies, on_success)
 		local _, close_err = close_spool(spool)
 		return nil, append_cleanup_failure(token_err, close_err)
 	end
-	local request_id = uuid()
+	local request_id, uuid_err = uuid()
 	if not valid_id(request_id) then
 		local _, close_err = close_spool(spool)
-		return nil, append_cleanup_failure("host request id is not one canonical UUIDv4", close_err)
+		return nil, append_cleanup_failure(uuid_err or "host request id is not one canonical UUIDv4", close_err)
 	end
 	local request = {
 		version = 2,
@@ -1334,7 +1565,7 @@ function M.request_host(action, dependencies, on_success)
 end
 
 function M.lifecycle_argv(action, spec)
-	if action ~= "up" and action ~= "status" and action ~= "log" and action ~= "host" then
+	if action ~= "up" and action ~= "status" and action ~= "log" and action ~= "host" and action ~= "doctor" then
 		return nil, "unsupported lifecycle action"
 	end
 	local launcher = configured.launcher
@@ -1344,6 +1575,11 @@ function M.lifecycle_argv(action, spec)
 	local argv = { launcher, action }
 	if type(spec) == "table" and spec.root then
 		vim.list_extend(argv, { "--repo", spec.root })
+	end
+	if action == "up" or action == "doctor" then
+		vim.list_extend(argv, { "--cli", configured.cli or "devcontainer" })
+		vim.list_extend(argv, { "--lockfile-policy", configured.lockfile_policy or "preserve" })
+		vim.list_extend(argv, { "--ssh-agent", configured.ssh_agent or "auto" })
 	end
 	if action == "up" and type(spec) == "table" then
 		if type(spec.tmux_pane) ~= "string" or not spec.tmux_pane:match("^%%%d+$") then
@@ -1370,28 +1606,106 @@ function M.lifecycle_argv(action, spec)
 end
 
 function M.stop()
-	if watcher then
-		watcher:stop()
-		watcher:close()
-		watcher = nil
+	if not is_configured and not watcher then
+		return M
 	end
+	watcher_generation = watcher_generation + 1
+	if watcher then
+		local current = watcher
+		watcher = nil
+		current:stop()
+		current:close()
+	end
+	publish_transport("stopped")
+	emit("stopped")
+	return M
+end
+
+local function schedule_watch(delay, expected, generation)
+	expected = expected or watcher
+	generation = generation or watcher_generation
+	if not expected or watcher ~= expected or watcher_generation ~= generation then
+		return
+	end
+	expected:start(
+		delay,
+		0,
+		vim.schedule_wrap(function()
+			if watcher ~= expected or watcher_generation ~= generation then
+				return
+			end
+			local ok, err, report = M.consume_spool_once()
+			if ok == nil then
+				watcher_failures = math.min(watcher_failures + 1, 5)
+				if type(configured.notify) == "function" then
+					configured.notify(err, vim.log.levels.ERROR)
+				end
+			else
+				watcher_failures = 0
+			end
+			local next_delay = configured.poll_interval_ms
+			if report and report.remaining > 0 then
+				next_delay = 0
+			elseif watcher_failures > 0 then
+				next_delay = math.min(configured.poll_interval_ms * (2 ^ watcher_failures), 2000)
+			end
+			schedule_watch(next_delay, expected, generation)
+		end)
+	)
+end
+
+function M.effective_config()
+	if not is_configured then
+		return public_defaults()
+	end
+	return copy({
+		ack_timeout_ms = configured.ack_timeout_ms,
+		claim_timeout_ms = configured.claim_timeout_ms,
+		cli = configured.cli,
+		lockfile_policy = configured.lockfile_policy,
+		max_messages_per_tick = configured.max_messages_per_tick,
+		poll_interval_ms = configured.poll_interval_ms,
+		ssh_agent = configured.ssh_agent,
+		watch = configured.watch ~= false,
+	})
+end
+
+function M.transport_status()
+	return copy(transport_status)
+end
+
+function M.teardown()
+	if not is_configured then
+		return M
+	end
+	M.stop()
+	emit("teardown")
+	configured = {}
+	is_configured = false
+	watcher_failures = 0
+	return M
 end
 
 function M.setup(opts)
-	M.stop()
-	configured = copy(opts or {})
+	if opts == nil then
+		opts = {}
+	end
+	local candidate, candidate_err = validate_setup(opts)
+	if not candidate then
+		error(candidate_err)
+	end
+	if is_configured then
+		M.teardown()
+	end
+	configured = candidate
+	is_configured = true
+	watcher_failures = 0
+	publish_transport("idle")
+	emit("setup", { config = M.effective_config() })
 	if M.in_workspace() and configured.watch ~= false then
+		watcher_generation = watcher_generation + 1
 		watcher = uv.new_timer()
-		watcher:start(
-			0,
-			configured.poll_interval_ms or 100,
-			vim.schedule_wrap(function()
-				local ok, err = M.consume_spool_once()
-				if ok == nil and type(configured.notify) == "function" then
-					configured.notify(err, vim.log.levels.ERROR)
-				end
-			end)
-		)
+		schedule_watch(0, watcher, watcher_generation)
 	end
 	return M
 end

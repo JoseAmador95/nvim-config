@@ -3,7 +3,7 @@ local M = {}
 
 local dependencies = require("native_review.dependencies")
 local lsp_navigation = dependencies.get("lsp_navigation")
-local local_config = dependencies.get("local_config")
+local config = dependencies.get("config")
 local repo = dependencies.get("repo")
 local review_lsp = require("native_review.lsp")
 local review_mode = require("native_review.mode")
@@ -1179,8 +1179,7 @@ function M.show(state, entry, options)
 	vim.api.nvim_set_current_win(state.origin.win)
 	review_mode.capture_window(state, state.origin.win)
 	presentation_generation = presentation_generation + 1
-	local review_config = local_config.get("review", { hunk_context = 3 })
-	local hunk_context = review_config.hunk_context
+	local hunk_context = config.hunk_context
 	local visibility_hunk_context = layout == "split" and math.max(1, hunk_context) or hunk_context
 	local old_line_count = #text_lines(entry.old_text or "")
 	local new_line_count = #text_lines(entry.new_text or "")

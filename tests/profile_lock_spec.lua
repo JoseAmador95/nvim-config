@@ -19,8 +19,10 @@ vim.api.nvim_create_autocmd("VimEnter", {
 		vim.schedule(function()
 			local ok, err = xpcall(function()
 				assert(vim.g.nvim_config_initialized == true, "init.lua did not complete")
-				local repo_root = assert(vim.env.NVIM_CONFIG_ROOT, "NVIM_CONFIG_ROOT is missing")
-				local lock = vim.json.decode(read_file(vim.fs.joinpath(repo_root, "lazy-lock.json")))
+				assert(vim.env.NVIM_CONFIG_ROOT, "NVIM_CONFIG_ROOT is missing")
+				local lazy_config = require("lazy.core.config")
+				local lockfile = assert(lazy_config.options.lockfile, "Lazy's effective lockfile is missing")
+				local lock = vim.json.decode(read_file(lockfile))
 				local checked = 0
 				local errors = {}
 

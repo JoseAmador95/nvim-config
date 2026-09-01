@@ -303,8 +303,15 @@ local function image_metadata()
 	}
 end
 
-function M.show(mode)
-	mode = mode or "svg"
+local effective_config = {
+	default_mode = "svg",
+	stage_timeout_ms = 30000,
+	max_stage_output_bytes = 16 * 1024 * 1024,
+	cache = { max_age_seconds = 30 * 24 * 60 * 60, max_bytes = 256 * 1024 * 1024 },
+}
+
+function M.show(mode, selection)
+	mode = mode or effective_config.default_mode
 	if mode ~= "svg" and mode ~= "ascii" then
 		local message = "diagram mode must be svg or ascii"
 		notify(message, vim.log.levels.WARN)
@@ -313,6 +320,7 @@ function M.show(mode)
 	local diagram, extract_err = view.extract({
 		bufnr = vim.api.nvim_get_current_buf(),
 		winid = vim.api.nvim_get_current_win(),
+		selection = selection,
 	})
 	if not diagram then
 		notify(extract_err, vim.log.levels.WARN)
@@ -367,9 +375,14 @@ local function register_interface()
 			notify("usage: :DiagramShow [svg|ascii]", vim.log.levels.WARN)
 			return
 		end
-		M.show(mode)
+		local selection
+		if options.range and options.range > 0 then
+			selection = { start_row = options.line1, end_row = options.line2 }
+		end
+		M.show(mode, selection)
 	end, {
 		nargs = "?",
+		range = true,
 		complete = function()
 			return { "svg", "ascii" }
 		end,
@@ -378,11 +391,18 @@ local function register_interface()
 
 	if require("config.pager").active then
 		vim.keymap.set("n", "<leader>md", "<cmd>DiagramShow<cr>", { desc = "Show diagram (SVG/ASCII)" })
+		vim.keymap.set("x", "<leader>md", ":<C-U>'<,'>DiagramShow<CR>", { desc = "Show selected diagram" })
 		return
 	end
 
 	local function map(buf)
 		vim.keymap.set("n", "<leader>md", "<cmd>DiagramShow<cr>", { buffer = buf, desc = "Show diagram (SVG/ASCII)" })
+		vim.keymap.set(
+			"x",
+			"<leader>md",
+			":<C-U>'<,'>DiagramShow<CR>",
+			{ buffer = buf, desc = "Show selected diagram" }
+		)
 	end
 	vim.api.nvim_create_autocmd("FileType", {
 		pattern = { "markdown", "plantuml" },
@@ -406,13 +426,16 @@ function M.setup(opts)
 		return true
 	end
 	opts = opts or {}
-	local limits = require("config.local_config").get("diagram_cache", {})
+	effective_config = require("config.local_config").plugin("diagram_view", effective_config)
 	local ok, err = view.setup({
 		cache_root = opts.cache_root or (vim.fn.stdpath("cache") .. "/diagram-v3"),
-		max_age_seconds = limits.max_age_seconds,
-		max_bytes = limits.max_bytes,
+		default_mode = effective_config.default_mode,
+		stage_timeout_ms = effective_config.stage_timeout_ms,
+		max_stage_output_bytes = effective_config.max_stage_output_bytes,
+		cache = effective_config.cache,
 		spawn = opts.spawn,
 		schedule = opts.schedule,
+		defer = opts.defer,
 		plantuml_policy = opts.plantuml_policy,
 		notify = opts.notify or notify,
 		event = opts.event,

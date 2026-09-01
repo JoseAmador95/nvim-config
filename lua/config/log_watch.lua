@@ -24,11 +24,16 @@ local function positive_integer(value, fallback)
 end
 
 local function settings()
-	local value = require("config.local_config").get("log_watch", {})
+	local value = require("config.local_config").plugin("log_workbench", {
+		poll_interval_ms = 500,
+		max_lines = DEFAULT_MAX_LINES,
+		max_bytes = DEFAULT_MAX_BYTES,
+	})
 	if type(value) ~= "table" then
 		value = {}
 	end
 	return {
+		poll_interval_ms = positive_integer(value.poll_interval_ms, 500),
 		max_lines = positive_integer(value.max_lines, DEFAULT_MAX_LINES),
 		max_bytes = positive_integer(value.max_bytes, DEFAULT_MAX_BYTES),
 	}
@@ -43,7 +48,7 @@ function M.setup(opts)
 	local ok, err = follow.setup({
 		max_lines = limits.max_lines,
 		max_bytes = limits.max_bytes,
-		poll_interval_ms = opts.poll_interval_ms,
+		poll_interval_ms = opts.poll_interval_ms or limits.poll_interval_ms,
 		uv = opts.uv,
 		new_fs_poll = opts.new_fs_poll,
 		new_fs_event = opts.new_fs_event,
@@ -170,13 +175,32 @@ function M.command(opts)
 		else
 			notify("This file is not being followed", vim.log.levels.WARN)
 		end
+	elseif arg == "pause" then
+		if session and follow.pause(session) then
+			notify("Paused log following")
+		else
+			notify("This file is not actively being followed", vim.log.levels.WARN)
+		end
+	elseif arg == "resume" then
+		if session then
+			local resumed, resume_err = follow.resume(session)
+			if resumed then
+				notify("Resumed log following")
+			elseif resume_err then
+				notify("Could not resume log following: " .. tostring(resume_err), vim.log.levels.ERROR)
+			else
+				notify("Log following is not paused", vim.log.levels.WARN)
+			end
+		else
+			notify("This file is not being followed", vim.log.levels.WARN)
+		end
 	else
-		notify("Argument must be 'on' or 'off'", vim.log.levels.ERROR)
+		notify("Argument must be 'on', 'off', 'pause', or 'resume'", vim.log.levels.ERROR)
 	end
 end
 
 function M.complete()
-	return { "on", "off" }
+	return { "on", "off", "pause", "resume" }
 end
 
 -- Temporarily replace ephemeral tail windows with their ordinary source

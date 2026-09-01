@@ -1,26 +1,46 @@
 local M = {}
 
 local HOME_VARIABLE = "nvim_config_home"
+local HOME_PRESENTED_VARIABLE = "tab_first_home_presented"
 local TRANSIENT_TITLE_VARIABLE = "nvim_config_transient_title"
 
-local options = {
-	enabled = function()
-		return true
-	end,
-	schedule = vim.schedule,
-	notify = vim.notify,
-	present_home = nil,
-	dismiss_ui = nil,
-	is_special_buffer = function(buf)
-		return vim.bo[buf].buftype ~= "" or vim.api.nvim_buf_get_name(buf) == ""
-	end,
-	history = {
-		enabled = true,
-		max_entries = 200,
-		native_fallback = nil,
-		open_location = nil,
-	},
-}
+local function default_options()
+	return {
+		enabled = function()
+			return true
+		end,
+		schedule = vim.schedule,
+		notify = vim.notify,
+		present_home = nil,
+		dismiss_ui = nil,
+		event = nil,
+		is_home_buffer = function(buf)
+			if vim.b[buf][HOME_PRESENTED_VARIABLE] == true then
+				return vim.api.nvim_buf_get_name(buf) == "" and not vim.bo[buf].modified
+			end
+			return vim.bo[buf].buftype == ""
+				and vim.bo[buf].filetype == ""
+				and vim.api.nvim_buf_get_name(buf) == ""
+				and not vim.bo[buf].modified
+				and vim.api.nvim_buf_line_count(buf) == 1
+				and (vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] or "") == ""
+		end,
+		is_special_buffer = function(buf)
+			return vim.bo[buf].buftype ~= "" or vim.api.nvim_buf_get_name(buf) == ""
+		end,
+		history = {
+			enabled = true,
+			max_entries = 200,
+			scope = "workspace",
+			native_fallback = nil,
+			open_location = nil,
+		},
+	}
+end
+
+local options = default_options()
+local configured = false
+local lifecycle_generation = 0
 
 local pending_closes = {}
 local focused_windows = {}
@@ -29,6 +49,15 @@ local history = {
 	entries = {},
 	index = 0,
 }
+
+local function emit(kind, payload)
+	if type(options.event) ~= "function" then
+		return
+	end
+	local event = vim.deepcopy(payload or {})
+	event.kind = kind
+	pcall(options.event, event)
+end
 
 local function is_enabled()
 	local ok, value = pcall(options.enabled)
@@ -116,16 +145,8 @@ local function has_home_shape(tabpage)
 	if not vim.api.nvim_buf_is_valid(buf) then
 		return false
 	end
-	if vim.bo[buf].filetype == "snacks_dashboard" then
-		return vim.bo[buf].buftype == "nofile" and vim.api.nvim_buf_get_name(buf) == "" and not vim.bo[buf].modified
-	end
-
-	return vim.bo[buf].buftype == ""
-		and vim.bo[buf].filetype == ""
-		and vim.api.nvim_buf_get_name(buf) == ""
-		and not vim.bo[buf].modified
-		and vim.api.nvim_buf_line_count(buf) == 1
-		and (vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] or "") == ""
+	local ok, result = pcall(options.is_home_buffer, buf)
+	return ok and result == true
 end
 
 local function buffer_is_blank(buf)
@@ -325,9 +346,129 @@ end
 ---Configure host-owned integrations. Repeated setup preserves tabs and history.
 ---@param opts? table
 function M.setup(opts)
-	opts = opts or {}
-	options = vim.tbl_deep_extend("force", options, opts)
-	options.history = vim.tbl_deep_extend("force", options.history or {}, opts.history or {})
+	if opts == nil then
+		opts = {}
+	end
+	assert(
+		type(opts) == "table" and (next(opts) == nil or not vim.islist(opts)),
+		"tab-first setup options must be an object"
+	)
+	local allowed = {
+		enabled = true,
+		schedule = true,
+		notify = true,
+		present_home = true,
+		dismiss_ui = true,
+		event = true,
+		is_home_buffer = true,
+		is_special_buffer = true,
+		history = true,
+	}
+	for key in pairs(opts) do
+		assert(allowed[key], "tab-first setup contains an unknown option: " .. tostring(key))
+	end
+	for _, key in ipairs({
+		"enabled",
+		"schedule",
+		"notify",
+		"present_home",
+		"dismiss_ui",
+		"event",
+		"is_home_buffer",
+		"is_special_buffer",
+	}) do
+		assert(opts[key] == nil or type(opts[key]) == "function", "tab-first " .. key .. " must be a function")
+	end
+	local history_options = opts.history
+	if history_options == nil then
+		history_options = {}
+	end
+	assert(
+		type(history_options) == "table" and (next(history_options) == nil or not vim.islist(history_options)),
+		"tab-first history must be an object"
+	)
+	for key in pairs(history_options) do
+		assert(
+			key == "enabled"
+				or key == "max_entries"
+				or key == "scope"
+				or key == "native_fallback"
+				or key == "open_location",
+			"tab-first history contains an unknown option: " .. tostring(key)
+		)
+	end
+	assert(
+		history_options.enabled == nil or type(history_options.enabled) == "boolean",
+		"tab-first history.enabled must be boolean"
+	)
+	assert(
+		history_options.max_entries == nil
+			or (
+				type(history_options.max_entries) == "number"
+				and history_options.max_entries % 1 == 0
+				and history_options.max_entries >= 1
+			),
+		"tab-first history.max_entries must be a positive integer"
+	)
+	assert(
+		history_options.scope == nil or history_options.scope == "workspace",
+		"tab-first history.scope must be workspace"
+	)
+	for _, key in ipairs({ "native_fallback", "open_location" }) do
+		assert(
+			history_options[key] == nil or type(history_options[key]) == "function",
+			"tab-first history." .. key .. " must be a function"
+		)
+	end
+	local defaults = default_options()
+	options = vim.tbl_deep_extend("force", defaults, opts)
+	options.history = vim.tbl_deep_extend("force", defaults.history, history_options)
+	pending_closes = {}
+	home_recovery_pending = false
+	configured = true
+	lifecycle_generation = lifecycle_generation + 1
+	return true
+end
+
+function M.effective_config()
+	return {
+		history = {
+			enabled = options.history.enabled,
+			max_entries = options.history.max_entries,
+			scope = options.history.scope,
+		},
+	}
+end
+
+function M.status()
+	local pending = 0
+	for _ in pairs(pending_closes) do
+		pending = pending + 1
+	end
+	return vim.deepcopy({
+		configured = configured,
+		history = {
+			enabled = options.history.enabled,
+			max_entries = options.history.max_entries,
+			scope = options.history.scope,
+			entries = #history.entries,
+			index = history.index,
+		},
+		pending_closes = pending,
+		home_recovery_pending = home_recovery_pending,
+	})
+end
+
+function M.teardown()
+	lifecycle_generation = lifecycle_generation + 1
+	pending_closes = {}
+	focused_windows = {}
+	home_recovery_pending = false
+	history.entries = {}
+	history.index = 0
+	options = default_options()
+	configured = false
+	return true
 end
 
 ---Remember the current normal window so tab labels survive transient floats.
@@ -429,7 +570,8 @@ function M.recover_home()
 		return false
 	end
 
-	local dashboard = vim.bo[buf].buftype == "nofile" and vim.bo[buf].filetype == "snacks_dashboard"
+	local classified, is_home = pcall(options.is_home_buffer, buf)
+	local dashboard = classified and is_home and vim.bo[buf].buftype == "nofile"
 	local marked = has_home_marker(tabpage)
 	local marked_landing = marked and vim.bo[buf].buftype == "" and vim.bo[buf].filetype == ""
 	if not dashboard and not marked_landing then
@@ -458,6 +600,7 @@ function M.recover_home()
 		notify("Could not open home dashboard: " .. tostring(error_message), vim.log.levels.ERROR, "Tabs")
 		return false
 	end
+	vim.b[buf][HOME_PRESENTED_VARIABLE] = true
 	M.mark_home(tabpage)
 	return true
 end
@@ -470,7 +613,11 @@ function M.ensure_home()
 	end
 
 	home_recovery_pending = true
+	local generation = lifecycle_generation
 	options.schedule(function()
+		if generation ~= lifecycle_generation then
+			return
+		end
 		home_recovery_pending = false
 		if is_enabled() then
 			M.recover_home()
@@ -580,7 +727,11 @@ function M.request_close(tabpage)
 	end
 
 	pending_closes[tabpage] = true
+	local generation = lifecycle_generation
 	options.schedule(function()
+		if generation ~= lifecycle_generation then
+			return
+		end
 		pending_closes[tabpage] = nil
 		if valid_tab(tabpage) then
 			M.close(tabpage)
@@ -654,6 +805,7 @@ function M.open(filepath, opts)
 	if origin then
 		M.record_transition(origin, M.capture())
 	end
+	emit("opened", { path = destination.path, reused = destination.reused })
 	return destination
 end
 
@@ -708,6 +860,7 @@ function M.record_transition(origin, destination)
 	else
 		append_history(destination)
 	end
+	emit("history", { index = history.index, entries = #history.entries })
 	return true
 end
 

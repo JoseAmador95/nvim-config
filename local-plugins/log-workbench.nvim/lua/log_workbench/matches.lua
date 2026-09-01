@@ -153,6 +153,11 @@ function M.setup(opts)
 	if type(opts) ~= "table" then
 		return nil, "setup options must be a table"
 	end
+	for key in pairs(opts) do
+		if key ~= "schedule" and key ~= "event" then
+			return nil, "setup contains an unknown option: " .. tostring(key)
+		end
+	end
 	if opts.schedule ~= nil and type(opts.schedule) ~= "function" then
 		return nil, "setup.schedule must be a function"
 	end

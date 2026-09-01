@@ -6,18 +6,17 @@ local function continuation(byte)
 	return byte and byte >= 128 and byte <= 191
 end
 
-local function valid_sequence(bytes, index, length)
+local function valid_prefix(bytes, index, available)
 	local first = bytes:byte(index)
+	for offset = 1, available - 1 do
+		if not continuation(bytes:byte(index + offset)) then
+			return false
+		end
+	end
+	if available < 2 then
+		return true
+	end
 	local second = bytes:byte(index + 1)
-	if not continuation(second) then
-		return false
-	end
-	if length >= 3 and not continuation(bytes:byte(index + 2)) then
-		return false
-	end
-	if length == 4 and not continuation(bytes:byte(index + 3)) then
-		return false
-	end
 	if first == 224 and second < 160 then
 		return false
 	end
@@ -70,14 +69,17 @@ function M.feed(carry, chunk)
 			if not length then
 				output[#output + 1] = REPLACEMENT
 				index = index + 1
-			elseif index + length - 1 > #bytes then
-				return table.concat(output), bytes:sub(index)
-			elseif valid_sequence(bytes, index, length) then
-				output[#output + 1] = bytes:sub(index, index + length - 1)
-				index = index + length
 			else
-				output[#output + 1] = REPLACEMENT
-				index = index + 1
+				local available = math.min(length, #bytes - index + 1)
+				if not valid_prefix(bytes, index, available) then
+					output[#output + 1] = REPLACEMENT
+					index = index + 1
+				elseif available < length then
+					return table.concat(output), bytes:sub(index)
+				else
+					output[#output + 1] = bytes:sub(index, index + length - 1)
+					index = index + length
+				end
 			end
 		end
 	end

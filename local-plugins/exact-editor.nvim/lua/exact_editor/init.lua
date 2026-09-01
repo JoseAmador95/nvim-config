@@ -1,12 +1,135 @@
 -- Exact editor registry and request bridge.
 local M = {}
 local contracts = require("local_plugins.contracts")
+local bit = require("bit")
+local ffi = require("ffi")
 
 local uv = vim.uv
 local active
 local deferred = false
+local deferred_generation = 0
 local configured = {}
 local temp_counter = 0
+local wait_controllers = {}
+local test_hook
+
+local declared, declare_err = pcall(
+	ffi.cdef,
+	[[
+		int openat(int dirfd, const char *pathname, int flags, ...);
+		int unlinkat(int dirfd, const char *pathname, int flags);
+		int fstatat(int dirfd, const char *pathname, void *status, int flags);
+		int renameatx_np(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags);
+		int renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags);
+		char *strerror(int error_number);
+		struct exact_editor_darwin_stat {
+			int32_t st_dev_value;
+			uint16_t st_mode_value;
+			uint16_t st_nlink_value;
+			uint64_t st_ino_value;
+			uint32_t st_uid_value;
+			uint32_t st_gid_value;
+			int32_t st_rdev_value;
+			int32_t st_padding;
+			int64_t st_atime_sec;
+			int64_t st_atime_nsec;
+			int64_t st_mtime_sec;
+			int64_t st_mtime_nsec;
+			int64_t st_ctime_sec;
+			int64_t st_ctime_nsec;
+			int64_t st_birthtime_sec;
+			int64_t st_birthtime_nsec;
+			int64_t st_size_value;
+			int64_t st_blocks_value;
+			int32_t st_blksize_value;
+			uint32_t st_flags_value;
+			uint32_t st_gen_value;
+			int32_t st_lspare_value;
+			int64_t st_qspare[2];
+		};
+		struct exact_editor_statx_timestamp {
+			int64_t tv_sec;
+			uint32_t tv_nsec;
+			int32_t reserved;
+		};
+		struct exact_editor_linux_statx {
+			uint32_t stx_mask;
+			uint32_t stx_blksize;
+			uint64_t stx_attributes;
+			uint32_t stx_nlink;
+			uint32_t stx_uid;
+			uint32_t stx_gid;
+			uint16_t stx_mode;
+			uint16_t spare0[1];
+			uint64_t stx_ino;
+			uint64_t stx_size;
+			uint64_t stx_blocks;
+			uint64_t stx_attributes_mask;
+			struct exact_editor_statx_timestamp stx_atime;
+			struct exact_editor_statx_timestamp stx_btime;
+			struct exact_editor_statx_timestamp stx_ctime;
+			struct exact_editor_statx_timestamp stx_mtime;
+			uint32_t stx_rdev_major;
+			uint32_t stx_rdev_minor;
+			uint32_t stx_dev_major;
+			uint32_t stx_dev_minor;
+			uint64_t spare2[14];
+		};
+		int statx(int dirfd, const char *pathname, int flags, unsigned int mask,
+			struct exact_editor_linux_statx *status);
+	]]
+)
+if not declared and tostring(declare_err):find("redefin", 1, true) then
+	declared = true
+end
+
+local descriptor_api
+if declared and ffi.abi("64bit") then
+	local system = uv.os_uname().sysname
+	if system == "Darwin" then
+		descriptor_api = {
+			at_fdcwd = -2,
+			close_on_exec = 0x01000000,
+			directory = 0x00100000,
+			nonblock = 0x00000004,
+			no_follow = 0x00000100,
+			symlink_no_follow = 0x00000020,
+			rename = "renameatx_np",
+			rename_noreplace_flag = 0x00000004,
+			eexist = 17,
+			noent = 2,
+		}
+	elseif system == "Linux" then
+		descriptor_api = {
+			at_fdcwd = -100,
+			close_on_exec = 0x00080000,
+			directory = 0x00010000,
+			nonblock = 0x00000800,
+			no_follow = 0x00020000,
+			symlink_no_follow = 0x00000100,
+			rename = "renameat2",
+			rename_noreplace_flag = 0x00000001,
+			eexist = 17,
+			noent = 2,
+		}
+	end
+end
+
+local SETUP_KEYS = {
+	state_root = true,
+	resolve_workspace = true,
+	open = true,
+	resolve_relative = true,
+	clock = true,
+	pid = true,
+	uuid = true,
+	server_start = true,
+	server_stop = true,
+	notify = true,
+	install_finish_mapping = true,
+	workspace_retention = true,
+	on_state_change = true,
+}
 
 local RECORD_KEYS = {
 	version = true,
@@ -45,7 +168,36 @@ local WAIT_STATE_KEYS = {
 
 local function notify(message, level)
 	local report = configured.notify or vim.notify
-	report(message, level or vim.log.levels.INFO, { title = "Exact Editor" })
+	pcall(report, message, level or vim.log.levels.INFO, { title = "Exact Editor" })
+end
+
+local function copy(value)
+	return vim.deepcopy(value)
+end
+
+local function emit(kind, details)
+	if type(configured.on_state_change) ~= "function" then
+		return
+	end
+	local event = copy(details or {})
+	event.kind = kind
+	pcall(configured.on_state_change, event)
+end
+
+local function exact_options(value, allowed, label)
+	if type(value) ~= "table" then
+		return nil, label .. " must be a table"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" or not allowed[key] then
+			return nil, label .. " contains an unknown option: " .. tostring(key)
+		end
+	end
+	return true
+end
+
+local function same_identity(left, right)
+	return left and right and left.type == right.type and left.dev == right.dev and left.ino == right.ino
 end
 
 local function uuid()
@@ -67,11 +219,39 @@ local function is_uuid(value)
 			~= nil
 end
 
-local function timestamp()
-	local clock = configured.clock or function()
+local function canonical_timestamp(value)
+	if type(value) ~= "string" then
+		return false
+	end
+	local year, month, day, hour, minute, second = value:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)Z$")
+	if not year then
+		return false
+	end
+	year, month, day = tonumber(year), tonumber(month), tonumber(day)
+	hour, minute, second = tonumber(hour), tonumber(minute), tonumber(second)
+	if year < 1 or month < 1 or month > 12 or hour > 23 or minute > 59 or second > 59 then
+		return false
+	end
+	local days = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+	if year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0) then
+		days[2] = 29
+	end
+	return day >= 1 and day <= days[month]
+end
+
+local function timestamp(source)
+	local selected = source or configured
+	local clock = selected.clock or function()
 		return os.date("!%Y-%m-%dT%H:%M:%SZ")
 	end
-	return clock()
+	local ok, value = pcall(clock)
+	if not ok then
+		return nil, "clock callback failed: " .. tostring(value)
+	end
+	if not canonical_timestamp(value) then
+		return nil, "clock callback must return a canonical UTC timestamp"
+	end
+	return value
 end
 
 function M.state_root()
@@ -91,11 +271,339 @@ function M.state_root()
 	return vim.fs.normalize(vim.fn.fnamemodify(root, ":p"))
 end
 
-local function unlink_regular(path)
-	local stat = uv.fs_lstat(path)
-	if stat and stat.type == "file" then
-		pcall(uv.fs_unlink, path)
+local function run_test_hook(event, details)
+	if type(test_hook) ~= "function" then
+		return true
 	end
+	local ok, err = pcall(test_hook, event, copy(details))
+	return ok and true or nil, ok and nil or tostring(err)
+end
+
+local function descriptor_error(label, number)
+	number = number or ffi.errno()
+	local ok, message = pcall(function()
+		return ffi.string(ffi.C.strerror(number))
+	end)
+	return ("%s: errno %d%s"):format(label, number, ok and " (" .. message .. ")" or "")
+end
+
+local function close_descriptor(fd)
+	if not fd then
+		return true
+	end
+	local closed, close_err = uv.fs_close(fd)
+	return closed and true or nil, closed and nil or tostring(close_err)
+end
+
+local function private_name(name)
+	return type(name) == "string"
+		and name ~= ""
+		and name ~= "."
+		and name ~= ".."
+		and not name:find("/", 1, true)
+		and not name:find("\0", 1, true)
+end
+
+local function anchor_valid(anchor)
+	local opened = anchor and anchor.fd and uv.fs_fstat(anchor.fd) or nil
+	local current = anchor and anchor.path and uv.fs_lstat(anchor.path) or nil
+	return same_identity(opened, anchor and anchor.identity) and same_identity(current, anchor and anchor.identity)
+end
+
+local function open_parent_anchor(path)
+	if not descriptor_api then
+		return nil, "descriptor-relative cleanup requires 64-bit Darwin or Linux"
+	end
+	local parent = vim.fs.dirname(path)
+	local name = vim.fs.basename(path)
+	if not private_name(name) then
+		return nil, "cleanup path has an invalid basename"
+	end
+	local before = uv.fs_lstat(parent)
+	if not before or before.type ~= "directory" or before.mode % 512 ~= tonumber("700", 8) then
+		return nil, "cleanup parent must be a real owner-only directory: " .. parent
+	end
+	local flags = bit.bor(
+		descriptor_api.directory,
+		descriptor_api.nonblock,
+		descriptor_api.no_follow,
+		descriptor_api.close_on_exec
+	)
+	ffi.errno(0)
+	local raw_fd = ffi.C.openat(descriptor_api.at_fdcwd, parent, flags)
+	if raw_fd < 0 then
+		return nil, descriptor_error("could not pin cleanup parent")
+	end
+	local fd = tonumber(raw_fd)
+	local opened = uv.fs_fstat(fd)
+	local anchor = { fd = fd, path = parent, identity = opened }
+	if not opened or opened.type ~= "directory" or not same_identity(before, opened) or not anchor_valid(anchor) then
+		close_descriptor(fd)
+		return nil, "cleanup parent changed while it was pinned"
+	end
+	return anchor, name
+end
+
+local function integer_key(value)
+	return tostring(value):gsub("ULL$", ""):gsub("LL$", "")
+end
+
+local function entry_kind(mode)
+	local kind = bit.band(mode, 0xF000)
+	return kind == 0x8000 and "file"
+		or kind == 0x4000 and "directory"
+		or kind == 0xA000 and "link"
+		or kind == 0xC000 and "socket"
+		or "other"
+end
+
+local function anchored_entry_stat(anchor, name, label)
+	if not anchor_valid(anchor) then
+		return nil, "cleanup parent changed before inspecting " .. label
+	end
+	if descriptor_api.rename == "renameatx_np" then
+		local raw = ffi.new("struct exact_editor_darwin_stat")
+		if ffi.C.fstatat(anchor.fd, name, raw, descriptor_api.symlink_no_follow) ~= 0 then
+			local number = ffi.errno()
+			if number == descriptor_api.noent then
+				return false
+			end
+			return nil, descriptor_error("could not inspect " .. label, number)
+		end
+		local mode = tonumber(raw.st_mode_value)
+		return {
+			type = entry_kind(mode),
+			ino = integer_key(raw.st_ino_value),
+			mode = mode,
+			nlink = tonumber(raw.st_nlink_value),
+			size = tonumber(raw.st_size_value),
+		}
+	end
+	local raw = ffi.new("struct exact_editor_linux_statx")
+	local called, result = pcall(ffi.C.statx, anchor.fd, name, descriptor_api.symlink_no_follow, 0x000007FF, raw)
+	if not called then
+		return nil, "descriptor-relative statx is unavailable: " .. tostring(result)
+	end
+	if result ~= 0 then
+		local number = ffi.errno()
+		if number == descriptor_api.noent then
+			return false
+		end
+		return nil, descriptor_error("could not inspect " .. label, number)
+	end
+	local mode = tonumber(raw.stx_mode)
+	return {
+		type = entry_kind(mode),
+		ino = integer_key(raw.stx_ino),
+		mode = mode,
+		nlink = tonumber(raw.stx_nlink),
+		size = tonumber(raw.stx_size),
+	}
+end
+
+local function matches_expected(actual, expected, kind)
+	if not actual or not expected or actual.type ~= kind or expected.type ~= kind then
+		return false
+	end
+	if actual.ino ~= integer_key(expected.ino) or actual.nlink ~= 1 or expected.nlink ~= 1 then
+		return false
+	end
+	if kind == "file" then
+		return actual.mode == expected.mode and actual.size == expected.size
+	end
+	return true
+end
+
+local function exclusive_rename(anchor, source, destination)
+	if not private_name(source) or not private_name(destination) or not anchor_valid(anchor) then
+		return nil, "anchored cleanup rename is invalid", -1
+	end
+	ffi.errno(0)
+	local called, result = pcall(function()
+		if descriptor_api.rename == "renameatx_np" then
+			return ffi.C.renameatx_np(anchor.fd, source, anchor.fd, destination, descriptor_api.rename_noreplace_flag)
+		end
+		return ffi.C.renameat2(anchor.fd, source, anchor.fd, destination, descriptor_api.rename_noreplace_flag)
+	end)
+	if not called then
+		return nil, "descriptor-relative exclusive rename is unavailable: " .. tostring(result), -1
+	end
+	if result == 0 then
+		return true
+	end
+	local number = ffi.errno()
+	return nil, descriptor_error("could not reserve cleanup entry", number), number
+end
+
+local function sync_and_close(anchor, warning)
+	if anchor_valid(anchor) then
+		local synced, sync_err = uv.fs_fsync(anchor.fd)
+		if not synced then
+			warning = warning or "cleanup directory fsync failed: " .. tostring(sync_err)
+		end
+	else
+		warning = warning or "cleanup parent changed before directory fsync"
+	end
+	local closed, close_err = close_descriptor(anchor.fd)
+	anchor.fd = nil
+	if not closed then
+		warning = warning or "cleanup directory close failed: " .. tostring(close_err)
+	end
+	return warning == nil and true or nil, warning
+end
+
+local function restore_reserved_entry(anchor, name, reserved, reserved_path, reason)
+	local restored, restore_err = exclusive_rename(anchor, reserved, name)
+	if not restored then
+		sync_and_close(anchor)
+		return nil,
+			tostring(reason) .. "; replacement remains preserved at " .. reserved_path .. ": " .. tostring(restore_err)
+	end
+	local _, warning = sync_and_close(anchor)
+	return nil, tostring(reason) .. "; replacement was restored" .. (warning and "; " .. warning or "")
+end
+
+local function reserve_cleanup(path, expected, kind, options)
+	if expected == nil and not (options and options.allow_unowned == true) then
+		return nil, "conditional cleanup requires an exact owned identity"
+	end
+	local anchor, name_or_err = open_parent_anchor(path)
+	if not anchor then
+		return nil, name_or_err
+	end
+	local name = name_or_err
+	local current, current_err = anchored_entry_stat(anchor, name, kind .. " cleanup entry")
+	if current == false then
+		close_descriptor(anchor.fd)
+		return false
+	end
+	if not current then
+		close_descriptor(anchor.fd)
+		return nil, current_err
+	end
+	if current.type ~= kind or current.nlink ~= 1 then
+		close_descriptor(anchor.fd)
+		return nil, "cleanup entry is not one owned " .. kind .. ": " .. path
+	end
+	if expected and not matches_expected(current, expected, kind) then
+		close_descriptor(anchor.fd)
+		return nil, "cleanup entry identity changed before reservation: " .. path
+	end
+	local hook_ok, hook_err = run_test_hook("before_cleanup_reserve", {
+		kind = kind,
+		path = path,
+	})
+	if not hook_ok then
+		close_descriptor(anchor.fd)
+		return nil, "cleanup reserve hook failed: " .. tostring(hook_err)
+	end
+	local reserved
+	for _ = 1, 64 do
+		temp_counter = temp_counter + 1
+		reserved = (".%s.%d.%d.retire"):format(name, uv.os_getpid(), temp_counter)
+		local moved, move_err, number = exclusive_rename(anchor, name, reserved)
+		if moved then
+			break
+		end
+		if number == descriptor_api.noent then
+			close_descriptor(anchor.fd)
+			return false
+		end
+		if number ~= descriptor_api.eexist then
+			close_descriptor(anchor.fd)
+			return nil, move_err
+		end
+		reserved = nil
+	end
+	if not reserved then
+		close_descriptor(anchor.fd)
+		return nil, "cleanup reservation namespace is exhausted"
+	end
+	local reserved_path = vim.fs.joinpath(anchor.path, reserved)
+	local reservation = {
+		anchor = anchor,
+		name = name,
+		path = path,
+		reserved = reserved,
+		reserved_path = reserved_path,
+		expected = expected,
+		kind = kind,
+		owned = false,
+	}
+	local hook_ok, hook_err = run_test_hook("after_cleanup_reserve", {
+		kind = kind,
+		path = path,
+		reserved = reserved_path,
+	})
+	if not hook_ok then
+		return restore_reserved_entry(
+			anchor,
+			name,
+			reserved,
+			reserved_path,
+			"cleanup post-reserve hook failed: " .. tostring(hook_err)
+		)
+	end
+	local reserved_stat, reserved_err = anchored_entry_stat(anchor, reserved, "reserved " .. kind)
+	if not reserved_stat then
+		return restore_reserved_entry(
+			anchor,
+			name,
+			reserved,
+			reserved_path,
+			"reserved cleanup entry could not be inspected: " .. tostring(reserved_err)
+		)
+	end
+	reservation.owned = matches_expected(reserved_stat, expected, kind)
+	return reservation
+end
+
+local function restore_reservation(reservation, reason)
+	return restore_reserved_entry(
+		reservation.anchor,
+		reservation.name,
+		reservation.reserved,
+		reservation.reserved_path,
+		reason
+	)
+end
+
+local function retire_reservation(reservation)
+	if not reservation.owned then
+		return restore_reservation(reservation, "cleanup entry identity changed during reservation")
+	end
+	local hook_ok, hook_err = run_test_hook("before_cleanup_unlink", {
+		kind = reservation.kind,
+		path = reservation.path,
+		reserved = reservation.reserved_path,
+	})
+	if not hook_ok then
+		return restore_reservation(reservation, "cleanup unlink hook failed: " .. tostring(hook_err))
+	end
+	local final, final_err =
+		anchored_entry_stat(reservation.anchor, reservation.reserved, "final reserved " .. reservation.kind)
+	if not matches_expected(final, reservation.expected, reservation.kind) then
+		return restore_reservation(
+			reservation,
+			"cleanup entry changed immediately before unlink: " .. tostring(final_err or "identity mismatch")
+		)
+	end
+	if ffi.C.unlinkat(reservation.anchor.fd, reservation.reserved, 0) ~= 0 then
+		return restore_reservation(reservation, descriptor_error("could not unlink reserved cleanup entry"))
+	end
+	local _, warning = sync_and_close(reservation.anchor)
+	return true, warning
+end
+
+local function unlink_regular(path, expected)
+	local reservation, reserve_err = reserve_cleanup(path, expected, "file")
+	if reservation == false then
+		return true
+	end
+	if not reservation then
+		return nil, reserve_err
+	end
+	return retire_reservation(reservation)
 end
 
 local function atomic_write(path, data)
@@ -109,12 +617,17 @@ local function atomic_write(path, data)
 	if not fd then
 		return nil, "cannot open temporary file: " .. tostring(open_err)
 	end
+	local temp_identity = uv.fs_fstat(fd)
+	if not temp_identity or temp_identity.type ~= "file" or temp_identity.nlink ~= 1 then
+		pcall(uv.fs_close, fd)
+		return nil, "temporary file identity is unsafe; staging was preserved"
+	end
 	local offset = 0
 	while offset < #data do
 		local written, write_err = uv.fs_write(fd, data:sub(offset + 1), offset)
 		if not written or written <= 0 then
 			pcall(uv.fs_close, fd)
-			unlink_regular(temp)
+			unlink_regular(temp, temp_identity)
 			return nil, "cannot write temporary file: " .. tostring(write_err or "zero-byte write")
 		end
 		offset = offset + written
@@ -122,21 +635,30 @@ local function atomic_write(path, data)
 	local synced, sync_err = uv.fs_fsync(fd)
 	local closed, close_err = uv.fs_close(fd)
 	if not synced or not closed then
-		unlink_regular(temp)
+		unlink_regular(temp, temp_identity)
 		return nil, "cannot persist temporary file: " .. tostring(sync_err or close_err)
 	end
 	local renamed, rename_err = uv.fs_rename(temp, path)
 	if not renamed then
-		unlink_regular(temp)
+		unlink_regular(temp, temp_identity)
 		return nil, "cannot replace target file: " .. tostring(rename_err)
 	end
-	local secured, secure_err = uv.fs_chmod(path, tonumber("600", 8))
-	return secured and true or nil, secured and nil or "cannot secure target file: " .. tostring(secure_err)
+	local published = uv.fs_lstat(path)
+	if
+		not published
+		or published.type ~= "file"
+		or published.nlink ~= 1
+		or published.mode % 512 ~= tonumber("600", 8)
+		or not same_identity(published, temp_identity)
+	then
+		return nil, "published target identity changed; replacement was preserved"
+	end
+	return true, nil, published
 end
 
 local function secure_read(path, label, maximum)
 	local before = uv.fs_lstat(path)
-	if not before or before.type ~= "file" then
+	if not before or before.type ~= "file" or before.nlink ~= 1 then
 		return nil, label .. " is missing or is not a regular non-symlink file"
 	end
 	if before.mode % 512 ~= tonumber("600", 8) then
@@ -153,6 +675,7 @@ local function secure_read(path, label, maximum)
 	if
 		not opened
 		or opened.type ~= "file"
+		or opened.nlink ~= 1
 		or opened.dev ~= before.dev
 		or opened.ino ~= before.ino
 		or opened.size ~= before.size
@@ -169,6 +692,7 @@ local function secure_read(path, label, maximum)
 	if
 		not after
 		or after.type ~= "file"
+		or after.nlink ~= 1
 		or after.dev ~= opened.dev
 		or after.ino ~= opened.ino
 		or after.size ~= opened.size
@@ -176,7 +700,16 @@ local function secure_read(path, label, maximum)
 	then
 		return nil, label .. " changed while validating"
 	end
-	return data
+	return data,
+		nil,
+		{
+			type = opened.type,
+			dev = opened.dev,
+			ino = opened.ino,
+			size = opened.size,
+			mode = opened.mode,
+			nlink = opened.nlink,
+		}
 end
 
 local function normalize_workspace(value)
@@ -300,6 +833,10 @@ function M.write_registry(instance)
 	if not workspaces then
 		return nil, workspace_err
 	end
+	local updated_at, timestamp_err = timestamp()
+	if not updated_at then
+		return nil, timestamp_err
+	end
 	local record = {
 		version = 2,
 		instance_id = instance.instance_id,
@@ -307,18 +844,15 @@ function M.write_registry(instance)
 		socket = instance.socket,
 		workspaces = workspaces,
 		TMUX_PANE = vim.env.TMUX_PANE or vim.NIL,
-		updated_at = timestamp(),
+		updated_at = updated_at,
 	}
 	local encoded = vim.json.encode(record) .. "\n"
-	local ok, err = atomic_write(record_path(instance), encoded)
+	local ok, err, identity = atomic_write(record_path(instance), encoded)
 	if not ok then
 		return nil, err
 	end
-	local chmod_ok, chmod_err = uv.fs_chmod(record_path(instance), tonumber("600", 8))
-	if not chmod_ok then
-		return nil, "cannot secure registry record: " .. tostring(chmod_err)
-	end
-	return record
+	instance.registry_identity = identity
+	return copy(record)
 end
 
 local function exact_keys(value, allowed, label)
@@ -338,21 +872,21 @@ local function write_wait_state(instance, request_id, status)
 	if status ~= "waiting" and status ~= "completed" and status ~= "aborted" then
 		return nil, "wait state status is invalid"
 	end
+	local updated_at, timestamp_err = timestamp()
+	if not updated_at then
+		return nil, timestamp_err
+	end
 	local state = {
 		version = 1,
 		request_id = request_id,
 		instance_id = instance.instance_id,
 		status = status,
-		updated_at = timestamp(),
+		updated_at = updated_at,
 	}
 	local path = wait_path(instance, request_id)
 	local ok, err = atomic_write(path, vim.json.encode(state) .. "\n")
 	if not ok then
 		return nil, err
-	end
-	local chmod_ok, chmod_err = uv.fs_chmod(path, tonumber("600", 8))
-	if not chmod_ok then
-		return nil, "cannot secure editor wait state: " .. tostring(chmod_err)
 	end
 	return state
 end
@@ -440,47 +974,77 @@ local function preserve_modified_buffer(buf, target)
 	end)
 end
 
-local function arm_editor_wait(instance, request_id, target, win, buf, dependencies)
-	local group = vim.api.nvim_create_augroup("exact_editor_wait_" .. request_id:gsub("%-", "_"), { clear = true })
-	local finished = false
-	local recovery_created = false
-	local remove_finish_mapping
+local function cleanup_wait_controller(controller)
+	pcall(vim.api.nvim_del_augroup_by_id, controller.group)
+	if type(controller.remove_finish_mapping) == "function" then
+		pcall(controller.remove_finish_mapping)
+	end
+	wait_controllers[controller.buf] = nil
+end
 
-	local function cleanup()
-		pcall(vim.api.nvim_del_augroup_by_id, group)
-		if type(remove_finish_mapping) == "function" then
-			pcall(remove_finish_mapping)
+local function finish_wait_controller(controller, requested_status)
+	if wait_controllers[controller.buf] ~= controller then
+		return true
+	end
+	local status = requested_status
+	if status ~= "aborted" and vim.api.nvim_buf_is_valid(controller.buf) and vim.bo[controller.buf].modified then
+		status = "aborted"
+	end
+	local ids = vim.tbl_keys(controller.requests)
+	table.sort(ids)
+	local failures = {}
+	for _, request_id in ipairs(ids) do
+		local request = controller.requests[request_id]
+		local persisted, err = write_wait_state(request.instance, request_id, status)
+		if persisted then
+			controller.requests[request_id] = nil
+			emit("wait-finished", { request_id = request_id, buf = controller.buf, status = status })
+		else
+			failures[#failures + 1] = request_id .. ": " .. tostring(err)
 		end
 	end
+	if next(controller.requests) == nil then
+		cleanup_wait_controller(controller)
+	end
+	if #failures > 0 then
+		local message = "Could not update editor wait state: " .. table.concat(failures, "; ")
+		notify(message, vim.log.levels.ERROR)
+		return nil, message
+	end
+	return true
+end
 
-	local function finish(status)
-		if finished then
-			return true
+local function create_wait_controller(buf, dependencies)
+	local controller = {
+		buf = buf,
+		requests = {},
+		windows = {},
+		recovery_created = false,
+	}
+	controller.group = vim.api.nvim_create_augroup("exact_editor_wait_buf_" .. tostring(buf), { clear = true })
+
+	local function first_target()
+		local ids = vim.tbl_keys(controller.requests)
+		table.sort(ids)
+		return ids[1] and controller.requests[ids[1]].target or nil
+	end
+	local function preserve_if_modified()
+		if not controller.recovery_created and vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified then
+			controller.recovery_created = true
+			preserve_modified_buffer(buf, first_target() or "")
 		end
-		if status ~= "aborted" and vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified then
-			status = "aborted"
-		end
-		local state, err = write_wait_state(instance, request_id, status)
-		if not state then
-			notify("Could not update editor wait state: " .. tostring(err), vim.log.levels.ERROR)
-			return nil
-		end
-		finished = true
-		cleanup()
-		return true
 	end
 
 	vim.api.nvim_create_autocmd("WinClosed", {
-		group = group,
-		pattern = tostring(win),
-		callback = function()
-			local modified = vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified
-			local completed = not modified
-			if modified and not recovery_created then
-				recovery_created = true
-				preserve_modified_buffer(buf, target)
+		group = controller.group,
+		callback = function(args)
+			local win = tonumber(args.match)
+			if not win or not controller.windows[win] then
+				return
 			end
-			finish("completed")
+			local completed = not (vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified)
+			preserve_if_modified()
+			finish_wait_controller(controller, "completed")
 			if completed then
 				vim.schedule(function()
 					if
@@ -495,39 +1059,39 @@ local function arm_editor_wait(instance, request_id, target, win, buf, dependenc
 		end,
 	})
 	vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
-		group = group,
+		group = controller.group,
 		buffer = buf,
 		callback = function()
-			if vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified and not recovery_created then
-				recovery_created = true
-				preserve_modified_buffer(buf, target)
-			end
-			finish("completed")
+			preserve_if_modified()
+			finish_wait_controller(controller, "completed")
 		end,
 	})
 	vim.api.nvim_create_autocmd("VimLeavePre", {
-		group = group,
+		group = controller.group,
 		callback = function()
-			finish("completed")
+			finish_wait_controller(controller, "completed")
 		end,
 	})
+
 	local function save_and_finish()
 		local wrote, write_err = pcall(vim.api.nvim_buf_call, buf, function()
 			vim.cmd.write()
 		end)
 		if not wrote or (vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified) then
-			finish("aborted")
+			finish_wait_controller(controller, "aborted")
 			notify("Could not save external-editor text: " .. tostring(write_err), vim.log.levels.ERROR)
 			return
 		end
-		if vim.api.nvim_win_is_valid(win) then
-			local closed, close_window_err = pcall(vim.api.nvim_win_close, win, false)
+		local finished = finish_wait_controller(controller, "completed")
+		if not finished then
+			return
+		end
+		local current = vim.api.nvim_get_current_win()
+		if controller.windows[current] and vim.api.nvim_win_is_valid(current) then
+			local closed, close_window_err = pcall(vim.api.nvim_win_close, current, false)
 			if not closed then
-				finish("aborted")
 				notify("Could not close external-editor window: " .. tostring(close_window_err), vim.log.levels.ERROR)
 			end
-		else
-			finish("completed")
 		end
 	end
 	local install_finish_mapping = (dependencies and dependencies.install_finish_mapping)
@@ -535,17 +1099,42 @@ local function arm_editor_wait(instance, request_id, target, win, buf, dependenc
 	if type(install_finish_mapping) == "function" then
 		local installed, remover_or_err = pcall(install_finish_mapping, buf, save_and_finish)
 		if not installed or (remover_or_err ~= nil and type(remover_or_err) ~= "function") then
-			cleanup()
+			cleanup_wait_controller(controller)
 			return nil, "could not install external-editor finish action: " .. tostring(remover_or_err)
 		end
-		remove_finish_mapping = remover_or_err
+		controller.remove_finish_mapping = remover_or_err
 	end
+	wait_controllers[buf] = controller
+	return controller
+end
 
-	local state, state_err = write_wait_state(instance, request_id, "waiting")
-	if not state then
-		cleanup()
+local function arm_editor_wait(instance, request_id, target, win, buf, dependencies)
+	local controller = wait_controllers[buf]
+	if not controller then
+		local controller_err
+		controller, controller_err = create_wait_controller(buf, dependencies)
+		if not controller then
+			return nil, controller_err
+		end
+	end
+	if controller.requests[request_id] then
+		return nil, "editor wait request is already armed"
+	end
+	controller.requests[request_id] = {
+		instance = instance,
+		target = target,
+		win = win,
+	}
+	controller.windows[win] = true
+	local durable, state_err = write_wait_state(instance, request_id, "waiting")
+	if not durable then
+		controller.requests[request_id] = nil
+		if next(controller.requests) == nil then
+			cleanup_wait_controller(controller)
+		end
 		return nil, state_err
 	end
+	emit("wait-armed", { request_id = request_id, buf = buf, win = win, target = target, status = "waiting" })
 	return true
 end
 
@@ -554,10 +1143,13 @@ local function consume(request_id, instance, dependencies, expected_version)
 		return nil, "request id must be a lowercase UUID"
 	end
 	local path = request_path(instance, request_id)
-	local encoded, read_err = secure_read(path, "request", 64 * 1024)
-	unlink_regular(path)
+	local encoded, read_err, request_identity = secure_read(path, "request", 64 * 1024)
 	if not encoded then
 		return nil, read_err
+	end
+	local removed, remove_err = unlink_regular(path, request_identity)
+	if not removed then
+		return nil, "request was replaced before identity-bound cleanup: " .. tostring(remove_err)
 	end
 	local ok, value = pcall(vim.json.decode, encoded)
 	if not ok or type(value) ~= "table" or vim.islist(value) then
@@ -682,29 +1274,136 @@ local function discover(instance, path)
 		if not normalized then
 			return nil, normalize_err
 		end
-		instance.workspaces[workspace_identity(normalized)] = normalized
+		local identity = workspace_identity(normalized)
+		local added = instance.workspaces[identity] == nil
+		instance.workspaces[identity] = normalized
+		if added then
+			emit("workspace-visited", { instance_id = instance.instance_id, workspace = normalized })
+		end
 	elseif resolve_err then
 		return nil, resolve_err
 	end
 	return M.write_registry(instance)
 end
 
+local function append_warning(current, warning)
+	if not warning or warning == "" then
+		return current
+	end
+	return current and (current .. "; " .. tostring(warning)) or tostring(warning)
+end
+
+local function stop_server(path)
+	local callback = configured.server_stop
+	local called, result = pcall(callback or vim.fn.serverstop, path)
+	if not called then
+		return nil, tostring(result)
+	end
+	local stopped = callback and result == true or callback == nil and result == 1
+	if not stopped then
+		return nil, "server_stop reported failure: " .. tostring(result)
+	end
+	return true
+end
+
+local function reserve_socket_replacement(path)
+	return reserve_cleanup(path, nil, "socket", { allow_unowned = true })
+end
+
+local function cleanup_socket(instance)
+	if not instance.owns_socket then
+		return true
+	end
+	local reservation, reserve_err = reserve_cleanup(instance.socket, instance.socket_identity, "socket")
+	if reservation == nil then
+		return nil, "could not reserve the exact editor socket safely; server remains active: " .. tostring(reserve_err)
+	end
+	local late_reservation
+	if reservation ~= false then
+		local hook_ok, hook_err = run_test_hook("before_cleanup_server_stop", {
+			kind = "socket",
+			path = instance.socket,
+			reserved = reservation.reserved_path,
+		})
+		if not hook_ok then
+			local _, restore_err = restore_reservation(reservation, "socket stop hook failed: " .. tostring(hook_err))
+			return nil, restore_err
+		end
+		local late, late_err = reserve_socket_replacement(instance.socket)
+		if late == nil then
+			local _, restore_err = restore_reservation(
+				reservation,
+				"late socket replacement could not be preserved: " .. tostring(late_err)
+			)
+			return nil, restore_err
+		end
+		if late ~= false then
+			late_reservation = late
+		end
+	end
+
+	local stopped, stop_err = stop_server(instance.socket)
+	if not stopped then
+		local warning = "exact editor server stop failed: " .. tostring(stop_err)
+		if reservation ~= false then
+			local _, restore_err = restore_reservation(reservation, warning)
+			warning = append_warning(warning, restore_err)
+		end
+		if late_reservation then
+			local _, restore_err = restore_reservation(late_reservation, "late socket replacement was preserved")
+			warning = append_warning(warning, restore_err)
+		end
+		return nil, warning
+	end
+
+	local warning
+	if reservation ~= false then
+		if reservation.owned then
+			local removed, remove_warning_or_err = retire_reservation(reservation)
+			warning = append_warning(warning, remove_warning_or_err)
+			if not removed then
+				warning = append_warning(warning, "owned socket entry was preserved after the server stopped")
+			end
+		else
+			local _, restore_err = restore_reservation(reservation, "socket replacement was preserved")
+			warning = append_warning(warning, restore_err)
+		end
+	end
+	if late_reservation then
+		local _, restore_err = restore_reservation(late_reservation, "late socket replacement was preserved")
+		warning = append_warning(warning, restore_err)
+	end
+	return true, warning
+end
+
 local function cleanup(instance)
 	if not instance then
-		return
+		return true
 	end
-	unlink_regular(record_path(instance))
-	if instance.owns_socket then
-		pcall(configured.server_stop or vim.fn.serverstop, instance.socket)
-		local socket_stat = uv.fs_lstat(instance.socket)
-		if socket_stat and socket_stat.type == "socket" then
-			pcall(uv.fs_unlink, instance.socket)
-		end
+	local socket_stopped, socket_warning_or_err = cleanup_socket(instance)
+	if not socket_stopped then
+		notify(tostring(socket_warning_or_err), vim.log.levels.WARN)
+		return nil, socket_warning_or_err
+	end
+	if socket_warning_or_err then
+		notify("Exact editor socket cleanup: " .. tostring(socket_warning_or_err), vim.log.levels.WARN)
+	end
+
+	local registry_removed, registry_err = unlink_regular(record_path(instance), instance.registry_identity)
+	if not registry_removed then
+		notify("Could not remove exact editor registry safely: " .. tostring(registry_err), vim.log.levels.WARN)
+	elseif registry_err then
+		notify(
+			"Exact editor registry cleanup committed with a warning: " .. tostring(registry_err),
+			vim.log.levels.WARN
+		)
 	end
 	if active == instance then
 		active = nil
 		_G.ExactEditorRequest = nil
 	end
+	emit("instance-stopped", { instance_id = instance.instance_id })
+	return true, append_warning(socket_warning_or_err, registry_err)
 end
 
 local function start_server(root, instance_id)
@@ -719,22 +1418,57 @@ local function start_server(root, instance_id)
 	end
 	local socket_stat = uv.fs_lstat(result)
 	if not socket_stat or socket_stat.type ~= "socket" then
-		pcall(configured.server_stop or vim.fn.serverstop, result)
-		return nil, "Neovim server path is not a Unix socket"
+		local stopped, stop_err = stop_server(result)
+		return nil,
+			"Neovim server path is not a Unix socket" .. (stopped and "" or "; server stop failed: " .. tostring(
+				stop_err
+			))
 	end
 	local secured, secure_err = uv.fs_chmod(result, tonumber("600", 8))
 	if not secured then
-		pcall(configured.server_stop or vim.fn.serverstop, result)
-		pcall(uv.fs_unlink, result)
+		local reservation, reserve_err = reserve_cleanup(result, socket_stat, "socket")
+		if reservation == nil then
+			return nil,
+				"could not secure the Neovim socket: "
+					.. tostring(secure_err)
+					.. "; unsafe cleanup was refused: "
+					.. tostring(reserve_err)
+		end
+		local stopped, stop_err = stop_server(result)
+		if not stopped then
+			if reservation ~= false then
+				local _, restore_err = restore_reservation(
+					reservation,
+					"socket permissions failed and the server remains active: " .. tostring(stop_err)
+				)
+				return nil,
+					"could not secure the Neovim socket: " .. tostring(secure_err) .. "; " .. tostring(restore_err)
+			end
+			return nil,
+				"could not secure the Neovim socket: "
+					.. tostring(secure_err)
+					.. "; server remains active: "
+					.. tostring(stop_err)
+		end
+		if reservation ~= false then
+			if reservation.owned then
+				retire_reservation(reservation)
+			else
+				restore_reservation(reservation, "socket changed after failed permission setup")
+			end
+		end
 		return nil, "could not secure the Neovim socket: " .. tostring(secure_err)
 	end
-	return result
+	return result, nil, socket_stat
 end
 
 function M.setup(opts)
-	opts = opts or {}
-	if active then
-		return active
+	if opts == nil then
+		opts = {}
+	end
+	local options_ok, options_err = exact_options(opts, SETUP_KEYS, "setup")
+	if not options_ok then
+		error(options_err)
 	end
 	if type(opts.state_root) ~= "string" and type(opts.state_root) ~= "function" then
 		error("exact_editor.setup requires state_root as a string or function")
@@ -745,31 +1479,86 @@ function M.setup(opts)
 	if type(opts.open) ~= "function" then
 		error("exact_editor.setup requires open")
 	end
-	configured = vim.tbl_extend("force", {}, opts)
-	local root = M.state_root()
+	for _, name in ipairs({
+		"state_root",
+		"resolve_workspace",
+		"open",
+		"resolve_relative",
+		"clock",
+		"pid",
+		"uuid",
+		"server_start",
+		"server_stop",
+		"notify",
+		"install_finish_mapping",
+		"on_state_change",
+	}) do
+		if opts[name] ~= nil and name ~= "state_root" and type(opts[name]) ~= "function" then
+			error("setup." .. name .. " must be a function")
+		end
+	end
+	local retention = opts.workspace_retention
+	if retention == nil then
+		retention = "visited"
+	end
+	if retention ~= "visited" then
+		error("setup.workspace_retention must be visited")
+	end
+	if active then
+		return active
+	end
+	local next_configured = vim.tbl_extend("force", {}, opts, { workspace_retention = retention })
+	local clock_value, clock_err = timestamp(next_configured)
+	if not clock_value then
+		local report = opts.notify or vim.notify
+		pcall(report, "Could not snapshot exact editor clock: " .. tostring(clock_err), vim.log.levels.ERROR)
+		return nil
+	end
+	local previous_configured = configured
+	configured = next_configured
+	local function setup_failure(message)
+		notify(message, vim.log.levels.ERROR)
+		configured = previous_configured
+		return nil
+	end
+	local root_ok, root = pcall(M.state_root)
+	if not root_ok then
+		return setup_failure("Could not resolve exact editor state root: " .. tostring(root))
+	end
 	local prepared, prepare_err = prepare_state(root)
 	if not prepared then
-		notify(prepare_err, vim.log.levels.ERROR)
-		return nil
+		return setup_failure(prepare_err)
 	end
-	local instance_id = uuid()
+	local uuid_ok, instance_id = pcall(uuid)
+	if not uuid_ok then
+		return setup_failure("UUID provider failed: " .. tostring(instance_id))
+	end
 	if not is_uuid(instance_id) then
-		notify("UUID provider returned an invalid identifier", vim.log.levels.ERROR)
-		return nil
+		return setup_failure("UUID provider returned an invalid identifier")
 	end
-	local socket, server_err = start_server(root, instance_id)
+	local owner_pid = uv.os_getpid()
+	if type(configured.pid) == "function" then
+		local pid_ok, resolved_pid = pcall(configured.pid)
+		if not pid_ok or not positive_integer(resolved_pid) then
+			return setup_failure("PID provider returned an invalid identifier")
+		end
+		owner_pid = resolved_pid
+	end
+	local socket, server_err, socket_identity = start_server(root, instance_id)
 	if not socket then
-		notify(server_err, vim.log.levels.ERROR)
-		return nil
+		return setup_failure(server_err)
 	end
 	local instance = {
 		root = root,
 		instance_id = instance_id,
+		pid = owner_pid,
 		socket = socket,
+		socket_identity = socket_identity,
 		owns_socket = true,
 		workspaces = {},
 	}
 	active = instance
+	emit("instance-started", { instance_id = instance_id, socket = socket })
 
 	_G.ExactEditorRequest = function(request_id)
 		local handled, err = consume(request_id, instance)
@@ -806,13 +1595,95 @@ function M.setup(opts)
 		end,
 	})
 
-	local ok, err = discover(instance, vim.api.nvim_buf_get_name(0))
+	local discovered, ok, err = pcall(discover, instance, vim.api.nvim_buf_get_name(0))
+	if not discovered then
+		err = ok
+		ok = nil
+	end
 	if not ok then
-		cleanup(instance)
-		notify("Could not create editor registry: " .. tostring(err), vim.log.levels.ERROR)
+		local cleaned, cleanup_err = cleanup(instance)
+		notify(
+			"Could not create editor registry: "
+				.. tostring(err)
+				.. (cleaned and "" or "; cleanup failed: " .. tostring(cleanup_err)),
+			vim.log.levels.ERROR
+		)
+		if cleaned then
+			pcall(vim.api.nvim_del_augroup_by_name, "exact_editor_rpc")
+			configured = previous_configured
+		end
 		return nil
 	end
 	return instance
+end
+
+function M.effective_config()
+	return { workspace_retention = configured.workspace_retention or "visited" }
+end
+
+function M.status()
+	local result = {
+		configured = active ~= nil,
+		instance = nil,
+		workspace_retention = configured.workspace_retention or "visited",
+		workspaces = {},
+		waits = {},
+	}
+	if active then
+		result.instance = {
+			instance_id = active.instance_id,
+			pid = active.pid,
+			root = active.root,
+			socket = active.socket,
+		}
+		for _, workspace in pairs(active.workspaces or {}) do
+			result.workspaces[#result.workspaces + 1] = copy(workspace)
+		end
+		table.sort(result.workspaces, function(left, right)
+			return workspace_identity(left) < workspace_identity(right)
+		end)
+	end
+	for buf, controller in pairs(wait_controllers) do
+		for request_id, request in pairs(controller.requests) do
+			result.waits[#result.waits + 1] = {
+				request_id = request_id,
+				instance_id = request.instance.instance_id,
+				buf = buf,
+				win = request.win,
+				target = request.target,
+				status = "waiting",
+			}
+		end
+	end
+	table.sort(result.waits, function(left, right)
+		return left.request_id < right.request_id
+	end)
+	return copy(result)
+end
+
+function M.teardown()
+	deferred_generation = deferred_generation + 1
+	deferred = false
+	pcall(vim.api.nvim_del_augroup_by_name, "exact_editor_rpc_deferred")
+	local buffers = vim.tbl_keys(wait_controllers)
+	table.sort(buffers)
+	local complete = true
+	for _, buf in ipairs(buffers) do
+		local controller = wait_controllers[buf]
+		if controller then
+			complete = finish_wait_controller(controller, "aborted") and complete
+		end
+	end
+	if active then
+		local cleaned = cleanup(active)
+		complete = cleaned and complete or false
+		if not cleaned then
+			return false
+		end
+	end
+	pcall(vim.api.nvim_del_augroup_by_name, "exact_editor_rpc")
+	configured = {}
+	return complete
 end
 
 -- A headless validation process is not a user-owned editor target. Register
@@ -833,9 +1704,13 @@ function M.setup_deferred(dependencies)
 			return
 		end
 		deferred = true
+		local generation = deferred_generation
 		schedule(function()
+			if generation ~= deferred_generation then
+				return
+			end
 			deferred = false
-			if ui_count() > 0 then
+			if not active and ui_count() > 0 then
 				setup()
 			end
 		end)
@@ -856,5 +1731,9 @@ M._wait_state_keys = WAIT_STATE_KEYS
 M._prepare_state = prepare_state
 M._normalize_workspace = normalize_workspace
 M._workspace_identity = workspace_identity
+M._set_test_hook = function(callback)
+	assert(callback == nil or type(callback) == "function", "exact editor test hook must be a function or nil")
+	test_hook = callback
+end
 
 return M

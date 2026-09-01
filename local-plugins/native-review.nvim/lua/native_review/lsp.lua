@@ -1024,6 +1024,18 @@ function M.setup()
 	})
 end
 
+function M.teardown()
+	for buf in pairs(vim.deepcopy(metadata_by_buffer)) do
+		M.clear(buf)
+	end
+	for buf in pairs(vim.deepcopy(mirrors_by_buffer)) do
+		M.clear(buf)
+	end
+	pcall(vim.api.nvim_del_augroup_by_name, "NvimReviewLspGuard")
+	setup_done = false
+	return true
+end
+
 M._build_line_maps = build_line_maps
 M._diagnostic_namespace = DIAGNOSTIC_NAMESPACE
 M._metadata = metadata_by_buffer

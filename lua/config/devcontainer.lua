@@ -6,8 +6,15 @@ local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normaliz
 local M = {}
 local uv = vim.uv
 local core = require("devcontainer_editor")
+local policy = require("config.local_config").plugin("devcontainer_editor", {
+	cli = "devcontainer",
+	lockfile_policy = "preserve",
+	ssh_agent = "auto",
+	claim_timeout_ms = 2000,
+	ack_timeout_ms = 5000,
+	max_messages_per_tick = 32,
+})
 local launcher = vim.fs.joinpath(config_root, "scripts", "devcontainer-editor")
-local CLAIM_TIMEOUT_MS = 2000
 
 local function state_root()
 	local configured = vim.env.NVIM_DEVCONTAINER_STATE_HOME
@@ -30,12 +37,18 @@ local function options()
 	return {
 		state_root = state_root,
 		launcher = launcher,
+		cli = policy.cli,
+		lockfile_policy = policy.lockfile_policy,
+		ssh_agent = policy.ssh_agent,
+		claim_timeout_ms = policy.claim_timeout_ms,
+		ack_timeout_ms = policy.ack_timeout_ms,
+		max_messages_per_tick = policy.max_messages_per_tick,
 		open = require("config.editor").open_file_in_tab,
 		notify = notify,
 	}
 end
 
-core.setup(options())
+assert(core.setup(options()))
 
 function M.in_workspace()
 	return core.in_workspace()
@@ -72,7 +85,7 @@ end
 local function wait_for_claim(project_root, claim_id, timeout_ms)
 	local failure
 	local last_error
-	local ready = vim.wait(timeout_ms or CLAIM_TIMEOUT_MS, function()
+	local ready = vim.wait(timeout_ms or policy.claim_timeout_ms, function()
 		local status, status_err = core.status(project_root)
 		if not status then
 			last_error = status_err
@@ -186,8 +199,21 @@ local function show_log()
 	end
 end
 
+local function show_doctor()
+	local ok, err = run_lifecycle("doctor", { root = root() }, function(result)
+		if result.code == 0 then
+			notify(result_message(result, "Dev Container configuration is ready"))
+		else
+			notify(result_message(result, "Dev Container doctor failed"), vim.log.levels.ERROR)
+		end
+	end)
+	if not ok then
+		notify(err, vim.log.levels.ERROR)
+	end
+end
+
 function M.setup()
-	core.setup(options())
+	assert(core.setup(options()))
 	if M.in_workspace() then
 		vim.g.nvim_devcontainer_status = {
 			project = vim.fs.basename(vim.env.NVIM_DEVCONTAINER_CONTAINER_ROOT or "container"),
@@ -204,6 +230,7 @@ function M.setup()
 	end, {
 		bang = true,
 		desc = "Replace the tmux editor pane with Dev Container Neovim (! authorizes network tools)",
+		force = true,
 	})
 
 	vim.api.nvim_create_user_command("DevContainerRecreate", function(command)
@@ -214,14 +241,22 @@ function M.setup()
 	end, {
 		bang = true,
 		desc = "Recreate the Dev Container and open its exact Neovim editor",
+		force = true,
 	})
 
 	vim.api.nvim_create_user_command("DevContainerStatus", show_status, {
 		desc = "Show private Dev Container lifecycle state",
+		force = true,
 	})
 
 	vim.api.nvim_create_user_command("DevContainerLog", show_log, {
 		desc = "Show the private Dev Container lifecycle log",
+		force = true,
+	})
+
+	vim.api.nvim_create_user_command("DevContainerDoctor", show_doctor, {
+		desc = "Validate Dev Container CLI and lockfile policy support",
+		force = true,
 	})
 
 	vim.api.nvim_create_user_command("DevContainerHostEditor", function()
@@ -229,7 +264,7 @@ function M.setup()
 		if not ok then
 			notify(err, vim.log.levels.ERROR)
 		end
-	end, { desc = "Explicitly return the tmux editor pane to host Neovim" })
+	end, { desc = "Explicitly return the tmux editor pane to host Neovim", force = true })
 end
 
 M._core = core
@@ -237,5 +272,6 @@ M._launcher = launcher
 M._replace_editor = replace_editor
 M._options = options
 M._wait_for_claim = wait_for_claim
+M._show_doctor = show_doctor
 
 return M

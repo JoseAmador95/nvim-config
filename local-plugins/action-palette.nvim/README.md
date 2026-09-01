@@ -8,7 +8,9 @@ intrinsic confirmations, and binds every presented action to one execution.
 
 The plugin never imports `config.*`, opens UI, or registers global commands or
 mappings. `setup(opts)` accepts confirmation, notification, target and context
-refresh adapters; a confirmation fails closed when no adapter was injected.
+refresh adapters; an injected target adapter must provide
+`revalidate(value, mode)`, and a confirmation fails closed when no adapter was
+injected.
 Snacks, menu.nvim and `vim.ui.select` remain host presentation surfaces.
 
 The curated inventory remains host-owned in `lua/config/menu/catalog.lua` and
@@ -28,11 +30,22 @@ TUICR/Agent descriptors; the plugin does not synthesize or discover actions.
 }
 ```
 
-Before execution the target must still identify the same live tab, window,
-buffer, cursor and changedtick. Availability is recomputed against refreshed
-host context. Confirmation belongs to the action definition and therefore
-applies identically on every surface. A bound callback is consumed by its first
-attempt, including cancellation or failed revalidation.
+Each descriptor may choose `target = "exact"`, `"buffer"`, `"window"`, or
+`"none"`. Exact additionally pins cursor and changedtick; buffer and window
+retain only the named identity guarantees; none permits actions without editor
+state. The default is exact.
+
+Availability is recomputed against refreshed host context and is always a
+structured `{ available, reason?, error? }` result. Unavailable actions are
+hidden by default or may remain visible with their reason when
+`unavailable = "show"`. Confirmation belongs to the action definition and
+therefore applies identically on every surface. A bound callback is consumed by
+its first attempt, including cancellation or failed revalidation.
+
+`setup()` rejects unknown options before replacing the registry. Repeated setup
+starts with an empty catalog. `effective_config()` and `status()` return copies
+and work before setup, and `teardown()` is repeatable. Plugin events are copied
+before delivery to the injected callback.
 
 Run the standalone tests from the configuration root:
 

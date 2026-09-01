@@ -8,6 +8,18 @@ package.path = table.concat({ plugin .. "/lua/?.lua", plugin .. "/lua/?/init.lua
 
 local failures = {}
 local count = 0
+local function equal(expected, actual, message)
+	if not vim.deep_equal(expected, actual) then
+		error(
+			(message or "values differ")
+				.. "\nexpected: "
+				.. vim.inspect(expected)
+				.. "\nactual: "
+				.. vim.inspect(actual)
+		)
+	end
+end
+
 local function test(name, callback)
 	count = count + 1
 	local ok, err = xpcall(callback, debug.traceback)
@@ -25,7 +37,23 @@ local source = fixture .. "/src/probe.py"
 vim.fn.writefile({ "value = 1", "print(value)" }, source)
 
 local coverage = require("coverage_workbench")
-coverage.setup()
+
+test("lifecycle defaults are copied and rejected setup is non-mutating", function()
+	local defaults = coverage.effective_config()
+	equal({ max_report_bytes = 50 * 1024 * 1024, signs = "all", stale = "hide" }, defaults)
+	assert(coverage.status().configured == false)
+	defaults.max_report_bytes = 1
+	equal(50 * 1024 * 1024, coverage.effective_config().max_report_bytes, "effective config leaked state")
+	local before = coverage.status()
+	local ok, err = coverage.setup({ unknown = true })
+	assert(not ok and err:find("unknown option", 1, true), err)
+	equal(before, coverage.status(), "rejected setup mutated state")
+	ok, err = coverage.setup(false)
+	assert(not ok and err:find("object", 1, true), "false setup options were accepted")
+	equal(before, coverage.status(), "false setup options mutated state")
+end)
+
+assert(coverage.setup())
 
 local function json(format, files)
 	local meta = { version = "fixture" }
@@ -135,6 +163,51 @@ test("valid replacement clears stale signs while invalid refresh preserves state
 	assert(coverage.clear(fixture))
 	assert(coverage.snapshot(fixture) == nil)
 	vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("source edits and replacements hide stale signs and failed refresh never restores them", function()
+	local events = {}
+	assert(coverage.setup({
+		event = function(event)
+			events[#events + 1] = vim.deepcopy(event)
+			event.root = "mutated"
+		end,
+	}))
+	vim.fn.writefile({ "value = 1", "print(value)" }, source)
+	local report = fixture .. "/stale-coverage.json"
+	vim.fn.writefile({ json(3) }, report)
+	local buf = vim.fn.bufadd(source)
+	vim.fn.bufload(buf)
+	assert(coverage.load({ root = fixture, path = report }))
+	assert(#owned_signs(buf) == 2)
+
+	vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "value = 2" })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf, modeline = false })
+	equal(0, #owned_signs(buf), "modified source retained coverage signs")
+	local stale = coverage.snapshot(fixture)
+	assert(stale.model.files[source].stale == true, "modified source was not marked stale")
+	local stale_event = events[#events]
+	assert(stale_event.kind == "stale" and stale_event.root == fixture, "stale event was not isolated")
+
+	vim.fn.writefile({ "{" }, report)
+	local refreshed, refresh_err = coverage.refresh(fixture)
+	assert(not refreshed and refresh_err:find("invalid coverage.py JSON", 1, true), refresh_err)
+	equal(0, #owned_signs(buf), "failed refresh restored stale signs")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "value = 1", "print(value)" })
+	vim.bo[buf].modified = false
+	vim.api.nvim_exec_autocmds("BufModifiedSet", { buffer = buf, modeline = false })
+	assert(#owned_signs(buf) == 2, "matching source did not recover its signs")
+	local replacement = source .. ".replacement"
+	vim.fn.writefile({ "value = 1", "print(value)" }, replacement)
+	assert(vim.uv.fs_rename(replacement, source))
+	vim.api.nvim_exec_autocmds("BufEnter", { buffer = buf, modeline = false })
+	equal(0, #owned_signs(buf), "replaced source identity retained coverage signs")
+
+	assert(coverage.clear(fixture))
+	vim.api.nvim_buf_delete(buf, { force = true })
+	vim.fn.writefile({ "value = 1", "print(value)" }, source)
+	vim.fn.delete(report)
 end)
 
 test("outside symlink is rejected before its target is opened", function()
@@ -265,11 +338,28 @@ end)
 test("size limits and unknown formats fail closed", function()
 	local report = fixture .. "/tiny.json"
 	vim.fn.writefile({ json(2) }, report)
-	coverage.setup({ max_bytes = 2 })
+	coverage.setup({ max_report_bytes = 2 })
 	local loaded, err = coverage.load({ root = fixture, path = report })
 	assert(loaded == nil and err:match("exceeds"))
 	local unknown, unknown_err = coverage.load({ root = fixture, path = report, format = "future" })
 	assert(unknown == nil and (unknown_err:match("exceeds") or unknown_err:match("unsupported")))
+end)
+
+test("repeated setup replaces config and teardown is deterministic", function()
+	assert(coverage.setup({ signs = "missing", stale = "show" }))
+	local status = coverage.status()
+	status.config.signs = "changed"
+	equal("missing", coverage.status().config.signs, "status leaked mutable config")
+	local before = coverage.status()
+	local ok = coverage.setup({ injected = true })
+	assert(not ok)
+	equal(before, coverage.status(), "invalid repeated setup mutated state")
+	assert(coverage.setup())
+	equal("all", coverage.effective_config().signs)
+	assert(coverage.teardown())
+	assert(coverage.teardown())
+	assert(not coverage.status().configured)
+	equal("hide", coverage.effective_config().stale)
 end)
 
 vim.fn.delete(fixture, "rf")

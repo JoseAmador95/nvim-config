@@ -15,22 +15,31 @@ sources.
 
 - `setup({ state_root, mode = "full" })` configures owner-only persistent state.
   `mode = "host-only"` excludes project sources without requesting approval.
-- `register_source({ id, layer, priority, value, repo, fingerprint })` replaces a
-  source. Host layers accept the host schema; project layers retain only
-  `clangd.path`, `clangd.profile`, `review`, and log settings.
-- `snapshot()` returns an independent
+- `register_source({ id, layer, priority, value, workspace, fingerprint })`
+  replaces a source. Project state is keyed by the exact `WorkspaceKey`
+  `{ runtime, root, repo_identity }`; host sources project into every scope.
+  Project values accept only `plugins.native_review`, bounded/reducing
+  `plugins.log_workbench.max_lines/max_bytes`, and
+  `plugins.clangd_compile_db.path/profile`. Old root schemas are rejected.
+- `snapshot([workspace])` returns an independent
   `{ generation, source, validity, value }` copy. `validity.provenance` maps
   leaf paths to source IDs and layers.
 - `register_applier({ id, order, prepare, apply, rollback })` adds a transactional
   applier. Every prepare completes before ordered apply; completed applies roll
   back in reverse after a failure.
-- `approve(repo, source, fingerprint)` persists an exact project-source
+- `approve({ workspace, source, fingerprint })` persists an exact project-source
   fingerprint only when it matches the currently registered, enabled project
-  candidate.
+  candidate. `approvals([workspace_or_repo])` returns copied approvals and
+  `revoke_approval(workspace_or_repo, source)` removes one.
 - `authorize(repo, capability)` and `revoke(repo, capability)` manage revocable
   grants. Capabilities are exactly `lint-format`, `test`, `build`, and `debug`.
-- `status([repo])` returns copied candidate/applied/pending/LKG state and grants.
-- `diff()` returns the candidate-to-applied leaf changes.
+- `status([workspace])` returns copied candidate/applied/pending/LKG state and
+  grants; zero-argument status also contains a deterministic aggregate of all
+  scopes and is safe before setup. `diff([workspace])` returns the
+  candidate-to-applied leaf changes.
+- `effective_config()` always returns copied, callback-free defaults or active
+  policy. Unknown setup keys are rejected before mutation, teardown is
+  repeatable, and failures in `on_state_change(event)` are isolated.
 
 Persistent JSON is bounded, atomically replaced with mode `0600`, and stored in
 a real mode-`0700` directory whose device/inode identity is pinned after setup.

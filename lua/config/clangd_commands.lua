@@ -42,6 +42,59 @@ function M.switch_source_header()
 	end, 0)
 end
 
+local function current_root()
+	local root, root_err = require("config.repo").current_root(0)
+	if not root then
+		notify(root_err, vim.log.levels.ERROR)
+		return nil
+	end
+	return root
+end
+
+function M.show_compile_commands_status()
+	local root = current_root()
+	if not root then
+		return
+	end
+	local status = require("config.clangd").status(root)
+	notify(table.concat({
+		("state: %s"):format(status.state),
+		("profile: %s"):format(status.profile),
+		("directory: %s"):format(status.directory or "none"),
+		("source: %s"):format(status.source or "none"),
+		("validity: %s"):format(status.validity or "none"),
+		("error: %s"):format(status.error or "none"),
+	}, "\n"))
+end
+
+function M.refresh_compile_commands()
+	local root = current_root()
+	if not root then
+		return false
+	end
+	local ok, err = require("config.clangd").refresh(root)
+	if not ok then
+		notify("clangd compile database refresh failed: " .. tostring(err), vim.log.levels.ERROR)
+		return false
+	end
+	notify("clangd compile database refreshed")
+	return true
+end
+
+function M.clear_compile_commands()
+	local root = current_root()
+	if not root then
+		return false
+	end
+	local ok, err = require("config.clangd").clear_manual(root)
+	if not ok then
+		notify("clangd compile database clear failed: " .. tostring(err), vim.log.levels.ERROR)
+		return false
+	end
+	notify("clangd manual compile database cleared")
+	return true
+end
+
 function M.setup()
 	vim.api.nvim_create_user_command("ClangdSetCompileCommands", function(opts)
 		M.set_compile_commands(opts.args, opts.bang)
@@ -50,10 +103,27 @@ function M.setup()
 		bang = true,
 		complete = "dir",
 		desc = "Point clangd at a validated compile_commands.json directory for this root",
+		force = true,
 	})
 	vim.api.nvim_create_user_command("ClangdSwitchSourceHeader", M.switch_source_header, {
 		nargs = 0,
 		desc = "Open clangd's corresponding source or header in a tab",
+		force = true,
+	})
+	vim.api.nvim_create_user_command("ClangdCompileCommandsStatus", M.show_compile_commands_status, {
+		nargs = 0,
+		desc = "Show the active clangd compile database",
+		force = true,
+	})
+	vim.api.nvim_create_user_command("ClangdRefreshCompileCommands", M.refresh_compile_commands, {
+		nargs = 0,
+		desc = "Revalidate and refresh the active clangd compile database",
+		force = true,
+	})
+	vim.api.nvim_create_user_command("ClangdClearCompileCommands", M.clear_compile_commands, {
+		nargs = 0,
+		desc = "Clear the manual clangd compile database override",
+		force = true,
 	})
 end
 

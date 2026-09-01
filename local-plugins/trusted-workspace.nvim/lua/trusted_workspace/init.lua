@@ -18,6 +18,7 @@ local CAPABILITIES = {
 	debug = true,
 }
 local LAYER_RANK = { host = 1, project = 2 }
+local HOST_SCOPE_KEY = "\0host"
 
 local uv = vim.uv
 local ffi_ok, ffi = pcall(require, "ffi")
@@ -73,6 +74,8 @@ local state = {
 	root_identity = nil,
 	mode = "full",
 	sources = {},
+	scopes = {},
+	current_scope = HOST_SCOPE_KEY,
 	appliers = {},
 	generation = 0,
 	candidate = nil,
@@ -83,6 +86,7 @@ local state = {
 	persistent = { version = STATE_VERSION, approvals = {}, grants = {} },
 	state_error = nil,
 	apply_error = nil,
+	on_state_change = nil,
 }
 local test_hook
 local run_test_hook
@@ -106,6 +110,75 @@ end
 
 local function copy(value)
 	return vim.deepcopy(value)
+end
+
+local function exact_options(value, allowed, label)
+	if type(value) ~= "table" then
+		return nil, label .. " must be a table"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" or not allowed[key] then
+			return nil, label .. " contains an unknown option: " .. tostring(key)
+		end
+	end
+	return true
+end
+
+local function workspace_identity(workspace)
+	if not workspace then
+		return HOST_SCOPE_KEY
+	end
+	return table.concat({ workspace.runtime, workspace.root, workspace.repo_identity }, "\0")
+end
+
+local function normalize_workspace(value, label)
+	local normalized, err = contracts.normalize_workspace_key(value)
+	if not normalized then
+		return nil, (label or "workspace") .. ": " .. tostring(err)
+	end
+	normalized.root = vim.fs.normalize(normalized.root)
+	return normalized
+end
+
+local function legacy_workspace(repo)
+	return { runtime = "host", root = repo, repo_identity = repo }
+end
+
+local function new_scope(workspace)
+	return {
+		workspace = workspace and copy(workspace) or nil,
+		sources = {},
+		generation = 0,
+		candidate = nil,
+		applied = nil,
+		pending = {},
+		last_known_good = nil,
+		applied_sources = {},
+		apply_error = nil,
+	}
+end
+
+local function scope_for(workspace, create)
+	local key = workspace_identity(workspace)
+	local scope = state.scopes[key]
+	if not scope and create then
+		scope = new_scope(workspace)
+		state.scopes[key] = scope
+	end
+	return scope, key
+end
+
+local function host_scope()
+	return scope_for(nil, true)
+end
+
+local function emit(kind, details)
+	if type(state.on_state_change) ~= "function" then
+		return
+	end
+	local event = copy(details or {})
+	event.kind = kind
+	pcall(state.on_state_change, event)
 end
 
 local function blank_snapshot()
@@ -157,16 +230,26 @@ local function merge_into(target, incoming, provenance, source, prefix)
 			end
 			merge_into(target[key], value, provenance, source, path)
 		else
-			target[key] = copy(value)
-			provenance[path] = { id = source.id, layer = source.layer }
+			local reduces_host_limit = source.layer == "project"
+				and (path == "plugins.log_workbench.max_lines" or path == "plugins.log_workbench.max_bytes")
+				and type(target[key]) == "number"
+				and type(value) == "number"
+				and value > target[key]
+			if not reduces_host_limit then
+				target[key] = copy(value)
+				provenance[path] = { id = source.id, layer = source.layer }
+			end
 		end
 	end
 	return target
 end
 
-local function sorted_sources()
+local function sorted_sources(scope)
 	local result = {}
 	for _, source in pairs(state.sources) do
+		result[#result + 1] = source
+	end
+	for _, source in pairs((scope and scope.sources) or {}) do
 		result[#result + 1] = source
 	end
 	table.sort(result, function(left, right)
@@ -211,12 +294,12 @@ local function source_enabled(source)
 	return source.enabled and (source.layer ~= "project" or state.mode == "full")
 end
 
-local function merged_sources(include_pending)
+local function merged_sources(scope, include_pending)
 	local value = {}
 	local provenance = {}
 	local errors = {}
 	local pending = {}
-	for _, source in ipairs(sorted_sources()) do
+	for _, source in ipairs(sorted_sources(scope)) do
 		if source_enabled(source) then
 			vim.list_extend(errors, source.errors)
 			local is_approved = approved(source)
@@ -242,14 +325,14 @@ local function merged_sources(include_pending)
 	return value, provenance, errors, pending
 end
 
-local function effective_sources()
+local function effective_sources(scope)
 	local result = {}
-	for _, source in ipairs(sorted_sources()) do
+	for _, source in ipairs(sorted_sources(scope)) do
 		if source_enabled(source) then
 			if approved(source) then
 				result[source.id] = source
 			elseif source.layer == "project" then
-				local previous = state.applied_sources[source.id]
+				local previous = scope.applied_sources[source.id]
 				local approvals = previous and state.persistent.approvals[previous.repo] or nil
 				if
 					previous
@@ -351,10 +434,10 @@ local function apply_transaction(next_snapshot, previous_snapshot, force)
 	return true
 end
 
-local function recompute(force)
-	state.generation = state.generation + 1
-	local candidate_value, candidate_provenance, errors, pending = merged_sources(true)
-	local next_sources = effective_sources()
+local function plan_scope_recompute(scope)
+	local generation = scope.generation + 1
+	local candidate_value, candidate_provenance, errors, pending = merged_sources(scope, true)
+	local next_sources = effective_sources(scope)
 	local applied_value, applied_provenance, applied_errors = merged_effective_sources(next_sources)
 	local validity = {
 		valid = #errors == 0 and #pending == 0,
@@ -363,13 +446,13 @@ local function recompute(force)
 		pending = copy(pending),
 	}
 	local candidate = assert(contracts.normalize_snapshot({
-		generation = state.generation,
+		generation = generation,
 		source = "trusted-workspace",
 		validity = validity,
 		value = candidate_value,
 	}))
 	local next_applied = assert(contracts.normalize_snapshot({
-		generation = state.generation,
+		generation = generation,
 		source = "trusted-workspace",
 		validity = {
 			valid = #applied_errors == 0,
@@ -379,21 +462,126 @@ local function recompute(force)
 		},
 		value = applied_value,
 	}))
-	local previous = state.applied or blank_snapshot()
-	state.candidate = candidate
-	state.pending = pending
-	local ok, err = apply_transaction(next_applied, previous, force)
+	local previous = scope.applied or blank_snapshot()
+	return {
+		scope = scope,
+		generation = generation,
+		candidate = candidate,
+		pending = pending,
+		next_applied = next_applied,
+		previous = previous,
+		next_sources = next_sources,
+	}
+end
+
+local function publish_scope_recompute(plan, ok, err)
+	local scope = plan.scope
+	scope.generation = plan.generation
+	scope.candidate = plan.candidate
+	scope.pending = plan.pending
 	if ok then
-		state.apply_error = nil
-		state.applied = next_applied
-		state.applied_sources = copy(next_sources)
-		if #pending == 0 then
-			state.last_known_good = snapshot_copy(next_applied)
+		scope.apply_error = nil
+		scope.applied = plan.next_applied
+		scope.applied_sources = copy(plan.next_sources)
+		if #plan.pending == 0 then
+			scope.last_known_good = snapshot_copy(plan.next_applied)
 		end
 	else
-		state.apply_error = err
+		scope.apply_error = err
 	end
+	emit("scope", {
+		workspace = scope.workspace,
+		generation = plan.generation,
+		pending = plan.pending,
+		applied = ok == true,
+		error = err,
+	})
 	return ok, err
+end
+
+local function recompute_scope(scope, force)
+	local plan = plan_scope_recompute(scope)
+	local ok, err = apply_transaction(plan.next_applied, plan.previous, force)
+	publish_scope_recompute(plan, ok, err)
+	return ok, err
+end
+
+local function apply_scope_plans(plans, force)
+	local prepared = {}
+	for _, plan in ipairs(plans) do
+		if force or not vim.deep_equal(plan.next_applied.value, plan.previous.value) then
+			for _, applier in ipairs(ordered_appliers()) do
+				local ok, token, detail =
+					pcall(applier.prepare, snapshot_copy(plan.next_applied), snapshot_copy(plan.previous))
+				if not ok then
+					return nil, ("applier %s prepare failed: %s"):format(applier.id, tostring(token))
+				end
+				local failure = callback_failure(token, detail, "prepare rejected the snapshot")
+				if failure then
+					return nil, ("applier %s prepare failed: %s"):format(applier.id, failure)
+				end
+				prepared[#prepared + 1] = { applier = applier, token = token, plan = plan }
+			end
+		end
+	end
+
+	local applied = {}
+	for _, item in ipairs(prepared) do
+		local ok, result, detail = pcall(
+			item.applier.apply,
+			item.token,
+			snapshot_copy(item.plan.next_applied),
+			snapshot_copy(item.plan.previous)
+		)
+		local failure = not ok and tostring(result) or callback_failure(result, detail, "apply rejected the snapshot")
+		if failure then
+			local rollback_errors = {}
+			for index = #applied, 1, -1 do
+				local completed = applied[index]
+				local rollback_ok, rollback_result, rollback_detail = pcall(
+					completed.applier.rollback,
+					completed.token,
+					snapshot_copy(completed.plan.next_applied),
+					snapshot_copy(completed.plan.previous)
+				)
+				local rollback_failure = not rollback_ok and tostring(rollback_result)
+					or callback_failure(rollback_result, rollback_detail, "rollback rejected the snapshot")
+				if rollback_failure then
+					rollback_errors[#rollback_errors + 1] = ("applier %s rollback failed: %s"):format(
+						completed.applier.id,
+						rollback_failure
+					)
+				end
+			end
+			local message = ("applier %s apply failed: %s"):format(item.applier.id, failure)
+			if #rollback_errors > 0 then
+				message = message .. "; " .. table.concat(rollback_errors, "; ")
+			end
+			return nil, message
+		end
+		applied[#applied + 1] = item
+	end
+	return true
+end
+
+local function recompute_all(force)
+	local keys = vim.tbl_keys(state.scopes)
+	table.sort(keys)
+	local plans = {}
+	for _, key in ipairs(keys) do
+		plans[#plans + 1] = plan_scope_recompute(state.scopes[key])
+	end
+	local ok, err = apply_scope_plans(plans, force)
+	if not ok then
+		for _, plan in ipairs(plans) do
+			publish_scope_recompute(plan, false, err)
+		end
+		return nil, err
+	end
+	for _, plan in ipairs(plans) do
+		publish_scope_recompute(plan, true)
+	end
+	return true
 end
 
 local function validate_string_map(value, label, value_validator)
@@ -2188,50 +2376,82 @@ local function update_persistent(mutator)
 end
 
 local function project_value(value)
-	local result = {}
-	local errors = {}
-	for key, child in pairs(value) do
-		if key == "clangd" then
-			if type(child) ~= "table" then
-				errors[#errors + 1] = "clangd: project field must be a table (ignored)"
-			else
-				local clangd = {}
-				for clangd_key, clangd_value in pairs(child) do
-					if clangd_key == "path" or clangd_key == "profile" then
-						if type(clangd_value) == "string" and clangd_value ~= "" then
-							clangd[clangd_key] = clangd_value
-						else
-							errors[#errors + 1] = ("clangd.%s: project field must be a non-empty string (ignored)"):format(
-								clangd_key
-							)
-						end
-					else
-						errors[#errors + 1] = ("clangd.%s: project field is not allowed (ignored)"):format(
-							tostring(clangd_key)
-						)
-					end
-				end
-				if next(clangd) then
-					result.clangd = clangd
-				end
-			end
-		elseif key == "review" or key == "logs" or key == "log_watch" then
-			if type(child) ~= "table" then
-				errors[#errors + 1] = ("%s: project field must be a table (ignored)"):format(key)
-			else
-				local destination = key == "logs" and "log_watch" or key
-				if result[destination] then
-					errors[#errors + 1] = "logs: duplicate project log settings (ignored)"
-				else
-					result[destination] = copy(child)
-				end
-			end
-		else
-			errors[#errors + 1] = ("%s: project field is not allowed (ignored)"):format(tostring(key))
-		end
+	local top_ok, top_err = exact_options(value, { plugins = true }, "project source value")
+	if not top_ok then
+		return nil, top_err
 	end
-	table.sort(errors)
-	return result, errors
+	local plugins = value.plugins or {}
+	local plugins_ok, plugins_err = exact_options(
+		plugins,
+		{ native_review = true, log_workbench = true, clangd_compile_db = true },
+		"project source value.plugins"
+	)
+	if not plugins_ok then
+		return nil, plugins_err
+	end
+	local result = {}
+	local normalized_plugins = {}
+	if plugins.native_review ~= nil then
+		local review_ok, review_err =
+			exact_options(plugins.native_review, { hunk_context = true }, "project source value.plugins.native_review")
+		if not review_ok then
+			return nil, review_err
+		end
+		local context = plugins.native_review.hunk_context
+		if context ~= nil and (type(context) ~= "number" or context < 0 or context % 1 ~= 0) then
+			return nil, "project source value.plugins.native_review.hunk_context must be a non-negative integer"
+		end
+		normalized_plugins.native_review = copy(plugins.native_review)
+	end
+	if plugins.log_workbench ~= nil then
+		local logs_ok, logs_err = exact_options(
+			plugins.log_workbench,
+			{ max_lines = true, max_bytes = true },
+			"project source value.plugins.log_workbench"
+		)
+		if not logs_ok then
+			return nil, logs_err
+		end
+		for name, maximum in pairs({ max_lines = 100000, max_bytes = 64 * 1024 * 1024 }) do
+			local configured = plugins.log_workbench[name]
+			if
+				configured ~= nil
+				and (type(configured) ~= "number" or configured < 1 or configured % 1 ~= 0 or configured > maximum)
+			then
+				return nil,
+					("project source value.plugins.log_workbench.%s must be a positive integer no greater than %d"):format(
+						name,
+						maximum
+					)
+			end
+		end
+		normalized_plugins.log_workbench = copy(plugins.log_workbench)
+	end
+	if plugins.clangd_compile_db ~= nil then
+		local clangd_ok, clangd_err = exact_options(
+			plugins.clangd_compile_db,
+			{ path = true, profile = true },
+			"project source value.plugins.clangd_compile_db"
+		)
+		if not clangd_ok then
+			return nil, clangd_err
+		end
+		local clangd = plugins.clangd_compile_db
+		if
+			clangd.path ~= nil
+			and (type(clangd.path) ~= "string" or clangd.path == "" or clangd.path:find("\0", 1, true))
+		then
+			return nil, "project source value.plugins.clangd_compile_db.path must be a non-empty string"
+		end
+		if clangd.profile ~= nil and clangd.profile ~= "full" and clangd.profile ~= "light" then
+			return nil, "project source value.plugins.clangd_compile_db.profile must be full or light"
+		end
+		normalized_plugins.clangd_compile_db = copy(clangd)
+	end
+	if next(normalized_plugins) ~= nil then
+		result.plugins = normalized_plugins
+	end
+	return result, {}
 end
 
 local function normalize_source(spec)
@@ -2265,17 +2485,33 @@ local function normalize_source(spec)
 	local errors = {}
 	local normalized_value = value.value
 	local repo
+	local workspace
 	local fingerprint
 	if spec.layer == "project" then
-		repo, value_err = nonempty_string(spec.repo, "source.repo")
-		if not repo then
-			return nil, value_err
+		if spec.workspace ~= nil then
+			workspace, value_err = normalize_workspace(spec.workspace, "source.workspace")
+			if not workspace then
+				return nil, value_err
+			end
+			repo = workspace.repo_identity
+		else
+			repo, value_err = nonempty_string(spec.repo, "source.repo")
+			if not repo then
+				return nil, value_err
+			end
+			workspace, value_err = normalize_workspace(legacy_workspace(repo), "source.workspace")
+			if not workspace then
+				return nil, value_err
+			end
 		end
 		fingerprint, value_err = nonempty_string(spec.fingerprint, "source.fingerprint")
 		if not fingerprint then
 			return nil, value_err
 		end
 		normalized_value, errors = project_value(normalized_value)
+		if not normalized_value then
+			return nil, errors
+		end
 	end
 	return {
 		id = id,
@@ -2284,6 +2520,7 @@ local function normalize_source(spec)
 		enabled = enabled,
 		value = normalized_value,
 		repo = repo,
+		workspace = workspace,
 		fingerprint = fingerprint,
 		errors = errors,
 	}
@@ -2324,9 +2561,12 @@ end
 
 local function approval_args(repo_or_spec, source_id, fingerprint)
 	if type(repo_or_spec) == "table" then
-		return repo_or_spec.repo, repo_or_spec.source or repo_or_spec.id, repo_or_spec.fingerprint
+		return repo_or_spec.workspace,
+			repo_or_spec.repo,
+			repo_or_spec.source or repo_or_spec.id,
+			repo_or_spec.fingerprint
 	end
-	return repo_or_spec, source_id, fingerprint
+	return nil, repo_or_spec, source_id, fingerprint
 end
 
 local function grant_args(repo_or_spec, capability)
@@ -2337,7 +2577,20 @@ local function grant_args(repo_or_spec, capability)
 end
 
 function M.setup(opts)
-	opts = opts or {}
+	if opts == nil then
+		opts = {}
+	end
+	local options_ok, options_err =
+		exact_options(opts, { state_root = true, mode = true, reset = true, on_state_change = true }, "setup")
+	if not options_ok then
+		return nil, options_err
+	end
+	if opts.reset ~= nil and type(opts.reset) ~= "boolean" then
+		return nil, "setup.reset must be boolean"
+	end
+	if opts.on_state_change ~= nil and type(opts.on_state_change) ~= "function" then
+		return nil, "setup.on_state_change must be a function"
+	end
 	local root, root_err = nonempty_string(opts.state_root, "setup.state_root")
 	if not root then
 		return nil, root_err
@@ -2346,14 +2599,26 @@ function M.setup(opts)
 	if root:sub(1, 1) ~= "/" then
 		return nil, "setup.state_root must be absolute"
 	end
-	local mode = opts.mode or "full"
+	local mode = opts.mode
+	if mode == nil then
+		mode = "full"
+	end
 	if mode ~= "full" and mode ~= "host-only" then
 		return nil, "setup.mode must be full or host-only"
 	end
+	if state.configured and state.state_root == root and state.mode == mode and opts.reset ~= true then
+		state.on_state_change = opts.on_state_change
+		return true
+	end
 	local root_changed = state.state_root ~= root
 	local reset = opts.reset == true or root_changed
+	local previous = state
+	local candidate = copy(state)
+	state = candidate
 	if reset then
 		state.sources = {}
+		state.scopes = {}
+		state.current_scope = HOST_SCOPE_KEY
 		state.appliers = {}
 		state.generation = 0
 		state.candidate = nil
@@ -2368,15 +2633,30 @@ function M.setup(opts)
 	end
 	state.state_root = root
 	state.mode = mode
+	state.on_state_change = nil
 	state.configured = true
 	local persistent, err = read_state()
-	state.state_error = err
-	state.persistent = persistent or { version = STATE_VERSION, approvals = {}, grants = {} }
-	recompute()
 	if err then
+		state = previous
 		return nil, err
 	end
+	state.state_error = nil
+	state.persistent = persistent
+	host_scope()
+	local recomputed, recompute_err = recompute_all()
+	if not recomputed then
+		state = previous
+		return nil, recompute_err
+	end
+	state.on_state_change = opts.on_state_change
 	return true
+end
+
+function M.effective_config()
+	if not state.configured then
+		return { mode = "full" }
+	end
+	return copy({ state_root = state.state_root, mode = state.mode })
 end
 
 function M.register_source(id_or_spec, maybe_spec)
@@ -2394,19 +2674,67 @@ function M.register_source(id_or_spec, maybe_spec)
 	if not source then
 		return nil, err
 	end
-	state.sources[source.id] = source
-	local ok, apply_err = recompute()
+	local ok, apply_err
+	if source.layer == "host" then
+		state.sources[source.id] = source
+		ok, apply_err = recompute_all()
+	else
+		local scope, key = scope_for(source.workspace, true)
+		scope.sources[source.id] = source
+		state.current_scope = key
+		ok, apply_err = recompute_scope(scope)
+	end
 	if not ok then
 		return nil, apply_err
 	end
 	return M.snapshot()
 end
 
-function M.snapshot()
+local function scope_from_selector(selector, create)
+	if selector == nil then
+		return state.scopes[state.current_scope] or host_scope(), state.current_scope
+	end
+	local workspace
+	if type(selector) == "string" then
+		local matches = {}
+		for key, scope in pairs(state.scopes) do
+			if scope.workspace and (scope.workspace.repo_identity == selector or scope.workspace.root == selector) then
+				matches[#matches + 1] = { key = key, scope = scope }
+			end
+		end
+		table.sort(matches, function(left, right)
+			return left.key < right.key
+		end)
+		if #matches == 1 then
+			return matches[1].scope, matches[1].key
+		end
+		if #matches > 1 then
+			return nil, "workspace selector is ambiguous; pass an exact WorkspaceKey"
+		end
+		workspace = legacy_workspace(selector)
+	else
+		local normalized, err = normalize_workspace(selector, "workspace")
+		if not normalized then
+			return nil, err
+		end
+		workspace = normalized
+	end
+	local scope, key = scope_for(workspace, create)
+	if not scope then
+		return nil, "workspace scope is not registered"
+	end
+	return scope, key
+end
+
+function M.snapshot(workspace)
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	return snapshot_copy(state.applied or blank_snapshot())
+	local scope, scope_err = scope_from_selector(workspace, false)
+	if not scope then
+		return nil, scope_err
+	end
+	return snapshot_copy(scope.applied or blank_snapshot())
 end
 
 function M.register_applier(id_or_spec, maybe_spec)
@@ -2418,7 +2746,7 @@ function M.register_applier(id_or_spec, maybe_spec)
 		return nil, err
 	end
 	state.appliers[applier.id] = applier
-	local ok, apply_err = recompute(true)
+	local ok, apply_err = recompute_all(true)
 	if not ok then
 		return nil, apply_err
 	end
@@ -2429,7 +2757,18 @@ function M.approve(repo_or_spec, source_id, fingerprint)
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	local repo, source, expected = approval_args(repo_or_spec, source_id, fingerprint)
+	local workspace, repo, source, expected = approval_args(repo_or_spec, source_id, fingerprint)
+	local scope, scope_err
+	if workspace ~= nil then
+		workspace, scope_err = normalize_workspace(workspace, "approval.workspace")
+		if not workspace then
+			return nil, scope_err
+		end
+		repo = workspace.repo_identity
+		scope, scope_err = scope_from_selector(workspace, false)
+	else
+		scope, scope_err = scope_from_selector(repo, false)
+	end
 	local repo_ok, err = nonempty_string(repo, "approval.repo")
 	if not repo_ok then
 		return nil, err
@@ -2444,7 +2783,10 @@ function M.approve(repo_or_spec, source_id, fingerprint)
 	if not fingerprint_ok then
 		return nil, err
 	end
-	local registered = state.sources[source]
+	if not scope then
+		return nil, "approval must match the currently registered enabled project source"
+	end
+	local registered = scope.sources[source]
 	if
 		not registered
 		or registered.layer ~= "project"
@@ -2455,7 +2797,7 @@ function M.approve(repo_or_spec, source_id, fingerprint)
 		return nil, "approval must match the currently registered enabled project source"
 	end
 	local persistent, write_err = update_persistent(function(latest)
-		local current = state.sources[source]
+		local current = scope.sources[source]
 		if
 			not current
 			or current.layer ~= "project"
@@ -2475,9 +2817,87 @@ function M.approve(repo_or_spec, source_id, fingerprint)
 	if not persistent then
 		return nil, write_err
 	end
-	local applied, apply_err = recompute()
+	local applied, apply_err = recompute_scope(scope)
 	if not applied then
 		return nil, apply_err
+	end
+	return true
+end
+
+function M.approvals(selector)
+	if not state.configured then
+		return nil, "setup must be called first"
+	end
+	if selector == nil then
+		return copy(state.persistent.approvals)
+	end
+	local repo = selector
+	if type(selector) == "table" then
+		local workspace, err = normalize_workspace(selector.workspace or selector, "approvals.workspace")
+		if not workspace then
+			return nil, err
+		end
+		repo = workspace.repo_identity
+	end
+	local valid, err = nonempty_string(repo, "approvals.repo")
+	if not valid then
+		return nil, err
+	end
+	return copy(state.persistent.approvals[repo] or {})
+end
+
+function M.revoke_approval(workspace_or_repo, source_id)
+	if not state.configured then
+		return nil, "setup must be called first"
+	end
+	local workspace
+	local repo = workspace_or_repo
+	if type(workspace_or_repo) == "table" then
+		workspace = workspace_or_repo.workspace or workspace_or_repo
+		source_id = workspace_or_repo.source or workspace_or_repo.id or source_id
+		local workspace_err
+		workspace, workspace_err = normalize_workspace(workspace, "approval.workspace")
+		if not workspace then
+			return nil, workspace_err
+		end
+		repo = workspace.repo_identity
+	end
+	local repo_ok, err = nonempty_string(repo, "approval.repo")
+	if not repo_ok then
+		return nil, err
+	end
+	local source_ok
+	source_ok, err = nonempty_string(source_id, "approval.source")
+	if not source_ok then
+		return nil, err
+	end
+	local persistent, write_err = update_persistent(function(latest)
+		if not latest.approvals[repo] or latest.approvals[repo][source_id] == nil then
+			return false
+		end
+		latest.approvals[repo][source_id] = nil
+		if next(latest.approvals[repo]) == nil then
+			latest.approvals[repo] = nil
+		end
+		return true
+	end)
+	if not persistent then
+		return nil, write_err
+	end
+	local scopes = {}
+	for _, scope in pairs(state.scopes) do
+		if scope.workspace and scope.workspace.repo_identity == repo and scope.sources[source_id] then
+			scopes[#scopes + 1] = scope
+		end
+	end
+	table.sort(scopes, function(left, right)
+		return workspace_identity(left.workspace) < workspace_identity(right.workspace)
+	end)
+	for _, scope in ipairs(scopes) do
+		local ok, apply_err = recompute_scope(scope)
+		if not ok then
+			return nil, apply_err
+		end
 	end
 	return true
 end
@@ -2536,18 +2956,41 @@ function M.revoke(repo_or_spec, capability)
 	return true
 end
 
-function M.status(repo)
+function M.status(selector)
 	if not state.configured then
-		return nil, "setup must be called first"
+		return {
+			configured = false,
+			mode = "unconfigured",
+			profile = nil,
+			workspace = nil,
+			generation = 0,
+			candidate = nil,
+			applied = nil,
+			pending = {},
+			last_known_good = nil,
+			sources = {},
+			grants = {},
+			state_error = nil,
+			apply_error = nil,
+			scopes = {},
+		}
+	end
+	local scope, scope_err = scope_from_selector(selector, false)
+	if not scope and type(selector) == "string" and scope_err == "workspace scope is not registered" then
+		scope = host_scope()
+	end
+	if not scope then
+		return nil, scope_err
 	end
 	local source_status = {}
-	for _, source in ipairs(sorted_sources()) do
+	for _, source in ipairs(sorted_sources(scope)) do
 		source_status[#source_status + 1] = {
 			id = source.id,
 			layer = source.layer,
 			priority = source.priority,
 			enabled = source_enabled(source),
 			repo = source.repo,
+			workspace = copy(source.workspace),
 			fingerprint = source.fingerprint,
 			approved = approved(source),
 			pending = source_enabled(source) and source.layer == "project" and not approved(source),
@@ -2555,24 +2998,27 @@ function M.status(repo)
 		}
 	end
 	local mode = "candidate"
-	if #state.pending > 0 then
+	if #scope.pending > 0 then
 		mode = "pending"
-	elseif state.applied then
+	elseif scope.applied then
 		mode = "applied"
 	end
 	local result = {
+		configured = true,
 		mode = mode,
 		profile = state.mode,
-		generation = state.generation,
-		candidate = state.candidate and snapshot_copy(state.candidate) or nil,
-		applied = state.applied and snapshot_copy(state.applied) or nil,
-		pending = copy(state.pending),
-		last_known_good = state.last_known_good and snapshot_copy(state.last_known_good) or nil,
+		workspace = copy(scope.workspace),
+		generation = scope.generation,
+		candidate = scope.candidate and snapshot_copy(scope.candidate) or nil,
+		applied = scope.applied and snapshot_copy(scope.applied) or nil,
+		pending = copy(scope.pending),
+		last_known_good = scope.last_known_good and snapshot_copy(scope.last_known_good) or nil,
 		sources = source_status,
 		grants = copy(state.persistent.grants),
 		state_error = state.state_error,
-		apply_error = state.apply_error,
+		apply_error = scope.apply_error,
 	}
+	local repo = type(selector) == "string" and selector or scope.workspace and scope.workspace.repo_identity or nil
 	if repo ~= nil then
 		local repo_ok, err = nonempty_string(repo, "status.repo")
 		if not repo_ok then
@@ -2580,7 +3026,54 @@ function M.status(repo)
 		end
 		result.repo_grants = copy(state.persistent.grants[repo] or {})
 	end
+	if selector == nil then
+		result.scopes = {}
+		local keys = vim.tbl_keys(state.scopes)
+		table.sort(keys)
+		for _, key in ipairs(keys) do
+			local item = state.scopes[key]
+			local item_mode = "candidate"
+			if #item.pending > 0 then
+				item_mode = "pending"
+			elseif item.applied then
+				item_mode = "applied"
+			end
+			result.scopes[#result.scopes + 1] = {
+				workspace = copy(item.workspace),
+				generation = item.generation,
+				mode = item_mode,
+				candidate = item.candidate and snapshot_copy(item.candidate) or nil,
+				applied = item.applied and snapshot_copy(item.applied) or nil,
+				pending = copy(item.pending),
+				last_known_good = item.last_known_good and snapshot_copy(item.last_known_good) or nil,
+				apply_error = item.apply_error,
+			}
+		end
+	end
 	return result
+end
+
+function M.teardown()
+	state.configured = false
+	state.state_root = nil
+	state.root_identity = nil
+	state.mode = "full"
+	state.sources = {}
+	state.scopes = {}
+	state.current_scope = HOST_SCOPE_KEY
+	state.appliers = {}
+	state.generation = 0
+	state.candidate = nil
+	state.applied = nil
+	state.pending = {}
+	state.last_known_good = nil
+	state.applied_sources = {}
+	state.persistent = { version = STATE_VERSION, approvals = {}, grants = {} }
+	state.state_error = nil
+	state.apply_error = nil
+	state.on_state_change = nil
+	test_hook = nil
+	return true
 end
 
 local function append_diff(result, before, after, provenance, prefix)
@@ -2612,14 +3105,18 @@ local function append_diff(result, before, after, provenance, prefix)
 	}
 end
 
-function M.diff()
+function M.diff(workspace)
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
+	local scope, scope_err = scope_from_selector(workspace, false)
+	if not scope then
+		return nil, scope_err
+	end
 	local result = {}
-	local before = state.applied and state.applied.value or {}
-	local after = state.candidate and state.candidate.value or {}
-	local provenance = state.candidate and state.candidate.validity.provenance or {}
+	local before = scope.applied and scope.applied.value or {}
+	local after = scope.candidate and scope.candidate.value or {}
+	local provenance = scope.candidate and scope.candidate.validity.provenance or {}
 	append_diff(result, before, after, provenance, "")
 	return copy(result)
 end

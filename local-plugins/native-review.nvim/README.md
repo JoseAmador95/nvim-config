@@ -11,7 +11,7 @@ CURRENT-only LSP and diagnostic bridge.
 
 The plugin never imports `config.*` and never registers global commands or
 global mappings. `setup(opts)` receives repository, filesystem, editor,
-local-setting and LSP-navigation adapters. Its own panels, protected review
+event and LSP-navigation adapters. Its own panels, protected review
 buffers, composers, and export previews may install buffer-local mappings.
 
 The host keeps `:Review*` commands, global mappings, menu/statusline adapters,
@@ -32,15 +32,25 @@ local review = require("native_review").setup({
   repo = repo_adapter,
   fs = filesystem_adapter,
   editor = editor_adapter,
-  local_config = local_settings_adapter,
   lsp_navigation = lsp_navigation_adapter,
+  event = function(status) end,
+  hunk_context = 3,
+  layout = "inline",
+  context = "hunks",
+  inline_comments = true,
+  panel = { max_width = 200, max_height = 48 },
 })
-
-review.controller.setup()
 ```
 
-`controller.setup()` installs only internal lifecycle autocmds and LSP guards.
-The host decides whether and how to expose controller operations.
+`setup()` validates the complete option object before replacing its adapters;
+unknown options fail without changing the active configuration. Repeated setup
+reuses stable adapter proxies while replacing their implementations. Session
+preferences override the normalized defaults above. `effective_config()` and
+`status()` always return copies and are callable before setup;
+`teardown()` removes internal lifecycle autocmds, panels and LSP state and may
+be called repeatedly. Change notifications are delivered only through the
+injected event callback. The host decides whether and how to expose controller
+operations or translate events into editor-wide notifications.
 
 ## Safety contracts
 
