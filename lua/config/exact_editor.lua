@@ -90,6 +90,9 @@ end
 
 local function options()
 	local open = require("config.editor").open_file_in_tab
+	local policy = require("config.local_config").plugin("exact_editor", {
+		workspace_retention = "visited",
+	})
 	return {
 		state_root = state_root,
 		resolve_workspace = resolve_workspace,
@@ -97,6 +100,7 @@ local function options()
 		open = open,
 		open_file = open,
 		install_finish_mapping = install_finish_mapping,
+		workspace_retention = policy.workspace_retention,
 	}
 end
 
@@ -145,6 +149,18 @@ end
 function M.setup_deferred(dependencies)
 	local deps = vim.tbl_extend("force", { options = options() }, dependencies or {})
 	return exact.setup_deferred(deps)
+end
+
+function M.status()
+	return exact.status()
+end
+
+function M.effective_config()
+	return exact.effective_config()
+end
+
+function M.teardown()
+	return exact.teardown()
 end
 
 function M._cleanup(instance)

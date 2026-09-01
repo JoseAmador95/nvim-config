@@ -11,6 +11,10 @@ require("treesitter_runtime").setup({
   profile = "editor",
   allowlist = { "lua", "python" },
   max_bytes = 200 * 1024,
+  reevaluate_debounce_ms = 50,
+  languages = {
+    markdown = { max_bytes = 100 * 1024, indent = false },
+  },
   highlight = true,
   indent = true,
   installed = function()
@@ -23,6 +27,8 @@ The runtime attaches only when the current buffer is loaded, its mapped language
 is allowlisted, the parser is reported by `installed()`, highlighting is enabled,
 and the current in-memory contents fit `max_bytes`. File size on disk is never
 used, so unsaved growth and shrinkage are handled by buffer lifecycle events.
+Text changes are coalesced with a 50 ms debounce. `languages` can override
+`max_bytes` and indentation independently for a mapped Tree-sitter language.
 
 `setup()` also accepts replaceable `start(buf, language)`, `stop(buf, language)`,
 `is_started(buf, language)`, `language(buf)`, and `buffer_bytes(buf)` callbacks.
@@ -41,3 +47,9 @@ next lifecycle evaluation or explicit `retry()`. When indentation is enabled,
 the exact previous `indentexpr` is restored only while the plugin still owns the
 value it wrote; a pre-existing value or later external change is left untouched.
 After complete teardown, a later `setup()` creates a fresh runtime profile.
+
+`status([buf])` is a side-effect-free, caller-owned snapshot with a stable
+eligibility `reason`; it is available before setup. `effective_config()` returns
+only copied, non-callback policy, and `on_state_change(event)` observes copied
+state events. Observer failures are isolated. Setup rejects unknown options
+before replacing the active profile.

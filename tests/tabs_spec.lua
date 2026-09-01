@@ -38,6 +38,12 @@ local dashboard_opens = 0
 local menu_dismisses = 0
 local menu_context_options = {}
 package.loaded["config.pager"] = { active = false }
+package.loaded["config.local_config"] = {
+	plugin = function(name, defaults)
+		assert(name == "tab_first")
+		return vim.deepcopy(defaults)
+	end,
+}
 package.loaded["config.menu"] = {
 	dismiss = function()
 		menu_dismisses = menu_dismisses + 1

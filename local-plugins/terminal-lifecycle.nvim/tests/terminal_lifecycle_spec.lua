@@ -317,6 +317,75 @@ test("backend replacement does not redirect existing records", function()
 	assert(#first_backend.opened == 1 and #second_backend.opened == 1)
 end)
 
+test("configuration, mappings, events, and stop timeout stay observable without fake exit", function()
+	terminal._reset()
+	local initial = terminal.status()
+	assert(initial.configured == false and #initial.terminals == 0)
+	assert(terminal.effective_config().stop_timeout_ms == 5000)
+	local backend = fake_backend()
+	local deferred = {}
+	local events = {}
+	terminal.setup({
+		backend = backend,
+		stop_timeout_ms = 7,
+		buffer_mappings = { close = "x", open_location = false },
+		defer = function(callback, milliseconds)
+			assert(milliseconds == 7)
+			deferred[#deferred + 1] = callback
+		end,
+		on_state_change = function(event)
+			events[#events + 1] = vim.deepcopy(event)
+			event.key = "mutated"
+			error("observer failure")
+		end,
+	})
+	local record = assert(terminal.open(spec("timeout")))
+	local mappings = {}
+	for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(record.buf, "n")) do
+		mappings[mapping.lhs] = true
+	end
+	assert(mappings.x and not mappings.q and not mappings.gf, "configured buffer mappings were not exact")
+	local effective = terminal.effective_config()
+	assert(effective.stop_timeout_ms == 7 and effective.buffer_mappings.close == "x")
+	effective.buffer_mappings.close = "mutated"
+	assert(terminal.effective_config().buffer_mappings.close == "x", "effective config shares state")
+	local before = terminal.status(record)
+	local ok, err = pcall(terminal.setup, { backend = backend, injected = true })
+	assert(not ok and tostring(err):find("unknown option: injected", 1, true))
+	assert(vim.deep_equal(before, terminal.status(record)), "rejected setup mutated a terminal")
+	ok, err = pcall(terminal.setup, { backend = { open = function() end } })
+	assert(not ok and tostring(err):find("backend requires show", 1, true), "incomplete backend was accepted")
+	assert(vim.deep_equal(before, terminal.status(record)), "incomplete backend setup mutated a terminal")
+
+	assert(terminal.stop(record) == record and #deferred == 1)
+	deferred[1]()
+	local timed_out = terminal.status(record)
+	assert(timed_out.stop_timed_out and timed_out.stop_pending)
+	assert(timed_out.state == "running" and timed_out.exit_code == nil, "timeout fabricated process exit")
+	assert(#backend.opened == 1 and backend.dispose_count == 0, "timeout restarted or disposed the process")
+	assert(events[#events].reason == "stop-timeout", "timeout state event was not emitted")
+	assert(terminal.status(record).key == "timeout", "observer mutated internal state")
+	record.handle.callbacks.on_exit(0)
+	assert(record.state == "exited-retained")
+	assert(terminal.dispose(record))
+	assert(terminal.teardown() and terminal.teardown(), "teardown was not repeatable")
+end)
+
+test("list and filtered dispose_all are deterministic and caller-owned", function()
+	local backend = setup_backend()
+	local second = assert(terminal.open(spec("z", { metadata = { group = "keep" } })))
+	local first = assert(terminal.open(spec("a", { metadata = { group = "dispose" } })))
+	local listed = terminal.list()
+	assert(#listed == 2 and listed[1].key == "a" and listed[2].key == "z")
+	listed[1].metadata.group = "mutated"
+	assert(terminal.status(first).metadata.group == "dispose", "list shares record metadata")
+	local disposed = assert(terminal.dispose_all({ metadata = { group = "dispose" } }))
+	assert(#disposed == 1 and disposed[1].key == "a" and disposed[1].dispose_pending)
+	assert(backend.stop_count == 1 and terminal.status(second).dispose_pending == false)
+	first.handle.callbacks.on_exit(0)
+	assert(terminal.status("a").state == "disposed" and terminal.status("z").state == "running")
+end)
+
 terminal._reset()
 
 if #failures > 0 then

@@ -1,5 +1,6 @@
 local M = {}
 local runtime = require("tab_first")
+local local_config = require("config.local_config")
 
 local SPECIAL_FILETYPES = {
 	oil = true,
@@ -34,6 +35,18 @@ local function is_special_buffer(buf)
 	return SPECIAL_FILETYPES[vim.bo[buf].filetype] or vim.api.nvim_buf_get_name(buf) == ""
 end
 
+local function is_home_buffer(buf)
+	if vim.bo[buf].filetype == "snacks_dashboard" then
+		return vim.bo[buf].buftype == "nofile" and vim.api.nvim_buf_get_name(buf) == "" and not vim.bo[buf].modified
+	end
+	return vim.bo[buf].buftype == ""
+		and vim.bo[buf].filetype == ""
+		and vim.api.nvim_buf_get_name(buf) == ""
+		and not vim.bo[buf].modified
+		and vim.api.nvim_buf_line_count(buf) == 1
+		and (vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] or "") == ""
+end
+
 local function native_history_fallback(direction)
 	if direction < 0 then
 		vim.cmd([[execute "normal! \<C-o>"]])
@@ -42,17 +55,23 @@ local function native_history_fallback(direction)
 	end
 end
 
+local configured = local_config.plugin("tab_first", {
+	history = { enabled = true, max_entries = 200, scope = "workspace" },
+})
+
 runtime.setup({
 	enabled = enabled,
 	present_home = present_home,
 	dismiss_ui = dismiss_ui,
 	is_special_buffer = is_special_buffer,
+	is_home_buffer = is_home_buffer,
 	notify = function(message, level, opts)
 		vim.notify(message, level, opts)
 	end,
 	history = {
-		enabled = true,
-		max_entries = 200,
+		enabled = configured.history.enabled,
+		max_entries = configured.history.max_entries,
+		scope = configured.history.scope,
 		native_fallback = native_history_fallback,
 		open_location = function(entry)
 			local ok = pcall(require("config.editor").open_file_in_tab, entry.path, {

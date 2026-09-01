@@ -2,13 +2,42 @@ local M = {}
 local contracts = require("local_plugins.contracts")
 
 local uv = vim.uv
+local DEFAULT_STOP_TIMEOUT_MS = 5000
 local records = {}
 local dependencies
 local create
 local dispose_record
 
+local SETUP_KEYS = {
+	backend = true,
+	presenter = true,
+	notify = true,
+	schedule = true,
+	defer = true,
+	open_location = true,
+	stop_timeout_ms = true,
+	buffer_mappings = true,
+	on_state_change = true,
+}
+
 local function copy(value)
 	return vim.deepcopy(value)
+end
+
+local function exact_keys(value, allowed, label)
+	if type(value) ~= "table" then
+		return nil, label .. " must be a table"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" or not allowed[key] then
+			return nil, label .. " contains an unknown option: " .. tostring(key)
+		end
+	end
+	return true
+end
+
+local function now_ms()
+	return math.floor(uv.hrtime() / 1000000)
 end
 
 local function non_empty_string(value)
@@ -197,6 +226,60 @@ local function backend_value(record, method, fallback)
 	return value
 end
 
+local function active(record)
+	return record.state == "starting" or record.state == "running"
+end
+
+local function status_snapshot(record, key)
+	if not record then
+		return {
+			key = key,
+			state = "disposed",
+			exit_code = nil,
+			visible = false,
+			buf = nil,
+			stop_pending = false,
+			dispose_pending = false,
+			restart_pending = false,
+			accepting_input = false,
+			stop_timeout_ms = dependencies and dependencies.stop_timeout_ms or DEFAULT_STOP_TIMEOUT_MS,
+			stop_timed_out = false,
+		}
+	end
+	local accepting_input = active(record)
+		and not record.stop_pending
+		and not record.dispose_pending
+		and record.restart_pending == nil
+		and not record.exit_seen
+	return {
+		key = record.key,
+		state = record.state,
+		exit_code = record.exit_code,
+		visible = record.visible == true,
+		buf = record.buf,
+		metadata = copy(record.spec.metadata),
+		stop_pending = record.stop_pending,
+		dispose_pending = record.dispose_pending,
+		restart_pending = record.restart_pending ~= nil,
+		accepting_input = accepting_input,
+		stop_timeout_ms = record.dependencies.stop_timeout_ms,
+		stop_requested_at_ms = record.stop_requested_at_ms,
+		stop_deadline_ms = record.stop_deadline_ms,
+		stop_timed_out = record.stop_timed_out == true,
+	}
+end
+
+local function emit_state(record, reason)
+	local callback = record and record.dependencies and record.dependencies.on_state_change
+	if type(callback) ~= "function" then
+		return
+	end
+	local event = status_snapshot(record, record.key)
+	event.kind = "state"
+	event.reason = reason
+	pcall(callback, copy(event))
+end
+
 local function notify(record, message, level)
 	local callback = record.dependencies.notify
 	if type(callback) == "function" then
@@ -209,6 +292,7 @@ local function dispose_visual(record)
 		return
 	end
 	record.visual_disposed = true
+	record.visible = false
 	local callback = record.backend.dispose
 	if type(callback) == "function" then
 		pcall(callback, record.handle)
@@ -226,6 +310,8 @@ local function mark_disposed(record, close_visual)
 		records[record.key] = nil
 	end
 	record.state = "disposed"
+	record.visible = false
+	emit_state(record, "disposed")
 	if close_visual then
 		local schedule = record.dependencies.schedule
 		if type(schedule) == "function" then
@@ -250,6 +336,9 @@ local function handle_exit(record, exit_code)
 	record.dispose_pending = false
 	record.restart_pending = nil
 	record.stop_pending = false
+	record.stop_requested_at_ms = nil
+	record.stop_deadline_ms = nil
+	record.stop_timed_out = false
 	if dispose_pending then
 		mark_disposed(record, true)
 		return
@@ -267,6 +356,8 @@ local function handle_exit(record, exit_code)
 			mark_disposed(record, true)
 		else
 			record.state = "exited-retained"
+			record.visible = true
+			emit_state(record, "stopped")
 		end
 		return
 	end
@@ -275,6 +366,8 @@ local function handle_exit(record, exit_code)
 		return
 	end
 	record.state = "exited-retained"
+	record.visible = true
+	emit_state(record, "exited")
 	if record.exit_code ~= 0 then
 		local title = record.spec.view.title or record.key
 		notify(
@@ -289,7 +382,12 @@ local function hide_record(record)
 	if record.state == "disposed" or record.handle == nil then
 		return nil, "terminal does not exist"
 	end
-	return backend_call(record, "hide")
+	local hidden, err = backend_call(record, "hide")
+	if hidden then
+		record.visible = false
+		emit_state(record, "hidden")
+	end
+	return hidden, err
 end
 
 local function configure_buffer(record, buf)
@@ -308,11 +406,14 @@ local function configure_buffer(record, buf)
 	local function map(modes, lhs, rhs, desc)
 		vim.keymap.set(modes, lhs, rhs, { buffer = buf, nowait = true, silent = true, desc = desc })
 	end
-	map("n", "q", function()
-		hide_record(record)
-	end, "Hide terminal")
-	if type(record.dependencies.open_location) == "function" then
-		map("n", "gf", function()
+	local mappings = record.dependencies.buffer_mappings
+	if mappings.close then
+		map("n", mappings.close, function()
+			hide_record(record)
+		end, "Hide terminal")
+	end
+	if mappings.open_location and type(record.dependencies.open_location) == "function" then
+		map("n", mappings.open_location, function()
 			local ok, opened, err = pcall(record.dependencies.open_location, copy(record.spec), buf)
 			if not ok or opened ~= true then
 				notify(record, tostring(ok and err or opened), vim.log.levels.WARN)
@@ -329,10 +430,7 @@ local function configure_buffer(record, buf)
 			hide_record(record)
 		end, "Hide terminal")
 	end
-end
-
-local function active(record)
-	return record.state == "starting" or record.state == "running"
+	emit_state(record, "buffer")
 end
 
 create = function(spec)
@@ -352,8 +450,14 @@ create = function(spec)
 		restart_pending = nil,
 		exit_seen = false,
 		visual_disposed = false,
+		visible = false,
+		stop_sequence = 0,
+		stop_requested_at_ms = nil,
+		stop_deadline_ms = nil,
+		stop_timed_out = false,
 	}
 	records[record.key] = record
+	emit_state(record, "starting")
 
 	local callbacks = {
 		on_buffer = function(buf)
@@ -385,6 +489,7 @@ create = function(spec)
 		return nil, tostring(ok and open_err or handle)
 	end
 	record.handle = handle
+	record.visible = backend_value(record, "visible", true) == true
 	if not record.buf then
 		local buf = backend_value(record, "buffer")
 		if type(buf) == "number" then
@@ -400,6 +505,7 @@ create = function(spec)
 	end
 	if record.state == "starting" then
 		record.state = "running"
+		emit_state(record, "running")
 	elseif record.state == "disposed" then
 		dispose_visual(record)
 	end
@@ -441,22 +547,87 @@ local function show_and_focus(record)
 	if not focused then
 		return nil, focus_err
 	end
+	record.visible = true
+	emit_state(record, "shown")
 	return record
 end
 
 function M.setup(opts)
-	opts = opts or {}
-	local backend = opts.backend or opts.presenter
-	if type(backend) ~= "table" or type(backend.open) ~= "function" then
-		error("terminal_lifecycle.setup requires a backend with open(spec, callbacks)")
+	if opts == nil then
+		opts = {}
 	end
-	dependencies = {
+	local options_ok, options_err = exact_keys(opts, SETUP_KEYS, "setup")
+	if not options_ok then
+		error(options_err)
+	end
+	local backend = opts.backend or opts.presenter
+	if type(backend) ~= "table" or (next(backend) ~= nil and vim.islist(backend)) then
+		error("terminal_lifecycle.setup requires a backend object")
+	end
+	for _, name in ipairs({ "open", "show", "focus", "hide", "visible", "buffer", "stop", "dispose", "lines" }) do
+		if type(backend[name]) ~= "function" then
+			error("terminal_lifecycle.setup backend requires " .. name)
+		end
+	end
+	if opts.backend ~= nil and opts.presenter ~= nil and opts.backend ~= opts.presenter then
+		error("setup.backend and setup.presenter cannot disagree")
+	end
+	for _, name in ipairs({ "notify", "schedule", "defer", "open_location", "on_state_change" }) do
+		if opts[name] ~= nil and type(opts[name]) ~= "function" then
+			error("setup." .. name .. " must be a function")
+		end
+	end
+	local stop_timeout_ms = opts.stop_timeout_ms
+	if stop_timeout_ms == nil then
+		stop_timeout_ms = DEFAULT_STOP_TIMEOUT_MS
+	end
+	if type(stop_timeout_ms) ~= "number" or stop_timeout_ms < 0 or stop_timeout_ms % 1 ~= 0 then
+		error("setup.stop_timeout_ms must be a non-negative integer")
+	end
+	local mapping_options = opts.buffer_mappings
+	if mapping_options == nil then
+		mapping_options = {}
+	end
+	local mappings_ok, mappings_err =
+		exact_keys(mapping_options, { close = true, open_location = true }, "setup.buffer_mappings")
+	if not mappings_ok then
+		error(mappings_err)
+	end
+	local mappings = { close = "q", open_location = "gf" }
+	for _, name in ipairs({ "close", "open_location" }) do
+		local value = mapping_options[name]
+		if value ~= nil then
+			if value ~= false and not non_empty_string(value) then
+				error("setup.buffer_mappings." .. name .. " must be false or a non-empty string")
+			end
+			mappings[name] = value
+		end
+	end
+	local next_dependencies = {
 		backend = backend,
 		notify = opts.notify or vim.notify,
 		schedule = opts.schedule or vim.schedule,
+		defer = opts.defer or vim.defer_fn,
 		open_location = opts.open_location,
+		stop_timeout_ms = stop_timeout_ms,
+		buffer_mappings = mappings,
+		on_state_change = opts.on_state_change,
 	}
+	dependencies = next_dependencies
 	return M
+end
+
+function M.effective_config()
+	if not dependencies then
+		return {
+			stop_timeout_ms = DEFAULT_STOP_TIMEOUT_MS,
+			buffer_mappings = { close = "q", open_location = "gf" },
+		}
+	end
+	return copy({
+		stop_timeout_ms = dependencies.stop_timeout_ms,
+		buffer_mappings = dependencies.buffer_mappings,
+	})
 end
 
 function M.open(spec)
@@ -515,7 +686,28 @@ local function request_stop(record, intent, restart_spec)
 	end
 	record.stop_pending = true
 	if previous.stop_pending then
+		emit_state(record, intent .. "-coalesced")
 		return records[record.key] or record
+	end
+	record.stop_sequence = record.stop_sequence + 1
+	local sequence = record.stop_sequence
+	record.stop_requested_at_ms = now_ms()
+	record.stop_deadline_ms = record.stop_requested_at_ms + record.dependencies.stop_timeout_ms
+	record.stop_timed_out = false
+	emit_state(record, intent .. "-requested")
+	local deferred, defer_err = pcall(record.dependencies.defer, function()
+		if
+			records[record.key] == record
+			and record.stop_pending
+			and not record.exit_seen
+			and record.stop_sequence == sequence
+		then
+			record.stop_timed_out = true
+			emit_state(record, "stop-timeout")
+		end
+	end, record.dependencies.stop_timeout_ms)
+	if not deferred then
+		notify(record, "Could not observe terminal stop timeout: " .. tostring(defer_err), vim.log.levels.WARN)
 	end
 	local stopped, stop_err = backend_call(record, "stop")
 	if stopped or record.exit_seen then
@@ -524,6 +716,10 @@ local function request_stop(record, intent, restart_spec)
 	record.stop_pending = previous.stop_pending
 	record.dispose_pending = previous.dispose_pending
 	record.restart_pending = previous.restart_pending
+	record.stop_requested_at_ms = nil
+	record.stop_deadline_ms = nil
+	record.stop_timed_out = false
+	emit_state(record, "stop-request-failed")
 	return nil, stop_err
 end
 
@@ -589,41 +785,95 @@ function M.dispose(identity)
 end
 
 function M.status(identity)
+	if identity == nil then
+		local keys = vim.tbl_keys(records)
+		table.sort(keys)
+		local terminals = {}
+		for _, key in ipairs(keys) do
+			terminals[#terminals + 1] = status_snapshot(records[key], key)
+		end
+		return copy({ configured = dependencies ~= nil, terminals = terminals })
+	end
 	local key, key_err = key_for(identity)
 	if not key then
 		return nil, key_err
 	end
-	local record = records[key]
-	if not record then
-		return {
-			key = key,
-			state = "disposed",
-			exit_code = nil,
-			visible = false,
-			buf = nil,
-			stop_pending = false,
-			dispose_pending = false,
-			restart_pending = false,
-			accepting_input = false,
-		}
+	return copy(status_snapshot(records[key], key))
+end
+
+function M.list()
+	local keys = vim.tbl_keys(records)
+	table.sort(keys)
+	local result = {}
+	for _, key in ipairs(keys) do
+		result[#result + 1] = status_snapshot(records[key], key)
 	end
-	local accepting_input = active(record)
-		and not record.stop_pending
-		and not record.dispose_pending
-		and record.restart_pending == nil
-		and not record.exit_seen
-	return {
-		key = key,
-		state = record.state,
-		exit_code = record.exit_code,
-		visible = backend_value(record, "visible", false) == true,
-		buf = record.buf or backend_value(record, "buffer"),
-		metadata = copy(record.spec.metadata),
-		stop_pending = record.stop_pending,
-		dispose_pending = record.dispose_pending,
-		restart_pending = record.restart_pending ~= nil,
-		accepting_input = accepting_input,
-	}
+	return copy(result)
+end
+
+local function filter_matches(filter, status)
+	if filter == nil then
+		return true
+	end
+	if type(filter) == "function" then
+		local ok, matched = pcall(filter, copy(status))
+		return ok and matched == true
+	end
+	if type(filter) ~= "table" or vim.islist(filter) then
+		return nil, "dispose filter must be a function or map"
+	end
+	local ok, err = exact_keys(filter, { key = true, state = true, metadata = true }, "dispose filter")
+	if not ok then
+		return nil, err
+	end
+	if filter.key ~= nil and filter.key ~= status.key then
+		return false
+	end
+	if filter.state ~= nil and filter.state ~= status.state then
+		return false
+	end
+	if filter.metadata ~= nil then
+		if type(filter.metadata) ~= "table" or vim.islist(filter.metadata) then
+			return nil, "dispose filter.metadata must be a map"
+		end
+		for key, value in pairs(filter.metadata) do
+			if not vim.deep_equal(value, (status.metadata or {})[key]) then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+function M.dispose_all(filter)
+	local selected = {}
+	for _, status in ipairs(M.list()) do
+		local matched, match_err = filter_matches(filter, status)
+		if matched == nil then
+			return nil, match_err
+		end
+		if matched then
+			selected[#selected + 1] = status.key
+		end
+	end
+	local result = {}
+	for _, key in ipairs(selected) do
+		local disposed, dispose_err = M.dispose(key)
+		if not disposed then
+			return nil, dispose_err, copy(result)
+		end
+		result[#result + 1] = M.status(key)
+	end
+	return copy(result)
+end
+
+function M.teardown(filter)
+	local disposed, err, partial = M.dispose_all(filter)
+	if not disposed then
+		return nil, err, partial
+	end
+	dependencies = nil
+	return true, disposed
 end
 
 function M.lines(identity)
@@ -646,6 +896,7 @@ M._reset = function()
 		record.state = "disposed"
 		dispose_visual(record)
 	end
+	dependencies = nil
 end
 
 return M

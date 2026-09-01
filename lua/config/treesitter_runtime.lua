@@ -43,6 +43,14 @@ function M.teardown(buf)
 	return runtime.teardown(buf)
 end
 
+function M.status(buf)
+	return runtime.status(buf)
+end
+
+function M.effective_config()
+	return runtime.effective_config()
+end
+
 ---@class NvimConfigTreesitterInstallOpts
 ---@field wait? boolean Wait for the installation task and return its result.
 ---@field timeout? integer Maximum wait in milliseconds (default 300000).
@@ -112,10 +120,17 @@ end
 function M.setup(opts)
 	opts = opts or {}
 	parsers = as_list(assert(opts.parsers, "Tree-sitter parsers are required"))
+	local policy = require("config.local_config").plugin("treesitter_runtime", {
+		max_bytes = opts.max_bytes or 200 * 1024,
+		reevaluate_debounce_ms = 50,
+		languages = {},
+	})
 	runtime.setup({
 		profile = opts.profile or "full",
 		allowlist = parsers,
-		max_bytes = opts.max_bytes,
+		max_bytes = policy.max_bytes,
+		reevaluate_debounce_ms = policy.reevaluate_debounce_ms,
+		languages = policy.languages,
 		highlight = opts.highlight == true,
 		indent = opts.indent == true,
 		installed = installed_parsers,

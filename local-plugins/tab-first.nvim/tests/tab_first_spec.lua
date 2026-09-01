@@ -29,6 +29,18 @@ end
 local tab_first = require("tab_first")
 local paths = {}
 
+test("workspace history defaults are copied and rejected setup is non-mutating", function()
+	equal({ history = { enabled = true, max_entries = 200, scope = "workspace" } }, tab_first.effective_config())
+	assert(tab_first.status().configured == false)
+	local config = tab_first.effective_config()
+	config.history.max_entries = 1
+	equal(200, tab_first.effective_config().history.max_entries, "effective config leaked mutable state")
+	local before = tab_first.status()
+	local ok, err = pcall(tab_first.setup, { history = { unknown = true } })
+	assert(not ok and tostring(err):find("unknown option", 1, true), tostring(err))
+	equal(before, tab_first.status(), "rejected setup mutated state")
+end)
+
 local function make_file(label)
 	local path = vim.fn.tempname() .. "-" .. label
 	assert(vim.fn.writefile({ label .. " one", label .. " two", label .. " three" }, path) == 0)
@@ -142,6 +154,23 @@ test("home presenter is injected and recovery requests coalesce", function()
 	queue[1]()
 	equal(1, presentations, "injected presenter did not run exactly once")
 	assert(tab_first.is_home(home), "presented dashboard is not a valid home")
+end)
+
+test("home classification is injected and the plugin has no Snacks filetype literal", function()
+	reset_editor()
+	local buf = vim.api.nvim_get_current_buf()
+	vim.bo[buf].buftype = "nofile"
+	vim.bo[buf].filetype = "custom_home"
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Home" })
+	vim.bo[buf].modified = false
+	tab_first.setup({
+		is_home_buffer = function(candidate)
+			return candidate == buf and vim.bo[candidate].filetype == "custom_home"
+		end,
+	})
+	assert(tab_first.mark_home(vim.api.nvim_get_current_tabpage()), "injected classifier was ignored")
+	local implementation = table.concat(vim.fn.readfile(plugin .. "/lua/tab_first/init.lua"), "\n")
+	assert(not implementation:find("snacks_dashboard", 1, true), "plugin retained a Snacks-specific classifier")
 end)
 
 test("queued closes use stable handles and coalesce duplicate clicks", function()
@@ -273,6 +302,31 @@ test("semantic history can be disabled without changing canonical opening", func
 	equal(0, #tab_first.history_snapshot().entries, "disabled history recorded a transition")
 	assert(not tab_first.back(), "disabled history reported a semantic traversal")
 	equal(-1, fallback, "disabled history did not delegate to the native fallback")
+end)
+
+test("history events are isolated and repeated teardown/setup resets lifecycle state", function()
+	reset_editor()
+	local events = {}
+	tab_first.setup({
+		event = function(event)
+			events[#events + 1] = vim.deepcopy(event)
+			event.entries = 999
+		end,
+		history = { max_entries = 3 },
+	})
+	assert(tab_first.record_transition({ path = "/tmp/a", lnum = 1, col = 1 }, { path = "/tmp/b", lnum = 2, col = 1 }))
+	equal({ kind = "history", index = 2, entries = 2 }, events[1])
+	equal(2, tab_first.status().history.entries, "event callback mutated history state")
+	local before = tab_first.status()
+	local ok = pcall(tab_first.setup, { unknown = true })
+	assert(not ok)
+	equal(before, tab_first.status(), "invalid repeated setup changed history")
+	assert(tab_first.teardown())
+	assert(tab_first.teardown())
+	assert(not tab_first.status().configured)
+	equal(200, tab_first.effective_config().history.max_entries)
+	assert(tab_first.setup())
+	assert(tab_first.status().configured)
 end)
 
 for _, path in ipairs(paths) do

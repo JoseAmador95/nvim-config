@@ -26,6 +26,7 @@ require("exact_editor").setup({
   install_finish_mapping = function(bufnr, finish)
     return host_install_buffer_mapping(bufnr, finish)
   end,
+  workspace_retention = "visited",
 })
 ```
 
@@ -34,12 +35,19 @@ require("exact_editor").setup({
 records remain readable by the CLI as host workspaces for migration.
 `install_finish_mapping` is optional: the host chooses the key and owns both
 installation and removal while the plugin supplies only the lifecycle callback.
+All blocking requests for one buffer share that single finish action. Completion
+is persisted once per request in sorted request-ID order, so concurrent callers
+observe deterministic fan-out. Visited workspaces remain in the instance
+registry for its lifetime; `workspace_retention` currently accepts only
+`"visited"`.
 
 The public RPC consumers are `consume_request`, `consume_normal`, and
 `consume_blocking`. Blocking requests keep an owner-only wait file until the
 external caller observes `completed` or `aborted`. `setup` accepts optional
 `resolve_relative`, `clock`, `pid`, `uuid`, `server_start`, `server_stop`, and
-`notify` hooks for embedding and deterministic tests.
+`notify` hooks for embedding and deterministic tests. An injected `server_stop`
+must return the boolean `true` only after the endpoint has stopped; the native
+`vim.fn.serverstop` path is successful only when it returns `1`.
 
 ## CLI
 
@@ -60,7 +68,21 @@ synthetic host workspace.
 
 Registry directories are forced to `0700`; records, requests, waits, and Unix
 sockets are forced to `0600`. State symlinks and non-regular entries are never
-followed or overwritten.
+followed or overwritten. Cleanup pins the containing directory, moves an entry
+with a no-clobber descriptor-relative rename, revalidates its exact identity,
+and only then uses `unlinkat` plus a directory `fsync`. Socket pathnames are
+reserved before `server_stop`, and replacements observed before the final
+syscall boundary are restored or retained under their quarantine name. The
+private owner UID is the final trust boundary because Unix has no atomic
+compare-and-unlink syscall against an expected inode; a hostile same-UID process
+can still race the final syscall boundary.
+
+`status()` returns copied instance, workspace, and active-wait state and is safe
+before setup. `effective_config()` exposes only copied policy (never callbacks),
+and `teardown()` is repeatable. A failed server stop preserves the live instance
+for an explicit teardown retry. Unknown setup options are rejected before active
+state changes; optional `on_state_change(event)` observers receive copied events
+and cannot break lifecycle work.
 
 ## Tests
 

@@ -10,7 +10,12 @@ return {
 		end,
 		config = function()
 			local selector = require("config.theme")
-			local theme = require("config.local_config").get("theme", {})
+			local theme = require("config.local_config").plugin("theme_router", {
+				background = "auto",
+				transparent = false,
+				italic_comments = true,
+				reload_on_focus = true,
+			})
 			local transparent = theme.transparent == true
 			local italic_comments = theme.italic_comments ~= false
 
@@ -70,7 +75,12 @@ return {
 			local selector = require("config.theme")
 
 			-- Per-host overrides from ~/.nvim-local.lua (see config.local_config).
-			local theme = require("config.local_config").get("theme", {})
+			local theme = require("config.local_config").plugin("theme_router", {
+				background = "auto",
+				transparent = false,
+				italic_comments = true,
+				reload_on_focus = true,
+			})
 			local transparent = theme.transparent
 			if transparent == nil then
 				transparent = false

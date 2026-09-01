@@ -61,11 +61,37 @@ local state = {
 	opts = nil,
 	painters = {},
 	selection = nil,
+	active = nil,
+	last_known_good = nil,
 }
 local test_hook
 
+local SETUP_KEYS = {
+	state_path = true,
+	legacy_path = true,
+	default = true,
+	fallback = true,
+	notify = true,
+	event = true,
+	on_state_change = true,
+	paint = true,
+	context = true,
+}
+
 local function copy(value)
 	return vim.deepcopy(value)
+end
+
+local function exact_options(value, allowed, label)
+	if type(value) ~= "table" then
+		return nil, label .. " must be a table"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" or not allowed[key] then
+			return nil, label .. " contains an unknown option: " .. tostring(key)
+		end
+	end
+	return true
 end
 
 local function nonempty_string(value, label)
@@ -94,14 +120,20 @@ local function notify(message, level)
 end
 
 local function emit(kind, details)
-	if not state.opts or not state.opts.event then
+	if not state.opts then
 		return
 	end
 	local event = copy(details or {})
 	event.kind = kind
-	local ok, err = pcall(state.opts.event, event)
-	if not ok then
-		notify("Theme event callback failed: " .. tostring(err), vim.log.levels.WARN)
+	local callbacks = { state.opts.event, state.opts.on_state_change }
+	for index = 1, 2 do
+		local callback = callbacks[index]
+		if type(callback) == "function" then
+			local ok, err = pcall(callback, copy(event))
+			if not ok then
+				notify("Theme event callback failed: " .. tostring(err), vim.log.levels.WARN)
+			end
+		end
 	end
 end
 
@@ -1712,7 +1744,7 @@ local function load_selection_locked()
 	return selection_or_err
 end
 
-local function paint(name)
+local function paint(name, source)
 	local painter = state.painters[name] or state.opts.paint
 	local context = {}
 	if state.opts.context then
@@ -1745,13 +1777,19 @@ local function paint(name)
 		emit("error", { colorscheme = name, error = message })
 		return false
 	end
-	emit("applied", { colorscheme = name })
+	state.active = { colorscheme = name, source = source or "direct" }
+	state.last_known_good = copy(state.active)
+	emit("applied", { colorscheme = name, source = state.active.source })
 	return true
 end
 
 function M.setup(opts)
 	if type(opts) ~= "table" then
 		return nil, "setup options must be a table"
+	end
+	local options_ok, options_err = exact_options(opts, SETUP_KEYS, "setup")
+	if not options_ok then
+		return nil, options_err
 	end
 	local path, path_err = nonempty_string(opts.state_path, "setup.state_path")
 	if not path then
@@ -1779,8 +1817,13 @@ function M.setup(opts)
 			return nil, "setup.legacy_path must be absolute"
 		end
 	end
-	for _, callback in ipairs({ "notify", "event", "paint" }) do
+	for _, callback in ipairs({ "notify", "paint" }) do
 		if type(opts[callback]) ~= "function" then
+			return nil, ("setup.%s must be a function"):format(callback)
+		end
+	end
+	for _, callback in ipairs({ "event", "on_state_change" }) do
+		if opts[callback] ~= nil and type(opts[callback]) ~= "function" then
 			return nil, ("setup.%s must be a function"):format(callback)
 		end
 	end
@@ -1794,12 +1837,16 @@ function M.setup(opts)
 		fallback = fallback,
 		notify = opts.notify,
 		event = opts.event,
+		on_state_change = opts.on_state_change,
 		paint = opts.paint,
 		context = opts.context,
 	}
 	state.painters = {}
 	state.configured = true
 	state.selection = load_selection_locked()
+	state.active = nil
+	state.last_known_good = nil
+	emit("setup", { selected = state.selection })
 	return M.selection()
 end
 
@@ -1825,6 +1872,28 @@ function M.selection()
 	return copy(state.selection)
 end
 
+function M.effective_config()
+	if not state.configured then
+		return {}
+	end
+	return copy({
+		state_path = state.opts.state_path,
+		legacy_path = state.opts.legacy_path,
+		default = state.opts.default,
+		fallback = state.opts.fallback,
+	})
+end
+
+function M.status()
+	return copy({
+		configured = state.configured,
+		selected = state.selection,
+		active = state.active,
+		validity = state.selection and state.selection.validity or nil,
+		last_known_good = state.last_known_good,
+	})
+end
+
 function M.apply(name)
 	if not state.configured then
 		return nil, "setup must be called first"
@@ -1835,7 +1904,7 @@ function M.apply(name)
 		notify(err, vim.log.levels.WARN)
 		return false
 	end
-	return paint(normalized)
+	return paint(normalized, "direct")
 end
 
 function M.repaint()
@@ -1843,18 +1912,75 @@ function M.repaint()
 		return nil, "setup must be called first"
 	end
 	local selected = state.selection.colorscheme
-	if paint(selected) then
+	if paint(selected, "selected") then
 		return true, selected
 	end
-	if selected ~= state.opts.default and paint(state.opts.default) then
+	if selected ~= state.opts.default and paint(state.opts.default, "default") then
 		emit("fallback", { colorscheme = state.opts.default, failed = selected, source = "default" })
 		return true, state.opts.default
 	end
-	if state.opts.fallback ~= selected and state.opts.fallback ~= state.opts.default and paint(state.opts.fallback) then
+	if
+		state.opts.fallback ~= selected
+		and state.opts.fallback ~= state.opts.default
+		and paint(state.opts.fallback, "fallback")
+	then
 		emit("fallback", { colorscheme = state.opts.fallback, failed = selected, source = "fallback" })
 		return true, state.opts.fallback
 	end
 	return false
+end
+
+---Paint and persist one selection through the plugin-owned composite lifecycle.
+---@param name string
+---@return boolean
+---@return string|nil
+function M.select(name)
+	if not state.configured then
+		return nil, "setup must be called first"
+	end
+	local normalized, err = colorscheme_name(name, "colorscheme")
+	if not normalized then
+		notify(err, vim.log.levels.ERROR)
+		return false, err
+	end
+	if not paint(normalized, "selected") then
+		return false, "theme could not be applied"
+	end
+	local persisted, warning = M.persist(normalized)
+	if not persisted then
+		return false, "theme could not be persisted"
+	end
+	emit("selected", { colorscheme = normalized })
+	return true, warning
+end
+
+---Reload the durable selection and repaint only a valid candidate.
+---Invalid state updates validity while preserving selected, active, and LKG.
+---@return boolean
+---@return string|nil
+function M.reload()
+	if not state.configured then
+		return nil, "setup must be called first"
+	end
+	local loaded = load_selection_locked()
+	if not loaded.validity.valid then
+		local previous = state.selection or default_selection()
+		state.selection = {
+			colorscheme = previous.colorscheme,
+			source = previous.source,
+			validity = copy(loaded.validity),
+		}
+		emit("reload-rejected", { selected = state.selection, active = state.active })
+		return false, loaded.validity.error
+	end
+	state.selection = loaded
+	local repainted, active_or_err = M.repaint()
+	if not repainted then
+		emit("reload-failed", { selected = state.selection, active = state.active })
+		return false, tostring(active_or_err or "theme could not be applied")
+	end
+	emit("reloaded", { selected = state.selection, active = state.active })
+	return true, active_or_err
 end
 
 function M.persist(name)
@@ -1949,6 +2075,17 @@ function M.reset()
 	emit("reset", { colorscheme = state.opts.default })
 	local repainted, repaint_result = M.repaint()
 	return repainted, warning or repaint_result
+end
+
+function M.teardown()
+	state.configured = false
+	state.opts = nil
+	state.painters = {}
+	state.selection = nil
+	state.active = nil
+	state.last_known_good = nil
+	test_hook = nil
+	return true
 end
 
 function M._set_test_hook(callback)

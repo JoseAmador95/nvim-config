@@ -74,6 +74,7 @@ local function setup(path, observed, extra)
 		fallback = extra.fallback or "habamax",
 		notify = observed.notify,
 		event = observed.event,
+		on_state_change = extra.on_state_change,
 		paint = observed.paint,
 		context = observed.context,
 	})
@@ -1053,6 +1054,61 @@ test("painter failures fall back and emit caller-owned events", function()
 	end))
 	assert(theme_router.apply("custom"), "registered painter did not apply")
 	assert(events[#events].kind == "applied", "apply event was not emitted")
+	vim.fn.delete(root, "rf")
+end)
+
+test("select and reload distinguish durable selection from active last-known-good", function()
+	theme_router.teardown()
+	local initial = theme_router.status()
+	assert(initial.configured == false and initial.selected == nil and initial.active == nil)
+	assert(vim.deep_equal(theme_router.effective_config(), {}))
+	local root = temp_dir()
+	local path = vim.fs.joinpath(root, "state", "theme.yaml")
+	local painted = {}
+	local observed = callbacks({
+		paint = function(name)
+			painted[#painted + 1] = name
+			return true
+		end,
+	})
+	setup(path, observed, {
+		on_state_change = function(event)
+			event.kind = "mutated"
+			error("observer failure")
+		end,
+	})
+	assert(theme_router.status().last_known_good == nil, "unpainted selection became last-known-good")
+	local selected, select_err = theme_router.select("catppuccin")
+	assert(selected, select_err)
+	local status = theme_router.status()
+	equal("catppuccin", status.selected.colorscheme, "select did not persist the chosen theme")
+	equal("catppuccin", status.active.colorscheme, "select did not paint the chosen theme")
+	equal("catppuccin", status.last_known_good.colorscheme, "select did not advance last-known-good")
+	status.active.colorscheme = "mutated"
+	equal("catppuccin", theme_router.status().active.colorscheme, "status shares active state")
+	local effective = theme_router.effective_config()
+	effective.default = "mutated"
+	equal("vscode", theme_router.effective_config().default, "effective config shares state")
+
+	write(path, { "version: 1", "colorscheme: [broken" })
+	local reloaded = theme_router.reload()
+	assert(not reloaded, "invalid YAML was reloaded")
+	status = theme_router.status()
+	equal(false, status.validity.valid, "invalid YAML did not update validity")
+	equal("catppuccin", status.selected.colorscheme, "invalid YAML replaced the selected theme")
+	equal("catppuccin", status.active.colorscheme, "invalid YAML repainted the active theme")
+	equal("catppuccin", status.last_known_good.colorscheme, "invalid YAML displaced last-known-good")
+
+	write(path, { "version: 1", "colorscheme: tokyonight" })
+	local valid, active = theme_router.reload()
+	assert(valid and active == "tokyonight", "valid reload did not repaint the durable selection")
+	equal("tokyonight", theme_router.status().active.colorscheme, "valid reload left stale active state")
+	equal({ "catppuccin", "tokyonight" }, painted, "reload painted an unexpected sequence")
+	local before = theme_router.status()
+	local accepted, setup_err = theme_router.setup({ injected = true })
+	assert(not accepted and setup_err:find("unknown option: injected", 1, true), "unknown setup option was accepted")
+	equal(before, theme_router.status(), "rejected setup mutated router state")
+	assert(theme_router.teardown() and theme_router.teardown(), "teardown was not repeatable")
 	vim.fn.delete(root, "rf")
 end)
 

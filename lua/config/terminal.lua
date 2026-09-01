@@ -254,12 +254,23 @@ local function parse_location(spec, buf)
 	return true
 end
 
-lifecycle.setup({
-	backend = snacks_backend,
-	notify = notify,
-	schedule = vim.schedule,
-	open_location = parse_location,
+local lifecycle_policy = require("config.local_config").plugin("terminal_lifecycle", {
+	stop_timeout_ms = 5000,
+	buffer_mappings = { close = "q", open_location = "gf" },
 })
+
+local function configure_lifecycle()
+	lifecycle.setup({
+		backend = snacks_backend,
+		notify = notify,
+		schedule = vim.schedule,
+		open_location = parse_location,
+		stop_timeout_ms = lifecycle_policy.stop_timeout_ms,
+		buffer_mappings = lifecycle_policy.buffer_mappings,
+	})
+end
+
+configure_lifecycle()
 
 local function call_with_spec(method, spec)
 	local normalized, err = normalize_spec(spec)
@@ -308,6 +319,14 @@ function M.dispose(identity)
 	return lifecycle.dispose(key)
 end
 
+function M.list()
+	return lifecycle.list()
+end
+
+function M.dispose_all(filter)
+	return lifecycle.dispose_all(filter)
+end
+
 function M.send(identity, text, options)
 	local status = M.status(identity)
 	if not status.accepting_input then
@@ -326,6 +345,9 @@ function M.send(identity, text, options)
 end
 
 function M.status(identity)
+	if identity == nil then
+		return lifecycle.status()
+	end
 	local key, err = key_for(identity)
 	if not key then
 		return nil, err
@@ -339,6 +361,10 @@ function M.status(identity)
 		and job > 0
 		and vim.fn.jobwait({ job }, 0)[1] == -1
 	return status
+end
+
+function M.effective_config()
+	return lifecycle.effective_config()
 end
 
 function M.lines(identity)
@@ -389,6 +415,9 @@ end
 
 M._normalize = normalize_spec
 M._key = workspace_key
-M._reset = lifecycle._reset
+M._reset = function()
+	lifecycle._reset()
+	configure_lifecycle()
+end
 
 return M

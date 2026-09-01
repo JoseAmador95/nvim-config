@@ -6,8 +6,16 @@ Themes, picker, commands, palette repaint, and OSC 11 stay outside.
 
 `setup(opts)` injects the absolute state path, optional legacy path, default and
 fallback names, generic painter, context, notification, and event callbacks.
-The public surface is `register`, `selection`, `apply`, `repaint`, `persist`, and
-`reset`. Every returned selection and event value is caller-owned.
+The public surface is `register`, `selection`, `apply`, `repaint`, `select`,
+`reload`, `persist`, and `reset`. `select(name)` paints and persists through one
+composite operation. `reload()` rereads durable YAML; invalid YAML updates
+validity while preserving the selected theme, active paint, and last-known-good
+paint. Every returned selection and event value is caller-owned.
+
+`status()` reports those selected, active, validity, and last-known-good states
+separately and is safe before setup. `effective_config()` contains copied policy
+without callbacks. Unknown setup options are rejected before state replacement,
+teardown is repeatable, and `on_state_change(event)` failures are isolated.
 
 The state directory also contains a permanent `.theme-router.lock`. It is an
 owner-UID, single-link regular `0600` file opened and validated through the
