@@ -141,16 +141,21 @@ local function record(id, pid, workspaces, pane, legacy)
 	return path, socket
 end
 
-local function invoke(extra_env, file, line, column, workspace)
+local function environment(extra_env)
 	local environment = {
 		NVIM_EXACT_EDITOR_STATE_HOME = state,
 		FAKE_NVIM_LOG = log,
+		HOME = vim.env.HOME or fixture,
 		PATH = bin .. ":" .. vim.env.PATH,
 		PYTHONPYCACHEPREFIX = fixture .. "/pycache",
 	}
 	for key, value in pairs(extra_env or {}) do
 		environment[key] = value
 	end
+	return environment
+end
+
+local function invoke(extra_env, file, line, column, workspace)
 	local command = {
 		helper,
 		"--cwd",
@@ -172,19 +177,10 @@ local function invoke(extra_env, file, line, column, workspace)
 			workspace.repo_identity,
 		})
 	end
-	return vim.system(command, { text = true, env = environment }):wait()
+	return vim.system(command, { text = true, env = environment(extra_env), clear_env = true }):wait()
 end
 
 local function invoke_editor(extra_env, file, signal_ready, tmux_pane, wait_timeout)
-	local environment = {
-		NVIM_EXACT_EDITOR_STATE_HOME = state,
-		FAKE_NVIM_LOG = log,
-		PATH = bin .. ":" .. vim.env.PATH,
-		PYTHONPYCACHEPREFIX = fixture .. "/pycache",
-	}
-	for key, value in pairs(extra_env or {}) do
-		environment[key] = value
-	end
 	local command = { helper, "--wait-editor" }
 	if signal_ready then
 		command[#command + 1] = "--signal-ready"
@@ -198,7 +194,7 @@ local function invoke_editor(extra_env, file, signal_ready, tmux_pane, wait_time
 		command[#command + 1] = tostring(wait_timeout)
 	end
 	command[#command + 1] = file
-	return vim.system(command, { text = true, env = environment, cwd = repo }):wait(5000)
+	return vim.system(command, { text = true, env = environment(extra_env), clear_env = true, cwd = repo }):wait(5000)
 end
 
 local function calls()
@@ -339,6 +335,105 @@ test("workspace runtime, root, and repository identity select exactly one editor
 	assert(#files == 1)
 	local request = vim.json.decode(table.concat(vim.fn.readfile(files[1]), "\n"))
 	assert(request.instance_id == container_id and request.repo_root == "/workspaces/project")
+end)
+
+test("a complete environment triplet selects the container workspace", function()
+	reset()
+	local host_id = "61616161-6161-4161-8161-616161616161"
+	local container_id = "62626262-6262-4262-8262-626262626262"
+	local identity = "logical-environment-repository"
+	record(host_id, nil, { { runtime = "host", root = repo, repo_identity = repo } })
+	record(container_id, nil, {
+		{ runtime = "container", root = "/workspaces/environment", repo_identity = identity },
+	})
+	local result = invoke({
+		NVIM_EXACT_EDITOR_RUNTIME = "container",
+		NVIM_EXACT_EDITOR_WORKSPACE_ROOT = "/workspaces/environment",
+		NVIM_EXACT_EDITOR_REPO_IDENTITY = identity,
+	})
+	assert(result.code == 0, result.stderr)
+	local files = vim.fn.glob(state .. "/requests/*.json", false, true)
+	assert(#files == 1)
+	local request = vim.json.decode(table.concat(vim.fn.readfile(files[1]), "\n"))
+	assert(request.instance_id == container_id and request.repo_root == "/workspaces/environment")
+end)
+
+test("a complete command-line triplet overrides a conflicting environment", function()
+	reset()
+	local cli_id = "63636363-6363-4363-8363-636363636363"
+	local env_id = "64646464-6464-4464-8464-646464646464"
+	record(cli_id, nil, {
+		{ runtime = "container", root = "/workspaces/cli", repo_identity = "cli-repository" },
+	})
+	record(env_id, nil, {
+		{ runtime = "container", root = "/workspaces/environment", repo_identity = "env-repository" },
+	})
+	local result = invoke(
+		{
+			NVIM_EXACT_EDITOR_RUNTIME = "container",
+			NVIM_EXACT_EDITOR_WORKSPACE_ROOT = "/workspaces/environment",
+			NVIM_EXACT_EDITOR_REPO_IDENTITY = "env-repository",
+		},
+		nil,
+		nil,
+		nil,
+		{
+			runtime = "container",
+			root = "/workspaces/cli",
+			repo_identity = "cli-repository",
+		}
+	)
+	assert(result.code == 0, result.stderr)
+	local files = vim.fn.glob(state .. "/requests/*.json", false, true)
+	assert(#files == 1)
+	local request = vim.json.decode(table.concat(vim.fn.readfile(files[1]), "\n"))
+	assert(request.instance_id == cli_id and request.repo_root == "/workspaces/cli")
+end)
+
+test("partial command-line and environment identities fail before editor lookup", function()
+	reset()
+	record("65656565-6565-4565-8565-656565656565")
+	local base = { helper, "--cwd", repo, "--file", "README.md" }
+	local command = vim.deepcopy(base)
+	vim.list_extend(command, { "--runtime", "container" })
+	local result = vim.system(command, {
+		text = true,
+		env = environment(),
+		clear_env = true,
+	}):wait()
+	assert(result.code ~= 0 and result.stderr:find("requires runtime, root, and repository identity", 1, true))
+	assert(#calls() == 0, "partial command-line identity reached editor lookup")
+
+	result = vim.system(base, {
+		text = true,
+		env = environment({ NVIM_EXACT_EDITOR_RUNTIME = "container" }),
+		clear_env = true,
+	}):wait()
+	assert(result.code ~= 0 and result.stderr:find("requires runtime, root, and repository identity", 1, true))
+	assert(#calls() == 0, "partial environment identity reached editor lookup")
+end)
+
+test("wait-editor inherits the exact environment workspace without raw path transport", function()
+	reset()
+	local id = "66666666-6666-4666-8666-666666666666"
+	local identity = "blocking-environment-repository"
+	record(id, nil, {
+		{ runtime = "container", root = "/workspaces/blocking", repo_identity = identity },
+	})
+	local target = vim.fn.tempname()
+	local request_log = fixture .. "/environment-wait-request.json"
+	assert(vim.fn.writefile({ "text" }, target) == 0)
+	local result = invoke_editor({
+		NVIM_EXACT_EDITOR_RUNTIME = "container",
+		NVIM_EXACT_EDITOR_WORKSPACE_ROOT = "/workspaces/blocking",
+		NVIM_EXACT_EDITOR_REPO_IDENTITY = identity,
+		FAKE_NVIM_REQUEST_LOG = request_log,
+		FAKE_NVIM_WAIT_INITIAL = "completed",
+	}, target)
+	assert(result.code == 0, result.stderr)
+	local request = vim.json.decode(table.concat(vim.fn.readfile(request_log), "\n"))
+	assert(request.instance_id == id and request.repo_root == "/workspaces/blocking")
+	vim.fn.delete(target)
 end)
 
 test("corrupt permissions are cleaned and symlinked registry entries fail closed", function()

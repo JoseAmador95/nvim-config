@@ -44,11 +44,19 @@ external caller observes `completed` or `aborted`. `setup` accepts optional
 ## CLI
 
 `scripts/exact-editor-open` supports normal and blocking requests. Exact
-selection can be supplied with `--runtime`, `--workspace-root`, and
-`--repo-identity`. Exit status `3` means that no matching editor exists and is
-the only state in which a caller may use a fallback. All ambiguity, unsafe
-state, live-but-unreachable endpoints, RPC rejection, and timeout failures use
-exit status `2` and fail closed.
+selection is one all-or-none triplet. A complete `--runtime`,
+`--workspace-root`, and `--repo-identity` triplet outranks the complete
+`NVIM_EXACT_EDITOR_RUNTIME`, `NVIM_EXACT_EDITOR_WORKSPACE_ROOT`, and
+`NVIM_EXACT_EDITOR_REPO_IDENTITY` environment triplet. With neither source,
+the CLI selects the canonical host Git root. Sources are never mixed and a
+partial source fails before editor lookup. Exit status `3` means that no
+matching editor exists and is the only state in which a caller may use a
+fallback. All ambiguity, unsafe state, live-but-unreachable endpoints, RPC
+rejection, and timeout failures use exit status `2` and fail closed.
+
+Inside a Dev Container, the host adapter requires the complete environment
+triplet with `runtime=container`. It never migrates a legacy root into a
+synthetic host workspace.
 
 Registry directories are forced to `0700`; records, requests, waits, and Unix
 sockets are forced to `0600`. State symlinks and non-regular entries are never

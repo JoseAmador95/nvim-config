@@ -66,6 +66,11 @@ WAIT_KEYS = {
     "updated_at",
 }
 WAIT_STATUSES = {"waiting", "completed", "aborted"}
+EXACT_WORKSPACE_ENV = (
+    "NVIM_EXACT_EDITOR_RUNTIME",
+    "NVIM_EXACT_EDITOR_WORKSPACE_ROOT",
+    "NVIM_EXACT_EDITOR_REPO_IDENTITY",
+)
 
 
 class OpenError(Exception):
@@ -536,7 +541,7 @@ def resolve_inputs(arguments: argparse.Namespace) -> tuple[pathlib.Path, pathlib
     try:
         cwd = pathlib.Path(arguments.cwd).expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as error:
-        raise OpenError("cwd does not exist: " + str(error))
+        raise OpenError("cwd does not exist: " + str(error)) from error
     if not cwd.is_dir():
         raise OpenError("cwd is not a directory")
     repo = git_root(cwd)
@@ -546,13 +551,13 @@ def resolve_inputs(arguments: argparse.Namespace) -> tuple[pathlib.Path, pathlib
     try:
         target = requested.resolve(strict=True)
     except (OSError, RuntimeError) as error:
-        raise OpenError("target file does not exist: " + str(error))
+        raise OpenError("target file does not exist: " + str(error)) from error
     if not target.is_file():
         raise OpenError("target is not a regular file")
     try:
         relative = target.relative_to(repo)
-    except ValueError:
-        raise OpenError("target resolves outside the repository")
+    except ValueError as error:
+        raise OpenError("target resolves outside the repository") from error
     if git_root(target.parent) != repo:
         raise OpenError("target belongs to a different Git repository")
     return repo, target, relative.as_posix()
@@ -581,7 +586,7 @@ def resolve_editor_input(filename: str) -> tuple[pathlib.Path, pathlib.Path]:
     try:
         cwd = pathlib.Path.cwd().resolve(strict=True)
     except (OSError, RuntimeError) as error:
-        raise OpenError("cwd does not exist: " + str(error))
+        raise OpenError("cwd does not exist: " + str(error)) from error
     if not cwd.is_dir():
         raise OpenError("cwd is not a directory")
     repo = git_root(cwd)
@@ -591,7 +596,7 @@ def resolve_editor_input(filename: str) -> tuple[pathlib.Path, pathlib.Path]:
     try:
         requested_stat = requested.lstat()
     except OSError as error:
-        raise OpenError("editor target does not exist: " + str(error))
+        raise OpenError("editor target does not exist: " + str(error)) from error
     if stat.S_ISLNK(requested_stat.st_mode):
         raise OpenError("editor target must not be a symlink")
     if not stat.S_ISREG(requested_stat.st_mode):
@@ -600,7 +605,7 @@ def resolve_editor_input(filename: str) -> tuple[pathlib.Path, pathlib.Path]:
         target = requested.resolve(strict=True)
         validate_text_file(target)
     except (OSError, RuntimeError) as error:
-        raise OpenError("could not validate editor target: " + str(error))
+        raise OpenError("could not validate editor target: " + str(error)) from error
     return repo, target
 
 
@@ -691,11 +696,35 @@ def wait_for_editor(
         unlink_regular(wait_path)
 
 
+def validate_workspace_triplet(
+    values: tuple[str | None, str | None, str | None],
+    label: str,
+) -> tuple[str, str, str] | None:
+    """Validate one all-or-none workspace identity source."""
+    if not any(value is not None for value in values):
+        return None
+    if any(not isinstance(value, str) or not value for value in values):
+        raise OpenError(f"{label} workspace identity requires runtime, root, and repository identity")
+    runtime, root, repo_identity = values
+    return runtime, root, repo_identity
+
+
+def requested_workspace(arguments: argparse.Namespace) -> tuple[str, str, str] | None:
+    """Resolve a complete CLI identity before consulting the environment."""
+    command_line = validate_workspace_triplet(
+        (arguments.runtime, arguments.workspace_root, arguments.repo_identity),
+        "command-line",
+    )
+    if command_line is not None:
+        return command_line
+    environment = tuple(os.environ.get(name) for name in EXACT_WORKSPACE_ENV)
+    return validate_workspace_triplet(environment, "environment")
+
+
 def workspace_key(arguments: argparse.Namespace, repo: pathlib.Path) -> WorkspaceKey:
     """Build the exact workspace key requested by the caller."""
-    runtime = arguments.runtime
-    repo_identity = arguments.repo_identity or str(repo)
-    root = arguments.workspace_root or str(repo)
+    requested = requested_workspace(arguments)
+    runtime, root, repo_identity = requested or ("host", str(repo), str(repo))
     if any(not value or "\0" in value for value in (runtime, repo_identity, root)):
         raise OpenError("workspace identity fields must be non-empty and contain no NUL")
     if not canonical_runtime_root(root):
@@ -721,7 +750,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--wait-editor", action="store_true")
     value.add_argument("--signal-ready", action="store_true")
     value.add_argument("--tmux-pane")
-    value.add_argument("--runtime", default="host")
+    value.add_argument("--runtime")
     value.add_argument("--workspace-root")
     value.add_argument("--repo-identity")
     value.add_argument("--wait-timeout", type=float, default=DEFAULT_WAIT_TIMEOUT)
@@ -746,6 +775,10 @@ def validate_arguments(argument_parser: argparse.ArgumentParser, arguments: argp
     validate_pane(argument_parser, arguments)
     if arguments.wait_timeout <= 0:
         argument_parser.error("--wait-timeout must be positive")
+    try:
+        requested_workspace(arguments)
+    except OpenError as error:
+        argument_parser.error(str(error))
 
 
 def validate_pane(argument_parser: argparse.ArgumentParser, arguments: argparse.Namespace) -> None:

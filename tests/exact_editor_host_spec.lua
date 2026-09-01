@@ -38,6 +38,16 @@ assert(vim.uv.fs_symlink(outside, fixture .. "/escape.lua"))
 local root = assert(vim.uv.fs_realpath(fixture))
 local external = assert(vim.uv.fs_realpath(outside))
 local external_files = { outside }
+local original_environment = {
+	NVIM_DEVCONTAINER = vim.env.NVIM_DEVCONTAINER,
+	NVIM_EXACT_EDITOR_RUNTIME = vim.env.NVIM_EXACT_EDITOR_RUNTIME,
+	NVIM_EXACT_EDITOR_WORKSPACE_ROOT = vim.env.NVIM_EXACT_EDITOR_WORKSPACE_ROOT,
+	NVIM_EXACT_EDITOR_REPO_IDENTITY = vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY,
+}
+vim.env.NVIM_DEVCONTAINER = nil
+vim.env.NVIM_EXACT_EDITOR_RUNTIME = nil
+vim.env.NVIM_EXACT_EDITOR_WORKSPACE_ROOT = nil
+vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY = nil
 
 local function temporary_text(lines)
 	local path = vim.fn.tempname()
@@ -145,6 +155,58 @@ test("state directories and atomic registry are owner-only", function()
 	for key in pairs(rpc._record_keys) do
 		assert(decoded[key] ~= nil or key == "TMUX_PANE", "registry omitted " .. key)
 	end
+end)
+
+test("container registration requires and preserves the exact environment triplet", function()
+	vim.env.NVIM_DEVCONTAINER = "1"
+	vim.env.NVIM_EXACT_EDITOR_RUNTIME = "container"
+	vim.env.NVIM_EXACT_EDITOR_WORKSPACE_ROOT = root
+	vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY = "/host/logical/repository"
+	local options = rpc._options()
+	local workspace, err = options.resolve_workspace(root .. "/target.lua")
+	assert(workspace and not err)
+	assert(vim.deep_equal(workspace, {
+		runtime = "container",
+		root = root,
+		repo_identity = "/host/logical/repository",
+	}))
+
+	local container_instance = {
+		root = state,
+		instance_id = "23456789-2345-4345-8345-23456789abcd",
+		socket = state .. "/sockets/container.sock",
+		roots = { [root] = true },
+	}
+	local record = assert(rpc.write_registry(container_instance))
+	assert(#record.workspaces == 1 and record.workspaces[1].runtime == "container")
+	assert(record.workspaces[1].repo_identity == "/host/logical/repository")
+
+	local retry_instance = {
+		root = state,
+		instance_id = "34567890-3456-4456-8456-34567890abcd",
+		socket = state .. "/sockets/retry.sock",
+		roots = { [root] = true },
+	}
+	vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY = nil
+	local failed, failed_err = rpc.write_registry(retry_instance)
+	assert(not failed and failed_err:find("requires runtime, workspace root, and repository identity", 1, true))
+	assert(retry_instance.workspaces == nil, "failed migration partially mutated the legacy instance")
+	vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY = "/host/logical/repository"
+	local retried = assert(rpc.write_registry(retry_instance))
+	assert(#retried.workspaces == 1 and retried.workspaces[1].runtime == "container")
+
+	vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY = nil
+	workspace, err = options.resolve_workspace(root .. "/target.lua")
+	assert(not workspace and err:find("requires runtime, workspace root, and repository identity", 1, true))
+	vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY = "/host/logical/repository"
+	vim.env.NVIM_EXACT_EDITOR_RUNTIME = "host"
+	workspace, err = options.resolve_workspace(root .. "/target.lua")
+	assert(not workspace and err:find("runtime must be container", 1, true))
+
+	vim.env.NVIM_DEVCONTAINER = nil
+	vim.env.NVIM_EXACT_EDITOR_RUNTIME = nil
+	vim.env.NVIM_EXACT_EDITOR_WORKSPACE_ROOT = nil
+	vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY = nil
 end)
 
 test("version-2 editor request arms durable state before acknowledging and finishes only after close", function()
@@ -340,6 +402,9 @@ vim.fn.delete(fixture, "rf")
 vim.fn.delete(state, "rf")
 for _, path in ipairs(external_files) do
 	vim.fn.delete(path)
+end
+for name, value in pairs(original_environment) do
+	vim.env[name] = value
 end
 
 if #failures > 0 then
