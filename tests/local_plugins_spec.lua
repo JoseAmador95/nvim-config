@@ -45,6 +45,25 @@ local expected = {
 }
 local support = { "_shared" }
 local local_root = vim.fs.joinpath(repo, "local-plugins")
+local modules = {
+	["native-review.nvim"] = "native_review",
+	["exact-editor.nvim"] = "exact_editor",
+	["devcontainer-editor.nvim"] = "devcontainer_editor",
+	["tab-first.nvim"] = "tab_first",
+	["terminal-lifecycle.nvim"] = "terminal_lifecycle",
+	["project-python.nvim"] = "project_python",
+	["action-palette.nvim"] = "action_palette",
+	["diagram-view.nvim"] = "diagram_view",
+	["log-workbench.nvim"] = "log_workbench",
+	["repo-scratch.nvim"] = "repo_scratch",
+	["coverage-workbench.nvim"] = "coverage_workbench",
+	["just-workbench.nvim"] = "just_workbench",
+	["clangd-compile-db.nvim"] = "clangd_compile_db",
+	["trusted-workspace.nvim"] = "trusted_workspace",
+	["verified-tools.nvim"] = "verified_tools",
+	["treesitter-runtime.nvim"] = "treesitter_runtime",
+	["theme-router.nvim"] = "theme_router",
+}
 
 test("local plugin inventory and README boundaries are exact", function()
 	local actual = {}
@@ -96,6 +115,34 @@ test("local plugin runtime Lua has no host imports or global commands", function
 			path .. " imports host config"
 		)
 		assert(not contents:find("nvim_create_user_command", 1, true), path .. " creates a global user command")
+	end
+end)
+
+test("every product exposes pure copied status and effective configuration", function()
+	for _, name in ipairs(expected) do
+		local plugin = require(assert(modules[name], "missing module mapping for " .. name))
+		assert(type(plugin.setup) == "function", name .. " has no setup()")
+		assert(type(plugin.status) == "function", name .. " has no status()")
+		assert(type(plugin.effective_config) == "function", name .. " has no effective_config()")
+
+		local first_status = plugin.status()
+		local first_config = plugin.effective_config()
+		assert(type(first_status) == "table", name .. " status() did not return a table")
+		assert(type(first_config) == "table", name .. " effective_config() did not return a table")
+		first_status.__mutation_probe = true
+		first_config.__mutation_probe = true
+		assert(plugin.status().__mutation_probe == nil, name .. " status() shares mutable state")
+		assert(plugin.effective_config().__mutation_probe == nil, name .. " effective_config() shares mutable state")
+	end
+end)
+
+test("unknown setup options fail before changing product state", function()
+	for _, name in ipairs(expected) do
+		local plugin = require(modules[name])
+		local before = plugin.status()
+		local called, result = pcall(plugin.setup, { __unknown_contract_option = true })
+		assert(not called or result == nil, name .. " accepted an unknown setup option")
+		equal(before, plugin.status(), name .. " mutated state before rejecting an unknown setup option")
 	end
 end)
 

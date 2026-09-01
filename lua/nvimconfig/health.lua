@@ -6,6 +6,26 @@ local uv = vim.uv
 local toolchain = require("config.toolchain")
 local tool_paths = require("config.tool_paths")
 
+local LOCAL_PRODUCTS = {
+	{ name = "native-review.nvim", module = "native_review" },
+	{ name = "exact-editor.nvim", module = "exact_editor" },
+	{ name = "devcontainer-editor.nvim", module = "devcontainer_editor" },
+	{ name = "tab-first.nvim", module = "tab_first" },
+	{ name = "terminal-lifecycle.nvim", module = "terminal_lifecycle" },
+	{ name = "project-python.nvim", module = "project_python" },
+	{ name = "action-palette.nvim", module = "action_palette" },
+	{ name = "diagram-view.nvim", module = "diagram_view" },
+	{ name = "log-workbench.nvim", module = "log_workbench" },
+	{ name = "repo-scratch.nvim", module = "repo_scratch" },
+	{ name = "coverage-workbench.nvim", module = "coverage_workbench" },
+	{ name = "just-workbench.nvim", module = "just_workbench" },
+	{ name = "clangd-compile-db.nvim", module = "clangd_compile_db" },
+	{ name = "trusted-workspace.nvim", module = "trusted_workspace" },
+	{ name = "verified-tools.nvim", module = "verified_tools" },
+	{ name = "treesitter-runtime.nvim", module = "treesitter_runtime" },
+	{ name = "theme-router.nvim", module = "theme_router" },
+}
+
 local function version_string()
 	local version = vim.version()
 	return ("%d.%d.%d"):format(version.major, version.minor, version.patch)
@@ -188,6 +208,51 @@ local function check_profile()
 	end
 end
 
+local function local_product_status()
+	local rows = {}
+	for _, product in ipairs(LOCAL_PRODUCTS) do
+		local loaded, plugin = pcall(require, product.module)
+		local row = { name = product.name, module = product.module, loaded = loaded }
+		if not loaded then
+			row.error = tostring(plugin)
+		else
+			if type(plugin.status) ~= "function" then
+				row.error = "missing status()"
+			elseif type(plugin.effective_config) ~= "function" then
+				row.error = "missing effective_config()"
+			else
+				local status_ok, status = pcall(plugin.status)
+				local config_ok, config = pcall(plugin.effective_config)
+				if not status_ok then
+					row.error = "status() failed: " .. tostring(status)
+				elseif not config_ok then
+					row.error = "effective_config() failed: " .. tostring(config)
+				elseif type(status) ~= "table" or type(config) ~= "table" then
+					row.error = "status() and effective_config() must return tables"
+				else
+					row.status = vim.deepcopy(status)
+					row.effective_config = vim.deepcopy(config)
+				end
+			end
+		end
+		rows[#rows + 1] = row
+	end
+	return rows
+end
+
+local function check_local_products()
+	health.start("Local plugin products")
+	for _, row in ipairs(local_product_status()) do
+		if row.error then
+			health.error(row.name .. ": " .. row.error)
+		else
+			local configured = row.status.configured
+			local suffix = configured == nil and "" or ("; configured=" .. tostring(configured))
+			health.ok(row.name .. ": status and effective configuration available" .. suffix)
+		end
+	end
+end
+
 local function joined_pins(order, entries)
 	local pins = {}
 	for _, name in ipairs(order) do
@@ -199,7 +264,7 @@ end
 local function state_summary()
 	local bootstrap = require("config.tool_bootstrap")
 	local grouped = {}
-	for _, record in ipairs(bootstrap.engine().status() or {}) do
+	for _, record in ipairs(bootstrap.engine().records() or {}) do
 		local status = record.status
 		local identity = record.identity.backend .. ":" .. record.identity.name .. "@" .. record.identity.version
 		if record and type(record.detail) == "string" and record.detail ~= "" then
@@ -504,6 +569,7 @@ function M.check()
 		configured
 	)
 	check_profile()
+	check_local_products()
 
 	health.start("Pinned tool bootstrap")
 	health.info("Managed release pins: " .. joined_pins(toolchain.managed_order, toolchain.managed_tools))
@@ -565,5 +631,6 @@ end
 -- Small test seam for origin classification; no filesystem or state mutation.
 M._path_origin = path_origin
 M._mason_receipt_status = mason_receipt_status
+M._local_product_status = local_product_status
 
 return M

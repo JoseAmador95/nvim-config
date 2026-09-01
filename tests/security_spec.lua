@@ -178,7 +178,7 @@ test("local config diagnostics redact environment values without mutating cache"
 	local secret = "security-spec-secret-value"
 	assert(vim.fn.writefile({
 		"return {",
-		"  theme = { background = 'light' },",
+		"  plugins = { theme_router = { background = 'light' } },",
 		"  env = { CONFIG_SECRET = '" .. secret .. "', EMPTY_SECRET = '' },",
 		"}",
 	}, config_path) == 0, "could not write temporary local config")
@@ -195,8 +195,11 @@ test("local config diagnostics redact environment values without mutating cache"
 	assert(display.env.EMPTY_SECRET == "<redacted>", "empty environment value was not redacted")
 	assert(runtime.env.CONFIG_SECRET == secret, "display helper mutated the cached secret")
 	assert(runtime.env.EMPTY_SECRET == "", "display helper mutated the cached empty value")
-	display.theme.background = "dark"
-	assert(local_config.read().theme.background == "light", "display snapshot shares nested runtime tables")
+	display.plugins.theme_router.background = "dark"
+	assert(
+		local_config.read().plugins.theme_router.background == "light",
+		"display snapshot shares nested runtime tables"
+	)
 
 	local notifications = {}
 	local original_notify = vim.notify
@@ -220,7 +223,7 @@ test("local config diagnostics redact environment values without mutating cache"
 	vim.fn.delete(root, "rf")
 end)
 
-test("review hunk context accepts only finite non-negative integers and is present in the template", function()
+test("native review hunk context accepts only bounded integers and is present in the template", function()
 	local root = temp_dir()
 	local config_path = root .. "/host.lua"
 	local original_override = vim.env.NVIM_CONFIG_FILE
@@ -233,27 +236,37 @@ test("review hunk context accepts only finite non-negative integers and is prese
 	package.loaded["config.local_config"] = nil
 	local local_config = require("config.local_config")
 
-	assert(local_config.read().review.hunk_context == 3)
+	assert(local_config.plugin("native_review").hunk_context == 3)
 	assert(#local_config.errors() == 0)
 
-	assert(vim.fn.writefile({ "return { review = { hunk_context = 0 } }" }, config_path) == 0)
-	assert(local_config.reload().review.hunk_context == 0)
+	assert(vim.fn.writefile({ "return { plugins = { native_review = { hunk_context = 0 } } }" }, config_path) == 0)
+	assert(local_config.reload().plugins.native_review.hunk_context == 0)
 	assert(#local_config.errors() == 0)
-	assert(vim.fn.writefile({ "return { review = { hunk_context = 7 } }" }, config_path) == 0)
-	assert(local_config.reload().review.hunk_context == 7)
+	assert(vim.fn.writefile({ "return { plugins = { native_review = { hunk_context = 7 } } }" }, config_path) == 0)
+	assert(local_config.reload().plugins.native_review.hunk_context == 7)
 	assert(#local_config.errors() == 0)
 
 	for _, invalid in ipairs({ "'three'", "-1", "1.5", "0 / 0", "math.huge", "-math.huge" }) do
-		assert(vim.fn.writefile({ "return { review = { hunk_context = " .. invalid .. " } }" }, config_path) == 0)
+		assert(
+			vim.fn.writefile(
+				{ "return { plugins = { native_review = { hunk_context = " .. invalid .. " } } }" },
+				config_path
+			) == 0
+		)
 		local before = #notifications
-		assert(local_config.reload().review.hunk_context == 3, "invalid context did not use the default: " .. invalid)
-		assert(table.concat(local_config.errors(), "\n"):find("review.hunk_context", 1, true))
+		assert(
+			local_config.reload().plugins.native_review.hunk_context == 3,
+			"invalid context did not use the default: " .. invalid
+		)
+		assert(table.concat(local_config.errors(), "\n"):find("plugins.native_review.hunk_context", 1, true))
 		assert(#notifications == before + 1, "invalid context did not use local-config diagnostics: " .. invalid)
 	end
 
 	vim.cmd("NvimConfigInit!")
 	local generated = table.concat(vim.fn.readfile(config_path), "\n")
-	assert(generated:find("review = { hunk_context = 3 }", 1, true), "generated template omitted review context")
+	assert(generated:find("native_review = {", 1, true), "generated template omitted native review")
+	assert(generated:find("hunk_context = 3", 1, true), "generated template omitted review context")
+	assert(vim.fn.getfperm(config_path) == "rw-------", "generated local config is not owner-only")
 
 	vim.notify = original_notify
 	vim.env.NVIM_CONFIG_FILE = original_override
