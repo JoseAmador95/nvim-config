@@ -8,6 +8,62 @@ vim.opt.runtimepath:prepend(plugin_root)
 package.path = table.concat({ repo_root .. "/local-plugins/_shared/lua/?.lua", package.path }, ";")
 
 local trusted_workspace = require("trusted_workspace")
+
+if vim.env.TRUSTED_WORKSPACE_STATE_CRASH_CHILD == "1" then
+	local root = assert(vim.env.TRUSTED_WORKSPACE_STATE_CRASH_ROOT)
+	local ready = assert(vim.env.TRUSTED_WORKSPACE_STATE_CRASH_READY)
+	assert(trusted_workspace.setup({ state_root = root }))
+	trusted_workspace._set_test_hook(function(phase, details)
+		if phase == "state_exchanged" then
+			assert(vim.uv.fs_lstat(details.path), "atomic exchange exposed a missing state path")
+			assert(vim.fn.writefile({ "ready" }, ready) == 0)
+			vim.wait(60_000, function()
+				return false
+			end, 100)
+			error("state exchange crash child was not killed")
+		end
+	end)
+	trusted_workspace.authorize("/crash-exchange", "test")
+	error("state exchange crash child unexpectedly completed")
+end
+
+if vim.env.TRUSTED_WORKSPACE_CLAIM_CRASH_CHILD == "1" then
+	local root = assert(vim.env.TRUSTED_WORKSPACE_CLAIM_CRASH_ROOT)
+	local ready = assert(vim.env.TRUSTED_WORKSPACE_CLAIM_CRASH_READY)
+	assert(trusted_workspace.setup({ state_root = root }))
+	trusted_workspace._set_test_hook(function(phase)
+		if phase == "lock_claim_staged" then
+			assert(vim.fn.writefile({ "ready" }, ready) == 0)
+			vim.wait(60_000, function()
+				return false
+			end, 100)
+			error("claim crash child was not killed")
+		end
+	end)
+	trusted_workspace.authorize("/crash", "test")
+	error("claim crash child unexpectedly completed")
+end
+
+if vim.env.TRUSTED_WORKSPACE_LOCK_CHILD == "1" then
+	local root = assert(vim.env.TRUSTED_WORKSPACE_LOCK_ROOT)
+	local ready = assert(vim.env.TRUSTED_WORKSPACE_LOCK_READY)
+	local peer_ready = assert(vim.env.TRUSTED_WORKSPACE_LOCK_PEER_READY)
+	local result_path = assert(vim.env.TRUSTED_WORKSPACE_LOCK_RESULT)
+	local capability = assert(vim.env.TRUSTED_WORKSPACE_LOCK_CAPABILITY)
+	assert(trusted_workspace.setup({ state_root = root }))
+	assert(vim.fn.writefile({ "ready" }, ready) == 0)
+	assert(
+		vim.wait(5000, function()
+			return vim.uv.fs_lstat(peer_ready) ~= nil
+		end, 5),
+		"lock child barrier timed out"
+	)
+	local ok, err = trusted_workspace.authorize("/race", capability)
+	assert(vim.fn.writefile({ ok and "ok" or ("error:" .. tostring(err)) }, result_path) == 0)
+	vim.cmd("quitall!")
+	return
+end
+
 local failures = {}
 local count = 0
 
@@ -15,6 +71,19 @@ local function equal(expected, actual, message)
 	if not vim.deep_equal(expected, actual) then
 		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
 	end
+end
+
+local function with_uv_override(name, replacement, callback)
+	local original = assert(vim.uv[name], "missing uv function " .. name)
+	vim.uv[name] = function(...)
+		return replacement(original, ...)
+	end
+	local ok, first, second, third = xpcall(callback, debug.traceback)
+	vim.uv[name] = original
+	if not ok then
+		error(first)
+	end
+	return first, second, third
 end
 
 local function test(name, callback)
@@ -49,6 +118,21 @@ local function find_error(errors, needle)
 		end
 	end
 	return false
+end
+
+local function lock_claim(root, kind, pid, token, number)
+	local base = vim.fs.joinpath(root, "trusted-workspace.lock")
+	local path
+	local value = { version = 1, kind = kind, pid = pid, token = token }
+	if kind == "choosing" then
+		path = base .. ".choosing." .. token
+	else
+		value.number = assert(number)
+		path = ("%s.ticket.%020d.%s"):format(base, number, token)
+	end
+	assert(vim.fn.writefile({ vim.json.encode(value) }, path) == 0)
+	assert(vim.uv.fs_chmod(path, 384))
+	return path
 end
 
 test("sources are deterministic, restricted, provenance-aware, and copy-safe", function()
@@ -145,8 +229,78 @@ test("changed fingerprints retain the last-known-good snapshot until approval", 
 	equal("two", pending.candidate.value.clangd.path, "changed candidate is stale")
 	equal("one", trusted_workspace.snapshot().value.clangd.path, "pending source displaced last-known-good")
 	equal("one", pending.last_known_good.value.clangd.path, "last-known-good changed before approval")
+	assert(trusted_workspace.register_source({
+		id = "host",
+		layer = "host",
+		value = { clangd = { path = "host-updated", profile = "full" } },
+	}))
+	local mixed = trusted_workspace.snapshot()
+	equal("one", mixed.value.clangd.path, "pending source lost its previously approved value")
+	equal("full", mixed.value.clangd.profile, "approved host update was blocked by a pending source")
 	assert(trusted_workspace.approve("/repo", "project", "two"))
 	equal("two", trusted_workspace.snapshot().value.clangd.path, "changed fingerprint approval did not apply")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("appliers receive effective validity while invalid pending data stays candidate-only", function()
+	local parent = temp_dir()
+	setup(state_root(parent))
+	local applied
+	assert(trusted_workspace.register_applier({
+		id = "capture",
+		prepare = function(next_snapshot)
+			return next_snapshot
+		end,
+		apply = function(token)
+			applied = token
+			return true
+		end,
+		rollback = function()
+			return true
+		end,
+	}))
+	assert(trusted_workspace.register_source({ id = "host", layer = "host", value = { review = { value = 1 } } }))
+	assert(trusted_workspace.register_source({
+		id = "project",
+		layer = "project",
+		repo = "/repo",
+		fingerprint = "pending-invalid",
+		value = { theme = { background = "hostile" }, review = { project = true } },
+	}))
+	local status = trusted_workspace.status()
+	assert(not status.candidate.validity.valid, "invalid pending candidate was reported valid")
+	assert(#status.candidate.validity.pending == 1, "candidate omitted pending approval")
+	assert(find_error(status.candidate.validity.errors, "theme: project field is not allowed"))
+
+	applied = nil
+	assert(trusted_workspace.register_source({ id = "host", layer = "host", value = { review = { value = 2 } } }))
+	assert(applied, "safe host update did not reach the applier")
+	assert(applied.validity.valid, "candidate errors contaminated the effective snapshot")
+	equal({}, applied.validity.errors, "effective snapshot retained candidate-only errors")
+	equal({}, applied.validity.pending, "effective snapshot retained candidate-only pending state")
+	equal(2, applied.value.review.value, "safe host update did not apply")
+	assert(applied.value.review.project == nil, "pending project value became effective")
+	local snapshot = trusted_workspace.snapshot()
+	assert(snapshot.validity.valid and #snapshot.validity.errors == 0 and #snapshot.validity.pending == 0)
+	vim.fn.delete(parent, "rf")
+end)
+
+test("approval is limited to the exact currently registered project candidate", function()
+	local parent = temp_dir()
+	setup(state_root(parent))
+	local missing, missing_err = trusted_workspace.approve("/repo", "project", "fingerprint")
+	assert(not missing and missing_err:find("currently registered", 1, true), "missing source was approved")
+	assert(trusted_workspace.register_source({
+		id = "project",
+		layer = "project",
+		repo = "/repo",
+		fingerprint = "fingerprint",
+		value = {},
+	}))
+	local wrong_repo = trusted_workspace.approve("/other", "project", "fingerprint")
+	local wrong_fingerprint = trusted_workspace.approve("/repo", "project", "different")
+	assert(not wrong_repo and not wrong_fingerprint, "mismatched candidate was approved")
+	assert(trusted_workspace.approve("/repo", "project", "fingerprint"))
 	vim.fn.delete(parent, "rf")
 end)
 
@@ -170,6 +324,1025 @@ test("capability grants are exact, persistent, copied, and revocable", function(
 	assert(trusted_workspace.status("/repo").repo_grants.build == nil, "revoked grant remains active")
 	setup(root)
 	assert(trusted_workspace.status("/repo").repo_grants.build == nil, "revocation did not survive reload")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("pre-commit file fsync and close failures do not create grants", function()
+	for _, fixture in ipairs({
+		{ name = "fsync", api = "fs_fsync" },
+		{ name = "close", api = "fs_close" },
+	}) do
+		local parent = temp_dir()
+		local root = state_root(parent)
+		setup(root)
+		local failed = false
+		local authorized, authorize_err = with_uv_override(fixture.api, function(original, fd, ...)
+			local info = vim.uv.fs_fstat(fd)
+			if not failed and info and info.type == "file" then
+				failed = true
+				if fixture.api == "fs_close" then
+					assert(original(fd, ...))
+				end
+				return nil, "simulated pre-commit " .. fixture.name .. " failure"
+			end
+			return original(fd, ...)
+		end, function()
+			return trusted_workspace.authorize("/precommit-" .. fixture.name, "test")
+		end)
+		assert(failed and not authorized, fixture.name .. " failure was reported as a successful mutation")
+		assert(
+			tostring(authorize_err):find("could not stage lock claim", 1, true),
+			fixture.name .. " error was lost: " .. tostring(authorize_err)
+		)
+		assert(
+			trusted_workspace.status("/precommit-" .. fixture.name).repo_grants.test == nil,
+			fixture.name .. " failure advanced in-memory grants"
+		)
+		assert(
+			vim.uv.fs_lstat(vim.fs.joinpath(root, "trusted-workspace.json")) == nil,
+			fixture.name .. " published state"
+		)
+		vim.fn.delete(parent, "rf")
+	end
+end)
+
+test("persistent lock and state mutations cross directory fsync barriers", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	local operations = {}
+	trusted_workspace._set_test_hook(function(phase, details)
+		if phase == "directory_fsync" then
+			operations[#operations + 1] = details.operation
+		end
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/barriers", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called and authorized, tostring(authorize_err or authorized))
+	local function saw(needle)
+		for _, operation in ipairs(operations) do
+			if operation:find(needle, 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+	assert(saw("state root mkdir"), "state root mkdir omitted its parent-directory fsync")
+	assert(saw("private quarantine mkdir"), "lock quarantine mkdir omitted its parent-directory fsync")
+	assert(saw("rename trusted-workspace.json.tmp."), "state publication omitted its directory fsync")
+	assert(saw("unlink record.quarantine."), "lock claim unlink omitted its directory fsync")
+	assert(saw("remove directory"), "quarantine removal omitted its directory fsync")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("persistent mutations reread under lock and preserve unrelated writers", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	local module_path = plugin_root .. "/lua/trusted_workspace/init.lua"
+	local function instance()
+		return assert(loadfile(module_path))()
+	end
+	local seed = instance()
+	assert(seed.setup({ state_root = root, reset = true }))
+	assert(seed.authorize("/repo", "debug"))
+	local left = instance()
+	local right = instance()
+	assert(left.setup({ state_root = root, reset = true }))
+	assert(right.setup({ state_root = root, reset = true }))
+	assert(left.revoke("/repo", "debug"))
+	assert(right.authorize("/repo", "test"))
+	local reader = instance()
+	assert(reader.setup({ state_root = root, reset = true }))
+	local grants = reader.status("/repo").repo_grants
+	assert(grants.debug == nil, "stale writer resurrected a revoked grant")
+	equal(true, grants.test, "stale writer discarded an unrelated grant")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("persistent CAS preserves an external writer at the publication boundary", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/repo", "debug"))
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local external = vim.json.decode(table.concat(vim.fn.readfile(path, "b"), "\n"))
+	external.grants["/external"] = { build = true }
+	local external_bytes = vim.json.encode(external)
+	local injected = false
+	trusted_workspace._set_test_hook(function(phase, details)
+		if not injected and phase == "state_target_checked" and details.path == path then
+			injected = true
+			assert(vim.fn.writefile({ external_bytes }, path, "b") == 0)
+		end
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(injected and not authorized and tostring(authorize_err):find("changed concurrently", 1, true))
+	equal(external_bytes, table.concat(vim.fn.readfile(path, "b"), "\n"), "external state was clobbered")
+	assert(trusted_workspace.status("/repo").repo_grants.test == nil, "failed CAS advanced in-memory grants")
+	assert(trusted_workspace.status("/external").repo_grants.build == nil, "failed CAS imported external state")
+
+	setup(root)
+	equal(true, trusted_workspace.status("/external").repo_grants.build, "preserved external state did not reload")
+	assert(trusted_workspace.status("/repo").repo_grants.test == nil, "rejected mutation reached durable state")
+	for name in vim.fs.dir(root) do
+		assert(not name:find("trusted%-workspace%.json%.cas%."), "CAS quarantine leaked after recovery")
+	end
+	vim.fn.delete(parent, "rf")
+end)
+
+test("persistent CAS restores a symlink introduced at the exchange boundary", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/repo", "debug"))
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local displaced = vim.fs.joinpath(parent, "trusted-workspace.before-symlink.json")
+	local outside = vim.fs.joinpath(parent, "outside.json")
+	assert(vim.fn.writefile({ "outside unchanged" }, outside, "b") == 0)
+	local injected = false
+	trusted_workspace._set_test_hook(function(phase, details)
+		if injected or phase ~= "state_target_checked" or details.path ~= path then
+			return
+		end
+		injected = true
+		assert(vim.uv.fs_rename(path, displaced))
+		assert(vim.uv.fs_symlink(outside, path))
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(injected and not authorized and tostring(authorize_err):find("changed concurrently", 1, true))
+	assert(assert(vim.uv.fs_lstat(path)).type == "link", "boundary symlink was not restored")
+	equal(outside, vim.uv.fs_readlink(path), "boundary symlink destination changed")
+	equal({ "outside unchanged" }, vim.fn.readfile(outside, "b"), "boundary symlink was followed")
+	assert(trusted_workspace.status("/repo").repo_grants.test == nil, "failed CAS advanced in-memory grants")
+	assert(vim.fn.filereadable(displaced) == 1, "race fixture lost the displaced prior state")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("successful state exchange publishes the exact staging snapshot and cleans the incumbent", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local original_bytes = table.concat(vim.fn.readfile(path, "b"), "\n")
+	local original_identity = assert(vim.uv.fs_lstat(path))
+	local exchange
+	trusted_workspace._set_test_hook(function(phase, details)
+		if phase ~= "state_exchanged" then
+			return
+		end
+		assert(exchange == nil, "state was exchanged more than once")
+		exchange = {
+			path = details.path,
+			recovery_path = details.recovery_path,
+			published_bytes = table.concat(vim.fn.readfile(details.path, "b"), "\n"),
+			published_identity = assert(vim.uv.fs_lstat(details.path)),
+			incumbent_bytes = table.concat(vim.fn.readfile(details.recovery_path, "b"), "\n"),
+			incumbent_identity = assert(vim.uv.fs_lstat(details.recovery_path)),
+		}
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(authorized, authorize_err)
+	assert(exchange, "existing state did not use the exchange publication path")
+	equal(path, exchange.path, "exchange published under the wrong state path")
+	equal(original_bytes, exchange.incumbent_bytes, "exchange did not preserve the exact incumbent bytes")
+	assert(
+		exchange.incumbent_identity.dev == original_identity.dev
+			and exchange.incumbent_identity.ino == original_identity.ino,
+		"exchange did not preserve the incumbent identity"
+	)
+	local final_identity = assert(vim.uv.fs_lstat(path))
+	assert(
+		final_identity.dev == exchange.published_identity.dev and final_identity.ino == exchange.published_identity.ino,
+		"cleanup replaced the published staging inode"
+	)
+	equal(
+		exchange.published_bytes,
+		table.concat(vim.fn.readfile(path, "b"), "\n"),
+		"cleanup changed the exact published staging bytes"
+	)
+	assert(vim.uv.fs_lstat(exchange.recovery_path) == nil, "successful exchange retained its displaced incumbent")
+	for name in vim.fs.dir(root) do
+		assert(not name:find("trusted%-workspace%.json%.tmp%."), "successful exchange leaked state staging")
+	end
+	vim.fn.delete(parent, "rf")
+end)
+
+test("state exchange fsync failure keeps committed success, warning, and recovery", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local injected = false
+	trusted_workspace._set_test_hook(function(phase, details)
+		if
+			phase == "directory_fsync"
+			and details.operation:find("exchange trusted-workspace.json.tmp.", 1, true)
+			and not injected
+		then
+			injected = true
+			error("simulated state exchange fsync failure")
+		end
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/committed-fsync", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(
+		called and injected and authorized,
+		"post-commit fsync failure became a false failure: " .. tostring(authorize_err)
+	)
+	local status = trusted_workspace.status("/committed-fsync")
+	assert(status.repo_grants.test, "committed state exchange did not advance memory")
+	assert(
+		tostring(status.state_error):find("directory fsync hook failed", 1, true),
+		"post-commit state fsync warning was not exposed"
+	)
+	local recovery
+	for name in vim.fs.dir(root) do
+		if name:find("trusted%-workspace%.json%.tmp%.") == 1 then
+			recovery = vim.fs.joinpath(root, name)
+			break
+		end
+	end
+	assert(recovery and vim.uv.fs_lstat(recovery), "uncertain state exchange discarded its recovery incumbent")
+	local persisted =
+		vim.json.decode(table.concat(vim.fn.readfile(vim.fs.joinpath(root, "trusted-workspace.json"), "b"), "\n"))
+	assert(persisted.grants["/committed-fsync"].test, "committed state bytes were not visible")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("state CAS rejects changed staging bytes and restores the exact incumbent", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local incumbent_bytes = table.concat(vim.fn.readfile(path, "b"), "\n")
+	local incumbent_identity = assert(vim.uv.fs_lstat(path))
+	local injected_bytes = vim.json.encode({
+		version = 1,
+		approvals = {},
+		grants = { ["/injected"] = { build = true } },
+	})
+	local staging_path
+	trusted_workspace._set_test_hook(function(phase)
+		if staging_path or phase ~= "state_target_checked" then
+			return
+		end
+		for name in vim.fs.dir(root) do
+			if name:find("trusted%-workspace%.json%.tmp%.") == 1 then
+				staging_path = vim.fs.joinpath(root, name)
+				assert(vim.fn.writefile({ injected_bytes }, staging_path, "b") == 0)
+				break
+			end
+		end
+		assert(staging_path, "state staging file was not found")
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(
+		not authorized and tostring(authorize_err):find("staging changed before exchange", 1, true),
+		"changed state staging was published"
+	)
+	local current = assert(vim.uv.fs_lstat(path))
+	assert(
+		current.dev == incumbent_identity.dev and current.ino == incumbent_identity.ino,
+		"incumbent identity changed after rejected staging"
+	)
+	equal(incumbent_bytes, table.concat(vim.fn.readfile(path, "b"), "\n"), "incumbent bytes were not restored")
+	equal(injected_bytes, table.concat(vim.fn.readfile(staging_path, "b"), "\n"), "changed staging was clobbered")
+	assert(trusted_workspace.status("/repo").repo_grants.test == nil, "rejected staging advanced memory")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("lock claim publication rejects changed staging content without deleting it", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	local staging_path
+	local final_path
+	local changed_bytes
+	local staging_identity
+	trusted_workspace._set_test_hook(function(phase, details)
+		if staging_path or phase ~= "lock_claim_staged" then
+			return
+		end
+		staging_path = details.staging_path
+		final_path = details.path
+		local intended = table.concat(vim.fn.readfile(staging_path, "b"), "\n")
+		changed_bytes = intended:gsub('"choosing"', '"CHOOSING"', 1)
+		assert(changed_bytes ~= intended and #changed_bytes == #intended, "claim mutation was not same-sized")
+		staging_identity = assert(vim.uv.fs_lstat(staging_path))
+		assert(vim.fn.writefile({ changed_bytes }, staging_path, "b") == 0)
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(staging_path, "lock claim staging hook did not run")
+	assert(
+		not authorized and tostring(authorize_err):find("staged lock claim content changed", 1, true),
+		"changed claim staging was published"
+	)
+	assert(vim.uv.fs_lstat(final_path) == nil, "changed staging became a visible lock claim")
+	local current = assert(vim.uv.fs_lstat(staging_path))
+	assert(
+		current.dev == staging_identity.dev and current.ino == staging_identity.ino,
+		"changed claim staging identity was replaced"
+	)
+	equal(changed_bytes, table.concat(vim.fn.readfile(staging_path, "b"), "\n"), "changed claim staging was deleted")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("lock release preserves a replacement instead of adopting its inode", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local displaced = vim.fs.joinpath(parent, "original-ticket")
+	local replacement_path
+	local replacement_bytes
+	local replacement_identity
+	local original_bytes
+	local original_identity
+	trusted_workspace._set_test_hook(function(phase)
+		if replacement_path or phase ~= "state_target_checked" then
+			return
+		end
+		for name in vim.fs.dir(root) do
+			if name:find("trusted%-workspace%.lock%.ticket%.") == 1 then
+				local claim = vim.fs.joinpath(root, name)
+				original_bytes = table.concat(vim.fn.readfile(claim, "b"), "\n")
+				original_identity = assert(vim.uv.fs_lstat(claim))
+				assert(vim.uv.fs_rename(claim, displaced))
+				replacement_bytes = original_bytes
+				assert(vim.fn.writefile({ replacement_bytes }, claim, "b") == 0)
+				assert(vim.uv.fs_chmod(claim, 384))
+				replacement_path = claim
+				replacement_identity = assert(vim.uv.fs_lstat(claim))
+				break
+			end
+		end
+		assert(replacement_path, "owned ticket was not found before state publication")
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(authorized, "committed update was reported as failed: " .. tostring(authorize_err))
+	assert(
+		tostring(trusted_workspace.status().state_error):find("changed before conditional removal", 1, true),
+		"release conflict was not exposed as a status warning"
+	)
+	local current = assert(vim.uv.fs_lstat(replacement_path))
+	assert(
+		current.dev == replacement_identity.dev and current.ino == replacement_identity.ino,
+		"replacement ticket inode changed during release"
+	)
+	equal(
+		replacement_bytes,
+		table.concat(vim.fn.readfile(replacement_path, "b"), "\n"),
+		"replacement ticket bytes changed during release"
+	)
+	local displaced_identity = assert(vim.uv.fs_lstat(displaced))
+	assert(
+		displaced_identity.dev == original_identity.dev and displaced_identity.ino == original_identity.ino,
+		"release lost the originally acquired ticket identity"
+	)
+	equal(original_bytes, table.concat(vim.fn.readfile(displaced, "b"), "\n"), "original ticket bytes changed")
+	for name in vim.fs.dir(root) do
+		assert(not name:find("%.remove%."), "release conflict leaked a lock quarantine")
+	end
+	local reader = assert(loadfile(plugin_root .. "/lua/trusted_workspace/init.lua"))()
+	assert(reader.setup({ state_root = root, reset = true }))
+	equal(true, reader.status("/repo").repo_grants.test, "committed state was lost after release conflict")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("lock quarantine cleanup preserves unknown entries and reports the retained directory", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local retained_path
+	local foreign_bytes = "cleanup-rival"
+	trusted_workspace._set_test_hook(function(phase, details)
+		if retained_path or phase ~= "directory_reserved_before_remove" then
+			return
+		end
+		if details.label ~= "lock claim quarantine" or not details.path:find("%.ticket%.") then
+			return
+		end
+		retained_path = details.path
+		assert(vim.fn.writefile({ foreign_bytes }, vim.fs.joinpath(details.reserved_path, "foreign"), "b") == 0)
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(retained_path, "ticket quarantine cleanup hook did not run")
+	assert(authorized, "committed update was reported as failed: " .. tostring(authorize_err))
+	assert(
+		tostring(trusted_workspace.status().state_error):find("directory changed before removal", 1, true),
+		"unsafe quarantine cleanup was not exposed as a status warning"
+	)
+	local foreign_path = vim.fs.joinpath(retained_path, "foreign")
+	equal(foreign_bytes, table.concat(vim.fn.readfile(foreign_path, "b"), "\n"), "cleanup deleted the unknown entry")
+	assert(trusted_workspace.status("/repo").repo_grants.test, "successful state write was lost on cleanup failure")
+	local reader = assert(loadfile(plugin_root .. "/lua/trusted_workspace/init.lua"))()
+	assert(reader.setup({ state_root = root, reset = true }))
+	equal(true, reader.status("/repo").repo_grants.test, "cleanup failure lost the durable state mutation")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("state cleanup preserves a replacement introduced after final validation", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local retained_old = vim.fs.joinpath(parent, "retained-state-incumbent")
+	local foreign_bytes = "post-validation-state-rival"
+	local replaced = false
+	trusted_workspace._set_test_hook(function(phase, details)
+		if phase ~= "entry_validated_before_quarantine" or details.label ~= "state CAS incumbent" or replaced then
+			return
+		end
+		replaced = true
+		assert(vim.uv.fs_rename(details.reserved_path, retained_old))
+		assert(vim.fn.writefile({ foreign_bytes }, details.reserved_path, "b") == 0)
+		assert(vim.uv.fs_chmod(details.reserved_path, 384))
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/post-validation", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(
+		called and replaced and authorized,
+		"cleanup conflict became a false write failure: " .. tostring(authorize_err)
+	)
+	assert(trusted_workspace.status("/post-validation").repo_grants.test, "committed grant was lost")
+	assert(vim.uv.fs_lstat(retained_old), "cleanup lost the displaced exact incumbent")
+	local preserved_foreign = false
+	for name in vim.fs.dir(root) do
+		local candidate = vim.fs.joinpath(root, name)
+		local info = vim.uv.fs_lstat(candidate)
+		if
+			name:find("trusted%-workspace%.json%.tmp%.") == 1
+			and info
+			and info.type == "file"
+			and table.concat(vim.fn.readfile(candidate, "b"), "\n") == foreign_bytes
+		then
+			preserved_foreign = true
+		end
+	end
+	assert(preserved_foreign, "cleanup deleted the post-validation state replacement")
+	assert(
+		tostring(trusted_workspace.status().state_error):find("changed after final validation", 1, true),
+		"post-validation cleanup conflict was not exposed"
+	)
+	vim.fn.delete(parent, "rf")
+end)
+
+test("directory cleanup preserves an empty replacement introduced after final validation", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	local retained_original = vim.fs.joinpath(parent, "retained-lock-quarantine")
+	local replacement_path
+	trusted_workspace._set_test_hook(function(phase, details)
+		if
+			phase ~= "directory_validated_before_quarantine"
+			or details.label ~= "lock claim quarantine"
+			or not details.path:find(".ticket.", 1, true)
+			or replacement_path
+		then
+			return
+		end
+		replacement_path = details.path
+		assert(vim.uv.fs_rename(details.reserved_path, retained_original))
+		assert(vim.fn.mkdir(details.reserved_path, "p", 448) == 1)
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/directory-rival", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(
+		called and replacement_path and authorized,
+		"directory replacement caused false failure: " .. tostring(authorize_err)
+	)
+	assert(assert(vim.uv.fs_lstat(replacement_path)).type == "directory", "replacement directory was deleted")
+	assert(assert(vim.uv.fs_lstat(retained_original)).type == "directory", "original quarantine was lost")
+	assert(
+		tostring(trusted_workspace.status().state_error):find("changed after final validation", 1, true),
+		"directory cleanup conflict was not exposed"
+	)
+	vim.fn.delete(parent, "rf")
+end)
+
+test("initial state no-replace publication preserves a boundary rival", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local rival_bytes = vim.json.encode({
+		version = 1,
+		approvals = {},
+		grants = { ["/rival"] = { debug = true } },
+	})
+	local rival_identity
+	trusted_workspace._set_test_hook(function(phase, details)
+		if rival_identity or phase ~= "state_target_checked" or details.target_present then
+			return
+		end
+		assert(vim.fn.writefile({ rival_bytes }, path, "b") == 0)
+		assert(vim.uv.fs_chmod(path, 384))
+		rival_identity = assert(vim.uv.fs_lstat(path))
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(not authorized and tostring(authorize_err):find("changed concurrently", 1, true))
+	local current = assert(vim.uv.fs_lstat(path))
+	assert(current.dev == rival_identity.dev and current.ino == rival_identity.ino, "initial rival inode was replaced")
+	equal(rival_bytes, table.concat(vim.fn.readfile(path, "b"), "\n"), "initial rival bytes were clobbered")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("a crash after state exchange never exposes missing durable state", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local incumbent_bytes = table.concat(vim.fn.readfile(path, "b"), "\n")
+	local ready = vim.fs.joinpath(parent, "state-exchange.ready")
+	local child = vim.system({ vim.v.progpath, "--headless", "-u", "NONE", "-i", "NONE", "-l", source }, {
+		env = {
+			TRUSTED_WORKSPACE_STATE_CRASH_CHILD = "1",
+			TRUSTED_WORKSPACE_STATE_CRASH_ROOT = root,
+			TRUSTED_WORKSPACE_STATE_CRASH_READY = ready,
+		},
+		text = true,
+	})
+	local ready_ok = vim.wait(5000, function()
+		return vim.uv.fs_lstat(ready) ~= nil
+	end, 5)
+	if not ready_ok then
+		child:kill(9)
+		local failed = child:wait(5000)
+		error("state exchange crash child did not reach exchange barrier: " .. tostring(failed.stderr))
+	end
+	local visible = assert(vim.uv.fs_lstat(path))
+	assert(visible.type == "file", "state path was absent during the exchange crash window")
+	local published = vim.json.decode(table.concat(vim.fn.readfile(path, "b"), "\n"))
+	equal(true, published.grants["/crash-exchange"].test, "NEW state was not visible after atomic exchange")
+	child:kill(9)
+	local killed = child:wait(5000)
+	assert(killed.signal == 9, "state exchange crash child was not killed")
+	local recovery
+	for name in vim.fs.dir(root) do
+		if name:find("trusted%-workspace%.json%.tmp%.") == 1 then
+			recovery = vim.fs.joinpath(root, name)
+			break
+		end
+	end
+	assert(recovery, "atomic exchange did not retain the displaced incumbent")
+	equal(incumbent_bytes, table.concat(vim.fn.readfile(recovery, "b"), "\n"), "recovery incumbent changed")
+	assert(trusted_workspace.setup({ state_root = root, reset = true }))
+	equal(
+		true,
+		trusted_workspace.status("/crash-exchange").repo_grants.test,
+		"valid NEW state did not reload after crash"
+	)
+	vim.fn.delete(parent, "rf")
+end)
+
+test("state locks reject live owners and reclaim only confirmed-dead owners", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(vim.fn.mkdir(root, "p", 448) == 1)
+	local live_token = vim.fn.sha256("live")
+	local lock = lock_claim(root, "ticket", vim.uv.os_getpid(), live_token, 1)
+	local authorized, live_err = trusted_workspace.authorize("/repo", "test")
+	assert(not authorized and live_err:find("locked by process", 1, true), "live owner lock was reclaimed")
+	assert(vim.uv.fs_lstat(lock), "live owner lock was removed")
+	assert(vim.uv.fs_unlink(lock))
+
+	local child = vim.system({ "sh", "-c", "exit 0" })
+	local dead_pid = child.pid
+	assert(child:wait().code == 0 and type(dead_pid) == "number")
+	assert(
+		vim.wait(1000, function()
+			local called, result, _, code = pcall(vim.uv.kill, dead_pid, 0)
+			return called and result == nil and code == "ESRCH"
+		end, 10),
+		"child process did not become observably dead"
+	)
+	local dead_token = vim.fn.sha256("dead")
+	lock = lock_claim(root, "ticket", dead_pid, dead_token, 1)
+	local reclaimed, dead_err = trusted_workspace.authorize("/repo", "test")
+	assert(reclaimed, "dead owner lock was not reclaimed: " .. tostring(dead_err))
+	assert(vim.uv.fs_lstat(lock) == nil, "reclaimed lock was not released")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("lock enumeration remains bound to the pinned root across an ABA swap", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local token = vim.fn.sha256("aba-live-lock")
+	local live_claim = lock_claim(root, "ticket", vim.uv.os_getpid(), token, 1)
+	local displaced = vim.fs.joinpath(parent, "state-original")
+	local outside = vim.fs.joinpath(parent, "outside")
+	assert(vim.fn.mkdir(outside, "p", 448) == 1)
+	local swapped = false
+	local restored = false
+	trusted_workspace._set_test_hook(function(phase)
+		if phase == "lock_claim_list_before" and not swapped then
+			swapped = true
+			assert(vim.uv.fs_rename(root, displaced))
+			assert(vim.uv.fs_symlink(outside, root))
+		elseif phase == "lock_claim_list_after" and swapped and not restored then
+			restored = true
+			assert(vim.uv.fs_unlink(root))
+			assert(vim.uv.fs_rename(displaced, root))
+		end
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(swapped and restored, "ABA listing hook did not complete the swap and restoration")
+	assert(not authorized and tostring(authorize_err):find("locked by process", 1, true), "live claim was omitted")
+	assert(vim.uv.fs_lstat(live_claim), "live claim was removed after descriptor enumeration")
+	assert(#vim.fn.readdir(outside) == 0, "ABA listing wrote through the transient pathname")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("dead-claim reclamation preserves a live replacement before conditional removal", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local child = vim.system({ "sh", "-c", "exit 0" })
+	local dead_pid = child.pid
+	assert(child:wait().code == 0 and type(dead_pid) == "number")
+	assert(
+		vim.wait(1000, function()
+			local called, result, _, code = pcall(vim.uv.kill, dead_pid, 0)
+			return called and result == nil and code == "ESRCH"
+		end, 10),
+		"child process did not become observably dead"
+	)
+	local token = vim.fn.sha256("replaced-dead-lock")
+	local claim = lock_claim(root, "ticket", dead_pid, token, 1)
+	local displaced = vim.fs.joinpath(parent, "dead-claim-original")
+	local rival = {
+		version = 1,
+		kind = "ticket",
+		pid = vim.uv.os_getpid(),
+		token = token,
+		number = 1,
+	}
+	local replaced = false
+	local rival_identity
+	trusted_workspace._set_test_hook(function(phase, details)
+		if replaced or phase ~= "lock_claim_before_remove" or details.path ~= claim then
+			return
+		end
+		replaced = true
+		assert(vim.uv.fs_rename(claim, displaced))
+		assert(vim.fn.writefile({ vim.json.encode(rival) }, claim) == 0)
+		assert(vim.uv.fs_chmod(claim, 384))
+		rival_identity = assert(vim.uv.fs_lstat(claim))
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(replaced, "conditional-removal replacement hook did not run")
+	assert(
+		not authorized and tostring(authorize_err):find("changed before conditional removal", 1, true),
+		"replacement claim was reclaimed"
+	)
+	local current = assert(vim.uv.fs_lstat(claim))
+	assert(
+		current.dev == rival_identity.dev and current.ino == rival_identity.ino,
+		"replacement claim identity changed"
+	)
+	equal(rival, vim.json.decode(table.concat(vim.fn.readfile(claim, "b"), "\n")), "replacement claim bytes changed")
+	assert(vim.uv.fs_lstat(displaced), "original dead claim was lost")
+	for name in vim.fs.dir(root) do
+		assert(not name:find("%.remove%."), "conditional removal leaked a quarantine after restoration")
+	end
+	vim.fn.delete(parent, "rf")
+end)
+
+test("a committed state update remains successful when lock release fails", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	trusted_workspace._set_test_hook(function(phase, details)
+		if phase == "lock_claim_before_remove" and details.name:find(".ticket.", 1, true) then
+			error("simulated lock release failure")
+		end
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/committed", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(authorized, "committed grant was reported as failed: " .. tostring(authorize_err))
+	local status = assert(trusted_workspace.status("/committed"))
+	assert(status.repo_grants.test == true, "committed grant was not reflected in memory")
+	assert(
+		tostring(status.state_error):find("could not release state lock", 1, true),
+		"lock release warning was not exposed through status"
+	)
+	local persisted =
+		vim.json.decode(table.concat(vim.fn.readfile(vim.fs.joinpath(root, "trusted-workspace.json"), "b"), "\n"))
+	assert(persisted.grants["/committed"].test == true, "committed grant was not durable")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("lock release fsync warnings survive later successful cleanup and mutations", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	local releasing_ticket = false
+	local injected = false
+	trusted_workspace._set_test_hook(function(phase, details)
+		if phase == "lock_claim_before_remove" and details.name:find(".ticket.", 1, true) then
+			releasing_ticket = true
+		elseif
+			phase == "directory_fsync"
+			and releasing_ticket
+			and details.operation:find("unlink record.quarantine.", 1, true)
+			and not injected
+		then
+			injected = true
+			error("simulated lock release directory fsync failure")
+		end
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/release-warning", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(
+		called and injected and authorized,
+		"release fsync warning became a false failure: " .. tostring(authorize_err)
+	)
+	local first_warning = tostring(trusted_workspace.status().state_error)
+	assert(
+		first_warning:find("lock release directory fsync failure", 1, true),
+		"release fsync warning was not retained"
+	)
+	assert(trusted_workspace.authorize("/later-success", "build"), "later clean mutation failed")
+	local later_warning = tostring(trusted_workspace.status().state_error)
+	assert(
+		later_warning:find("lock release directory fsync failure", 1, true),
+		"later successful cleanup erased the earlier release warning"
+	)
+	assert(trusted_workspace.status("/later-success").repo_grants.build, "later successful mutation was not applied")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("post-commit quarantine close failures remain successful state warnings", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	local release_started = false
+	local injected = false
+	local authorized, authorize_err = with_uv_override("fs_close", function(original, fd, ...)
+		local info = vim.uv.fs_fstat(fd)
+		local closed, close_err = original(fd, ...)
+		if release_started and not injected and info and info.type == "directory" then
+			injected = true
+			return nil, "simulated post-commit quarantine close failure"
+		end
+		return closed, close_err
+	end, function()
+		trusted_workspace._set_test_hook(function(phase, details)
+			if phase == "lock_claim_before_remove" and details.name:find(".ticket.", 1, true) then
+				release_started = true
+			end
+		end)
+		local result, result_err = trusted_workspace.authorize("/close-warning", "test")
+		trusted_workspace._set_test_hook(nil)
+		return result, result_err
+	end)
+	assert(injected and authorized, "post-commit close warning became a false failure: " .. tostring(authorize_err))
+	assert(trusted_workspace.status("/close-warning").repo_grants.test, "committed close-warning grant was lost")
+	assert(
+		tostring(trusted_workspace.status().state_error):find("post-commit quarantine close failure", 1, true),
+		"post-commit close warning was not exposed"
+	)
+	vim.fn.delete(parent, "rf")
+end)
+
+test("hard-linked state and lock claims fail closed", function()
+	local state_parent = temp_dir()
+	local root = state_root(state_parent)
+	assert(vim.fn.mkdir(root, "p", 448) == 1)
+	local outside_state = vim.fs.joinpath(state_parent, "outside-state.json")
+	assert(vim.fn.writefile({ vim.json.encode({ version = 1, approvals = {}, grants = {} }) }, outside_state) == 0)
+	assert(vim.uv.fs_link(outside_state, vim.fs.joinpath(root, "trusted-workspace.json")))
+	local ok, err = trusted_workspace.setup({ state_root = root, reset = true })
+	assert(not ok and err:find("hard links are rejected", 1, true), "hard-linked state was accepted")
+	local authorized = trusted_workspace.authorize("/repo", "test")
+	assert(not authorized, "hard-linked state accepted a mutation")
+
+	local lock_parent = temp_dir()
+	root = state_root(lock_parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/repo", "debug"))
+	local token = vim.fn.sha256("hard-linked-lock")
+	local claim = lock_claim(root, "ticket", vim.uv.os_getpid(), token, 1)
+	local alias = vim.fs.joinpath(lock_parent, "lock-claim-alias")
+	assert(vim.uv.fs_link(claim, alias))
+	authorized, err = trusted_workspace.authorize("/repo", "test")
+	assert(not authorized and tostring(err):find("hard links are rejected", 1, true), "hard-linked lock was accepted")
+	assert(vim.uv.fs_lstat(claim), "unsafe lock claim was removed")
+	vim.fn.delete(state_parent, "rf")
+	vim.fn.delete(lock_parent, "rf")
+end)
+
+test("state root substitution is rejected after setup", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/repo", "debug"))
+	local displaced = vim.fs.joinpath(parent, "state-original")
+	local outside = vim.fs.joinpath(parent, "outside")
+	assert(vim.uv.fs_rename(root, displaced))
+	assert(vim.fn.mkdir(outside, "p", 448) == 1)
+	assert(vim.uv.fs_symlink(outside, root))
+	local authorized, err = trusted_workspace.authorize("/repo", "test")
+	assert(not authorized and tostring(err):find("state root", 1, true), "substituted state root was accepted")
+	assert(#vim.fn.readdir(outside) == 0, "substituted state root was modified")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("state publication stays pinned when a validated ancestor is swapped", function()
+	local container = temp_dir()
+	local parent = vim.fs.joinpath(container, "trusted-parent")
+	assert(vim.fn.mkdir(parent, "p", 448) == 1)
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/repo", "debug"))
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local original_bytes = table.concat(vim.fn.readfile(path, "b"), "\n")
+	local displaced = vim.fs.joinpath(container, "trusted-parent-original")
+	local outside = vim.fs.joinpath(container, "outside-parent")
+	local outside_root = state_root(outside)
+	assert(vim.fn.mkdir(outside_root, "p", 448) == 1)
+	local rival_path = vim.fs.joinpath(outside_root, "trusted-workspace.json")
+	local rival_bytes = vim.json.encode({
+		version = 1,
+		approvals = {},
+		grants = { ["/rival"] = { build = true } },
+	})
+	assert(vim.fn.writefile({ rival_bytes }, rival_path, "b") == 0)
+	local swapped = false
+	trusted_workspace._set_test_hook(function(phase, details)
+		if swapped or phase ~= "state_target_checked" or details.path ~= path then
+			return
+		end
+		swapped = true
+		assert(vim.uv.fs_rename(parent, displaced))
+		assert(vim.uv.fs_symlink(outside, parent))
+	end)
+	local called, authorized, authorize_err = xpcall(function()
+		return trusted_workspace.authorize("/repo", "test")
+	end, debug.traceback)
+	trusted_workspace._set_test_hook(nil)
+	assert(called, authorized)
+	assert(swapped, "ancestor-swap publication hook did not run")
+	assert(not authorized and tostring(authorize_err):find("state root changed", 1, true), "ancestor swap was accepted")
+	equal(rival_bytes, table.concat(vim.fn.readfile(rival_path, "b"), "\n"), "outside rival was clobbered")
+	equal(
+		original_bytes,
+		table.concat(vim.fn.readfile(vim.fs.joinpath(displaced, "state", "trusted-workspace.json"), "b"), "\n"),
+		"pinned incumbent changed after the ancestor swap"
+	)
+	assert(trusted_workspace.status("/repo").repo_grants.test == nil, "failed ancestor-swap CAS advanced memory")
+	vim.fn.delete(container, "rf")
+end)
+
+test("a process crash before claim publication leaves no blocking claim", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/seed", "debug"))
+	local ready = vim.fs.joinpath(parent, "claim-crash.ready")
+	local child = vim.system({ vim.v.progpath, "--headless", "-u", "NONE", "-i", "NONE", "-l", source }, {
+		env = {
+			TRUSTED_WORKSPACE_CLAIM_CRASH_CHILD = "1",
+			TRUSTED_WORKSPACE_CLAIM_CRASH_ROOT = root,
+			TRUSTED_WORKSPACE_CLAIM_CRASH_READY = ready,
+		},
+		text = true,
+	})
+	local ready_ok = vim.wait(5000, function()
+		return vim.uv.fs_lstat(ready) ~= nil
+	end, 5)
+	if not ready_ok then
+		child:kill(9)
+		local failed = child:wait(5000)
+		error("claim crash child did not reach publication barrier: " .. tostring(failed.stderr))
+	end
+	child:kill(9)
+	local killed = child:wait(5000)
+	assert(killed.signal == 9, "claim crash child was not killed")
+
+	local staged = {}
+	for name in vim.fs.dir(root) do
+		if name:find("trusted-workspace.lock.", 1, true) == 1 and name:sub(-8) == ".publish" then
+			staged[#staged + 1] = vim.fs.joinpath(root, name)
+		end
+	end
+	equal(1, #staged, "crashed publisher did not leave exactly one staging file")
+	assert(vim.uv.fs_lstat(staged[1]:sub(1, -9)) == nil, "incomplete claim became visible")
+
+	local dead_token = vim.fn.sha256("post-crash-final-claim")
+	local dead_claim = lock_claim(root, "ticket", child.pid, dead_token, 1)
+	local authorized, authorize_err = trusted_workspace.authorize("/repo", "test")
+	assert(authorized, "orphan staging file blocked lock acquisition: " .. tostring(authorize_err))
+	assert(vim.uv.fs_lstat(dead_claim) == nil, "valid final dead claim was not reclaimed")
+	assert(vim.uv.fs_lstat(staged[1]), "unrecognized staging orphan was treated as a claim")
+	assert(vim.uv.fs_unlink(staged[1]))
+	vim.fn.delete(parent, "rf")
+end)
+
+test("two processes serialize simultaneous stale-claim reclamation", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(vim.fn.mkdir(root, "p", 448) == 1)
+	local child = vim.system({ "sh", "-c", "exit 0" })
+	local dead_pid = child.pid
+	assert(child:wait().code == 0 and type(dead_pid) == "number")
+	assert(vim.wait(1000, function()
+		local called, result, _, code = pcall(vim.uv.kill, dead_pid, 0)
+		return called and result == nil and code == "ESRCH"
+	end, 10))
+	local stale = lock_claim(root, "ticket", dead_pid, vim.fn.sha256("simultaneous-stale"), 1)
+	local left_ready = vim.fs.joinpath(parent, "left.ready")
+	local right_ready = vim.fs.joinpath(parent, "right.ready")
+	local left_result = vim.fs.joinpath(parent, "left.result")
+	local right_result = vim.fs.joinpath(parent, "right.result")
+	local function spawn(capability, ready, peer, result)
+		return vim.system({ vim.v.progpath, "--headless", "-u", "NONE", "-i", "NONE", "-l", source }, {
+			env = {
+				TRUSTED_WORKSPACE_LOCK_CHILD = "1",
+				TRUSTED_WORKSPACE_LOCK_ROOT = root,
+				TRUSTED_WORKSPACE_LOCK_READY = ready,
+				TRUSTED_WORKSPACE_LOCK_PEER_READY = peer,
+				TRUSTED_WORKSPACE_LOCK_RESULT = result,
+				TRUSTED_WORKSPACE_LOCK_CAPABILITY = capability,
+			},
+			text = true,
+		})
+	end
+	local left = spawn("test", left_ready, right_ready, left_result)
+	local right = spawn("debug", right_ready, left_ready, right_result)
+	local left_done = left:wait(10000)
+	local right_done = right:wait(10000)
+	assert(left_done.code == 0, left_done.stderr)
+	assert(right_done.code == 0, right_done.stderr)
+	equal({ "ok" }, vim.fn.readfile(left_result), "left process did not acquire the serialized lock")
+	equal({ "ok" }, vim.fn.readfile(right_result), "right process did not acquire the serialized lock")
+	assert(vim.uv.fs_lstat(stale) == nil, "simultaneously reclaimed stale claim survived")
+	assert(trusted_workspace.setup({ state_root = root, reset = true }))
+	local grants = trusted_workspace.status("/race").repo_grants
+	assert(grants.test and grants.debug, "serialized writers lost a persistent mutation")
 	vim.fn.delete(parent, "rf")
 end)
 
@@ -229,8 +1402,15 @@ test("corrupt and symlink state fail closed without overwriting targets", functi
 	assert(vim.fn.writefile({ "{broken" }, corrupt_path) == 0)
 	local ok, err = trusted_workspace.setup({ state_root = corrupt_root, reset = true })
 	assert(not ok and err:find("corrupt", 1, true), "corrupt JSON did not fail closed")
+	assert(trusted_workspace.register_source({
+		id = "project",
+		layer = "project",
+		repo = "/repo",
+		fingerprint = "fingerprint",
+		value = {},
+	}))
 	local approved, approval_err = trusted_workspace.approve("/repo", "project", "fingerprint")
-	assert(not approved and approval_err:find("unavailable", 1, true), "corrupt state accepted an approval")
+	assert(not approved and approval_err:find("corrupt", 1, true), "corrupt state accepted an approval")
 	equal("{broken", vim.fn.readfile(corrupt_path)[1], "corrupt state was overwritten")
 
 	local symlink_parent = temp_dir()

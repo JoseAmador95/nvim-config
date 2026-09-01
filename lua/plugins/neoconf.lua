@@ -1,18 +1,22 @@
--- Per-project settings from .vscode/settings.json (and .neoconf.json),
--- merged into LSP server settings. Loaded as a dependency of mason-lspconfig
--- so setup() runs before any vim.lsp.enable(). config.lsp_neoconf uses the
--- public neoconf.get() API to gate startup in root_dir, merge settings before
--- initialization, and reapply them when neoconf live-reloads a project file.
+-- Neoconf remains the UI and global-settings backend. Project files are read
+-- only by config.project_settings after explicit fingerprint approval.
 return {
 	"folke/neoconf.nvim",
 	cond = function()
 		return not vim.g.vscode
 	end,
 	opts = {
+		live_reload = false,
+		local_settings = {},
 		import = {
-			vscode = true,
+			vscode = false,
 			coc = false,
 			nlsp = false,
+		},
+		plugins = {
+			lspconfig = { enabled = false },
+			jsonls = { enabled = false },
+			lua_ls = { enabled = false },
 		},
 	},
 }

@@ -64,129 +64,157 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 
 				local project = vim.fn.tempname()
-				assert(vim.fn.mkdir(project .. "/.vscode", "p") == 1, "could not create neoconf fixture")
+				assert(vim.fn.mkdir(project .. "/.vscode", "p") == 1, "could not create project settings fixture")
 				assert(vim.fn.mkdir(project .. "/.venv/bin", "p") == 1, "could not create local Python fixture")
 				project = vim.uv.fs_realpath(project) or project
 				local local_python = project .. "/.venv/bin/python"
-				assert(
-					vim.fn.writefile({ "#!/bin/sh", "exit 0" }, local_python) == 0,
-					"could not write local Python fixture"
-				)
-				assert(
-					vim.uv.fs_chmod(local_python, tonumber("700", 8)),
-					"could not make local Python fixture executable"
-				)
+				assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, local_python) == 0)
+				assert(vim.uv.fs_chmod(local_python, tonumber("700", 8)))
 				assert(vim.fn.writefile({
 					'{ "python.analysis.typeCheckingMode": "strict", "python.analysis.autoSearchPaths": false }',
-				}, project .. "/.vscode/settings.json") == 0, "could not write neoconf fixture")
+				}, project .. "/.vscode/settings.json") == 0)
+				assert(vim.fn.writefile({ '{ "lspconfig": { "ruff": false } }' }, project .. "/.neoconf.json") == 0)
+
+				local current_source
+				local approved_fingerprint
+				local authority = {
+					register_source = function(source)
+						current_source = vim.deepcopy(source)
+						return true
+					end,
+					status = function()
+						local source = vim.deepcopy(current_source)
+						source.approved = approved_fingerprint == source.fingerprint
+						return { sources = { source } }
+					end,
+					approve = function(root, source_id, fingerprint)
+						assert(root == project and source_id == "project-lsp-settings")
+						assert(current_source.fingerprint == fingerprint)
+						approved_fingerprint = fingerprint
+						return true
+					end,
+				}
+				local project_settings = require("config.project_settings")
+				project_settings.setup({
+					active = true,
+					authority = authority,
+					repo = {
+						root = function()
+							return project
+						end,
+					},
+					neoconf = neoconf,
+				})
+				assert(vim.fn.exists(":NvimConfigTrustProjectSettings") == 2, "project trust command is missing")
+				assert(vim.fn.exists(":Neoconf") == 2, "Neoconf global UI command is missing")
+				assert(vim.fn.exists("#Neoconf#BufWritePost") == 0, "Neoconf live reload remains enabled")
+				for _, item in
+					ipairs(require("neoconf.commands").get_files({
+						["local"] = true,
+						global = true,
+						file = project,
+					}))
+				do
+					assert(item.is_global, "Neoconf UI retained direct project-file authority")
+				end
 				assert(
-					require("config.python").for_root(project) == local_python,
-					"local Python fixture was not detected"
+					neoconf.get("lspconfig.ruff", {}, { file = project .. "/disabled.py" }) ~= false,
+					"Neoconf still imported unapproved project settings directly"
 				)
+
 				local startup_config = vim.deepcopy(vim.lsp.config.pyright)
 				startup_config.root_dir = project
 				local startup_client = { settings = startup_config.settings }
 				vim.lsp.config.pyright.before_init({}, startup_config)
+				assert(rawequal(startup_config.settings, startup_client.settings))
+				assert(startup_client.settings.pyright.disableOrganizeImports)
 				assert(
-					rawequal(startup_config.settings, startup_client.settings),
-					"Pyright startup replaced client.settings"
+					startup_client.settings.python.analysis.typeCheckingMode ~= "strict",
+					"unapproved VSCode settings reached Pyright"
 				)
+				assert(startup_client.settings.python.pythonPath == local_python)
+
+				local disabled_buf = vim.api.nvim_create_buf(false, false)
+				vim.api.nvim_buf_set_name(disabled_buf, project .. "/disabled.py")
+				local started_before_approval = false
+				vim.lsp.config.ruff.root_dir(disabled_buf, function()
+					started_before_approval = true
+				end)
+				assert(started_before_approval, "unapproved server setting gated startup")
+				vim.api.nvim_set_current_buf(disabled_buf)
+				vim.cmd("NvimConfigTrustProjectSettings")
+				assert(approved_fingerprint, "trust command did not persist the exact fingerprint")
+				local approved_vscode, approved_err = project_settings.get("vscode", {}, project)
 				assert(
-					startup_client.settings.pyright.disableOrganizeImports,
-					"base Pyright settings were not visible to the client"
+					approved_vscode.python.analysis.typeCheckingMode == "strict",
+					"approved adapter value is missing: "
+						.. vim.inspect({ approved_vscode, approved_err, current_source })
 				)
-				assert(
-					startup_client.settings.python.analysis.typeCheckingMode == "strict"
-						and startup_client.settings.python.analysis.autoSearchPaths == false,
-					"real .vscode/settings.json was not visible to the client"
-				)
-				assert(
-					startup_client.settings.python.pythonPath == local_python,
-					"local Python was not visible to the client"
-				)
+
+				startup_config = vim.deepcopy(vim.lsp.config.pyright)
+				startup_config.root_dir = project
+				startup_client = { settings = startup_config.settings }
+				vim.lsp.config.pyright.before_init({}, startup_config)
+				assert(rawequal(startup_config.settings, startup_client.settings))
+				assert(startup_client.settings.python.analysis.typeCheckingMode == "strict")
+				assert(startup_client.settings.python.analysis.autoSearchPaths == false)
+				local disabled_started = false
+				vim.lsp.config.ruff.root_dir(disabled_buf, function()
+					disabled_started = true
+				end)
+				assert(not disabled_started, "approved lspconfig.ruff=false did not gate startup")
+
 				local real_config = {
 					name = "pyright",
 					root_dir = project,
 					settings = { python = { analysis = { diagnosticMode = "openFilesOnly" } } },
 				}
 				local upstream_saw_settings = false
-				require("config.lsp_neoconf").wrap_before_init("pyright", function(_, config)
-					upstream_saw_settings = config.settings.python.analysis.typeCheckingMode == "strict"
-				end)({}, real_config)
-				assert(upstream_saw_settings, "upstream before_init ran before real VSCode settings")
-				assert(
-					real_config.settings.python.analysis.autoSearchPaths == false,
-					"real .vscode/settings.json was not merged"
+				local wrapped_before_init = require("config.lsp_neoconf").wrap_before_init(
+					"pyright",
+					function(_, config)
+						upstream_saw_settings = config.settings.python.analysis.typeCheckingMode == "strict"
+					end
 				)
-				assert(
-					real_config.settings.python.analysis.diagnosticMode == "openFilesOnly",
-					"base server settings were lost during real neoconf merge"
-				)
+				wrapped_before_init({}, real_config)
+				assert(upstream_saw_settings, "approved settings were not merged before upstream before_init")
+				assert(real_config.settings.python.analysis.diagnosticMode == "openFilesOnly")
 
-				real_config.on_new_config = require("config.lsp_neoconf").wrap_on_new_config("pyright")
 				assert(vim.fn.writefile({
-					'{ "python.analysis.typeCheckingMode": "basic", "python.analysis.autoSearchPaths": true, "python.venvPath": "/explicit/venvs", "python.venv": "chosen" }',
-				}, project .. "/.vscode/settings.json") == 0, "could not update neoconf fixture")
-				local original_get_clients = vim.lsp.get_clients
-				local notification
-				vim.lsp.get_clients = function()
-					return {
-						{
-							name = "pyright",
-							config = real_config,
-							notify = function(method, payload)
-								notification = { method = method, payload = payload }
-								return true
-							end,
-						},
-					}
-				end
-				local reload_ok, reload_err = xpcall(function()
-					vim.api.nvim_exec_autocmds("BufWritePost", {
-						group = "Neoconf",
-						pattern = project .. "/.vscode/settings.json",
-						modeline = false,
-					})
-				end, debug.traceback)
-				vim.lsp.get_clients = original_get_clients
-				assert(reload_ok, reload_err)
+					'{ "python.analysis.typeCheckingMode": "basic", "python.analysis.autoSearchPaths": true }',
+				}, project .. "/.vscode/settings.json") == 0)
+				local changed = { root_dir = project, settings = {} }
+				vim.lsp.config.pyright.before_init({}, changed)
+				local changed_analysis = changed.settings.python and changed.settings.python.analysis or {}
 				assert(
-					real_config.settings.python.analysis.typeCheckingMode == "basic",
-					"neoconf live reload did not reapply changed VSCode settings"
+					changed_analysis.typeCheckingMode ~= "basic",
+					"changed unapproved project settings remained active"
 				)
+				upstream_saw_settings = true
+				local stable_settings = real_config.settings
+				wrapped_before_init({}, real_config)
+				assert(
+					rawequal(stable_settings, real_config.settings),
+					"LSP settings table identity changed on revocation"
+				)
+				assert(not upstream_saw_settings, "revoked settings remained visible to the upstream hook")
+				assert(real_config.settings.python.analysis.typeCheckingMode == nil, "revoked settings remained sticky")
 				assert(
 					real_config.settings.python.analysis.diagnosticMode == "openFilesOnly",
-					"neoconf live reload lost original server settings"
+					"base settings were lost"
 				)
-				local pyright_config = { root_dir = project, settings = {} }
-				vim.lsp.config.pyright.on_new_config(pyright_config, project)
-				assert(pyright_config.settings.python.venvPath == "/explicit/venvs")
-				assert(pyright_config.settings.python.venv == "chosen")
-				assert(
-					pyright_config.settings.python.pythonPath == nil,
-					"automatic Python resolution overrode explicit VSCode venv settings"
-				)
-				assert(
-					notification and notification.method == "workspace/didChangeConfiguration",
-					"neoconf live reload did not notify the active client"
-				)
-
-				assert(
-					vim.fn.writefile({ '{ "lspconfig": { "pyright": false } }' }, project .. "/.neoconf.json") == 0,
-					"could not write the disabled-server fixture"
-				)
-				local disabled_buf = vim.api.nvim_create_buf(false, false)
-				vim.api.nvim_buf_set_name(disabled_buf, project .. "/disabled.py")
-				assert(
-					neoconf.get("lspconfig.pyright", {}, { file = project .. "/disabled.py" }) == false,
-					"neoconf did not expose the disabled-server setting"
-				)
-				local disabled_started = false
-				vim.lsp.config.pyright.root_dir(disabled_buf, function()
+				disabled_started = false
+				vim.lsp.config.ruff.root_dir(disabled_buf, function()
 					disabled_started = true
 				end)
-				assert(not disabled_started, "lspconfig.pyright=false did not prevent native LSP startup")
+				assert(disabled_started, "combined-fingerprint mutation did not revoke the startup gate")
 				vim.api.nvim_buf_delete(disabled_buf, { force = true })
+				project_settings.setup({
+					authority = require("trusted_workspace"),
+					repo = require("config.repo"),
+					neoconf = neoconf,
+					notify = vim.notify,
+				})
 				vim.fn.delete(project, "rf")
 
 				local navigation = require("config.lsp_navigation")
