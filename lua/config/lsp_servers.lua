@@ -1,6 +1,7 @@
 local M = {}
 
 local review_lsp = require("config.native_review").lsp
+local deferred = require("config.lsp_deferred")
 
 local function register(name, config)
 	vim.lsp.config(name, config)
@@ -28,14 +29,14 @@ function M.setup(context)
 
 	register("clangd", {
 		capabilities = client_capabilities,
-		cmd = require("config.clangd").command(),
-		on_new_config = require("config.clangd").on_new_config,
+		cmd = deferred.clangd_command(),
+		on_new_config = deferred.clangd_on_new_config,
 	})
 	register("pyright", {
 		capabilities = client_capabilities,
 		settings = { pyright = { disableOrganizeImports = true } },
-		before_init = require("config.python").before_init,
-		on_new_config = require("config.python").on_new_config,
+		before_init = deferred.pyright_before_init,
+		on_new_config = deferred.pyright_on_new_config,
 	})
 	register("ruff", { capabilities = client_capabilities })
 	register("cmake", {

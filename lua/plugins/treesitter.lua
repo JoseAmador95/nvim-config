@@ -1,4 +1,6 @@
 -- lua/plugins/treesitter.lua
+local redraw_profile = require("config.redraw_profile")
+
 local parsers = {
 	"bash",
 	"c",
@@ -104,7 +106,7 @@ return {
 	{
 		"nvim-treesitter/nvim-treesitter-context",
 		event = "VeryLazy",
-		opts = { max_lines = 3 },
+		opts = { enable = not redraw_profile.low_bandwidth(), max_lines = 3 },
 		cond = function()
 			return not vim.g.vscode
 		end,

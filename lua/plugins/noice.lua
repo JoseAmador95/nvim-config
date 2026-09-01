@@ -1,3 +1,5 @@
+local redraw_profile = require("config.redraw_profile")
+
 return {
 	"folke/noice.nvim",
 	event = "VeryLazy",
@@ -42,7 +44,7 @@ return {
 				enabled = true,
 				format = "lsp_progress",
 				format_done = "lsp_progress_done",
-				throttle = 1000 / 30,
+				throttle = redraw_profile.low_bandwidth() and 100 or 1000 / 30,
 				view = "mini",
 			},
 			override = {

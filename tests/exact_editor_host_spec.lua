@@ -377,6 +377,10 @@ test("symlinked state directories are rejected before chmod", function()
 	vim.fn.delete(target, "rf")
 end)
 
+test("host applies the bounded default registry heartbeat", function()
+	assert(rpc._options().registry_heartbeat_seconds == 21600, "host heartbeat policy default changed")
+end)
+
 test("interactive registration is deferred once beyond the startup path", function()
 	local callbacks = {}
 	local setups = 0

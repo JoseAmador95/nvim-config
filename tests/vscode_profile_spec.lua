@@ -16,6 +16,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 		vim.schedule(function()
 			local ok, err = xpcall(function()
 				assert(vim.g.vscode, "VSCode profile flag is missing")
+				assert(require("config.redraw_profile").current() == "full", "VSCode accepted host redraw throttling")
 				assert(vim.g.nvim_config_initialized == true, "init.lua did not complete in the VSCode profile")
 				for _, command in ipairs({
 					"MenuOpen",
@@ -54,6 +55,28 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(package.loaded["config.exact_editor"] == nil, "exact editor adapter loaded in VSCode")
 				assert(package.loaded["config.project_settings"] == nil, "project settings adapter loaded in VSCode")
 				assert(package.loaded.tab_first == nil, "tab-first runtime loaded in VSCode")
+				for _, name in ipairs({ "trusted_workspace", "treesitter_runtime" }) do
+					assert(package.loaded[name] ~= nil, name .. " is missing from the VSCode early allowlist")
+				end
+				for _, name in ipairs({
+					"theme_router",
+					"exact_editor",
+					"devcontainer_editor",
+					"terminal_lifecycle",
+					"project_python",
+					"action_palette",
+					"diagram_view",
+					"log_workbench.matches",
+					"log_workbench.follow",
+					"repo_scratch",
+					"coverage_workbench",
+					"just_workbench",
+					"clangd_compile_db",
+					"verified_tools",
+					"native_review",
+				}) do
+					assert(package.loaded[name] == nil, name .. " crossed the VSCode load boundary")
+				end
 				assert(
 					vim.tbl_isempty(vim.fn.maparg("<leader><leader>", "n", false, true)),
 					"palette mapping leaked into VSCode"

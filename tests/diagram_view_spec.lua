@@ -54,15 +54,27 @@ package.loaded["config.local_config"] = {
 package.loaded["config.pager"] = { active = false }
 
 test("host owns commands, keymaps, renderer commands, and presenters", function()
-	local jobs = {}
+	local jobs_a = {}
+	local jobs_b = {}
+	local pending_killed = false
+	local function spawn_into(jobs)
+		return function(argv, options, callback)
+			jobs[#jobs + 1] = { argv = vim.deepcopy(argv), options = vim.deepcopy(options) }
+			if not tostring(options.stdin):find("PENDING", 1, true) then
+				callback({ code = 0, stdout = "ASCII", stderr = "" })
+			end
+			return {
+				kill = function()
+					pending_killed = true
+				end,
+			}
+		end
+	end
 	local adapter = require("config.diagram")
+	assert(package.loaded.diagram_view == nil, "host adapter loaded diagram-view before setup")
 	assert(adapter.setup({
 		cache_root = cache_root(),
-		spawn = function(argv, options, callback)
-			jobs[#jobs + 1] = { argv = vim.deepcopy(argv), options = vim.deepcopy(options) }
-			callback({ code = 0, stdout = "ASCII", stderr = "" })
-			return { kill = function() end }
-		end,
+		spawn = spawn_into(jobs_a),
 		schedule = function(callback)
 			callback()
 		end,
@@ -70,9 +82,7 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 	}))
 
 	equal(2, vim.fn.exists(":DiagramShow"), "host command is missing")
-	local status = require("diagram_view").status()
-	equal({ "mermaid:ascii", "mermaid:svg", "plantuml:ascii", "plantuml:svg" }, status.renderers)
-	equal({ "ascii", "image" }, status.presenters)
+	assert(package.loaded.diagram_view == nil, "host registration initialized diagram-view")
 
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
@@ -93,10 +103,43 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 	local command_ok, command_err = pcall(vim.cmd, "2,3DiagramShow ascii")
 	vim.fn.executable = original_executable
 	assert(command_ok, command_err)
-	equal("A --> B\nB --> C", jobs[#jobs].options.stdin, "visual command did not pass the selected lines")
+	equal("A --> B\nB --> C", jobs_a[#jobs_a].options.stdin, "visual command did not pass the selected lines")
+	assert(package.loaded.diagram_view ~= nil, "first DiagramShow did not initialize diagram-view")
+	local core = require("diagram_view")
+	local status = core.status()
+	equal({ "mermaid:ascii", "mermaid:svg", "plantuml:ascii", "plantuml:svg" }, status.renderers)
+	equal({ "ascii", "image" }, status.presenters)
+	assert(core.register_presenter("pending", {
+		open = function()
+			return {}
+		end,
+		deliver = function() end,
+	}))
+	assert(core.open({
+		renderer = "plantuml:ascii",
+		presenter = "pending",
+		kind = "plantuml",
+		source = "@startuml\nPENDING -> B\n@enduml",
+	}))
+	assert(adapter.setup({
+		cache_root = cache_root(),
+		spawn = spawn_into(jobs_b),
+		schedule = function(callback)
+			callback()
+		end,
+		notify = function() end,
+	}))
+	assert(pending_killed, "second host setup did not let the core cancel its active session")
+	vim.fn.executable = function()
+		return 1
+	end
+	local second_ok, second_err = pcall(vim.cmd, "2,3DiagramShow ascii")
+	vim.fn.executable = original_executable
+	assert(second_ok, second_err)
+	equal("A --> B\nB --> C", jobs_b[#jobs_b].options.stdin, "second use did not receive setup B")
 
 	local delivery = {}
-	assert(require("diagram_view").register_presenter("capture", {
+	assert(core.register_presenter("capture", {
 		open = function()
 			return {}
 		end,
@@ -104,14 +147,14 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 			delivery.result = result.data
 		end,
 	}))
-	local session = assert(require("diagram_view").open({
+	local session = assert(core.open({
 		renderer = "plantuml:ascii",
 		presenter = "capture",
 		kind = "plantuml",
 		source = "@startuml\nA -> B\n@enduml",
 	}))
-	equal({ "plantuml", "-ttxt", "-pipe" }, jobs[#jobs].argv)
-	equal("SANDBOX", jobs[#jobs].options.env.PLANTUML_SECURITY_PROFILE)
+	equal({ "plantuml", "-ttxt", "-pipe" }, jobs_b[#jobs_b].argv)
+	equal("SANDBOX", jobs_b[#jobs_b].options.env.PLANTUML_SECURITY_PROFILE)
 	equal("ASCII", delivery.result)
 	equal("presented", session:status().state)
 end)

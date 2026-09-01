@@ -1041,6 +1041,9 @@ test("painter failures fall back and emit caller-owned events", function()
 	equal("dark", context.background, "painter received shared context")
 	assert(has_message(observed, "not installed"), "painter rejection was not reported")
 	assert(events[#events].kind == "fallback", "fallback event was not emitted")
+	local reloaded, unchanged_active = theme_router.reload()
+	assert(reloaded and unchanged_active == "habamax", "unchanged fallback request did not reload")
+	equal({ "missing", "habamax" }, painted, "mutated painter context defeated reload deduplication")
 
 	assert(theme_router.register("broken", function()
 		error("exploded")
@@ -1065,10 +1068,14 @@ test("select and reload distinguish durable selection from active last-known-goo
 	local root = temp_dir()
 	local path = vim.fs.joinpath(root, "state", "theme.yaml")
 	local painted = {}
+	local context = { background = "dark" }
 	local observed = callbacks({
 		paint = function(name)
 			painted[#painted + 1] = name
 			return true
+		end,
+		context = function()
+			return context
 		end,
 	})
 	setup(path, observed, {
@@ -1104,6 +1111,15 @@ test("select and reload distinguish durable selection from active last-known-goo
 	assert(valid and active == "tokyonight", "valid reload did not repaint the durable selection")
 	equal("tokyonight", theme_router.status().active.colorscheme, "valid reload left stale active state")
 	equal({ "catppuccin", "tokyonight" }, painted, "reload painted an unexpected sequence")
+	valid, active = theme_router.reload()
+	assert(valid and active == "tokyonight", "unchanged valid reload failed")
+	equal({ "catppuccin", "tokyonight" }, painted, "unchanged valid reload called a painter")
+	context.background = "light"
+	valid, active = theme_router.reload()
+	assert(valid and active == "tokyonight", "context-changing reload failed")
+	equal({ "catppuccin", "tokyonight", "tokyonight" }, painted, "changed repaint context did not call the painter")
+	assert(theme_router.repaint(), "explicit repaint failed")
+	equal({ "catppuccin", "tokyonight", "tokyonight", "tokyonight" }, painted, "explicit repaint was deduplicated")
 	local before = theme_router.status()
 	local accepted, setup_err = theme_router.setup({ injected = true })
 	assert(not accepted and setup_err:find("unknown option: injected", 1, true), "unknown setup option was accepted")

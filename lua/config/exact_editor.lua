@@ -92,6 +92,7 @@ local function options()
 	local open = require("config.editor").open_file_in_tab
 	local policy = require("config.local_config").plugin("exact_editor", {
 		workspace_retention = "visited",
+		registry_heartbeat_seconds = 21600,
 	})
 	return {
 		state_root = state_root,
@@ -101,6 +102,7 @@ local function options()
 		open_file = open,
 		install_finish_mapping = install_finish_mapping,
 		workspace_retention = policy.workspace_retention,
+		registry_heartbeat_seconds = policy.registry_heartbeat_seconds,
 	}
 end
 

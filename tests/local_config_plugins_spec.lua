@@ -72,9 +72,35 @@ test("canonical plugin schema exposes all products and host-only top-level value
 	equal("workspace", config.plugins.tab_first.history.scope, "tab history is not workspace-scoped")
 	equal(30000, config.plugins.diagram_view.stage_timeout_ms, "diagram timeout default changed")
 	equal(5000, config.plugins.terminal_lifecycle.stop_timeout_ms, "terminal stop timeout default changed")
+	equal(21600, config.plugins.exact_editor.registry_heartbeat_seconds, "exact editor heartbeat default changed")
 	equal("auto", config.plugins.theme_router.background, "theme background default changed")
 	equal("dap-ui", config.dap.ui, "DAP host configuration moved under plugins")
+	equal("full", config.ui.redraw_profile, "redraw profile default changed")
 	equal({}, config.env, "env host configuration default changed")
+end)
+
+test("redraw profile accepts only the documented host values", function()
+	assert(vim.fn.writefile({ "return { ui = { redraw_profile = 'low-bandwidth' } }" }, config_path) == 0)
+	local config = local_config.reload()
+	equal("low-bandwidth", config.ui.redraw_profile, "low-bandwidth redraw profile was rejected")
+
+	assert(vim.fn.writefile({ "return { ui = { redraw_profile = 'automatic' } }" }, config_path) == 0)
+	config = local_config.reload()
+	equal("full", config.ui.redraw_profile, "invalid redraw profile did not fall back to full")
+	assert(
+		table.concat(local_config.errors(), "\n"):find("ui.redraw_profile", 1, true),
+		"invalid redraw profile did not report its schema path"
+	)
+end)
+
+test("exact editor heartbeat accepts both inclusive policy bounds", function()
+	for _, value in ipairs({ 60, 604800 }) do
+		assert(vim.fn.writefile({
+			("return { plugins = { exact_editor = { registry_heartbeat_seconds = %d } } }"):format(value),
+		}, config_path) == 0)
+		local config = local_config.reload()
+		equal(value, config.plugins.exact_editor.registry_heartbeat_seconds, "heartbeat boundary was rejected")
+	end
 end)
 
 test("plugin accessor returns isolated values and does not expose unrelated host data", function()
@@ -111,7 +137,7 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 	assert(vim.fn.writefile({
 		"return { plugins = {",
 		"  native_review = { hunk_context = 7 },",
-		"  exact_editor = { workspace_retention = 'visible' },",
+		"  exact_editor = { workspace_retention = 'visible', registry_heartbeat_seconds = 59 },",
 		"  devcontainer_editor = { cli = '' },",
 		"  tab_first = { history = { scope = 'global' } },",
 		"  terminal_lifecycle = { buffer_mappings = { close = '' } },",
@@ -127,6 +153,7 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 	local config = local_config.reload()
 	equal(7, config.plugins.native_review.hunk_context, "canonical review value was ignored")
 	equal("visited", config.plugins.exact_editor.workspace_retention, "unsupported retention escaped validation")
+	equal(21600, config.plugins.exact_editor.registry_heartbeat_seconds, "unsafe heartbeat escaped validation")
 	equal("devcontainer", config.plugins.devcontainer_editor.cli, "empty CLI escaped validation")
 	equal("workspace", config.plugins.tab_first.history.scope, "unsupported history scope escaped validation")
 	equal("q", config.plugins.terminal_lifecycle.buffer_mappings.close, "empty mapping escaped validation")
@@ -145,6 +172,7 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 	local errors = table.concat(local_config.errors(), "\n")
 	for _, path in ipairs({
 		"plugins.exact_editor.workspace_retention",
+		"plugins.exact_editor.registry_heartbeat_seconds",
 		"plugins.devcontainer_editor.cli",
 		"plugins.tab_first.history.scope",
 		"plugins.terminal_lifecycle.buffer_mappings.close",
@@ -179,6 +207,14 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 	equal("rw-------", vim.fn.getfperm(config_path), "generated host config is not 0600")
 	local generated = table.concat(vim.fn.readfile(config_path), "\n")
 	assert(generated:find("plugins = {", 1, true), "generated template omitted canonical plugins table")
+	assert(
+		generated:find('ui = { redraw_profile = "full" }', 1, true),
+		"generated template omitted the host redraw profile"
+	)
+	assert(
+		generated:find("registry_heartbeat_seconds = 21600", 1, true),
+		"generated template omitted the exact editor heartbeat policy"
+	)
 	assert(not generated:find("mason =", 1, true), "generated template retained retired Mason automation")
 end)
 

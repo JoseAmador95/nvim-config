@@ -1,8 +1,10 @@
 -- Host UI for log-workbench.nvim matches. Colors, visual selection parsing,
 -- commands, and notifications remain configuration policy.
-local matches = require("log_workbench.matches")
-
 local M = {}
+local deferred = require("config.deferred")
+
+local matches
+local configured = false
 
 local colors = {
 	{ name = "red", dark = { bg = "#3b1f1f", ctermbg = 52 }, light = { bg = "#f5c6c6", ctermbg = 217 } },
@@ -30,6 +32,36 @@ local function apply_highlights()
 		local shade = entry[variant]
 		vim.api.nvim_set_hl(0, "LogHl" .. index, { bg = shade.bg, ctermbg = shade.ctermbg })
 	end
+end
+
+local function ensure_matches()
+	if configured then
+		return matches
+	end
+	if not matches then
+		local ok, result = deferred.try("log_workbench.matches")
+		if not ok then
+			return nil, result
+		end
+		matches = result
+	end
+	local ok, setup_ok, setup_err = pcall(matches.setup)
+	if not ok then
+		return nil, setup_ok
+	end
+	if not setup_ok then
+		return nil, setup_err
+	end
+	apply_highlights()
+	local group = vim.api.nvim_create_augroup("LogHighlightColors", { clear = true })
+	vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = apply_highlights })
+	vim.api.nvim_create_autocmd("OptionSet", {
+		group = group,
+		pattern = "background",
+		callback = apply_highlights,
+	})
+	configured = true
+	return matches
 end
 
 local function split_cmdline(cmdline)
@@ -104,9 +136,10 @@ local function legacy_pattern(entry)
 end
 
 local function sync_buffer_state(buf)
+	local core = assert(ensure_matches())
 	local patterns = {}
 	local next_id = 1
-	for _, entry in ipairs(matches.list(buf)) do
+	for _, entry in ipairs(core.list(buf)) do
 		patterns[#patterns + 1] = {
 			id = entry.id,
 			group = entry.hl_group,
@@ -126,6 +159,11 @@ function M.complete_colors(arglead, cmdline)
 end
 
 function M.add(kind, opts)
+	local core, setup_err = ensure_matches()
+	if not core then
+		notify("Could not initialize log patterns: " .. tostring(setup_err), vim.log.levels.ERROR)
+		return nil
+	end
 	local buf = vim.api.nvim_get_current_buf()
 	local args = vim.trim(opts.args or "")
 	if args == "" then
@@ -146,7 +184,7 @@ function M.add(kind, opts)
 		notify("Pattern is required", vim.log.levels.ERROR)
 		return
 	end
-	local entry, err = matches.add(buf, {
+	local entry, err = core.add(buf, {
 		kind = kind,
 		text = pattern_text,
 		hl_group = "LogHl" .. color_index_or_err,
@@ -162,10 +200,15 @@ function M.add(kind, opts)
 end
 
 function M.clear(opts)
+	local core, setup_err = ensure_matches()
+	if not core then
+		notify("Could not initialize log patterns: " .. tostring(setup_err), vim.log.levels.ERROR)
+		return nil
+	end
 	local buf = vim.api.nvim_get_current_buf()
 	local arg = vim.trim(opts.args or "")
 	if arg == "" then
-		matches.clear(buf)
+		core.clear(buf)
 		sync_buffer_state(buf)
 		return
 	end
@@ -175,33 +218,33 @@ function M.clear(opts)
 		return
 	end
 	local ids = {}
-	for _, entry in ipairs(matches.list(buf)) do
+	for _, entry in ipairs(core.list(buf)) do
 		if entry.metadata.color_key == color_key then
 			ids[#ids + 1] = entry.id
 		end
 	end
-	matches.clear(buf, ids)
+	core.clear(buf, ids)
 	sync_buffer_state(buf)
 end
 
 function M.next(buf, opts)
-	return matches.next(buf or vim.api.nvim_get_current_buf(), opts)
+	local core, err = ensure_matches()
+	if not core then
+		return nil, err
+	end
+	return core.next(buf or vim.api.nvim_get_current_buf(), opts)
 end
 
 function M.previous(buf, opts)
-	return matches.previous(buf or vim.api.nvim_get_current_buf(), opts)
+	local core, err = ensure_matches()
+	if not core then
+		return nil, err
+	end
+	return core.previous(buf or vim.api.nvim_get_current_buf(), opts)
 end
 
 function M.setup()
-	assert(matches.setup())
-	apply_highlights()
-	local group = vim.api.nvim_create_augroup("LogHighlightColors", { clear = true })
-	vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = apply_highlights })
-	vim.api.nvim_create_autocmd("OptionSet", {
-		group = group,
-		pattern = "background",
-		callback = apply_highlights,
-	})
+	return ensure_matches()
 end
 
 return M

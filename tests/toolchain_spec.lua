@@ -277,7 +277,9 @@ test("clangd has one argv builder and rejects invalid databases before stop", fu
 	}
 	package.loaded["config.clangd"] = nil
 	local clangd = require("config.clangd")
+	assert(package.loaded.clangd_compile_db == nil, "clangd router loaded before a root-scoped operation")
 	local command = clangd.command()
+	assert(package.loaded.clangd_compile_db == nil, "base clangd argv activated the compile-db router")
 	assert(command[1] == "/host/bin/clangd-custom", "local clangd path was ignored")
 	assert(vim.tbl_contains(command, "--clang-tidy"), "dynamic clangd argv lost --clang-tidy")
 
@@ -285,7 +287,7 @@ test("clangd has one argv builder and rejects invalid databases before stop", fu
 	assert(vim.fn.writefile({ "[]" }, root .. "/compile_commands.json") == 0)
 	root = vim.uv.fs_realpath(root) or vim.fs.normalize(root)
 	assert(clangd.validate_compile_commands(root) == root, "valid database was rejected")
-	clangd._router.setup({ defer = function() end })
+	clangd._router().setup({ defer = function() end })
 	assert(clangd.set_manual(root, root), "valid manual database was not applied")
 	command = clangd.command(root)
 	assert(command[2] == "--compile-commands-dir=" .. root, "root-scoped compile database flag is misplaced")

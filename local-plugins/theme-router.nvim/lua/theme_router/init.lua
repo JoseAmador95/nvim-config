@@ -63,6 +63,7 @@ local state = {
 	selection = nil,
 	active = nil,
 	last_known_good = nil,
+	last_successful_request = nil,
 }
 local test_hook
 
@@ -1744,8 +1745,7 @@ local function load_selection_locked()
 	return selection_or_err
 end
 
-local function paint(name, source)
-	local painter = state.painters[name] or state.opts.paint
+local function snapshot_context(name)
 	local context = {}
 	if state.opts.context then
 		local context_ok, context_or_error = pcall(state.opts.context)
@@ -1753,10 +1753,36 @@ local function paint(name, source)
 			local message = "Theme context callback failed: " .. tostring(context_or_error)
 			notify(message, vim.log.levels.WARN)
 			emit("error", { colorscheme = name, error = message })
-			return false
+			return false, message
 		end
 		context = context_or_error
 	end
+	local copy_ok, context_copy = pcall(copy, context)
+	if not copy_ok then
+		local message = "Theme context could not be copied: " .. tostring(context_copy)
+		notify(message, vim.log.levels.WARN)
+		emit("error", { colorscheme = name, error = message })
+		return false, message
+	end
+	return true, context_copy
+end
+
+local function successful_request(context)
+	local copied, request_or_error = pcall(copy, {
+		selection = { colorscheme = state.selection.colorscheme },
+		context = context,
+	})
+	if not copied then
+		local message = "Theme repaint request could not be copied: " .. tostring(request_or_error)
+		notify(message, vim.log.levels.WARN)
+		emit("error", { colorscheme = state.selection.colorscheme, error = message })
+		return nil, message
+	end
+	return request_or_error
+end
+
+local function paint(name, source, context)
+	local painter = state.painters[name] or state.opts.paint
 	local copy_ok, context_copy = pcall(copy, context)
 	if not copy_ok then
 		local message = "Theme context could not be copied: " .. tostring(context_copy)
@@ -1781,6 +1807,30 @@ local function paint(name, source)
 	state.last_known_good = copy(state.active)
 	emit("applied", { colorscheme = name, source = state.active.source })
 	return true
+end
+
+local function repaint_with_context(context, request)
+	state.last_successful_request = nil
+	local selected = state.selection.colorscheme
+	if paint(selected, "selected", context) then
+		state.last_successful_request = request
+		return true, selected
+	end
+	if selected ~= state.opts.default and paint(state.opts.default, "default", context) then
+		state.last_successful_request = request
+		emit("fallback", { colorscheme = state.opts.default, failed = selected, source = "default" })
+		return true, state.opts.default
+	end
+	if
+		state.opts.fallback ~= selected
+		and state.opts.fallback ~= state.opts.default
+		and paint(state.opts.fallback, "fallback", context)
+	then
+		state.last_successful_request = request
+		emit("fallback", { colorscheme = state.opts.fallback, failed = selected, source = "fallback" })
+		return true, state.opts.fallback
+	end
+	return false
 end
 
 function M.setup(opts)
@@ -1846,6 +1896,7 @@ function M.setup(opts)
 	state.selection = load_selection_locked()
 	state.active = nil
 	state.last_known_good = nil
+	state.last_successful_request = nil
 	emit("setup", { selected = state.selection })
 	return M.selection()
 end
@@ -1862,6 +1913,7 @@ function M.register(name, painter)
 		return nil, "painter must be a function"
 	end
 	state.painters[normalized] = painter
+	state.last_successful_request = nil
 	return true
 end
 
@@ -1904,30 +1956,28 @@ function M.apply(name)
 		notify(err, vim.log.levels.WARN)
 		return false
 	end
-	return paint(normalized, "direct")
+	local context_ok, context_or_error = snapshot_context(normalized)
+	if not context_ok then
+		return false, context_or_error
+	end
+	state.last_successful_request = nil
+	local painted = paint(normalized, "direct", context_or_error)
+	return painted
 end
 
 function M.repaint()
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	local selected = state.selection.colorscheme
-	if paint(selected, "selected") then
-		return true, selected
+	local context_ok, context_or_error = snapshot_context(state.selection.colorscheme)
+	if not context_ok then
+		return false, context_or_error
 	end
-	if selected ~= state.opts.default and paint(state.opts.default, "default") then
-		emit("fallback", { colorscheme = state.opts.default, failed = selected, source = "default" })
-		return true, state.opts.default
+	local request, request_err = successful_request(context_or_error)
+	if not request then
+		return false, request_err
 	end
-	if
-		state.opts.fallback ~= selected
-		and state.opts.fallback ~= state.opts.default
-		and paint(state.opts.fallback, "fallback")
-	then
-		emit("fallback", { colorscheme = state.opts.fallback, failed = selected, source = "fallback" })
-		return true, state.opts.fallback
-	end
-	return false
+	return repaint_with_context(context_or_error, request)
 end
 
 ---Paint and persist one selection through the plugin-owned composite lifecycle.
@@ -1943,13 +1993,23 @@ function M.select(name)
 		notify(err, vim.log.levels.ERROR)
 		return false, err
 	end
-	if not paint(normalized, "selected") then
+	local context_ok, context_or_error = snapshot_context(normalized)
+	if not context_ok then
+		return false, context_or_error
+	end
+	state.last_successful_request = nil
+	if not paint(normalized, "selected", context_or_error) then
 		return false, "theme could not be applied"
 	end
 	local persisted, warning = M.persist(normalized)
 	if not persisted then
 		return false, "theme could not be persisted"
 	end
+	local request, request_err = successful_request(context_or_error)
+	if not request then
+		return false, request_err
+	end
+	state.last_successful_request = request
 	emit("selected", { colorscheme = normalized })
 	return true, warning
 end
@@ -1974,7 +2034,21 @@ function M.reload()
 		return false, loaded.validity.error
 	end
 	state.selection = loaded
-	local repainted, active_or_err = M.repaint()
+	local context_ok, context_or_error = snapshot_context(state.selection.colorscheme)
+	if not context_ok then
+		emit("reload-failed", { selected = state.selection, active = state.active })
+		return false, context_or_error
+	end
+	local request, request_err = successful_request(context_or_error)
+	if not request then
+		emit("reload-failed", { selected = state.selection, active = state.active })
+		return false, request_err
+	end
+	if state.active and state.last_successful_request and vim.deep_equal(request, state.last_successful_request) then
+		emit("reloaded", { selected = state.selection, active = state.active, unchanged = true })
+		return true, state.active.colorscheme
+	end
+	local repainted, active_or_err = repaint_with_context(context_or_error, request)
 	if not repainted then
 		emit("reload-failed", { selected = state.selection, active = state.active })
 		return false, tostring(active_or_err or "theme could not be applied")
@@ -2013,6 +2087,7 @@ function M.persist(name)
 	end
 	local warning = append_warning(write_err, lock_warning)
 	state.selection = { colorscheme = normalized, source = "local", validity = { valid = true } }
+	state.last_successful_request = nil
 	emit("persisted", { colorscheme = normalized })
 	if warning then
 		notify("Theme state committed with a durability warning: " .. tostring(warning), vim.log.levels.WARN)
@@ -2084,6 +2159,7 @@ function M.teardown()
 	state.selection = nil
 	state.active = nil
 	state.last_known_good = nil
+	state.last_successful_request = nil
 	test_hook = nil
 	return true
 end

@@ -1,3 +1,5 @@
+local redraw_profile = require("config.redraw_profile")
+
 return {
 	"SmiteshP/nvim-navic",
 	commit = "f5eba192f39b453675d115351808bd51276d9de5",
@@ -24,5 +26,6 @@ return {
 		highlight = true,
 		separator = " ",
 		depth_limit = 0,
+		lazy_update_context = redraw_profile.low_bandwidth(),
 	},
 }

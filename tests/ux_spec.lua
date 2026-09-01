@@ -121,23 +121,14 @@ for _, entry in ipairs(require("plugins.treesitter")) do
 	end
 end
 assert(context_spec and context_spec.opts.max_lines == 3, "Treesitter Context is not limited to three lines")
+assert(context_spec.opts.enable == true, "Treesitter Context is disabled in the full profile")
 local navic_spec = require("plugins.navic")
 assert(navic_spec.commit == "f5eba192f39b453675d115351808bd51276d9de5", "nvim-navic pin drifted")
+assert(navic_spec.opts.lazy_update_context == false, "navic full-profile refresh changed")
 local original_navic = package.loaded["nvim-navic"]
-package.loaded["nvim-navic"] = {
-	is_available = function()
-		return true
-	end,
-	get_data = function()
-		return { { icon = "C", name = "Outer" }, { icon = "F", name = "inner" } }
-	end,
-}
-local statusline = require("config.statusline")
-assert(statusline.navic() == "Finner", "statusline shows more than the innermost symbol")
-package.loaded["nvim-navic"] = original_navic
-statusline.update_root(0)
-assert(vim.b.nvim_config_root == vim.uv.fs_realpath(repo), "statusline did not cache the filesystem project root")
-
+local original_python = package.loaded["config.python"]
+local original_cmake = package.loaded["config.cmake"]
+local original_clangd = package.loaded["config.clangd"]
 local original_review = package.loaded["config.code_review"]
 local review_status = {
 	active = true,
@@ -149,19 +140,45 @@ local review_status = {
 	inline_comments = false,
 	entry = { identity = "entry", path = "lua/example.lua", layer = "history", side = "OLD" },
 }
+package.loaded["nvim-navic"] = {
+	is_available = function()
+		return true
+	end,
+	get_data = function()
+		return { { icon = "C", name = "Outer" }, { icon = "F", name = "inner" } }
+	end,
+}
+package.loaded["config.python"] = {
+	root = function()
+		return repo
+	end,
+	venv_name = function()
+		return ".venv"
+	end,
+}
+package.loaded["config.cmake"] = { status = function() end }
+package.loaded["config.clangd"] = {
+	profile = function()
+		return "full"
+	end,
+}
 package.loaded["config.code_review"] = {
 	status = function()
 		return vim.deepcopy(review_status)
 	end,
 }
+local statusline = require("config.statusline")
+statusline.refresh_buffer(0)
+assert(statusline.navic() == "Finner", "statusline shows more than the innermost symbol")
+assert(vim.b.nvim_config_root == vim.uv.fs_realpath(repo), "statusline did not cache the filesystem project root")
 assert(
 	statusline.review()
 		== "REV OFF · range:base..head · history · split/full · comments:off · OLD · lua/example.lua",
 	"review statusline lost the native review state"
 )
 review_status.active = false
+statusline.refresh_buffer(0)
 assert(statusline.review() == "", "inactive review statusline stayed visible")
-package.loaded["config.code_review"] = original_review
 
 local original_lualine = package.loaded.lualine
 local lualine_options
@@ -177,9 +194,15 @@ package.loaded.lualine = {
 }
 require("plugins.lualine").config()
 assert(lualine_options.sections.lualine_x[1] == statusline.review, "lualine omitted the review component")
+assert(lualine_options.options.refresh.refresh_time == 16, "lualine full-profile refresh changed")
 vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigReviewChanged", modeline = false })
 assert(lualine_refreshes == 1, "review state changes did not refresh lualine")
 package.loaded.lualine = original_lualine
+package.loaded["nvim-navic"] = original_navic
+package.loaded["config.python"] = original_python
+package.loaded["config.cmake"] = original_cmake
+package.loaded["config.clangd"] = original_clangd
+package.loaded["config.code_review"] = original_review
 
 vim.o.background = "dark"
 vim.api.nvim_set_hl(0, "Normal", { bg = 0x101010, fg = 0xf0f0f0 })

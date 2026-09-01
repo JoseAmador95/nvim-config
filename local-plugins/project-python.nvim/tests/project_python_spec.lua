@@ -114,18 +114,18 @@ test("precedence is explicit, manual, project environment, active environment, f
 	assert(project_python.select(service, manual).source == "manual")
 	local chosen = executable(service .. "/.chosen/bin/python")
 	explicit[service] = { pythonPath = chosen }
-	snapshot = project_python.snapshot(service)
+	snapshot = project_python.refresh(service)
 	assert(snapshot.source == "explicit" and snapshot.value.interpreter == chosen)
 	explicit[service] = nil
-	assert(project_python.snapshot(service).source == "manual")
+	assert(project_python.refresh(service).source == "manual")
 	assert(vim.fn.delete(manual) == 0)
-	assert(project_python.snapshot(service).source == "local:.venv")
+	assert(project_python.refresh(service).source == "local:.venv")
 	assert(vim.fn.delete(automatic) == 0)
 	local active = executable(service .. "/.active/bin/python")
 	env.VIRTUAL_ENV = service .. "/.active"
-	assert(project_python.snapshot(service).value.interpreter == active)
+	assert(project_python.refresh(service).value.interpreter == active)
 	env.VIRTUAL_ENV = nil
-	assert(project_python.snapshot(service).source == "fallback")
+	assert(project_python.refresh(service).source == "fallback")
 end)
 
 test("invalid explicit configuration fails without automatic fallback", function()
@@ -137,10 +137,10 @@ test("invalid explicit configuration fails without automatic fallback", function
 	assert(snapshot.value.interpreter == nil)
 	assert(local_python ~= nil)
 	explicit[service] = { venvPath = service .. "/envs" }
-	assert(project_python.snapshot(service).validity == "invalid")
+	assert(project_python.refresh(service).validity == "invalid")
 end)
 
-test("snapshots are copied, generation-aware, and stale manual choices fall through", function()
+test("snapshots are copied, generation-aware, and stale manual choices wait for refresh", function()
 	configure()
 	local local_python = executable(service .. "/.venv/bin/python")
 	local selected_python = executable(service .. "/.selected/bin/python")
@@ -151,6 +151,9 @@ test("snapshots are copied, generation-aware, and stale manual choices fall thro
 	assert(copy.generation == selected_snapshot.generation)
 	assert(vim.fn.delete(selected_python) == 0)
 	local stale = project_python.snapshot(service)
+	assert(stale.source == "manual" and stale.value.interpreter == selected_python)
+	assert(stale.generation == copy.generation)
+	stale = project_python.refresh(service)
 	assert(stale.source == "local:.venv" and stale.value.interpreter == local_python)
 	assert(stale.generation > copy.generation)
 	project_python._reset_for_tests()
@@ -160,6 +163,54 @@ test("snapshots are copied, generation-aware, and stale manual choices fall thro
 		end,
 	})
 	assert(project_python.snapshot(service).source ~= "manual", "manual choice persisted across reset")
+end)
+
+test("default snapshot hits bypass canonicalization and discovery", function()
+	configure()
+	executable(service .. "/.venv/bin/python")
+	local first = project_python.snapshot(service)
+	local original_realpath = vim.uv.fs_realpath
+	local original_stat = vim.uv.fs_stat
+	local original_access = vim.uv.fs_access
+	vim.uv.fs_realpath = function()
+		error("cached snapshot canonicalized its root")
+	end
+	vim.uv.fs_stat = function()
+		error("cached snapshot inspected the filesystem")
+	end
+	vim.uv.fs_access = function()
+		error("cached snapshot inspected executable bits")
+	end
+	local ok, second = pcall(project_python.snapshot, service)
+	vim.uv.fs_realpath = original_realpath
+	vim.uv.fs_stat = original_stat
+	vim.uv.fs_access = original_access
+	assert(ok, second)
+	assert(vim.deep_equal(second, first))
+end)
+
+test("caller explicit snapshots are ephemeral", function()
+	local events = {}
+	configure({
+		event = function(event)
+			events[#events + 1] = event
+		end,
+	})
+	local automatic_python = executable(service .. "/.venv/bin/python")
+	local baseline = project_python.snapshot(service)
+	assert(baseline.value.interpreter == automatic_python)
+	local status = project_python.status()
+	local event_count = #events
+	local override = executable(service .. "/.ephemeral/bin/python")
+	local explicit_snapshot = project_python.snapshot(service, { explicit = { pythonPath = override } })
+	assert(explicit_snapshot.source == "explicit" and explicit_snapshot.value.interpreter == override)
+	assert(explicit_snapshot.generation == baseline.generation)
+	local invalid = project_python.snapshot(service, { explicit = { pythonPath = service .. "/missing/python" } })
+	assert(invalid.source == "explicit" and invalid.validity == "invalid")
+	assert(invalid.generation == baseline.generation)
+	assert(vim.deep_equal(project_python.status(), status), "ephemeral snapshot changed published state")
+	assert(#events == event_count, "ephemeral snapshot emitted an event")
+	assert(vim.deep_equal(project_python.snapshot(service), baseline))
 end)
 
 test("Pyright, Neotest, and DAP consume the same immutable snapshot", function()

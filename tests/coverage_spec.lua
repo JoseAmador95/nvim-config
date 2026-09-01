@@ -33,6 +33,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			assert(vim.fn.exists(":CoverageSummary") == 2, "host did not register CoverageSummary")
 			assert(vim.fn.exists(":CoverageClear") == 2, "host did not register CoverageClear")
 			assert(package.loaded.coverage == nil, "retired nvim-coverage module was loaded")
+			assert(package.loaded.coverage_workbench == nil, "coverage command registration initialized its core")
 
 			local original_system = vim.system
 			local original_jobstart = vim.fn.jobstart

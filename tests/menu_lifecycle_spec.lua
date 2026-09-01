@@ -18,6 +18,13 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			local ok, err = xpcall(function()
 				assert(left_mouse_mapping().lhs == nil, "fixture started with a global LeftMouse mapping")
 				assert(package.loaded["menu.state"] == nil, "menu.nvim state loaded before first use")
+				assert(package.loaded.action_palette == nil, "action-palette core loaded before first use")
+				assert(package.loaded["config.action_palette"] == nil, "action palette catalog loaded before first use")
+				assert(vim.fn.exists(":MenuOpen") == 2, "MenuOpen was not registered before first use")
+				assert(
+					vim.fn.maparg("<RightMouse>", "n") ~= "",
+					"right-click mapping was not registered before first use"
+				)
 				assert(_G.NvimConfigCloseTab == nil, "obsolete global tabline close callback is present")
 				require("lazy").load({ plugins = { "bufferline.nvim" } })
 				local bridge = assert(_G.___bufferline_private, "installed bufferline click bridge is missing")

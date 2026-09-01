@@ -53,6 +53,7 @@ if not pager.active then
 		desc = "Save",
 	})
 	require("config.tabs").setup()
+	require("config.menu").setup()
 	require("config.just").setup()
 	require("config.scratch").setup()
 	require("config.coverage").setup()

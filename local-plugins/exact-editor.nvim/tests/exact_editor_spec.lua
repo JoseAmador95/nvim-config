@@ -14,6 +14,37 @@ local exact = require("exact_editor")
 local failures = {}
 local count = 0
 
+local function fake_timer_factory(observed)
+	return function()
+		local timer = {
+			closed = false,
+			close_calls = 0,
+			stop_calls = 0,
+			unref_calls = 0,
+		}
+		function timer:start(timeout, repeat_interval, callback)
+			self.timeout = timeout
+			self.repeat_interval = repeat_interval
+			self.callback = callback
+		end
+		function timer:stop()
+			self.stop_calls = self.stop_calls + 1
+		end
+		function timer:close()
+			self.close_calls = self.close_calls + 1
+			self.closed = true
+		end
+		function timer:is_closing()
+			return self.closed
+		end
+		function timer:unref()
+			self.unref_calls = self.unref_calls + 1
+		end
+		observed[#observed + 1] = timer
+		return timer
+	end
+end
+
 local function test(name, callback)
 	count = count + 1
 	local ok, err = xpcall(callback, debug.traceback)
@@ -79,12 +110,38 @@ local function request_path(id)
 end
 
 test("status and setup rejection are safe before an instance exists", function()
-	assert(vim.deep_equal(exact.effective_config(), { workspace_retention = "visited" }))
+	assert(vim.deep_equal(exact.effective_config(), {
+		workspace_retention = "visited",
+		registry_heartbeat_seconds = 21600,
+	}))
 	local status = exact.status()
-	assert(status.configured == false and status.workspace_retention == "visited")
+	assert(
+		status.configured == false
+			and status.workspace_retention == "visited"
+			and status.registry_heartbeat_seconds == 21600
+	)
 	local ok, err = pcall(exact.setup, { injected = true })
 	assert(not ok and tostring(err):find("unknown option: injected", 1, true))
 	assert(vim.deep_equal(status, exact.status()), "rejected setup mutated status")
+end)
+
+test("heartbeat policy is strict before setup performs I/O", function()
+	for _, value in ipairs({ 59, 604801, 60.5, "60" }) do
+		local server_called = false
+		local ok, err = pcall(exact.setup, {
+			state_root = state,
+			resolve_workspace = function()
+				return workspace
+			end,
+			open = function() end,
+			registry_heartbeat_seconds = value,
+			server_start = function()
+				server_called = true
+			end,
+		})
+		assert(not ok and tostring(err):find("integer between 60 and 604800", 1, true))
+		assert(not server_called and not exact.status().configured, "invalid heartbeat policy caused setup I/O")
+	end
 end)
 
 test("failed setup restores the prior configuration", function()
@@ -349,10 +406,118 @@ test("symlink request and record paths are rejected without unlinking their targ
 	assert(vim.uv.fs_lstat(record).type == "link")
 end)
 
+test("discovery publishes only new workspaces and heartbeat is quick-exit safe", function()
+	local lifecycle_state = ("/tmp/nvim-eeh-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
+	local second_root = fixture .. "/repo-second"
+	assert(vim.fn.mkdir(second_root, "p") == 1)
+	second_root = assert(vim.uv.fs_realpath(second_root))
+	local first_workspace = { runtime = "host", root = root, repo_identity = "repo:first" }
+	local second_workspace = { runtime = "host", root = second_root, repo_identity = "repo:second" }
+	local resolver_calls = 0
+	local events = {}
+	local timers = {}
+	vim.cmd("enew")
+	exact._set_timer_factory_for_tests(fake_timer_factory(timers))
+	local lifecycle_instance = assert(exact.setup({
+		state_root = lifecycle_state,
+		resolve_workspace = function(path)
+			resolver_calls = resolver_calls + 1
+			if path == root or path:sub(1, #root + 1) == root .. "/" then
+				return first_workspace
+			end
+			if path == second_root or path:sub(1, #second_root + 1) == second_root .. "/" then
+				return second_workspace
+			end
+			return nil
+		end,
+		open = function() end,
+		uuid = function()
+			return "76543210-1234-4234-8234-123456789abc"
+		end,
+		registry_heartbeat_seconds = 60,
+		on_state_change = function(event)
+			events[#events + 1] = event.kind
+		end,
+	}))
+	assert(#timers == 1, "setup created more than one heartbeat")
+	local timer = timers[1]
+	assert(timer.timeout == 60000 and timer.repeat_interval == 60000, "heartbeat interval was not applied")
+	assert(timer.unref_calls == 1, "heartbeat can keep a quick Neovim exit alive")
+	assert(exact.setup({
+		state_root = lifecycle_state,
+		resolve_workspace = function()
+			return nil
+		end,
+		open = function() end,
+		registry_heartbeat_seconds = 60,
+	}) == lifecycle_instance, "repeated setup did not reuse the active instance")
+	assert(#timers == 1, "repeated setup created a second heartbeat")
+	assert(exact.effective_config().registry_heartbeat_seconds == 60)
+	assert(exact.status().registry_heartbeat_seconds == 60)
+
+	local original_write_registry = exact.write_registry
+	local writes = 0
+	local fail_next = false
+	exact.write_registry = function(selected)
+		writes = writes + 1
+		if fail_next then
+			fail_next = false
+			return nil, "simulated registry publication failure"
+		end
+		return original_write_registry(selected)
+	end
+	timer.callback()
+	assert(
+		vim.wait(1000, function()
+			return writes == 1
+		end, 10),
+		"heartbeat did not refresh the registry"
+	)
+
+	writes = 0
+	resolver_calls = 0
+	local before_events = #events
+	assert(exact._discover(lifecycle_instance, root .. "/target.lua"))
+	assert(writes == 1 and resolver_calls == 1, "new workspace did not publish exactly once")
+	assert(#events == before_events + 1 and events[#events] == "workspace-visited")
+	writes = 0
+	resolver_calls = 0
+	assert(exact._discover(lifecycle_instance, root .. "/target.lua"))
+	assert(writes == 0 and resolver_calls == 0, "known workspace discovery was not a zero-write cache hit")
+
+	before_events = #events
+	fail_next = true
+	local published, publish_err = exact._discover(lifecycle_instance, second_root)
+	assert(not published and publish_err:find("simulated", 1, true))
+	assert(writes == 1, "failed new workspace publication did not write exactly once")
+	assert(lifecycle_instance.workspaces[exact._workspace_identity(second_workspace)] == nil)
+	assert(#events == before_events, "failed workspace publication emitted a visited event")
+	writes = 0
+	assert(exact._discover(lifecycle_instance, second_root))
+	assert(writes == 1, "retried workspace publication did not write exactly once")
+	assert(lifecycle_instance.workspaces[exact._workspace_identity(second_workspace)] ~= nil)
+	assert(#events == before_events + 1 and events[#events] == "workspace-visited")
+
+	writes = 0
+	vim.api.nvim_exec_autocmds("VimLeavePre", {})
+	assert(timer.stop_calls == 1 and timer.close_calls == 1, "VimLeavePre did not close the heartbeat")
+	timer.callback()
+	vim.wait(50, function()
+		return false
+	end, 10)
+	assert(writes == 0, "stale heartbeat callback survived cleanup")
+	exact.write_registry = original_write_registry
+	exact._set_timer_factory_for_tests(nil)
+	assert(not exact.status().configured)
+	vim.fn.delete(lifecycle_state, "rf")
+end)
+
 test("failed server stop preserves the live instance and teardown can retry", function()
 	local retry_state = ("/tmp/nvim-eet-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
 	local allow_stop = false
 	local events = {}
+	local timers = {}
+	exact._set_timer_factory_for_tests(fake_timer_factory(timers))
 	local retry_instance = assert(exact.setup({
 		state_root = retry_state,
 		resolve_workspace = function()
@@ -381,9 +546,27 @@ test("failed server stop preserves the live instance and teardown can retry", fu
 		"failed teardown removed discovery state"
 	)
 	assert(not vim.tbl_contains(events, "instance-stopped"), "failed teardown emitted a stop event")
+	local timer = assert(timers[1], "failed-stop fixture did not create a heartbeat")
+	assert(timer.stop_calls == 0 and timer.close_calls == 0, "failed server stop discarded the heartbeat")
+	local original_write_registry = exact.write_registry
+	local heartbeat_writes = 0
+	exact.write_registry = function(selected)
+		heartbeat_writes = heartbeat_writes + 1
+		return original_write_registry(selected)
+	end
+	timer.callback()
+	assert(
+		vim.wait(1000, function()
+			return heartbeat_writes == 1
+		end, 10),
+		"preserved heartbeat did not remain live for teardown retry"
+	)
+	exact.write_registry = original_write_registry
 
 	allow_stop = true
 	assert(exact.teardown(), "teardown retry did not stop the preserved instance")
+	assert(timer.stop_calls == 1 and timer.close_calls == 1, "successful retry did not close the heartbeat")
+	exact._set_timer_factory_for_tests(nil)
 	assert(not exact.status().configured and _G.ExactEditorRequest == nil)
 	assert(vim.uv.fs_lstat(retry_instance.socket) == nil and vim.uv.fs_lstat(record) == nil)
 	local stopped = vim.tbl_filter(function(kind)

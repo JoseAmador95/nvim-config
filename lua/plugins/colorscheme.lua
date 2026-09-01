@@ -139,7 +139,12 @@ return {
 
 			-- A host can pin the background; then we skip OSC 11 auto-detection.
 			if theme.background == "light" or theme.background == "dark" then
-				vim.o.background = theme.background
+				if vim.o.background ~= theme.background then
+					vim.o.background = theme.background
+				end
+				-- A pinned host background is known now. Paint synchronously so the
+				-- fallback theme cannot remain visible for the coalescing window;
+				-- repaint() cancels the queued OptionSet refresh from the assignment.
 				selector.repaint()
 				return
 			end
@@ -148,20 +153,6 @@ return {
 			selector.repaint()
 
 			local group = vim.api.nvim_create_augroup("NvimConfigThemeBgFollow", { clear = true })
-
-			-- Re-apply the matching style whenever 'background' changes, driven
-			-- either by Neovim's own startup detection, by the OSC 11 re-query
-			-- below, or by a manual `:set background=...`.
-			vim.api.nvim_create_autocmd("OptionSet", {
-				pattern = "background",
-				group = group,
-				callback = function()
-					if vim.g.vscode then
-						return
-					end
-					selector.repaint()
-				end,
-			})
 
 			--------------------------------------------------------------
 			-- Active OSC 11 background detection.
@@ -206,9 +197,9 @@ return {
 				return nil
 			end
 
-			-- Persistent handler: any OSC 11 reply updates 'background', which
-			-- fires the OptionSet autocmd above and repaints. Idempotent:
-			-- setting the same value is a no-op, so re-queries never loop.
+			-- Persistent handler: any OSC 11 reply updates 'background'. The host
+			-- theme adapter coalesces this response with the resulting OptionSet
+			-- repaint, so setting the same value and re-querying cannot fan out.
 			vim.api.nvim_create_autocmd("TermResponse", {
 				group = group,
 				nested = true,

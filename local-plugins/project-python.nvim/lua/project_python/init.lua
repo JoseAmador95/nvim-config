@@ -225,6 +225,21 @@ local function automatic(root)
 	return "none", nil
 end
 
+local function public_snapshot(snapshot)
+	local result = copy(snapshot)
+	result._fingerprint = nil
+	return result
+end
+
+local function ephemeral(root, source, validity, interpreter)
+	return {
+		generation = generations[root] or 0,
+		source = source,
+		validity = validity,
+		value = { root = root, interpreter = interpreter },
+	}
+end
+
 local function publish(root, source, validity, interpreter)
 	local value = { root = root, interpreter = interpreter }
 	local fingerprint = vim.json.encode({ source = source, validity = validity, value = value })
@@ -239,13 +254,10 @@ local function publish(root, source, validity, interpreter)
 			_fingerprint = fingerprint,
 		}
 		snapshots[root] = previous
-		local public = copy(previous)
-		public._fingerprint = nil
+		local public = public_snapshot(previous)
 		emit("status", { root = root, status = public })
 	end
-	local result = copy(previous)
-	result._fingerprint = nil
-	return result
+	return public_snapshot(previous)
 end
 
 local function nearest_marker(start)
@@ -402,26 +414,41 @@ function M.resolve_root(input)
 end
 
 function M.snapshot(root, options)
+	options = options or {}
+	local caller_explicit = options.explicit ~= nil
+	if not caller_explicit and snapshots[root] then
+		return public_snapshot(snapshots[root])
+	end
 	root = canonical(root)
 	if not root then
 		return { generation = 0, source = "none", validity = "invalid", value = { root = nil, interpreter = nil } }
 	end
-	options = options or {}
+	if not caller_explicit and snapshots[root] then
+		return public_snapshot(snapshots[root])
+	end
 	local present, explicit = explicit_candidate(root, explicit_for(root, options.explicit))
 	if present then
-		return publish(root, "explicit", explicit and "valid" or "invalid", explicit)
+		local validity = explicit and "valid" or "invalid"
+		return caller_explicit and ephemeral(root, "explicit", validity, explicit)
+			or publish(root, "explicit", validity, explicit)
 	end
 	local manual = selected[root]
 	if manual then
 		local valid = executable(manual)
 		if valid then
-			selected[root] = valid
-			return publish(root, "manual", "valid", valid)
+			if not caller_explicit then
+				selected[root] = valid
+			end
+			return caller_explicit and ephemeral(root, "manual", "valid", valid)
+				or publish(root, "manual", "valid", valid)
 		end
-		selected[root] = nil
+		if not caller_explicit then
+			selected[root] = nil
+		end
 	end
 	local source, python = automatic(root)
-	return publish(root, source, python and "valid" or "invalid", python)
+	local validity = python and "valid" or "invalid"
+	return caller_explicit and ephemeral(root, source, validity, python) or publish(root, source, validity, python)
 end
 
 function M.resolve(input, options)

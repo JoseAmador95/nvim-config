@@ -20,6 +20,7 @@
 --       theme_router = { background = "auto", transparent = false },
 --     },
 --     dap = { ui = "dap-ui" }, -- dap-ui | dap-view
+--     ui = { redraw_profile = "full" }, -- full | low-bandwidth
 --     path = { "~/bin" },          -- dirs prepended to $PATH
 --     env = { FOO = "bar" },       -- environment variables to export
 --     plugins_dir = { "~/.nvim-plugins" }, -- dirs of extra lazy.nvim specs
@@ -71,6 +72,7 @@ local SCHEMA = {
 				type = "table",
 				fields = {
 					workspace_retention = { type = "enum", values = { "visited" }, default = "visited" },
+					registry_heartbeat_seconds = integer(21600, 60, 604800),
 				},
 			},
 			devcontainer_editor = {
@@ -246,6 +248,12 @@ local SCHEMA = {
 		type = "table",
 		fields = {
 			ui = { type = "enum", values = { "dap-ui", "dap-view" }, default = "dap-ui" },
+		},
+	},
+	ui = {
+		type = "table",
+		fields = {
+			redraw_profile = { type = "enum", values = { "full", "low-bandwidth" }, default = "full" },
 		},
 	},
 	path = {
@@ -570,10 +578,11 @@ local function compute()
 			})
 			if source_err then
 				last_errors[#last_errors + 1] = "project source: " .. tostring(source_err)
-			end
-			local approved, approval_err = trusted_workspace.approve(repo, "local-config-project", fingerprint)
-			if not approved then
-				last_errors[#last_errors + 1] = "project approval: " .. tostring(approval_err)
+			else
+				local approved, approval_err = trusted_workspace.approve(repo, "local-config-project", fingerprint)
+				if not approved then
+					last_errors[#last_errors + 1] = "project approval: " .. tostring(approval_err)
+				end
 			end
 		else
 			local _, source_err = trusted_workspace.register_source({
@@ -746,7 +755,10 @@ return {
       panel = { max_width = 200, max_height = 48 },
     },
 
-    exact_editor = { workspace_retention = "visited" }, -- visited
+    exact_editor = {
+      workspace_retention = "visited", -- visited
+      registry_heartbeat_seconds = 21600, -- 60..604800
+    },
     devcontainer_editor = {
       cli = "devcontainer",
       lockfile_policy = "preserve", -- lockfile updates require an explicit action
@@ -803,6 +815,9 @@ return {
 
   -- Debug UI selected at startup. $NVIM_DAP_UI overrides this value.
   dap = { ui = "dap-ui" }, -- dap-ui | dap-view
+
+  -- Terminal redraw policy selected explicitly per host. Never inferred from SSH.
+  ui = { redraw_profile = "full" }, -- full | low-bandwidth
 
   -- Directories prepended to $PATH (expanded).
   path = {

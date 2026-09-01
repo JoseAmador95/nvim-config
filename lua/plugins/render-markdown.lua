@@ -1,3 +1,14 @@
+local redraw_profile = require("config.redraw_profile")
+local deferred = require("config.deferred")
+
+local render_opts = { render_modes = true }
+if redraw_profile.low_bandwidth() then
+	render_opts = {
+		render_modes = { "n" },
+		anti_conceal = { enabled = false },
+	}
+end
+
 return {
 	"MeanderingProgrammer/render-markdown.nvim",
 	-- Must register its FileType observer before the first event. Loading this
@@ -7,9 +18,10 @@ return {
 		return not vim.g.vscode
 	end,
 	dependencies = { "nvim-treesitter/nvim-treesitter" },
-	opts = {},
-	config = function()
-		require("render-markdown").setup({ render_modes = true })
+	opts = render_opts,
+	config = function(_, opts)
+		local renderer = deferred.load("render-markdown")
+		renderer.setup(opts)
 
 		-- render-markdown defaults lean dark; override the groups that read
 		-- worst on a light background and hand control back to its generated
@@ -45,7 +57,7 @@ return {
 		vim.api.nvim_create_user_command("MarkdownRender", function(opts)
 			local args = vim.trim(opts.args or "")
 			if args == "" then
-				require("render-markdown").toggle()
+				renderer.toggle()
 				return
 			end
 			vim.cmd("RenderMarkdown " .. args)

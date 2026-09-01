@@ -1,8 +1,12 @@
 -- Host adapter for diagram-view.nvim. Tool discovery, user commands, keymaps,
 -- and the concrete Neovim/Snacks presenters deliberately stay in config.
-local view = require("diagram_view")
-
 local M = {}
+
+local deferred = require("config.deferred")
+local local_config = require("config.local_config")
+local view
+local configured = false
+local setup_options = {}
 
 local INSTALL = { ["rsvg-convert"] = "brew install librsvg" }
 local DEPS = {
@@ -303,12 +307,58 @@ local function image_metadata()
 	}
 end
 
-local effective_config = {
+local DEFAULT_CONFIG = {
 	default_mode = "svg",
 	stage_timeout_ms = 30000,
 	max_stage_output_bytes = 16 * 1024 * 1024,
 	cache = { max_age_seconds = 30 * 24 * 60 * 60, max_bytes = 256 * 1024 * 1024 },
 }
+local effective_config = vim.deepcopy(DEFAULT_CONFIG)
+
+local function configure_view(core, options, config)
+	local ok, setup_ok, setup_err = pcall(core.setup, {
+		cache_root = options.cache_root or (vim.fn.stdpath("cache") .. "/diagram-v3"),
+		default_mode = config.default_mode,
+		stage_timeout_ms = config.stage_timeout_ms,
+		max_stage_output_bytes = config.max_stage_output_bytes,
+		cache = config.cache,
+		spawn = options.spawn,
+		schedule = options.schedule,
+		defer = options.defer,
+		plantuml_policy = options.plantuml_policy,
+		notify = options.notify or notify,
+		event = options.event,
+	})
+	if not ok or not setup_ok then
+		return nil, ok and setup_err or setup_ok
+	end
+	configured = false
+	local registered, register_err = pcall(function()
+		register_renderers()
+		assert(core.register_presenter("ascii", ascii_presenter()))
+		assert(core.register_presenter("image", image_presenter()))
+	end)
+	if not registered then
+		pcall(core.teardown)
+		return nil, register_err
+	end
+	configured = true
+	return core
+end
+
+local function ensure_view()
+	if configured then
+		return view
+	end
+	if not view then
+		local ok, result = deferred.try("diagram_view")
+		if not ok then
+			return nil, result
+		end
+		view = result
+	end
+	return configure_view(view, setup_options, effective_config)
+end
 
 function M.show(mode, selection)
 	mode = mode or effective_config.default_mode
@@ -317,7 +367,12 @@ function M.show(mode, selection)
 		notify(message, vim.log.levels.WARN)
 		return nil, message
 	end
-	local diagram, extract_err = view.extract({
+	local core, setup_err = ensure_view()
+	if not core then
+		notify("Could not initialize diagram viewer: " .. tostring(setup_err), vim.log.levels.ERROR)
+		return nil, setup_err
+	end
+	local diagram, extract_err = core.extract({
 		bufnr = vim.api.nvim_get_current_buf(),
 		winid = vim.api.nvim_get_current_win(),
 		selection = selection,
@@ -355,7 +410,7 @@ function M.show(mode, selection)
 		return nil, message
 	end
 
-	return view.open({
+	return core.open({
 		renderer = diagram.kind .. ":" .. mode,
 		presenter = mode == "svg" and "image" or "ascii",
 		kind = diagram.kind,
@@ -426,31 +481,28 @@ function M.setup(opts)
 		return true
 	end
 	opts = opts or {}
-	effective_config = require("config.local_config").plugin("diagram_view", effective_config)
-	local ok, err = view.setup({
-		cache_root = opts.cache_root or (vim.fn.stdpath("cache") .. "/diagram-v3"),
-		default_mode = effective_config.default_mode,
-		stage_timeout_ms = effective_config.stage_timeout_ms,
-		max_stage_output_bytes = effective_config.max_stage_output_bytes,
-		cache = effective_config.cache,
-		spawn = opts.spawn,
-		schedule = opts.schedule,
-		defer = opts.defer,
-		plantuml_policy = opts.plantuml_policy,
-		notify = opts.notify or notify,
-		event = opts.event,
-	})
-	if not ok then
-		notify("Could not initialize diagram viewer: " .. tostring(err), vim.log.levels.ERROR)
-		return nil, err
+	if type(opts) ~= "table" then
+		return nil, "setup options must be a table"
 	end
-	register_renderers()
-	assert(view.register_presenter("ascii", ascii_presenter()))
-	assert(view.register_presenter("image", image_presenter()))
+	local candidate_config = local_config.plugin("diagram_view", DEFAULT_CONFIG)
+	if configured then
+		local core, setup_err = configure_view(view, opts, candidate_config)
+		if not core then
+			return nil, setup_err
+		end
+	end
+	setup_options = opts
+	effective_config = candidate_config
 	register_interface()
 	return true
 end
 
-M.extract = view.extract
+function M.extract(...)
+	local core, err = ensure_view()
+	if not core then
+		return nil, err
+	end
+	return core.extract(...)
+end
 
 return M

@@ -11,6 +11,11 @@ host-owned. The plugin does not install, probe external tools, or access the
 network during `setup()` or aggregate `status()`; aggregate `status()` also
 performs no filesystem I/O.
 
+The host keeps startup and Mason readiness at setup-only. Its `plan(name)` API
+plans one requested identity, and aggregate `plan_all()` is available only to
+explicit callers. The `all` install target likewise enumerates the catalog only
+after the caller names it.
+
 ## Setup and public request envelopes
 
 `setup()` accepts exactly these top-level keys:

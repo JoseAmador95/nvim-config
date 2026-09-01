@@ -6,8 +6,13 @@ local M = {}
 
 local TITLE = "nvim.theme"
 local FALLBACK = "habamax"
+local REFRESH_COALESCE_MS = 100
 local initialized = false
-local focus_reload_group = "NvimConfigThemeReload"
+local refresh_group = "NvimConfigThemeReload"
+local refresh_generation = 0
+local refresh_pending
+local refresh_scheduled = false
+local defer = vim.defer_fn
 
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve theme adapter")
 local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
@@ -86,6 +91,51 @@ local function ensure_setup()
 	return true
 end
 
+local function reset_refresh_coalescer()
+	refresh_generation = refresh_generation + 1
+	refresh_pending = nil
+	refresh_scheduled = false
+end
+
+local function queue_refresh(kind)
+	if kind == "reload" or refresh_pending == nil then
+		refresh_pending = kind
+	end
+	if refresh_scheduled then
+		return
+	end
+	refresh_scheduled = true
+	local generation = refresh_generation
+	defer(function()
+		if generation ~= refresh_generation then
+			return
+		end
+		local pending = refresh_pending
+		refresh_pending = nil
+		local called, refresh_err = pcall(function()
+			if pending == "reload" then
+				router.reload()
+			elseif pending == "repaint" then
+				router.repaint()
+			end
+		end)
+		if generation == refresh_generation then
+			refresh_pending = nil
+			refresh_scheduled = false
+		end
+		if not called then
+			notify("Theme refresh failed: " .. tostring(refresh_err), vim.log.levels.ERROR)
+		end
+	end, REFRESH_COALESCE_MS)
+end
+
+local function is_background_response(event)
+	local data = event and event.data
+	local sequence = type(data) == "table" and data.sequence or data
+	return type(sequence) == "string"
+		and (sequence:find("^\27%]11;rgb:") ~= nil or sequence:find("^\27%]11;rgba:") ~= nil)
+end
+
 ---Register a host painter for a colorscheme with custom setup requirements.
 ---@param name string
 ---@param painter fun(background: string)
@@ -112,11 +162,27 @@ function M.selection()
 end
 
 function M.apply(name)
-	return ensure_setup() and router.apply(name) or false
+	if not ensure_setup() then
+		return false
+	end
+	local applied, err = router.apply(name)
+	if applied then
+		reset_refresh_coalescer()
+	end
+	return applied, err
 end
 
 function M.repaint()
-	return ensure_setup() and router.repaint() or false
+	if not ensure_setup() then
+		return false
+	end
+	-- An explicit repaint owns the current frame and supersedes any delayed
+	-- OptionSet/OSC repaint already waiting in the coalescer.
+	local repainted, err = router.repaint()
+	if repainted then
+		reset_refresh_coalescer()
+	end
+	return repainted, err
 end
 
 function M.save(name)
@@ -124,15 +190,27 @@ function M.save(name)
 end
 
 function M.select(name)
-	if not ensure_setup() or not router.select(name) then
+	if not ensure_setup() then
 		return false
 	end
+	local selected = router.select(name)
+	if not selected then
+		return false
+	end
+	reset_refresh_coalescer()
 	notify("Theme set to " .. name, vim.log.levels.INFO)
 	return true
 end
 
 function M.reload()
-	return ensure_setup() and router.reload() or false
+	if not ensure_setup() then
+		return false
+	end
+	local reloaded, err = router.reload()
+	if reloaded then
+		reset_refresh_coalescer()
+	end
+	return reloaded, err
 end
 
 function M.status()
@@ -144,11 +222,16 @@ function M.effective_config()
 end
 
 function M.reset()
-	if not ensure_setup() or not router.reset() then
+	if not ensure_setup() then
 		return false
 	end
+	local reset, err = router.reset()
+	if not reset then
+		return false
+	end
+	reset_refresh_coalescer()
 	notify("Theme reset to " .. M.selection().colorscheme, vim.log.levels.INFO)
-	return true
+	return true, err
 end
 
 -- Interactive UI remains a host concern. Snacks previews when available and
@@ -180,15 +263,31 @@ end
 function M.setup()
 	ensure_setup()
 	local configured = policy()
-	local group = vim.api.nvim_create_augroup(focus_reload_group, { clear = true })
+	reset_refresh_coalescer()
+	local group = vim.api.nvim_create_augroup(refresh_group, { clear = true })
 	if configured.reload_on_focus ~= false then
 		vim.api.nvim_create_autocmd("FocusGained", {
 			group = group,
 			callback = function()
-				router.reload()
+				queue_refresh("reload")
 			end,
 		})
 	end
+	vim.api.nvim_create_autocmd("OptionSet", {
+		group = group,
+		pattern = "background",
+		callback = function()
+			queue_refresh("repaint")
+		end,
+	})
+	vim.api.nvim_create_autocmd("TermResponse", {
+		group = group,
+		callback = function(event)
+			if is_background_response(event) then
+				queue_refresh("repaint")
+			end
+		end,
+	})
 	vim.api.nvim_create_user_command("Theme", function(opts)
 		if opts.args ~= "" then
 			M.select(opts.args)

@@ -40,6 +40,7 @@ end
 
 local toolchain = require("config.toolchain")
 local fs = require("config.fs")
+local release_plan_count = 0
 local release_install_count = 0
 local registry_refresh_count = 0
 local mason_install_count = 0
@@ -84,6 +85,7 @@ local fake_paths = {
 
 local fake_release = {}
 function fake_release.plan(name)
+	release_plan_count = release_plan_count + 1
 	local entry = toolchain.managed_tools[name]
 	if not entry then
 		return nil, "unknown"
@@ -194,35 +196,91 @@ assert(vim.fn.writefile({
 	}),
 }, legacy_root .. "/plantuml@1.2026.6.json") == 0)
 
-test("setup publishes the manual command before fallible startup planning", function()
+test("setup publishes the manual command without planning", function()
 	local verified_tools = require("verified_tools")
 	local original_plan = verified_tools.plan
+	local original_attest = verified_tools.attest
 	verified_tools.plan = function()
-		error("injected startup planning failure")
+		error("setup planned a tool")
 	end
+	verified_tools.attest = function()
+		error("setup attested a tool")
+	end
+	local before_release_plans = release_plan_count
 	local ok, setup_err = pcall(bootstrap.setup)
 	verified_tools.plan = original_plan
+	verified_tools.attest = original_attest
 	assert(ok, setup_err)
 	assert(vim.fn.exists(":NvimConfigToolsInstall") == 2)
-	assert(bootstrap.setup(), "startup planning was not retryable")
+	assert(bootstrap.setup(), "idempotent setup failed")
+	assert(release_plan_count == before_release_plans)
 	bootstrap._reset_for_tests()
 end)
 
-test("Mason readiness repairs a skipped Lazy init hook", function()
+test("Mason readiness repairs a skipped Lazy init hook without probes or attestation", function()
+	local verified_tools = require("verified_tools")
+	local original_plan = verified_tools.plan
+	local original_attest = verified_tools.attest
+	local original_system = bootstrap._system
+	local original_registry = bootstrap._registry
+	local original_network = bootstrap._network_authorized
+	local network_checks = 0
+	verified_tools.plan = function()
+		error("Mason readiness planned a tool")
+	end
+	verified_tools.attest = function()
+		error("Mason readiness attested a tool")
+	end
+	bootstrap._system = function()
+		error("Mason readiness ran a version probe")
+	end
+	bootstrap._registry = function()
+		error("Mason readiness accessed the registry")
+	end
+	bootstrap._network_authorized = function()
+		network_checks = network_checks + 1
+		return true
+	end
+	local before_release_plans = release_plan_count
+	local before_versions = mason_version_checks
 	assert(vim.fn.exists(":NvimConfigToolsInstall") == 0)
-	bootstrap.mason_ready()
+	local ok, ready_err = pcall(bootstrap.mason_ready)
+	verified_tools.plan = original_plan
+	verified_tools.attest = original_attest
+	bootstrap._system = original_system
+	bootstrap._registry = original_registry
+	bootstrap._network_authorized = original_network
+	assert(ok, ready_err)
 	assert(vim.fn.exists(":NvimConfigToolsInstall") == 2)
+	assert(network_checks == 0)
+	assert(release_plan_count == before_release_plans and mason_version_checks == before_versions)
+	bootstrap._reset_for_tests()
 end)
 
-test("setup and Mason readiness perform no network or install", function()
+test("targeted planning and aggregate planning are explicit", function()
 	bootstrap.setup()
+	local verified_tools = require("verified_tools")
+	local original_plan = verified_tools.plan
+	local planned = {}
+	verified_tools.plan = function(spec)
+		planned[#planned + 1] = spec.identity.name
+		return original_plan(spec)
+	end
+	local targeted = assert(bootstrap.plan("mmdflux"))
+	assert(targeted.identity.name == "mmdflux")
+	assert(vim.deep_equal(planned, { "mmdflux" }), "targeted plan expanded to the catalog")
 	local plans = bootstrap.plan_all()
+	verified_tools.plan = original_plan
 	assert(plans.mmdflux and plans.clangd)
+	assert(#planned > 1, "explicit plan_all did not enumerate the catalog")
 	assert(release_install_count == 0 and registry_refresh_count == 0 and mason_install_count == 0)
 	bootstrap.mason_ready()
 	assert(release_install_count == 0 and registry_refresh_count == 0 and mason_install_count == 0)
+	assert(not bootstrap.install(nil), "install accepted an implicit target")
+	assert(bootstrap.import_legacy("plantuml"))
 	local migrated = assert(bootstrap.engine().status(assert(bootstrap.spec("plantuml")).identity))
 	assert(migrated.status == "repair-required")
+	assert(not bootstrap.import_legacy("unknown-tool"), "legacy import accepted an unknown target")
 	assert(vim.fn.exists(":NvimConfigToolsInstall") == 2)
 end)
 

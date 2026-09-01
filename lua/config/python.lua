@@ -1,7 +1,9 @@
 -- Host adapters for project-python.nvim. Commands, mappings, prompts, LSP
 -- restarts, and upstream plugin integration remain configuration policy.
 local M = {}
-local engine = require("project_python")
+local deferred = require("config.deferred")
+local engine_instance
+local engine_configured = false
 local local_config = require("config.local_config")
 local repo = require("config.repo")
 local terminal = require("config.terminal")
@@ -101,12 +103,43 @@ local terminal_bridge = {
 	end,
 }
 
-engine.setup({
-	explicit = explicit_from_project_settings,
-	fallback = fallback_python,
-	terminal = terminal_bridge,
-	test_runner = plugin_config.test_runner,
-	repl = plugin_config.repl,
+local function ensure_engine()
+	if engine_configured and engine_instance then
+		return engine_instance
+	end
+	local candidate = engine_instance
+	if not candidate then
+		local loaded, result = deferred.try("project_python")
+		if not loaded then
+			return nil, tostring(result)
+		end
+		candidate = result
+	end
+	local ok, result = pcall(candidate.setup, {
+		explicit = explicit_from_project_settings,
+		fallback = fallback_python,
+		terminal = terminal_bridge,
+		test_runner = plugin_config.test_runner,
+		repl = plugin_config.repl,
+	})
+	if not ok or not result then
+		engine_instance = nil
+		engine_configured = false
+		return nil, tostring(ok and "project-python setup failed" or result)
+	end
+	engine_instance = candidate
+	engine_configured = true
+	return engine_instance
+end
+
+local engine = setmetatable({}, {
+	__index = function(_, key)
+		local instance, err = ensure_engine()
+		if not instance then
+			error(err)
+		end
+		return instance[key]
+	end,
 })
 
 local function root_for_start(start, buf)
@@ -520,6 +553,6 @@ function M.setup()
 	end, { desc = "Send selection to Python REPL" })
 end
 
-M._engine = engine
+M._engine = ensure_engine
 
 return M

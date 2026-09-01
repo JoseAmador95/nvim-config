@@ -8,9 +8,11 @@ This is a Neovim 0.12+ configuration with a full editor profile and a small
 ## Setup and optional features
 
 Clone the repository as `~/.config/nvim` and start Neovim. Lazy restores locked
-plugins; startup only plans and attests exact tool pins. Installation, retry and
-repair are explicit through `:NvimConfigToolsInstall[!]`, and offline startup
-never consumes an attempt.
+plugins; startup only registers a lightweight verified-tool command facade. The
+tool lifecycle and its local plugin are loaded on the first explicit
+`:NvimConfigToolsInstall[!]` request. Startup performs no tool planning, version
+probes, attestation, registry access, or network work, and offline startup never
+consumes an attempt.
 
 For a reproducible install or validation run, download the four pinned,
 precompiled validators and restore the committed plugin/parser pins into an
@@ -34,7 +36,7 @@ mutates plugins, parsers, or the committed lock.
 
 Host-specific settings belong in `~/.nvim-local.lua`; create a documented
 owner-only template with `:NvimConfigInit`. Plugin settings live exclusively
-under `plugins.<plugin_name>`; `dap`, `path`, `env`, and `plugins_dir` remain
+under `plugins.<plugin_name>`; `dap`, `ui`, `path`, `env`, and `plugins_dir` remain
 host-level settings. The retired root names `theme`, `clangd`, `review`,
 `log_watch`, `diagram_cache`, and `mason` are rejected rather than treated as
 aliases. `:NvimConfigDump` recursively redacts environment values. For example,
@@ -43,11 +45,38 @@ set `plugins = { native_review = { hunk_context = 0 } }` to change that
 review-local context. Split view keeps one structural context line when
 configured to zero so native old/new filler stays aligned.
 
+The terminal editor starts with `ui = { redraw_profile = "full" }`. Set
+`redraw_profile = "low-bandwidth"` explicitly in the per-host file to reduce
+redraw traffic; it is never inferred from SSH. Project-local `ui` is forbidden:
+the complete project source is rejected before approval rather than partially
+merged. VSCode Neovim and `nvimpager` always keep `full`.
+
+| Surface | `full` | `low-bandwidth` |
+| --- | --- | --- |
+| Core UI | `cursorline`, `showmatch`, `scrolloff=10` | no cursor line/match flash, `scrolloff=0` |
+| Diagnostics | virtual lines on the current line | virtual lines off |
+| Navic / Illuminate | immediate navic; Illuminate 100 ms with LSP, Tree-sitter, regex | lazy navic; Illuminate 300 ms with LSP only |
+| Indent / context | indent scope on at 200 ms; Tree-sitter Context on | scope off at 500 ms; Tree-sitter Context off |
+| Markdown | all configured render modes with normal anti-conceal | normal mode only; anti-conceal off |
+| Noice / Lualine | existing 33 ms LSP progress and 16 ms event refresh | both throttled to 100 ms |
+
+The choice is fixed at startup; restart Neovim after changing it. `full`
+preserves the existing interactive behavior and remains the default.
+
 Every local product exposes a strict setup contract plus copied `status()` and
 `effective_config()` snapshots. `:checkhealth nvimconfig` aggregates those 17
 surfaces without refreshing state, starting processes, installing tools, or
 downloading parsers. Workflow commands remain in the host configuration rather
 than inside the plugins.
+
+All 17 local plugin directories stay on `runtimepath`; none is registered as a
+Lazy plugin. The startup-owned foundations are `trusted-workspace`,
+`exact-editor`, `tab-first`, `treesitter-runtime`, `theme-router`, and
+`native-review` (VSCode and pager use their smaller profile-specific subsets).
+The devcontainer, terminal, Python, action palette, diagram, log, scratch,
+coverage, Just, clangd compile-database, and verified-tools cores load only at
+their documented first-use boundary. Their host commands and mappings remain
+available from startup through lightweight adapters.
 
 The debug UI defaults to `dap-ui`. Select the pinned `nvim-dap-view`
 alternative with `dap = { ui = "dap-view" }` in local config, or for one
@@ -60,6 +89,8 @@ terminal background with Latte in light mode and Mocha in dark mode.
 `:Theme vscode` switches back, while `:ThemeReset` discards the local choice
 and restores the current versioned default without persisting it; a private
 migration marker prevents the retained legacy Lua choice from returning.
+Focus, terminal-background option, and OSC response bursts share one 100 ms
+refresh window; a durable reload wins over repaint when both are pending.
 
 The effective executable order is deliberate:
 
@@ -70,9 +101,10 @@ The effective executable order is deliberate:
 5. config-managed release binaries under the primary Neovim data root;
 6. Mason's `bin` directory.
 
-External candidates are still probed before a managed claim, but once an exact
-pin is installed its content-attested shim wins consistently in the editor and
-`nvimpager`. `:checkhealth nvimconfig` prints the effective origin and order.
+External candidates are probed only while planning an explicit install request,
+before a managed claim. Once an exact pin is installed its content-attested shim
+wins consistently in the editor and `nvimpager`. `:checkhealth nvimconfig`
+prints the effective origin and order.
 External tools are optional unless their feature is used:
 
 | Feature | Tools |
@@ -90,13 +122,18 @@ External tools are optional unless their feature is used:
 `mmdflux`, PlantUML, release tools and exact Mason packages share
 `:NvimConfigToolsInstall [all|name]`; append `!` for explicit repair or to
 force the managed pin when a compatible external tool would otherwise win.
+Naming one tool plans only that target; spelling `all` is the explicit aggregate
+planning/install path. That explicit request also imports only the matching
+legacy tool record; startup never scans the legacy catalog.
+
 Mason's UI is
 read-only: its install, update and uninstall commands and mappings are removed.
 Release installs bind the verified source-archive SHA to hashes of every
 promoted command/artifact. Mason validates its exact raw source version and
 complete executable-link map, then binds them to a private `0600` receipt;
-subsequent attestation detects receipt or executable drift without refreshing
-the registry.
+an explicit request for an already-succeeded identity attests it and detects
+receipt or executable drift without refreshing the registry.
+
 The managed backends and their host prerequisites are:
 
 | Backend | Packages | Host prerequisite |
@@ -299,10 +336,16 @@ Python settings take precedence only after
 `.vscode/settings.json` and `.neoconf.json`; any edit revokes their effect until
 they are approved again. Selection never changes global `PATH`,
 `VIRTUAL_ENV` or terminal activation. The effective interpreter for each root
-is shared by Pyright, Neotest, DAP, the REPL and statusline. An attached Pyright
-root or the nearest Python project marker takes precedence over an enclosing Git
-root, so nested Python projects stay independent. Opening a PEP 723 script never
-runs venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
+is shared by Pyright, Neotest, DAP, the REPL and an event-refreshed statusline
+cache. Statusline renders read cached labels only; project discovery, Git and
+filesystem work run outside the render path. An attached Pyright root or the
+nearest Python project marker takes precedence over an enclosing Git root, so
+nested Python projects stay independent. Opening a PEP 723 script never runs
+venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
+Environment discovery is cached per project; use `:PythonEnvironmentRefresh`
+after changing an environment on disk, or `:PythonEnvironmentClear` to discard
+the manual selection and rediscover it.
+
 `<leader>Tn` runs the nearest test, `<leader>Td` debugs it, `<leader>pr` toggles
 the project REPL and `<leader>ps` opens or focuses that REPL before sending the
 current line or visual selection. Sends are queued FIFO per project until the

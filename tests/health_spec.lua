@@ -22,7 +22,7 @@ for _, required in ipairs({
 	"Managed release platform/prerequisites",
 	"record.detail",
 	"Tool failures never auto-retry",
-	"Startup is local probe/plan/attest only",
+	"Startup leaves verified-tools unloaded; health and explicit commands own plan/probe/attest/install",
 	":NvimConfigToolsInstall",
 	"tree-sitter",
 	"Tree-sitter parser compilation",

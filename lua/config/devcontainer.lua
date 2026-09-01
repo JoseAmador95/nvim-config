@@ -5,7 +5,9 @@ local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normaliz
 
 local M = {}
 local uv = vim.uv
-local core = require("devcontainer_editor")
+local deferred = require("config.deferred")
+local core
+local core_configured = false
 local policy = require("config.local_config").plugin("devcontainer_editor", {
 	cli = "devcontainer",
 	lockfile_policy = "preserve",
@@ -48,18 +50,39 @@ local function options()
 	}
 end
 
-assert(core.setup(options()))
+local function ensure_core()
+	if core_configured and core then
+		return core
+	end
+	local candidate = core
+	if not candidate then
+		local loaded, result = deferred.try("devcontainer_editor")
+		if not loaded then
+			return nil, tostring(result)
+		end
+		candidate = result
+	end
+	local ok, result = pcall(candidate.setup, options())
+	if not ok then
+		core = nil
+		return nil, tostring(result)
+	end
+	core = candidate
+	core_configured = true
+	return core
+end
 
 function M.in_workspace()
-	return core.in_workspace()
+	return vim.env.NVIM_DEVCONTAINER == "1"
 end
 
 function M.network_authorized()
-	return core.network_authorized()
+	return vim.env.NVIM_CONFIG_OFFLINE ~= "1"
 end
 
 function M.request_host(action, dependencies, on_success)
-	return core.request_host(action, dependencies, on_success)
+	local instance, err = ensure_core()
+	return instance and instance.request_host(action, dependencies, on_success) or nil, err
 end
 
 local function exact_pane()
@@ -83,10 +106,14 @@ local function exact_pane()
 end
 
 local function wait_for_claim(project_root, claim_id, timeout_ms)
+	local instance, load_err = ensure_core()
+	if not instance then
+		return nil, load_err
+	end
 	local failure
 	local last_error
 	local ready = vim.wait(timeout_ms or policy.claim_timeout_ms, function()
-		local status, status_err = core.status(project_root)
+		local status, status_err = instance.status(project_root)
 		if not status then
 			last_error = status_err
 			return false
@@ -119,11 +146,15 @@ local function replace_editor(recreate, allow_network)
 		return nil, pane_err
 	end
 	local project_root = root()
-	local claim_id, claim_err = core.new_claim_id()
+	local instance, load_err = ensure_core()
+	if not instance then
+		return nil, load_err
+	end
+	local claim_id, claim_err = instance.new_claim_id()
 	if not claim_id then
 		return nil, claim_err
 	end
-	local argv, argv_err = core.lifecycle_argv("up", {
+	local argv, argv_err = instance.lifecycle_argv("up", {
 		root = project_root,
 		tmux_pane = pane,
 		claim_id = claim_id,
@@ -148,7 +179,11 @@ local function replace_editor(recreate, allow_network)
 end
 
 local function run_lifecycle(action, specification, callback)
-	local argv, err = core.lifecycle_argv(action, specification)
+	local instance, load_err = ensure_core()
+	if not instance then
+		return nil, load_err
+	end
+	local argv, err = instance.lifecycle_argv(action, specification)
 	if not argv then
 		return nil, err
 	end
@@ -213,8 +248,11 @@ local function show_doctor()
 end
 
 function M.setup()
-	assert(core.setup(options()))
 	if M.in_workspace() then
+		local instance, err = ensure_core()
+		if not instance then
+			error("Could not initialize Dev Container editor: " .. tostring(err))
+		end
 		vim.g.nvim_devcontainer_status = {
 			project = vim.fs.basename(vim.env.NVIM_DEVCONTAINER_CONTAINER_ROOT or "container"),
 			network = M.network_authorized() and "online" or "offline",
@@ -265,9 +303,12 @@ function M.setup()
 			notify(err, vim.log.levels.ERROR)
 		end
 	end, { desc = "Explicitly return the tmux editor pane to host Neovim", force = true })
+	return true
 end
 
-M._core = core
+M._core = function()
+	return assert(ensure_core())
+end
 M._launcher = launcher
 M._replace_editor = replace_editor
 M._options = options

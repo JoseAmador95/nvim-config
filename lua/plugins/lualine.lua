@@ -1,3 +1,5 @@
+local redraw_profile = require("config.redraw_profile")
+
 return {
 	"nvim-lualine/lualine.nvim",
 	lazy = false,
@@ -42,6 +44,7 @@ return {
 		local function setup()
 			lualine.setup({
 				options = {
+					refresh = { refresh_time = redraw_profile.low_bandwidth() and 100 or 16 },
 					theme = theme(),
 					icons_enabled = true,
 					component_separators = "",

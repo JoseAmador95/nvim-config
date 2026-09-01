@@ -1,6 +1,11 @@
+local virtual_lines = { current_line = true }
+if require("config.redraw_profile").low_bandwidth() then
+	virtual_lines = false
+end
+
 vim.diagnostic.config({
 	virtual_text = false,
-	virtual_lines = { current_line = true },
+	virtual_lines = virtual_lines,
 	severity_sort = true,
 	float = {
 		border = "rounded",

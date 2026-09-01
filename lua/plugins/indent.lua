@@ -1,3 +1,42 @@
+local redraw_profile = require("config.redraw_profile")
+local deferred = require("config.deferred")
+local palette = require("config.palette")
+
+local opts = {
+	debounce = redraw_profile.low_bandwidth() and 500 or 200,
+	indent = {
+		char = "│",
+		tab_char = "│",
+		highlight = { "IblIndent" },
+	},
+	scope = {
+		enabled = not redraw_profile.low_bandwidth(),
+		show_start = false,
+		show_end = false,
+		highlight = {
+			"IblRainbow1",
+			"IblRainbow2",
+			"IblRainbow3",
+			"IblRainbow4",
+			"IblRainbow5",
+			"IblRainbow6",
+			"IblRainbow7",
+		},
+	},
+	exclude = {
+		filetypes = {
+			"help",
+			"dashboard",
+			"oil",
+			"Trouble",
+			"lazy",
+			"mason",
+			"notify",
+			"snacks_terminal",
+		},
+	},
+}
+
 return {
 	"lukas-reineke/indent-blankline.nvim",
 	main = "ibl",
@@ -5,9 +44,10 @@ return {
 	cond = function()
 		return not vim.g.vscode
 	end,
-	config = function()
-		local hooks = require("ibl.hooks")
-		local palette = require("config.palette")
+	opts = opts,
+	config = function(_, config_opts)
+		local ibl = deferred.load("ibl")
+		local hooks = deferred.load("ibl.hooks")
 
 		local function apply_hl()
 			palette.apply()
@@ -19,7 +59,7 @@ return {
 			group = vim.api.nvim_create_augroup("IblRainbowColors", { clear = true }),
 			callback = function()
 				apply_hl()
-				pcall(require("ibl").update, {})
+				pcall(ibl.update, {})
 			end,
 		})
 
@@ -35,38 +75,6 @@ return {
 			return ((depth - 2) % #palette.current().rainbow) + 1
 		end)
 
-		require("ibl").setup({
-			indent = {
-				char = "│",
-				tab_char = "│",
-				highlight = { "IblIndent" },
-			},
-			scope = {
-				enabled = true,
-				show_start = false,
-				show_end = false,
-				highlight = {
-					"IblRainbow1",
-					"IblRainbow2",
-					"IblRainbow3",
-					"IblRainbow4",
-					"IblRainbow5",
-					"IblRainbow6",
-					"IblRainbow7",
-				},
-			},
-			exclude = {
-				filetypes = {
-					"help",
-					"dashboard",
-					"oil",
-					"Trouble",
-					"lazy",
-					"mason",
-					"notify",
-					"snacks_terminal",
-				},
-			},
-		})
+		ibl.setup(config_opts)
 	end,
 }

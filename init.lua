@@ -49,6 +49,8 @@ vim.opt.undodir = undodir .. "//"
 -- Apply per-host $PATH and environment overrides from ~/.nvim-local.lua early,
 -- before plugins and mason rely on them.
 require("config.local_config").apply_env()
+local redraw_profile = require("config.redraw_profile")
+local low_bandwidth_redraw = redraw_profile.low_bandwidth()
 
 -- Command Pallete -----------------------------------------------------------
 
@@ -87,12 +89,12 @@ end
 -- Interface and Display Options ---------------------------------------------
 
 -- Display settings
-vim.opt.cursorline = true -- Highlight the cursor line
+vim.opt.cursorline = not low_bandwidth_redraw -- Highlight the cursor line
 vim.opt.foldcolumn = "1" -- Show a small column for folding
 vim.opt.number = true -- Show line numbers
 vim.opt.relativenumber = false -- Show relative line numbers
 vim.opt.ruler = true -- Show the cursor position in the status line
-vim.opt.showmatch = true -- Highlight matching brackets
+vim.opt.showmatch = not low_bandwidth_redraw -- Highlight matching brackets
 vim.opt.wildmenu = true -- Enhanced command-line completion
 vim.opt.signcolumn = "yes" -- Keep sign column visible
 vim.opt.updatetime = 250 -- Faster CursorHold events
@@ -104,7 +106,7 @@ vim.opt.incsearch = true -- Show matches as you type
 vim.opt.hlsearch = true -- Highlight search results
 
 -- Scroll off
-vim.opt.scrolloff = 10
+vim.opt.scrolloff = low_bandwidth_redraw and 0 or 10
 
 -- Tab and Indent Settings ---------------------------------------------------
 
@@ -229,12 +231,15 @@ if is_editor then
 	require("config.viewer_commands")
 	require("config.diagram").setup()
 	require("config.clangd_commands")
+	require("config.tool_commands").setup()
 elseif pager.active then
 	require("config.viewer_commands")
 	require("config.diagram").setup()
 end
 
-require("config.theme").setup()
+if not is_vscode then
+	require("config.theme").setup()
+end
 require("config.lazy")
 
 -- `:syntax enable` also enables filetype detection and replays it for buffers

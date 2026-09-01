@@ -125,6 +125,7 @@ vim.notify = function(message, level)
 end
 
 local terminal = require("config.terminal")
+assert(package.loaded.terminal_lifecycle == nil, "terminal lifecycle loaded before the first terminal operation")
 
 local function drain_scheduled()
 	defer_scheduled = false
@@ -142,6 +143,37 @@ local function spec(id, overrides)
 		metadata = { runtime = "host", root = repo, id = id },
 	}, overrides or {})
 end
+
+test("a first-use lifecycle load failure is returned and remains retryable", function()
+	local original_preload = package.preload.terminal_lifecycle
+	package.preload.terminal_lifecycle = function()
+		error("injected terminal lifecycle load failure")
+	end
+	package.loaded.terminal_lifecycle = nil
+
+	local called, value, err = pcall(terminal.send, "first-use-failure", "probe")
+	package.preload.terminal_lifecycle = function()
+		return {
+			setup = function()
+				error("injected terminal lifecycle setup failure")
+			end,
+		}
+	end
+	package.loaded.terminal_lifecycle = nil
+	local setup_called, setup_value, setup_err = pcall(terminal.send, "first-setup-failure", "probe")
+
+	package.preload.terminal_lifecycle = original_preload
+	package.loaded.terminal_lifecycle = nil
+	assert(called, "send raised instead of returning the lifecycle error")
+	assert(value == nil and tostring(err):find("injected terminal lifecycle load failure", 1, true), tostring(err))
+	assert(setup_called, "send raised instead of returning the lifecycle setup error")
+	assert(
+		setup_value == nil and tostring(setup_err):find("injected terminal lifecycle setup failure", 1, true),
+		tostring(setup_err)
+	)
+	local status, retry_err = terminal.status()
+	assert(type(status) == "table", "retry did not load the lifecycle: " .. tostring(retry_err))
+end)
 
 test("specs require arrays, absolute directories, and explicit string env", function()
 	for _, case in ipairs({

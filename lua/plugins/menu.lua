@@ -16,8 +16,5 @@ return {
 		cond = full_terminal_editor,
 		lazy = true,
 		dependencies = { "volt" },
-		init = function()
-			require("config.menu").setup()
-		end,
 	},
 }

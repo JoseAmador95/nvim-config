@@ -3,6 +3,8 @@
 -- "freeze" del resaltado. Providers en cascada LSP -> treesitter -> regex, así
 -- que funciona en cualquier buffer. Navegación: */# nativos (textual) para el día
 -- a día, y Option/Alt + */# para el salto SEMÁNTICO (solo referencias reales, LSP).
+local redraw_profile = require("config.redraw_profile")
+
 return {
 	"RRethy/vim-illuminate",
 	event = { "BufReadPost", "BufNewFile" },
@@ -10,8 +12,8 @@ return {
 		return not vim.g.vscode
 	end,
 	opts = {
-		providers = { "lsp", "treesitter", "regex" },
-		delay = 100,
+		providers = redraw_profile.low_bandwidth() and { "lsp" } or { "lsp", "treesitter", "regex" },
+		delay = redraw_profile.low_bandwidth() and 300 or 100,
 		-- Afinado (ruido/rendimiento):
 		-- No resaltar un símbolo que aparece una sola vez.
 		min_count_to_highlight = 2,
