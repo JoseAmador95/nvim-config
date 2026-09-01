@@ -2,6 +2,7 @@
 -- restarts, and upstream plugin integration remain configuration policy.
 local M = {}
 local engine = require("project_python")
+local local_config = require("config.local_config")
 local repo = require("config.repo")
 local terminal = require("config.terminal")
 local project_settings = require("config.project_settings")
@@ -12,8 +13,15 @@ local repl_drain_attempts = {}
 local repl_drain_scheduled = {}
 local dap_python_module
 
-local REPL_DRAIN_INTERVAL_MS = 50
-local REPL_DRAIN_MAX_ATTEMPTS = 100
+local plugin_config = local_config.plugin("project_python", {
+	test_runner = "pytest",
+	repl = {
+		readiness_timeout_ms = 5000,
+		poll_interval_ms = 50,
+	},
+})
+local REPL_DRAIN_INTERVAL_MS = plugin_config.repl.poll_interval_ms
+local REPL_DRAIN_MAX_ATTEMPTS = math.ceil(plugin_config.repl.readiness_timeout_ms / REPL_DRAIN_INTERVAL_MS)
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Python" })
@@ -50,7 +58,7 @@ local function explicit_from_project_settings(root)
 			local nested = type(settings.settings) == "table" and settings.settings.python or nil
 			for _, python in pairs({ direct = direct, nested = nested }) do
 				if type(python) == "table" then
-					for _, field in ipairs({ "pythonPath", "venvPath", "venv" }) do
+					for _, field in ipairs({ "defaultInterpreterPath", "pythonPath", "venvPath", "venv" }) do
 						if type(python[field]) == "string" and python[field] ~= "" then
 							return vim.deepcopy(python)
 						end
@@ -97,8 +105,20 @@ engine.setup({
 	explicit = explicit_from_project_settings,
 	fallback = fallback_python,
 	terminal = terminal_bridge,
-	neotest_runner = "pytest",
+	test_runner = plugin_config.test_runner,
+	repl = plugin_config.repl,
 })
+
+local function root_for_start(start, buf)
+	if type(start) ~= "string" or start == "" or start:find("%z") then
+		return nil
+	end
+	return engine.resolve_root({
+		start = start,
+		attached_root = buf and attached_pyright_root(buf, start) or nil,
+		repo_root = repo.root(start),
+	})
+end
 
 function M.root(buf)
 	buf = buf or 0
@@ -107,11 +127,7 @@ function M.root(buf)
 	end
 	local name = vim.api.nvim_buf_get_name(buf)
 	local start = name ~= "" and name or (uv.cwd() or vim.fn.getcwd())
-	return engine.resolve_root({
-		start = start,
-		attached_root = attached_pyright_root(buf, start),
-		repo_root = repo.root(start),
-	})
+	return root_for_start(start, buf)
 end
 
 function M.snapshot(root)
@@ -289,6 +305,57 @@ function M.refresh_current(buf, python)
 	return snapshot
 end
 
+local function refresh_consumers(root, before, snapshot)
+	if before.value.interpreter == snapshot.value.interpreter and before.source == snapshot.source then
+		return snapshot
+	end
+	install_dap_resolver()
+	restart_pyright(root)
+	confirm_repl_restart(root, snapshot.value.interpreter)
+	vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigPythonChanged", modeline = false })
+	return snapshot
+end
+
+function M.refresh(root)
+	root = root or M.root(0)
+	if not root then
+		return nil, "Python project root is unavailable"
+	end
+	local before = engine.snapshot(root)
+	local snapshot, err = engine.refresh(root)
+	if not snapshot then
+		return nil, err
+	end
+	return refresh_consumers(root, before, snapshot)
+end
+
+function M.clear(root)
+	root = root or M.root(0)
+	if not root then
+		return nil, "Python project root is unavailable"
+	end
+	local before = engine.snapshot(root)
+	local snapshot, err = engine.clear(root)
+	if not snapshot then
+		return nil, err
+	end
+	return refresh_consumers(root, before, snapshot)
+end
+
+function M.environment(root)
+	root = root or M.root(0)
+	if not root then
+		return nil, "Python project root is unavailable"
+	end
+	local snapshot = engine.snapshot(root)
+	local diagnostics = engine.diagnostics(root)
+	return {
+		root = root,
+		snapshot = snapshot,
+		candidates = diagnostics.candidates,
+	}
+end
+
 function M.before_init(_, config)
 	return engine.apply_pyright(config, config and config.root_dir or M.root(0))
 end
@@ -309,7 +376,23 @@ function M.setup_dap(dap, dap_python)
 	dap_python_module = dap_python or package.loaded["dap-python"]
 	install_dap_resolver()
 	dap.listeners.on_config.nvim_config_python = function(config)
-		return engine.apply_dap(config, M.root(0))
+		local function value(field)
+			local candidate = config[field]
+			if type(candidate) == "function" then
+				local ok, resolved = pcall(candidate)
+				candidate = ok and resolved or nil
+			end
+			return type(candidate) == "string" and candidate ~= "" and not candidate:find("${", 1, true) and candidate
+				or nil
+		end
+		local resolved_root
+		for _, field in ipairs({ "cwd", "program", "workspace", "workspaceFolder" }) do
+			resolved_root = root_for_start(value(field))
+			if resolved_root then
+				break
+			end
+		end
+		return engine.apply_dap(config, resolved_root or M.root(0))
 	end
 end
 
@@ -388,6 +471,46 @@ function M.venv_name(root)
 end
 
 function M.setup()
+	local function show_environment()
+		local environment, err = M.environment()
+		if not environment then
+			notify(err, vim.log.levels.ERROR)
+			return
+		end
+		local snapshot = environment.snapshot
+		local lines = {
+			("root: %s"):format(environment.root),
+			("source: %s (%s)"):format(snapshot.source, snapshot.validity),
+			("interpreter: %s"):format(snapshot.value.interpreter or "unavailable"),
+			"candidates:",
+		}
+		for _, candidate in ipairs(environment.candidates) do
+			lines[#lines + 1] = ("  %s: %s [%s]"):format(
+				candidate.source,
+				candidate.interpreter or candidate.path or "unavailable",
+				candidate.validity
+			)
+		end
+		notify(table.concat(lines, "\n"))
+	end
+	local function run_change(callback, label)
+		local snapshot, err = callback()
+		if not snapshot then
+			notify(("Could not %s Python environment: %s"):format(label, tostring(err)), vim.log.levels.ERROR)
+			return
+		end
+		notify(("Python environment %s: %s"):format(label, snapshot.value.interpreter or "unavailable"))
+	end
+	vim.api.nvim_create_user_command("PythonEnvironment", show_environment, {
+		desc = "Show the selected Python environment and discovery candidates",
+		force = true,
+	})
+	vim.api.nvim_create_user_command("PythonEnvironmentRefresh", function()
+		run_change(M.refresh, "refreshed")
+	end, { desc = "Refresh the current project Python environment", force = true })
+	vim.api.nvim_create_user_command("PythonEnvironmentClear", function()
+		run_change(M.clear, "cleared")
+	end, { desc = "Clear the current project's manual Python environment", force = true })
 	vim.keymap.set("n", "<leader>pr", M.open_repl, { desc = "Python REPL" })
 	vim.keymap.set("n", "<leader>ps", function()
 		M.send(false)

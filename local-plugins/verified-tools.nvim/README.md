@@ -7,8 +7,9 @@ host owns catalogs, installers, upstream managers, policy, commands, and UI.
 planning, two-job scheduling, cross-process locks, cancellation, watchdogs,
 attestation, repair, shims, and private schema-2 records. Tool manifests,
 installers, Mason registry access, network policy, commands, and health UI remain
-host-owned. The plugin does not install, probe, or access the network during
-`setup()` or `status()`.
+host-owned. The plugin does not install, probe external tools, or access the
+network during `setup()` or aggregate `status()`; aggregate `status()` also
+performs no filesystem I/O.
 
 ## Setup and public request envelopes
 
@@ -23,13 +24,14 @@ host-owned. The plugin does not install, probe, or access the network during
   defer = schedule,
   instance_token = "<optional 64 lowercase hex>",
   lock_wait_ms = 250,
-  lock_retry_ms = 5,
+  lock_retry_ms = 25,
   watchdog_ms = 300000,
   pid = pid_resolver,
   process_alive = liveness_probe,
   clock = clock,
   notify = notify,
   events = emit,
+  on_state_change = observe,
   fail_persist = test_persist_fault,
   interleave = test_interleaving_fault,
 }
@@ -44,16 +46,31 @@ first. Only a completely valid setup publishes any module state. Failed setup
 can therefore be retried, does not expose a shim path, and performs no
 state-root creation. The PID and state-root resolvers are each snapshotted once.
 
+`events(name, payload)` and `on_state_change(event)` receive independent deep
+copies. The latter adds `event.kind = name`; observer failures are isolated from
+the tool lifecycle.
+
+`teardown()` releases process-local configuration only when no queued or running
+jobs remain. Reconfiguration after setup must be exact and idempotent; changing a
+root, callback, backend, PID, token, or policy requires a successful teardown
+first.
+
 `claim()` returns the only managed run authority accepted by `run()`:
 `{identity, plan, record, mode}` with no extra or missing keys. `mode` must be
 `auto`, `retry`, or `repair` and must equal the mode in the exact claimed
 schema-2 record. The optional `run()` callback must be a function.
 
-`status()` lists all records. A targeted status or cancellation accepts either
-an exact `ToolIdentity` or the exact wrapper `{identity = ToolIdentity}`;
-wrapper extras are rejected before filesystem mutation. `cancel()` rejects the
-same malformed envelopes. `attest()` uses the same exact identity wrapper and
-accepts only a function callback when one is supplied.
+`status()` is a pure, copied aggregate of configuration state and process-local
+jobs; it is available before setup. `jobs()` returns a deterministic flat list
+whose rows contain identity/key, status, queue position, stage, and copied
+resources without I/O or callbacks. `records()` explicitly enumerates durable
+records. A targeted `status(identity)` or cancellation accepts either an exact
+`ToolIdentity` or the exact wrapper `{identity = ToolIdentity}`; wrapper extras
+are rejected before filesystem mutation. `effective_config()` returns only
+copied, non-callback policy and uses a 25 ms lock-retry default. There is no
+host-configurable maximum-jobs knob. `cancel()` rejects the same malformed
+envelopes. `attest()` uses the same exact identity wrapper and accepts only a
+function callback when one is supplied.
 
 ## Tool specs and plans
 
@@ -236,7 +253,7 @@ no-replace rename; replacement uses atomic rename exchange, so an existing recor
 never has a missing-name window. Both exchanged sides are re-read exactly. A
 post-check conflict is exchanged back using the actual stable displaced entry,
 including a symlink or other non-record rival. Recovery distinguishes prepared,
-committed, and interrupted-conflict states before reads and `status()`. Cleanup
+committed, and interrupted-conflict states before durable reads. Cleanup
 first reserves each exact entry under a unique name and preserves replacements.
 Once exact NEW is visible, sync, marker, or cleanup failures retain recovery
 evidence and warn without reporting a false write failure. Final transaction-root

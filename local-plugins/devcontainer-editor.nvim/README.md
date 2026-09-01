@@ -30,15 +30,28 @@ a replacement detected against the opened snapshot. POSIX has no
 compare-and-unlink syscall; after the last reservation snapshot, other host
 processes running as the same UID remain the final-syscall trust boundary.
 
+The inbox consumes at most `max_messages_per_tick` records (32 by default),
+returns a copied per-record outcome report, immediately schedules remaining
+backlog, and exponentially backs off repeated failures. Host requests use a
+5000 ms acknowledgement timeout by default. Setup rejects unknown keys before
+stopping an existing watcher or changing configuration.
+
+`effective_config()` is available before setup and returns caller-owned core
+policy defaults; configured projections and setup events exclude callbacks,
+launcher/state/spool paths, and UUID providers. `status()` returns a copied
+aggregate with `configured`, transport, and watcher state, while
+`status(host_root)` keeps the authenticated workspace-record view.
+
 ## API
 
-- `setup(opts)` / `stop()`
+- `setup(opts)` / `effective_config()` / `teardown()` / `stop()`
 - `in_workspace()` / `network_authorized()`
 - `workspace_key(value)` / `route(path, from_root, to_root, kind)`
 - `status(host_root)`
 - `new_claim_id()`
 - `request_host(action, dependencies?, callback?)`
 - `consume_spool_once()`
+- `transport_status()`
 - `lifecycle_argv(action, spec)`
 
 ## Boundary:
@@ -52,3 +65,10 @@ The plugin owns lifecycle argv validation and the editor-side authenticated
 transport contract. `lifecycle_argv("up", spec)` therefore requires an explicit
 `spec.tmux_pane` and canonical `spec.claim_id`; the host waits for that exact
 claim before reporting detached startup success.
+
+The injected policy defaults are `cli = "devcontainer"`, lockfile policy
+`preserve`, SSH-agent policy `auto`, a 2000 ms claim timeout, a 5000 ms ACK
+timeout, and 32 messages per tick. The detached launcher probes lockfile flag
+support at each `up` or `doctor` invocation, then uses `--frozen-lockfile` when
+the adjacent lockfile exists or `--no-lockfile` when it is absent. Missing
+capability support fails closed before `devcontainer up` runs.

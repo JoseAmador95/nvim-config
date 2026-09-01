@@ -40,6 +40,19 @@ test("record FFI ABI selection uses exact Darwin and Linux directory-removal fla
 	assert(unsupported == nil and unsupported_err == "unsupported record FFI ABI: FreeBSD")
 end)
 
+test("pre-setup status and effective defaults are pure and unknown options are transactional", function()
+	tools._reset_for_tests()
+	local status = tools.status()
+	assert(status.configured == false and vim.deep_equal(status.jobs, {}))
+	local effective = tools.effective_config()
+	assert(effective.lock_retry_ms == 25 and vim.deep_equal(effective.backends, {}))
+	effective.backends[1] = "mutated"
+	assert(vim.deep_equal(tools.effective_config().backends, {}), "default effective config shares state")
+	local ok, err = pcall(tools.setup, { state_root = "/tmp", injected = true })
+	assert(not ok and tostring(err):find("unknown option", 1, true))
+	assert(vim.deep_equal(status, tools.status()), "rejected setup mutated aggregate status")
+end)
+
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p") == 1)
 fixture = assert(vim.uv.fs_realpath(fixture))
@@ -239,6 +252,7 @@ local function configure(options)
 		clock = options.clock,
 		interleave = options.interleave,
 		events = options.events,
+		on_state_change = options.on_state_change,
 		notify = options.notify,
 	}
 	if not options.use_default_liveness then
@@ -530,6 +544,14 @@ test("identity destination and every shim remain scheduler and cross-process res
 	}))
 	assert(tools.run(first))
 	assert(tools.run(second))
+	local jobs = tools.jobs()
+	assert(#jobs == 2 and jobs[1].status == "queued" and jobs[1].queue_position == 1)
+	assert(jobs[2].status == "running" and jobs[2].queue_position == nil)
+	assert(type(jobs[1].identity) == "table" and type(jobs[1].resources) == "table")
+	jobs[1].resources[1] = "mutated"
+	assert(tools.jobs()[1].resources[1] ~= "mutated", "jobs shares resource state")
+	local aggregate = tools.status()
+	assert(aggregate.configured == true and vim.deep_equal(aggregate.jobs, tools.jobs()))
 	local queued, active = tools._queue_size()
 	assert(queued == 1 and active == 1, "same shim ran concurrently across install roots")
 	local resource_claims = vim.fn.glob(state .. "/locks/resources/*.ticket.*", false, true)
@@ -1093,7 +1115,7 @@ test("randomized schema-1 filenames migrate canonically without deleting legacy 
 	assert(repaired.record.schema == 2 and repaired.record.identity_key == plan.identity_key)
 	assert(vim.uv.fs_lstat(record_path(plan)).type == "file")
 	assert(vim.uv.fs_lstat(legacy_path).type == "file", "explicit repair deleted legacy recovery state")
-	local listed = assert(tools.status())
+	local listed = assert(tools.records())
 	assert(#listed == 1 and listed[1].schema == 2)
 
 	configure()
@@ -2434,6 +2456,47 @@ test("setup failures are transactional and allow a clean retry", function()
 		assert(tools.shim_bin() == setup_root .. "/shims/bin")
 		assert(vim.uv.fs_lstat(setup_root) == nil, "successful setup performed implicit I/O")
 	end
+end)
+
+test("pinned setup only accepts an exact idempotent candidate", function()
+	tools._reset_for_tests()
+	local setup_root = fixture .. "/pinned-setup"
+	local root_calls = 0
+	local root_resolver = function()
+		root_calls = root_calls + 1
+		return setup_root
+	end
+	local pid_resolver = function()
+		return vim.uv.os_getpid()
+	end
+	local options = {
+		state_root = root_resolver,
+		instance_token = string.rep("c", 64),
+		pid = pid_resolver,
+		lock_wait_ms = 0,
+	}
+	assert(tools.setup(options))
+	local before_config = tools.effective_config()
+	local before_status = tools.status()
+	assert(tools.setup(options), "exact repeated setup was not idempotent")
+	assert(root_calls == 2, "repeated setup did not snapshot its candidate root")
+
+	local changed = vim.tbl_extend("force", {}, options, { lock_wait_ms = 1 })
+	local ok, err = pcall(tools.setup, changed)
+	assert(not ok and tostring(err):find("teardown", 1, true), tostring(err))
+	assert(root_calls == 3, "rejected reconfiguration skipped candidate root resolution")
+	assert(vim.deep_equal(before_config, tools.effective_config()), "rejected reconfiguration changed policy")
+	assert(vim.deep_equal(before_status, tools.status()), "rejected reconfiguration changed lifecycle state")
+
+	changed = vim.tbl_extend("force", {}, options, {
+		pid = function()
+			return 0
+		end,
+	})
+	ok = pcall(tools.setup, changed)
+	assert(not ok, "invalid repeated PID was accepted")
+	assert(root_calls == 4, "PID failure skipped candidate root resolution")
+	assert(vim.deep_equal(before_config, tools.effective_config()), "PID failure changed policy")
 end)
 
 test("state roots reject symlinked ancestors without escaping", function()

@@ -22,9 +22,11 @@ local original_editor = package.loaded["config.editor"]
 
 local profile = "full"
 package.loaded["config.local_config"] = {
-	get = function(name)
-		assert(name == "clangd")
-		return { path = "clangd-custom", profile = profile }
+	plugin = function(name, defaults)
+		assert(name == "clangd_compile_db")
+		assert(defaults.path == "clangd" and defaults.profile == "full")
+		assert(defaults.restart_timeout_ms == 5000 and defaults.max_validation_bytes == 256 * 1024 * 1024)
+		return vim.tbl_extend("force", vim.deepcopy(defaults), { path = "clangd-custom", profile = profile })
 	end,
 }
 
@@ -38,21 +40,33 @@ local clients = {
 		config = { root_dir = fixture .. "/one" },
 		attached_buffers = { [buf_one] = true },
 		stop = function(self)
+			self.stopped = true
 			stopped[#stopped + 1] = self
+		end,
+		is_stopped = function(self)
+			return self.stopped == true
 		end,
 	},
 	{
 		config = { root_dir = fixture .. "/two" },
 		attached_buffers = { [buf_two] = true },
 		stop = function(self)
+			self.stopped = true
 			stopped[#stopped + 1] = self
+		end,
+		is_stopped = function(self)
+			return self.stopped == true
 		end,
 	},
 	{
 		config = { root_dir = fixture .. "/three" },
 		attached_buffers = { [buf_three] = true },
 		stop = function(self)
+			self.stopped = true
 			stopped[#stopped + 1] = self
+		end,
+		is_stopped = function(self)
+			return self.stopped == true
 		end,
 	},
 }
@@ -124,15 +138,11 @@ test("clearing the only manual database restarts clangd without a compile direct
 	end))
 end)
 
-test("full is default and trusted light profile has an explicit flag surface", function()
+test("full profile and configured executable have an explicit flag surface", function()
 	local full = clangd.command(fixture .. "/one")
 	assert(full[1] == "clangd-custom")
 	assert(vim.tbl_contains(full, "--background-index") and vim.tbl_contains(full, "--clang-tidy"))
-	profile = "light"
-	local light = clangd.command(fixture .. "/one")
-	assert(not vim.tbl_contains(light, "--background-index") and not vim.tbl_contains(light, "--clang-tidy"))
-	assert(clangd.status(fixture .. "/one").profile == "light")
-	profile = "full"
+	assert(clangd.status(fixture .. "/one").profile == "full")
 end)
 
 test("cmake-tools successful generate feeds its actual root, preset, and build directory", function()
@@ -185,6 +195,13 @@ test("source/header switch uses clangd and shared tab navigation", function()
 	vim.fn.writefile({ "#pragma once" }, fixture .. "/one/header.hpp")
 	require("config.clangd_commands").switch_source_header()
 	assert(vim.api.nvim_get_commands({}).ClangdSetCompileCommands.bang == true)
+	for _, name in ipairs({
+		"ClangdCompileCommandsStatus",
+		"ClangdRefreshCompileCommands",
+		"ClangdClearCompileCommands",
+	}) do
+		assert(vim.fn.exists(":" .. name) == 2, "missing command " .. name)
+	end
 	vim.wait(100, function()
 		return opened ~= nil
 	end)

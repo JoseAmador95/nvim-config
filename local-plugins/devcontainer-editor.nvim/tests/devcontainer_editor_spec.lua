@@ -40,8 +40,9 @@ vim.env.NVIM_CONFIG_OFFLINE = "1"
 
 local opened
 local plugin_module = require("devcontainer_editor")
-local function configure(notify, open_callback)
-	plugin_module.setup({
+local function configure(notify, open_callback, overrides)
+	overrides = overrides or {}
+	local options = {
 		state_root = state,
 		spool_root = spool,
 		launcher = "/bin/devcontainer-editor",
@@ -53,7 +54,11 @@ local function configure(notify, open_callback)
 		open = open_callback or function(path, position)
 			opened = { path = path, position = position }
 		end,
-	})
+	}
+	for key, value in pairs(overrides) do
+		options[key] = value
+	end
+	assert(plugin_module.setup(options))
 end
 
 local function with_directory_fsync_failure(directory, failure, callback)
@@ -108,6 +113,21 @@ local function with_test_hook(hook, callback)
 	assert(ok, err)
 	return unpack(results)
 end
+
+test("pre-setup public defaults and aggregate status are copied", function()
+	local first = plugin_module.effective_config()
+	assert(first.cli == "devcontainer" and first.lockfile_policy == "preserve")
+	assert(first.claim_timeout_ms == 2000 and first.ack_timeout_ms == 5000)
+	assert(first.max_messages_per_tick == 32 and first.ssh_agent == "auto")
+	first.max_messages_per_tick = 1
+	assert(plugin_module.effective_config().max_messages_per_tick == 32)
+	assert(pcall(vim.json.encode, plugin_module.effective_config()))
+
+	local status = plugin_module.status()
+	assert(status.configured == false and status.transport.state == "idle")
+	status.transport.state = "mutated"
+	assert(plugin_module.status().transport.state == "idle")
+end)
 
 configure()
 assert(plugin_module._prepare_spool(spool))
@@ -182,7 +202,9 @@ test("wrong authentication and traversal requests fail closed", function()
 		request.auth = fields.valid and assert(plugin_module._authenticate(token, "open_location", request)) or "wrong"
 		local path = spool .. "/inbox/" .. request_id .. ".json"
 		assert(plugin_module._atomic_create(path, vim.json.encode(request) .. "\n"))
-		assert(plugin_module.consume_spool_once() == nil)
+		local consumed, consume_err, report = plugin_module.consume_spool_once()
+		assert(consumed == nil and type(consume_err) == "string")
+		assert(report.state == "partial" and report.failed == 1 and report.records[1].ok == false)
 		assert(vim.uv.fs_lstat(path) == nil)
 	end
 end)
@@ -341,6 +363,40 @@ test("host requests use an authenticated private spool and exact allowlist", fun
 	assert(plugin_module.request_host("publish") == nil)
 	assert(plugin_module.request_host("execute") == nil)
 	assert(vim.uv.fs_unlink(spool .. "/outbox/00000000-0000-4000-8000-000000000001.json"))
+end)
+
+test("UUID callback and random failures are isolated without leaking spool descriptors", function()
+	configure(nil, nil, {
+		uuid = function()
+			error("fixture UUID failure")
+		end,
+	})
+	local fd_root = vim.uv.fs_stat("/dev/fd") and "/dev/fd" or "/proc/self/fd"
+	local function fd_count()
+		local scanner = assert(vim.uv.fs_scandir(fd_root))
+		local count = 0
+		while vim.uv.fs_scandir_next(scanner) do
+			count = count + 1
+		end
+		return count
+	end
+	local original_random = vim.uv.random
+	vim.uv.random = function()
+		error("fixture random failure")
+	end
+	local before = fd_count()
+	local ok, err = xpcall(function()
+		local claim, claim_err = plugin_module.new_claim_id()
+		assert(claim == nil and tostring(claim_err):find("generate", 1, true), tostring(claim_err))
+		for _ = 1, 5 do
+			local safe, committed, request_err = pcall(plugin_module.request_host, "lazygit")
+			assert(safe and committed == nil and tostring(request_err):find("generate", 1, true), tostring(request_err))
+		end
+	end, debug.traceback)
+	vim.uv.random = original_random
+	assert(ok, err)
+	assert(fd_count() == before, "UUID failure leaked authenticated spool descriptors")
+	configure()
 end)
 
 test("truncated host acknowledgement is retired without masking its decode error", function()
@@ -877,6 +933,12 @@ test("offline authorization and lifecycle argv are explicit", function()
 		"up",
 		"--repo",
 		repo,
+		"--cli",
+		"devcontainer",
+		"--lockfile-policy",
+		"preserve",
+		"--ssh-agent",
+		"auto",
 		"--tmux-pane",
 		"%7",
 		"--claim-id",
@@ -888,6 +950,18 @@ test("offline authorization and lifecycle argv are explicit", function()
 	assert(plugin_module.lifecycle_argv("up", { root = repo, tmux_pane = "%7\n" }) == nil)
 	assert(plugin_module.lifecycle_argv("up", { root = repo, tmux_pane = "%7", claim_id = "bad" }) == nil)
 	assert(plugin_module.lifecycle_argv("delete", {}) == nil)
+	assert(vim.deep_equal(assert(plugin_module.lifecycle_argv("doctor", { root = repo })), {
+		"/bin/devcontainer-editor",
+		"doctor",
+		"--repo",
+		repo,
+		"--cli",
+		"devcontainer",
+		"--lockfile-policy",
+		"preserve",
+		"--ssh-agent",
+		"auto",
+	}))
 end)
 
 test("workspace status rejects hostile state and returns immutable copies", function()
@@ -919,6 +993,144 @@ test("workspace status rejects hostile state and returns immutable copies", func
 	assert(vim.uv.fs_unlink(path))
 	assert(vim.uv.fs_symlink(repo .. "/sub/file.txt", path))
 	assert(plugin_module.status(repo) == nil)
+end)
+
+test("spool batches backlog and reports each record outcome", function()
+	configure(nil, nil, { max_messages_per_tick = 2 })
+	local names = {}
+	for index = 1, 3 do
+		local request_id = ("00000000-0000-4000-8000-%012d"):format(100 + index)
+		local request = {
+			version = 2,
+			request_id = request_id,
+			action = "open_location",
+			path = "sub/file.txt",
+			line = index,
+			column = 1,
+			created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+		}
+		request.auth = assert(plugin_module._authenticate(token, "open_location", request))
+		assert(plugin_module._atomic_create(spool .. "/inbox/" .. request_id .. ".json", vim.json.encode(request)))
+		names[#names + 1] = request_id
+	end
+	local consumed, err, report = plugin_module.consume_spool_once()
+	assert(consumed == 2 and err == nil)
+	assert(report.state == "backlog" and report.processed == 2 and report.succeeded == 2 and report.remaining == 1)
+	assert(#report.records == 2 and report.records[1].ok and report.records[2].ok)
+	report.records[1].ok = false
+	assert(plugin_module.transport_status().records[1].ok == true)
+	consumed, err, report = plugin_module.consume_spool_once()
+	assert(consumed == 1 and err == nil and report.state == "idle" and report.remaining == 0)
+	for _, request_id in ipairs(names) do
+		assert(vim.uv.fs_unlink(spool .. "/acks/" .. request_id .. ".json"))
+	end
+end)
+
+test("setup contracts reject unknown keys without state mutation", function()
+	local events = {}
+	configure(nil, nil, {
+		event = function(event)
+			events[#events + 1] = event
+		end,
+	})
+	local before = assert(plugin_module.effective_config())
+	assert(before.claim_timeout_ms == 2000 and before.ack_timeout_ms == 5000)
+	assert(before.max_messages_per_tick == 32 and before.lockfile_policy == "preserve")
+	assert(before.launcher == nil and before.open == nil and before.notify == nil and before.event == nil)
+	assert(before.state_root == nil and before.spool_root == nil and before.uuid == nil)
+	assert(pcall(vim.json.encode, before))
+	before.max_messages_per_tick = 1
+	assert(assert(plugin_module.effective_config()).max_messages_per_tick == 32)
+	local rejected, reject_err = pcall(plugin_module.setup, { injected = true })
+	assert(not rejected and tostring(reject_err):find("unknown key", 1, true))
+	assert(assert(plugin_module.effective_config()).max_messages_per_tick == 32)
+	for label, invalid in pairs({
+		false_options = false,
+		false_cli = { cli = false },
+		nul_launcher = { launcher = "/bin/tool\0arg" },
+		empty_state_root = { state_root = "" },
+		nul_spool_root = { spool_root = "spool\0root" },
+	}) do
+		local accepted = pcall(plugin_module.setup, invalid)
+		assert(not accepted, label .. " was accepted")
+	end
+	assert(assert(plugin_module.effective_config()).max_messages_per_tick == 32)
+
+	configure(nil, nil, {
+		state_root = function()
+			error("state boom")
+		end,
+	})
+	local safe, value, dynamic_err = pcall(plugin_module.status, repo)
+	assert(safe and value == nil and tostring(dynamic_err):find("state boom", 1, true), "state callback escaped API")
+	configure(nil, nil, {
+		spool_root = function()
+			error("spool boom")
+		end,
+	})
+	safe, value, dynamic_err = pcall(plugin_module.consume_spool_once)
+	assert(safe and value == nil and tostring(dynamic_err):find("spool boom", 1, true), "spool callback escaped API")
+	configure(nil, nil, {
+		event = function(event)
+			events[#events + 1] = event
+		end,
+	})
+	local transport = plugin_module.transport_status()
+	transport.state = "mutated"
+	assert(plugin_module.transport_status().state ~= "mutated")
+	local aggregate = plugin_module.status()
+	assert(aggregate.configured == true and aggregate.transport.state ~= "mutated")
+	aggregate.transport.state = "mutated"
+	assert(plugin_module.status().transport.state ~= "mutated")
+	assert(events[#events].kind == "setup" and events[#events].config.launcher == nil)
+	assert(pcall(vim.json.encode, events[#events].config))
+	assert(plugin_module.teardown())
+	assert(plugin_module.effective_config().max_messages_per_tick == 32)
+	assert(plugin_module.status().configured == false)
+end)
+
+test("stale watcher callbacks cannot consume or rearm a replacement lifecycle", function()
+	local original_new_timer = vim.uv.new_timer
+	local original_schedule_wrap = vim.schedule_wrap
+	local original_consume = plugin_module.consume_spool_once
+	local timers = {}
+	local consumes = 0
+	vim.schedule_wrap = function(callback)
+		return callback
+	end
+	vim.uv.new_timer = function()
+		local timer = { starts = 0, closed = false }
+		function timer:start(_, _, callback)
+			self.starts = self.starts + 1
+			self.callback = callback
+		end
+		function timer:stop() end
+		function timer:close()
+			self.closed = true
+		end
+		timers[#timers + 1] = timer
+		return timer
+	end
+	plugin_module.consume_spool_once = function()
+		consumes = consumes + 1
+		return 0, nil, { remaining = 0 }
+	end
+	local ok, err = xpcall(function()
+		configure(nil, nil, { watch = true })
+		local stale = assert(timers[1].callback)
+		configure(nil, nil, { watch = true })
+		assert(timers[1].closed and timers[2].starts == 1)
+		stale()
+		assert(consumes == 0, "stale watcher consumed the replacement spool")
+		assert(timers[2].starts == 1, "stale watcher rearmed the replacement timer")
+		timers[2].callback()
+		assert(consumes == 1 and timers[2].starts == 2, "active watcher did not consume and rearm")
+		plugin_module.stop()
+	end, debug.traceback)
+	vim.uv.new_timer = original_new_timer
+	vim.schedule_wrap = original_schedule_wrap
+	plugin_module.consume_spool_once = original_consume
+	assert(ok, err)
 end)
 
 plugin_module.stop()

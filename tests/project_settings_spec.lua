@@ -48,21 +48,23 @@ local function harness(root, globals)
 	local authority = {}
 	function authority.register_source(source)
 		current_source = vim.deepcopy(source)
+		current_source.repo = current_source.workspace.repo_identity
 		return true
 	end
-	function authority.status()
+	function authority.status(workspace)
 		local source = vim.deepcopy(current_source)
 		if not source then
 			return { sources = {} }
 		end
+		assert(vim.deep_equal(workspace, source.workspace))
 		source.approved = approvals[source.repo] == source.fingerprint
 		source.pending = source.enabled and not source.approved
 		return { sources = { source } }
 	end
-	function authority.approve(repo, source_id, fingerprint)
-		assert(current_source.id == source_id and current_source.repo == repo)
-		assert(current_source.fingerprint == fingerprint and current_source.enabled)
-		approvals[repo] = fingerprint
+	function authority.approve(spec)
+		assert(current_source.id == spec.source and vim.deep_equal(current_source.workspace, spec.workspace))
+		assert(current_source.fingerprint == spec.fingerprint and current_source.enabled)
+		approvals[spec.workspace.repo_identity] = spec.fingerprint
 		return true
 	end
 	local repo = {

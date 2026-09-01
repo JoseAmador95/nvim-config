@@ -749,7 +749,7 @@ function M.install(target, force)
 end
 
 local function attest_existing()
-	for _, record in ipairs(engine.status() or {}) do
+	for _, record in ipairs(engine.records() or {}) do
 		if record.status == "succeeded" then
 			engine.attest(record.identity, function(ok, reason)
 				if ok then

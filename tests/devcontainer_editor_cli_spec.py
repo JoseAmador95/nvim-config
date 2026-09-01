@@ -311,10 +311,12 @@ class DevContainerEditorCliTest(unittest.TestCase):
             spool.root,
             True,
             agent,
+            "--no-lockfile",
         )
         self.assertEqual(argv[:2], ["/managed/devcontainer", "up"])
         self.assertIn("--remove-existing-container", argv)
         self.assertIn("SSH_AUTH_SOCK=/tmp/nvim-config-ssh-agent.sock", argv)
+        self.assertIn("--no-lockfile", argv)
         self.assertIn(str(spool.root), "\n".join(argv))
         self.assertTrue(remote.startswith("/tmp/nvim-devcontainer-"))
 
@@ -327,6 +329,7 @@ class DevContainerEditorCliTest(unittest.TestCase):
             self.spool.root,
             False,
             None,
+            "--no-lockfile",
         )
         pinned = self.spool.root.with_name("pinned-spool")
         outside = self.root / "outside-spool"
@@ -387,6 +390,47 @@ class DevContainerEditorCliTest(unittest.TestCase):
             return_value=None,
         ), self.assertRaisesRegex(MODULE.EditorError, "no implicit download"):
             MODULE.cli_path()
+
+    def test_preserve_lockfile_selects_flags_at_each_invocation(self) -> None:
+        """Preserve chooses absent and present lock modes after an on-demand probe."""
+        supported = subprocess.CompletedProcess(
+            ["devcontainer", "up", "--help"],
+            0,
+            b"--frozen-lockfile\n--no-lockfile\n",
+            b"",
+        )
+        with mock.patch.object(MODULE, "run", return_value=supported) as execute:
+            self.assertEqual(
+                MODULE.preserve_lockfile_flag("/managed/devcontainer", self.config),
+                "--no-lockfile",
+            )
+            lockfile = MODULE.lockfile_path(self.config)
+            self.assertEqual(lockfile, self.config.with_name("devcontainer-lock.json"))
+            lockfile.write_text('{"lockfileVersion":1}\n', encoding="utf-8")
+            self.assertEqual(
+                MODULE.preserve_lockfile_flag("/managed/devcontainer", self.config),
+                "--frozen-lockfile",
+            )
+        self.assertEqual(execute.call_count, 2, "capability was cached instead of probed per invocation")
+        execute.assert_called_with(
+            ["/managed/devcontainer", "up", "--help"],
+            timeout=5.0,
+            check=False,
+        )
+
+    def test_preserve_lockfile_fails_closed_when_cli_is_unsupported(self) -> None:
+        """An old or ambiguous CLI cannot silently mutate lockfile state."""
+        unsupported = subprocess.CompletedProcess(
+            ["devcontainer", "up", "--help"],
+            0,
+            b"--no-lockfile\n",
+            b"",
+        )
+        with mock.patch.object(MODULE, "run", return_value=unsupported), self.assertRaisesRegex(
+            MODULE.EditorError,
+            "required lockfile preservation flags",
+        ):
+            MODULE.preserve_lockfile_flag("/managed/devcontainer", self.config)
 
     def test_workspace_lock_rejects_hard_link_without_modifying_peer(self) -> None:
         """A hard-linked lock never truncates the other pathname's contents."""
@@ -2075,6 +2119,10 @@ class DevContainerEditorCliTest(unittest.TestCase):
             return_value=("%7", 7007),
         ), mock.patch.object(MODULE, "cli_path", return_value="/managed/devcontainer"), mock.patch.object(
             MODULE,
+            "preserve_lockfile_flag",
+            return_value="--no-lockfile",
+        ), mock.patch.object(
+            MODULE,
             "run",
             return_value=result,
         ), mock.patch.object(MODULE, "respawn_container_editor", side_effect=verified), mock.patch.object(
@@ -2109,6 +2157,10 @@ class DevContainerEditorCliTest(unittest.TestCase):
             "require_editor_pane",
             return_value=("%7", 7007),
         ), mock.patch.object(MODULE, "cli_path", return_value="/managed/devcontainer"), mock.patch.object(
+            MODULE,
+            "preserve_lockfile_flag",
+            return_value="--no-lockfile",
+        ), mock.patch.object(
             MODULE,
             "run",
             return_value=result,

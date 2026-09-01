@@ -19,7 +19,7 @@ return {
 			if not ok_bootstrap or not ok_repair then
 				return
 			end
-			for _, record in ipairs(bootstrap.engine().status() or {}) do
+			for _, record in ipairs(bootstrap.engine().records() or {}) do
 				if record.identity and record.identity.name == "markdown-preview" and record.status == "succeeded" then
 					repair.repair(plugin.dir, record)
 					break

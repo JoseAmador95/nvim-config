@@ -4,6 +4,13 @@ local M = {}
 local router = require("clangd_compile_db")
 local local_config = require("config.local_config")
 
+local plugin_config = local_config.plugin("clangd_compile_db", {
+	path = "clangd",
+	profile = "full",
+	restart_timeout_ms = 5000,
+	max_validation_bytes = 256 * 1024 * 1024,
+})
+
 local FULL_FLAGS = {
 	"--background-index",
 	"--clang-tidy",
@@ -26,13 +33,11 @@ local function canonical(path)
 end
 
 function M.profile()
-	return local_config.get("clangd", {}).profile or "full"
+	return plugin_config.profile
 end
 
 function M.command(root)
-	local config = local_config.get("clangd", {})
-	local executable = type(config.path) == "string" and config.path ~= "" and config.path or "clangd"
-	local command = { vim.fn.expand(executable) }
+	local command = { vim.fn.expand(plugin_config.path) }
 	local directory = root and router.command_directory(root) or nil
 	if directory then
 		command[#command + 1] = "--compile-commands-dir=" .. directory
@@ -50,6 +55,18 @@ local lsp = {
 	end,
 	stop = function(client)
 		client:stop()
+	end,
+	wait_stopped = function(_, root, timeout_ms)
+		return vim.wait(timeout_ms, function()
+			for _, client in ipairs(vim.lsp.get_clients({ name = "clangd" })) do
+				local client_root = canonical(client.config and client.config.root_dir)
+				local stopped = type(client.is_stopped) == "function" and client:is_stopped() or false
+				if client_root == canonical(root) and not stopped then
+					return false
+				end
+			end
+			return true
+		end, 20, false)
 	end,
 	buffer_valid = function(bufnr)
 		return vim.api.nvim_buf_is_valid(bufnr)
@@ -77,9 +94,14 @@ local lsp = {
 
 router.setup({
 	lsp = lsp,
-	events = function()
+	event = function(event)
+		if event.kind ~= "status" then
+			return
+		end
 		vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigCMakeChanged", modeline = false })
 	end,
+	max_validation_bytes = plugin_config.max_validation_bytes,
+	restart_timeout_ms = plugin_config.restart_timeout_ms,
 })
 router.register_provider("cmake", { priority = 10 })
 
@@ -109,6 +131,11 @@ end
 
 function M.restart_root(root)
 	return router.restart(root)
+end
+
+function M.refresh(root)
+	local state, err = router.refresh(root)
+	return state ~= nil, err
 end
 
 function M.status(root)

@@ -2,9 +2,36 @@ local M = {}
 
 local uv = vim.uv
 local configured = {}
+local is_configured = false
 local selected = {}
 local snapshots = {}
 local generations = {}
+
+local DEFAULT_REPL = {
+	readiness_timeout_ms = 5000,
+	poll_interval_ms = 50,
+}
+
+local SETUP_KEYS = {
+	environment = true,
+	event = true,
+	explicit = true,
+	fallback = true,
+	on_change = true,
+	repl = true,
+	root_markers = true,
+	terminal = true,
+	test_runner = true,
+}
+
+local TERMINAL_KEYS = {
+	focus = true,
+	open = true,
+	restart = true,
+	send = true,
+	status = true,
+	toggle = true,
+}
 
 local DEFAULT_MARKERS = {
 	"pyrightconfig.json",
@@ -15,8 +42,44 @@ local DEFAULT_MARKERS = {
 	"Pipfile",
 }
 
+local function public_defaults()
+	return {
+		repl = vim.deepcopy(DEFAULT_REPL),
+		root_markers = vim.deepcopy(DEFAULT_MARKERS),
+		test_runner = "pytest",
+	}
+end
+
 local function copy(value)
 	return vim.deepcopy(value)
+end
+
+local function reject_unknown(value, allowed, label)
+	if type(value) ~= "table" then
+		return nil, label .. " must be a table"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" or not allowed[key] then
+			return nil, label .. " contains unknown key: " .. tostring(key)
+		end
+	end
+	return true
+end
+
+local function positive_integer(value, label)
+	if type(value) ~= "number" or value < 1 or value % 1 ~= 0 then
+		return nil, label .. " must be a positive integer"
+	end
+	return value
+end
+
+local function emit(kind, details)
+	if type(configured.event) ~= "function" then
+		return
+	end
+	local event = copy(details or {})
+	event.kind = kind
+	pcall(configured.event, event)
 end
 
 local function lexical(path)
@@ -88,23 +151,28 @@ end
 local function explicit_candidate(root, raw)
 	local value = explicit_value(raw)
 	if type(value) == "string" and value ~= "" then
-		return true, executable(absolute_from(root, value))
+		local path = absolute_from(root, value)
+		return true, executable(path), path
 	end
 	if type(value) ~= "table" then
 		return false
 	end
-	local python_path = type(value.pythonPath) == "string" and value.pythonPath or nil
+	local python_path = type(value.defaultInterpreterPath) == "string" and value.defaultInterpreterPath
+		or type(value.pythonPath) == "string" and value.pythonPath
+		or nil
 	local venv_path = type(value.venvPath) == "string" and value.venvPath or nil
 	local venv = type(value.venv) == "string" and value.venv or nil
 	if python_path and python_path ~= "" then
-		return true, executable(absolute_from(root, python_path))
+		local path = absolute_from(root, python_path)
+		return true, executable(path), path
 	end
 	if (venv_path and venv_path ~= "") or (venv and venv ~= "") then
 		if not venv or venv == "" then
-			return true, nil
+			return true, nil, venv_path and absolute_from(root, venv_path) or nil
 		end
 		local base = venv_path and venv_path ~= "" and absolute_from(root, venv_path) or root
-		return true, base and environment_python(vim.fs.joinpath(base, venv)) or nil
+		local environment_path = base and vim.fs.joinpath(base, venv) or nil
+		return true, environment_path and environment_python(environment_path) or nil, environment_path
 	end
 	return false
 end
@@ -171,6 +239,9 @@ local function publish(root, source, validity, interpreter)
 			_fingerprint = fingerprint,
 		}
 		snapshots[root] = previous
+		local public = copy(previous)
+		public._fingerprint = nil
+		emit("status", { root = root, status = public })
 	end
 	local result = copy(previous)
 	result._fingerprint = nil
@@ -187,8 +258,125 @@ local function nearest_marker(start)
 end
 
 function M.setup(opts)
-	configured = vim.tbl_extend("force", {}, opts or {})
+	if opts == nil then
+		opts = {}
+	end
+	local valid, setup_err = reject_unknown(opts, SETUP_KEYS, "project_python.setup options")
+	if not valid then
+		error(setup_err)
+	end
+	for _, name in ipairs({ "environment", "event", "explicit", "fallback", "on_change" }) do
+		if opts[name] ~= nil and type(opts[name]) ~= "function" then
+			error("project_python.setup " .. name .. " must be a function")
+		end
+	end
+	local markers = opts.root_markers
+	if markers == nil then
+		markers = DEFAULT_MARKERS
+	end
+	if type(markers) ~= "table" or not vim.islist(markers) then
+		error("project_python.setup root_markers must be an array")
+	end
+	for index, marker in ipairs(markers) do
+		if type(marker) ~= "string" or marker == "" or marker:find("%z") then
+			error(("project_python.setup root_markers[%d] is invalid"):format(index))
+		end
+	end
+	local runner = opts.test_runner
+	if runner == nil then
+		runner = "pytest"
+	end
+	if runner ~= "pytest" and runner ~= "unittest" then
+		error("project_python.setup test_runner must be pytest or unittest")
+	end
+	local repl = opts.repl
+	if repl == nil then
+		repl = {}
+	end
+	valid, setup_err = reject_unknown(repl, {
+		readiness_timeout_ms = true,
+		poll_interval_ms = true,
+	}, "project_python.setup repl")
+	if not valid then
+		error(setup_err)
+	end
+	local readiness_value = repl.readiness_timeout_ms
+	if readiness_value == nil then
+		readiness_value = DEFAULT_REPL.readiness_timeout_ms
+	end
+	local readiness_timeout_ms, timeout_err = positive_integer(readiness_value, "repl.readiness_timeout_ms")
+	if not readiness_timeout_ms then
+		error(timeout_err)
+	end
+	local poll_value = repl.poll_interval_ms
+	if poll_value == nil then
+		poll_value = DEFAULT_REPL.poll_interval_ms
+	end
+	local poll_interval_ms, interval_err = positive_integer(poll_value, "repl.poll_interval_ms")
+	if not poll_interval_ms then
+		error(interval_err)
+	end
+	if poll_interval_ms > readiness_timeout_ms then
+		error("repl.poll_interval_ms must not exceed repl.readiness_timeout_ms")
+	end
+	if opts.terminal ~= nil then
+		valid, setup_err = reject_unknown(opts.terminal, TERMINAL_KEYS, "project_python.setup terminal")
+		if not valid then
+			error(setup_err)
+		end
+		for name in pairs(TERMINAL_KEYS) do
+			if type(opts.terminal[name]) ~= "function" then
+				error("project_python.setup terminal." .. name .. " must be a function")
+			end
+		end
+	end
+	if is_configured then
+		M.teardown()
+	end
+	configured = {
+		environment = opts.environment,
+		event = opts.event,
+		explicit = opts.explicit,
+		fallback = opts.fallback,
+		on_change = opts.on_change,
+		repl = {
+			readiness_timeout_ms = readiness_timeout_ms,
+			poll_interval_ms = poll_interval_ms,
+		},
+		root_markers = copy(markers),
+		terminal = opts.terminal and copy(opts.terminal) or nil,
+		test_runner = runner,
+	}
+	selected = {}
+	snapshots = {}
+	generations = {}
+	is_configured = true
+	emit("setup", { config = M.effective_config() })
 	return M
+end
+
+function M.effective_config()
+	if not is_configured then
+		return public_defaults()
+	end
+	return copy({
+		repl = configured.repl,
+		root_markers = configured.root_markers,
+		test_runner = configured.test_runner,
+	})
+end
+
+function M.teardown()
+	if not is_configured then
+		return true
+	end
+	emit("teardown", {})
+	configured = {}
+	selected = {}
+	snapshots = {}
+	generations = {}
+	is_configured = false
+	return true
 end
 
 function M.resolve_root(input)
@@ -253,6 +441,7 @@ function M.select(root, path)
 	if type(configured.on_change) == "function" then
 		configured.on_change(copy(result))
 	end
+	emit("changed", { root = root, status = result })
 	return result
 end
 
@@ -267,6 +456,21 @@ function M.clear(root)
 	if type(configured.on_change) == "function" then
 		configured.on_change(copy(result))
 	end
+	emit("changed", { root = root, status = result })
+	return result
+end
+
+function M.refresh(root)
+	root = canonical(root)
+	if not root then
+		return nil, "project root is invalid"
+	end
+	snapshots[root] = nil
+	local result = M.snapshot(root)
+	if type(configured.on_change) == "function" then
+		configured.on_change(copy(result))
+	end
+	emit("changed", { root = root, status = result })
 	return result
 end
 
@@ -275,7 +479,7 @@ local function settings_explicit(settings)
 	if type(python) ~= "table" then
 		return nil
 	end
-	for _, key in ipairs({ "pythonPath", "venvPath", "venv" }) do
+	for _, key in ipairs({ "defaultInterpreterPath", "pythonPath", "venvPath", "venv" }) do
 		if type(python[key]) == "string" and python[key] ~= "" then
 			return python
 		end
@@ -313,7 +517,103 @@ function M.neotest_python(root)
 end
 
 function M.neotest_runner()
-	return configured.neotest_runner or "pytest"
+	return configured.test_runner or "pytest"
+end
+
+local function diagnostic_candidate(result, source, path)
+	local interpreter = executable(path)
+	result[#result + 1] = {
+		source = source,
+		path = path,
+		interpreter = interpreter,
+		validity = interpreter and "valid" or "invalid",
+	}
+end
+
+function M.diagnostics(root, options)
+	root = canonical(root)
+	if not root then
+		return { root = nil, candidates = {} }
+	end
+	local candidates = {}
+	local present, explicit, attempted = explicit_candidate(root, explicit_for(root, options and options.explicit))
+	if present then
+		candidates[#candidates + 1] = {
+			source = "explicit",
+			path = attempted,
+			interpreter = explicit,
+			validity = explicit and "valid" or "invalid",
+		}
+	end
+	if selected[root] then
+		diagnostic_candidate(candidates, "manual", selected[root])
+	end
+	local values = environment()
+	local uv_environment = values.UV_PROJECT_ENVIRONMENT
+	if type(uv_environment) == "string" and uv_environment ~= "" then
+		local path = absolute_from(root, uv_environment)
+		local python = path and contained(root, path) and environment_python(path) or nil
+		candidates[#candidates + 1] = {
+			source = "uv-project-environment",
+			path = path,
+			interpreter = python,
+			validity = python and "valid" or "invalid",
+		}
+	end
+	for _, relative in ipairs({ ".venv", ".pixi/envs/default", "venv", "env", ".conda" }) do
+		local path = vim.fs.joinpath(root, relative)
+		local python = environment_python(path)
+		candidates[#candidates + 1] = {
+			source = "local:" .. relative,
+			path = path,
+			interpreter = python,
+			validity = python and "valid" or "missing",
+		}
+	end
+	for _, name in ipairs({ "VIRTUAL_ENV", "CONDA_PREFIX" }) do
+		local path = values[name]
+		if type(path) == "string" and path ~= "" then
+			local python = contained(root, path) and environment_python(path) or nil
+			candidates[#candidates + 1] = {
+				source = "environment:" .. name,
+				path = lexical(path),
+				interpreter = python,
+				validity = python and "valid" or "invalid",
+			}
+		end
+	end
+	local fallback = type(configured.fallback) == "function" and configured.fallback(root) or nil
+	if fallback then
+		diagnostic_candidate(candidates, "fallback", fallback)
+	end
+	return copy({ root = root, candidates = candidates })
+end
+
+function M.status(root)
+	if root == nil then
+		local public_snapshots = copy(snapshots)
+		for _, snapshot in pairs(public_snapshots) do
+			snapshot._fingerprint = nil
+		end
+		return copy({
+			configured = is_configured,
+			generations = generations,
+			selected = selected,
+			snapshots = public_snapshots,
+		})
+	end
+	root = canonical(root)
+	local snapshot = root and snapshots[root] or nil
+	if snapshot then
+		snapshot = copy(snapshot)
+		snapshot._fingerprint = nil
+	end
+	return copy({
+		configured = is_configured,
+		root = root,
+		selected = root and selected[root] or nil,
+		snapshot = snapshot,
+	})
 end
 
 function M.apply_dap(config, root)
@@ -382,6 +682,7 @@ end
 
 function M._reset_for_tests()
 	configured = {}
+	is_configured = false
 	selected = {}
 	snapshots = {}
 	generations = {}

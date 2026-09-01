@@ -1375,17 +1375,30 @@ def workspace_lock(paths: Mapping[str, pathlib.Path], root: pathlib.Path) -> Ite
         os.close(descriptor)
 
 
-def cli_path() -> str:
-    """Resolve an already-installed Dev Containers CLI without installing it."""
-    configured = os.environ.get("NVIM_DEVCONTAINER_CLI")
-    path = configured or shutil.which("devcontainer")
-    if not path:
+def cli_path(configured: str | None = None) -> str:
+    """Resolve an already-installed Dev Containers CLI without installing it.
+
+    :param configured: Configured executable name or path.
+    """
+    selected = configured or os.environ.get("NVIM_DEVCONTAINER_CLI") or "devcontainer"
+    path = shutil.which(selected)
+    if path is None:
         fail("@devcontainers/cli is not installed; no implicit download was attempted")
-    return path
+    candidate = pathlib.Path(path).expanduser().resolve()
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        fail("@devcontainers/cli is not one executable file")
+    return os.fspath(candidate)
 
 
-def ssh_agent() -> pathlib.Path | None:
-    """Return a live owner socket or disable forwarding."""
+def ssh_agent(policy: str = "auto") -> pathlib.Path | None:
+    """Return a live owner socket according to explicit forwarding policy.
+
+    :param policy: ``auto`` to forward a safe socket or ``off`` to disable it.
+    """
+    if policy == "off":
+        return None
+    if policy != "auto":
+        fail("SSH-agent policy must be auto or off")
     value = os.environ.get("SSH_AUTH_SOCK")
     if not value:
         return None
@@ -1397,6 +1410,41 @@ def ssh_agent() -> pathlib.Path | None:
     if not stat.S_ISSOCK(mode) or path.stat().st_uid != os.getuid():
         return None
     return path
+
+
+def lockfile_path(config: pathlib.Path) -> pathlib.Path:
+    """Return the Dev Containers lockfile adjacent to one configuration.
+
+    :param config: Canonical Dev Container configuration path.
+    """
+    return config.with_name(f"{config.stem}-lock.json")
+
+
+def preserve_lockfile_flag(cli: str, config: pathlib.Path) -> str:
+    """Probe lock flags and preserve the current lockfile state fail closed.
+
+    :param cli: Absolute Dev Containers CLI executable.
+    :param config: Canonical Dev Container configuration path.
+    :raises EditorError: If capability probing or lockfile inspection fails.
+    """
+    result = run([cli, "up", "--help"], timeout=5.0, check=False)
+    try:
+        help_text = (result.stdout + result.stderr).decode("utf-8", "strict")
+    except UnicodeError as error:
+        raise EditorError("Dev Containers CLI capability output is not UTF-8") from error
+    capabilities = set(help_text.split())
+    if result.returncode != 0 or not {"--frozen-lockfile", "--no-lockfile"}.issubset(capabilities):
+        fail("Dev Containers CLI does not support required lockfile preservation flags")
+    lockfile = lockfile_path(config)
+    try:
+        details = lockfile.lstat()
+    except FileNotFoundError:
+        return "--no-lockfile"
+    except OSError as error:
+        raise EditorError(f"could not inspect Dev Container lockfile: {error}") from error
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        fail("Dev Container lockfile is not one regular non-symlink file")
+    return "--frozen-lockfile"
 
 
 def mount_argument(source: pathlib.Path, target: str, *, readonly: bool = False) -> str:
@@ -1417,9 +1465,12 @@ def up_argv(
     spool: pathlib.Path,
     recreate: bool,
     agent: pathlib.Path | None,
+    lockfile_flag: str,
 ) -> tuple[list[str], str]:
     """Build the exact ``devcontainer up`` argv and remote spool path."""
     remote_spool = f"/tmp/nvim-devcontainer-{workspace_id(root)[:16]}"
+    if lockfile_flag not in {"--frozen-lockfile", "--no-lockfile"}:
+        fail("Dev Container lockfile flag is invalid")
     argv = [
         cli,
         "up",
@@ -1427,6 +1478,7 @@ def up_argv(
         str(root),
         "--config",
         str(config),
+        lockfile_flag,
         "--mount",
         mount_argument(spool, remote_spool),
         "--mount",
@@ -2094,7 +2146,7 @@ def cmd_up(arguments: argparse.Namespace) -> None:
     spool_root = spool_path(paths, root)
     log = log_path(paths, root)
     token = secrets.token_urlsafe(32)
-    agent = ssh_agent()
+    agent = ssh_agent(getattr(arguments, "ssh_agent", "auto"))
     record = base_record(root, config, log, arguments.allow_network, agent, pane, pane_pid, claim_id)
     with workspace_spool(spool_root, parent_fd=paths.descriptor("spool")) as spool, workspace_lock(paths, root):
         update_workspace_record(paths, root, record)
@@ -2102,8 +2154,20 @@ def cmd_up(arguments: argparse.Namespace) -> None:
         try:
             unlink_regular_at(spool.root_fd, "auth.json", durable=True)
             create_auth(spool, token)
-            cli = cli_path()
-            command, remote_spool = up_argv(cli, root, config, spool.root, arguments.recreate, agent)
+            cli = cli_path(getattr(arguments, "cli", None))
+            policy = getattr(arguments, "lockfile_policy", "preserve")
+            if policy != "preserve":
+                fail("Dev Container lockfile policy must be preserve")
+            lockfile_flag = preserve_lockfile_flag(cli, config)
+            command, remote_spool = up_argv(
+                cli,
+                root,
+                config,
+                spool.root,
+                arguments.recreate,
+                agent,
+                lockfile_flag,
+            )
             result = run_up_with_pinned_spool(command, spool, arguments.timeout)
             container_id, container_root = decode_up(result)
             update_workspace_record(
@@ -2460,6 +2524,31 @@ def cmd_host(arguments: argparse.Namespace) -> None:
             raise
 
 
+def cmd_doctor(arguments: argparse.Namespace) -> None:
+    """Validate CLI capability and the selected lockfile preservation mode."""
+    root = repo_root(arguments.repo or os.getcwd())
+    config = discover_config(root, arguments.config)
+    cli = cli_path(arguments.cli)
+    if arguments.lockfile_policy != "preserve":
+        fail("Dev Container lockfile policy must be preserve")
+    flag = preserve_lockfile_flag(cli, config)
+    agent = ssh_agent(arguments.ssh_agent)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "command": "doctor",
+                "cli": cli,
+                "config": str(config),
+                "lockfile": str(lockfile_path(config)),
+                "lockfile_flag": flag,
+                "ssh_agent_forwarding": agent is not None,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     """Build the Dev Container editor command-line parser."""
     value = argparse.ArgumentParser(description=__doc__)
@@ -2469,6 +2558,9 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--config")
     up.add_argument("--recreate", action="store_true")
     up.add_argument("--allow-network", action="store_true")
+    up.add_argument("--cli", default="devcontainer")
+    up.add_argument("--lockfile-policy", choices=("preserve",), default="preserve")
+    up.add_argument("--ssh-agent", choices=("auto", "off"), default="auto")
     up.add_argument("--tmux-pane", required=True)
     up.add_argument("--claim-id", required=True)
     up.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
@@ -2489,6 +2581,13 @@ def parser() -> argparse.ArgumentParser:
     host = commands.add_parser("host")
     host.add_argument("--repo")
     host.set_defaults(callback=cmd_host)
+    doctor = commands.add_parser("doctor")
+    doctor.add_argument("--repo")
+    doctor.add_argument("--config")
+    doctor.add_argument("--cli", default="devcontainer")
+    doctor.add_argument("--lockfile-policy", choices=("preserve",), default="preserve")
+    doctor.add_argument("--ssh-agent", choices=("auto", "off"), default="auto")
+    doctor.set_defaults(callback=cmd_doctor)
     location = commands.add_parser("open-location")
     location.add_argument("--cwd", required=True)
     location.add_argument("--file", required=True)

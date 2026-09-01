@@ -6,6 +6,7 @@
 local M = {}
 
 local authority_module = require("trusted_workspace")
+local contracts = require("local_plugins.contracts")
 local repo_module = require("config.repo")
 
 local uv = vim.uv
@@ -359,13 +360,37 @@ local function combined_fingerprint(files)
 	return vim.fn.sha256(table.concat(parts))
 end
 
+local function workspace_for(root)
+	local workspace
+	if vim.env.NVIM_DEVCONTAINER ~= "1" then
+		workspace = { runtime = "host", root = root, repo_identity = root }
+	else
+		workspace = {
+			runtime = vim.env.NVIM_EXACT_EDITOR_RUNTIME,
+			root = vim.env.NVIM_EXACT_EDITOR_WORKSPACE_ROOT,
+			repo_identity = vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY,
+		}
+		if workspace.runtime ~= "container" then
+			return nil, "Dev Container project settings require the exact editor runtime metadata"
+		end
+	end
+	local normalized, err = contracts.normalize_workspace_key(workspace)
+	if not normalized then
+		return nil, "project settings WorkspaceKey is invalid: " .. tostring(err)
+	end
+	if normalized.root ~= root then
+		return nil, "project settings repository root does not match the exact editor WorkspaceKey"
+	end
+	return normalized
+end
+
 local function register_candidate(candidate)
 	local _, err = configured.authority.register_source({
 		id = SOURCE_ID,
 		layer = "project",
 		priority = SOURCE_PRIORITY,
 		enabled = candidate.present,
-		repo = candidate.root,
+		workspace = candidate.workspace,
 		fingerprint = candidate.fingerprint,
 		value = {},
 	})
@@ -373,7 +398,7 @@ local function register_candidate(candidate)
 end
 
 local function exact_approval(candidate)
-	local status, status_err = configured.authority.status(candidate.root)
+	local status, status_err = configured.authority.status(candidate.workspace)
 	if not status then
 		return nil, status_err
 	end
@@ -382,7 +407,8 @@ local function exact_approval(candidate)
 			source.id == SOURCE_ID
 			and source.layer == "project"
 			and source.enabled == true
-			and source.repo == candidate.root
+			and vim.deep_equal(source.workspace, candidate.workspace)
+			and source.repo == candidate.workspace.repo_identity
 			and source.fingerprint == candidate.fingerprint
 			and source.approved == true
 		then
@@ -417,6 +443,10 @@ local function read_candidate(start)
 	if not root_identity or root_identity.type ~= "directory" then
 		return nil, "repository root is unavailable"
 	end
+	local workspace, workspace_err = workspace_for(root)
+	if not workspace then
+		return nil, workspace_err
+	end
 	local files = {}
 	for _, relative in ipairs(FILES) do
 		local item, read_err = read_project_file(root, root_identity, relative)
@@ -450,6 +480,7 @@ local function read_candidate(start)
 	end
 	return {
 		root = root,
+		workspace = workspace,
 		present = present,
 		fingerprint = combined_fingerprint(files),
 		files = files,
@@ -499,7 +530,11 @@ local function revalidate_candidate(candidate, start)
 	if not current then
 		return nil, current_err
 	end
-	if current.root ~= candidate.root or current.fingerprint ~= candidate.fingerprint then
+	if
+		current.root ~= candidate.root
+		or not vim.deep_equal(current.workspace, candidate.workspace)
+		or current.fingerprint ~= candidate.fingerprint
+	then
 		register_candidate(current)
 		return nil, "project settings changed during fingerprint validation"
 	end
@@ -525,6 +560,7 @@ function M.snapshot(start)
 	end
 	return copy({
 		root = current.root,
+		workspace = current.workspace,
 		present = current.present,
 		fingerprint = current.fingerprint,
 		approved = approved,
@@ -576,7 +612,11 @@ function M.approve(start)
 	if not registered then
 		return nil, register_err
 	end
-	local approved, approval_err = configured.authority.approve(candidate.root, SOURCE_ID, candidate.fingerprint)
+	local approved, approval_err = configured.authority.approve({
+		workspace = candidate.workspace,
+		source = SOURCE_ID,
+		fingerprint = candidate.fingerprint,
+	})
 	if not approved then
 		return nil, approval_err
 	end

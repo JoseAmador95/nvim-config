@@ -24,14 +24,16 @@ local clients = {}
 local stopped = {}
 local starts = {}
 local attached = {}
+local waits = {}
 
-local function configure()
+local function configure(event)
 	router._reset_for_tests()
-	deferred, clients, stopped, starts, attached = {}, {}, {}, {}, {}
+	deferred, clients, stopped, starts, attached, waits = {}, {}, {}, {}, {}, {}
 	router.setup({
 		defer = function(callback)
 			deferred[#deferred + 1] = callback
 		end,
+		event = event,
 		lsp = {
 			clients = function()
 				return clients
@@ -41,6 +43,10 @@ local function configure()
 			end,
 			stop = function(client)
 				stopped[#stopped + 1] = client.id
+			end,
+			wait_stopped = function(waited, waited_root, timeout_ms)
+				waits[#waits + 1] = { clients = vim.deepcopy(waited), root = waited_root, timeout_ms = timeout_ms }
+				return true
 			end,
 			buffer_valid = function()
 				return true
@@ -80,6 +86,20 @@ local function test(name, callback)
 	end
 end
 
+test("pre-setup public defaults and aggregate status are copied", function()
+	local first = router.effective_config()
+	assert(first.max_validation_bytes == 256 * 1024 * 1024)
+	assert(first.restart_delay_ms == 100 and first.restart_timeout_ms == 5000)
+	first.restart_timeout_ms = 1
+	assert(router.effective_config().restart_timeout_ms == 5000)
+	assert(pcall(vim.json.encode, router.effective_config()))
+
+	local status = router.status()
+	assert(status.configured == false and vim.tbl_isempty(status.roots))
+	status.configured = true
+	assert(router.status().configured == false)
+end)
+
 test("validation accepts only a structural JSON array", function()
 	configure()
 	local valid = database("valid", "[]")
@@ -88,6 +108,41 @@ test("validation accepts only a structural JSON array", function()
 		local result, err = router.validate(database(name, data))
 		assert(result == nil and err:find("expected a JSON array", 1, true))
 	end
+end)
+
+test("hostile compile database entries are rejected exactly", function()
+	configure()
+	for name, entry in pairs({
+		missing_directory = { file = "a.c", command = "cc a.c" },
+		bad_file = { directory = "/tmp", file = 7, command = "cc a.c" },
+		both_forms = { directory = "/tmp", file = "a.c", command = "cc a.c", arguments = { "cc", "a.c" } },
+		neither_form = { directory = "/tmp", file = "a.c" },
+		bad_arguments = { directory = "/tmp", file = "a.c", arguments = { "cc", 7 } },
+		bad_command = { directory = "/tmp", file = "a.c", command = "" },
+	}) do
+		local value, err = router.validate(database("hostile-" .. name, vim.json.encode({ entry })))
+		assert(value == nil and err:find("entry 1", 1, true), name .. ": " .. tostring(err))
+	end
+	assert(
+		router.validate(
+			database(
+				"valid-entries",
+				'[{"directory":"/tmp","file":"a.c","arguments":["cc","a.c"]},{"directory":"/tmp","file":"b.c","command":"cc b.c"}]'
+			)
+		)
+	)
+
+	local stable = database("stable-active", "[]")
+	local hostile = database("hostile-candidate", "[]")
+	assert(router.set_provider(root, "meson", stable))
+	local active = assert(router.active(root))
+	assert(router.candidate(root, "cmake", hostile))
+	assert(vim.fn.writefile({ '[{"directory":"/tmp","file":"a.c"}]' }, hostile .. "/compile_commands.json") == 0)
+	local applied, apply_err = router.apply(root, { provider = "cmake" })
+	assert(applied == nil and apply_err:find("exactly one", 1, true))
+	local status = router.status(root)
+	assert(status.active.fingerprint == active.fingerprint, "hostile candidate replaced the prior active database")
+	assert(status.candidates.cmake == nil, "hostile candidate remained eligible")
 end)
 
 test("files over 256 MiB require explicit unchecked candidate and apply", function()
@@ -176,7 +231,8 @@ test("changed or malformed active databases become stale without replacement", f
 	assert(router.set_provider(root, "cmake", directory))
 	local active = assert(router.active(root))
 	assert(vim.fn.writefile({ "not json" }, directory .. "/compile_commands.json") == 0)
-	local status = router.status(root)
+	local refreshed, refresh_err, status = router.refresh(root)
+	assert(refreshed == nil and refresh_err:find("expected a JSON array", 1, true))
 	assert(status.state == "stale" and status.active.directory == active.directory)
 	local generation = status.generation
 	assert(router.status(root).generation == generation, "stale status republished without a transition")
@@ -197,6 +253,8 @@ test("restarts coalesce, build latest cmd first, and create one ordered client p
 	assert(#deferred == 1, "restart was not coalesced")
 	deferred[1]()
 	assert(vim.deep_equal(stopped, { 1, 2 }))
+	assert(#waits == 1 and waits[1].root == root and waits[1].timeout_ms == 5000)
+	assert(#waits[1].clients == 2)
 	assert(#starts == 1 and starts[1].bufnr == 1)
 	assert(starts[1].config.cmd[2] == "--compile-commands-dir=" .. second)
 	assert(vim.deep_equal(attached, {
@@ -206,6 +264,37 @@ test("restarts coalesce, build latest cmd first, and create one ordered client p
 	}))
 	assert(router.set_provider(root, "cmake", second))
 	assert(#deferred == 1, "unchanged active database scheduled another restart")
+end)
+
+test("setup contracts reject unknown options without mutating active state", function()
+	local events = {}
+	configure(function(event)
+		events[#events + 1] = event
+	end)
+	local directory = database("contract-active", "[]")
+	assert(router.set_provider(root, "cmake", directory))
+	local active = assert(router.active(root))
+	local config = assert(router.effective_config())
+	assert(config.lsp == nil and config.defer == nil and config.event == nil and config.events == nil)
+	assert(pcall(vim.json.encode, config))
+	config.restart_timeout_ms = 1
+	assert(assert(router.effective_config()).restart_timeout_ms == 5000)
+	local first = router.status(root)
+	first.active.directory = "mutated"
+	assert(router.status(root).active.directory == directory)
+	local ok, err = pcall(router.setup, { injected = true })
+	assert(not ok and tostring(err):find("unknown key", 1, true))
+	assert(router.active(root).fingerprint == active.fingerprint)
+	local aggregate = router.status()
+	assert(aggregate.configured == true and aggregate.roots[root].active.directory == directory)
+	aggregate.roots[root].active.directory = "mutated"
+	assert(router.status().roots[root].active.directory == directory)
+	assert(events[1].kind == "setup" and events[1].config.lsp == nil)
+	assert(pcall(vim.json.encode, events[1].config))
+	assert(router.teardown())
+	assert(router.effective_config().restart_timeout_ms == 5000)
+	assert(router.status().configured == false)
+	assert(type(router.status(root)) == "table")
 end)
 
 test("clear override coalesces one restart for provider fallback and no database", function()

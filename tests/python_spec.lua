@@ -38,6 +38,7 @@ interpreter(python_b, false)
 local original_selector = package.loaded["venv-selector"]
 local original_terminal = package.loaded["config.terminal"]
 local original_project_settings = package.loaded["config.project_settings"]
+local original_local_config = package.loaded["config.local_config"]
 local original_clients = vim.lsp.get_clients
 local original_select = vim.ui.select
 local original_defer_fn = vim.defer_fn
@@ -67,6 +68,14 @@ local explicit_project_values = {}
 package.loaded["config.project_settings"] = {
 	get = function(key, default)
 		return vim.deepcopy(explicit_project_values[key] or default)
+	end,
+}
+package.loaded["config.local_config"] = {
+	plugin = function(name, defaults)
+		assert(name == "project_python")
+		assert(defaults.test_runner == "pytest")
+		assert(defaults.repl.readiness_timeout_ms == 5000 and defaults.repl.poll_interval_ms == 50)
+		return vim.deepcopy(defaults)
 	end,
 }
 package.loaded["venv-selector"] = {
@@ -303,8 +312,35 @@ test("Pyright, Neotest, and DAP consume the same root selection without interpre
 	assert(dap.listeners.on_config.nvim_config_python({ type = "cppdbg" }).type == "cppdbg")
 end)
 
+test("DAP roots resolve cross-project config fields before the active buffer", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	local dap = { listeners = { on_config = {} } }
+	python.setup_dap(dap)
+	local resolve = dap.listeners.on_config.nvim_config_python
+	local from_cwd = resolve({
+		type = "python",
+		request = "launch",
+		cwd = fixture .. "/b",
+		program = fixture .. "/a/src/test_a.py",
+	})
+	assert(from_cwd.pythonPath == python_b, "cwd did not take precedence over the active A buffer")
+	local from_program = resolve({
+		type = "python",
+		request = "launch",
+		program = function()
+			return fixture .. "/b/src/test_b.py"
+		end,
+	})
+	assert(from_program.pythonPath == python_b, "program did not resolve project B")
+	local from_workspace = resolve({ type = "python", request = "launch", workspace = fixture .. "/b" })
+	assert(from_workspace.pythonPath == python_b, "workspace did not resolve project B")
+	local placeholder = resolve({ type = "python", request = "launch", program = "${file}" })
+	assert(placeholder.pythonPath == python_a, "unresolved placeholder preempted the active buffer")
+end)
+
 test("Pyright automatic configuration preserves explicit interpreter and venv settings", function()
 	for _, explicit in ipairs({
+		{ defaultInterpreterPath = "/explicit/default-python" },
 		{ pythonPath = "/explicit/python" },
 		{ venvPath = "/explicit/venvs" },
 		{ venv = "chosen" },
@@ -696,6 +732,9 @@ end)
 
 test("Python mappings stay outside the review namespace", function()
 	python.setup()
+	for _, name in ipairs({ "PythonEnvironment", "PythonEnvironmentRefresh", "PythonEnvironmentClear" }) do
+		assert(vim.fn.exists(":" .. name) == 2, "missing command " .. name)
+	end
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>pr", "n", false, true)))
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>ps", "n", false, true)))
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>ps", "x", false, true)))
@@ -709,6 +748,7 @@ end)
 package.loaded["venv-selector"] = original_selector
 package.loaded["config.terminal"] = original_terminal
 package.loaded["config.project_settings"] = original_project_settings
+package.loaded["config.local_config"] = original_local_config
 vim.lsp.get_clients = original_clients
 vim.ui.select = original_select
 vim.defer_fn = original_defer_fn

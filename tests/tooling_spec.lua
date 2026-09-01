@@ -82,15 +82,18 @@ vim.api.nvim_create_autocmd("VimEnter", {
 						current_source = vim.deepcopy(source)
 						return true
 					end,
-					status = function()
+					status = function(workspace)
 						local source = vim.deepcopy(current_source)
+						assert(vim.deep_equal(workspace, source.workspace))
+						source.repo = source.workspace.repo_identity
 						source.approved = approved_fingerprint == source.fingerprint
 						return { sources = { source } }
 					end,
-					approve = function(root, source_id, fingerprint)
-						assert(root == project and source_id == "project-lsp-settings")
-						assert(current_source.fingerprint == fingerprint)
-						approved_fingerprint = fingerprint
+					approve = function(request)
+						assert(vim.deep_equal(request.workspace, current_source.workspace))
+						assert(request.workspace.root == project and request.source == "project-lsp-settings")
+						assert(current_source.fingerprint == request.fingerprint)
+						approved_fingerprint = request.fingerprint
 						return true
 					end,
 				}
