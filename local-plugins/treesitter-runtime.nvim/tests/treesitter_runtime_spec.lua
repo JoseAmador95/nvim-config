@@ -158,17 +158,45 @@ test("indent restoration is conditional on exact ownership", function()
 	equal("ExternalIndent()", vim.bo[buf].indentexpr, "external indentation was overwritten during teardown")
 end)
 
-test("pre-existing parser and indentation are never claimed or stopped", function()
+test("pre-existing parser is managed across ineligible and eligible transitions", function()
 	reset()
 	installed = { "lua" }
 	local target = "v:lua.require'nvim-treesitter'.indentexpr()"
-	local buf = make_buffer("return true", "lua", target)
+	local buf = make_buffer("small", "lua", "PriorIndent()")
 	active[buf] = true
-	setup()
+	setup({ max_bytes = 16 })
 	equal({}, starts, "pre-existing parser was started again")
-	assert(runtime.teardown(), "teardown failed")
-	equal({}, stops, "pre-existing parser was stopped")
-	equal(target, vim.bo[buf].indentexpr, "pre-existing indentation was erased")
+	equal(target, vim.bo[buf].indentexpr, "managed pre-existing parser did not receive indentation")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { string.rep("x", 32) })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf })
+	equal({ { buf = buf, language = "lua" } }, stops, "ineligible pre-existing parser was not stopped")
+	equal("PriorIndent()", vim.bo[buf].indentexpr, "ineligible transition did not restore prior indentation")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "tiny" })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf })
+	equal({ { buf = buf, language = "lua" } }, starts, "eligible re-entry did not restart the parser")
+	equal(target, vim.bo[buf].indentexpr, "eligible re-entry did not restore managed indentation")
+end)
+
+test("retry recovers an externally stopped parser without reclaiming external indentation", function()
+	reset()
+	installed = { "lua" }
+	local buf = make_buffer("return true", "lua", "PriorIndent()")
+	setup()
+	equal(1, #starts, "initial parser was not started")
+
+	active[buf] = nil
+	assert(runtime.retry(buf), "retry did not recover an externally stopped parser")
+	equal(2, #starts, "retry did not restart the externally stopped parser exactly once")
+	equal({}, stops, "retry tried to stop a parser that was already inactive")
+	assert(vim.bo[buf].indentexpr:find("nvim%-treesitter"), "retry did not restore managed indentation")
+
+	vim.bo[buf].indentexpr = "ExternalIndent()"
+	active[buf] = nil
+	assert(runtime.retry(buf), "second retry did not recover the externally stopped parser")
+	equal(3, #starts, "second retry did not restart the parser exactly once")
+	equal("ExternalIndent()", vim.bo[buf].indentexpr, "retry reclaimed externally changed indentation")
 end)
 
 test("failed starts are retryable after the condition is repaired", function()

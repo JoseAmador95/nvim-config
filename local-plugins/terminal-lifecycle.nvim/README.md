@@ -49,10 +49,17 @@ Every record is in exactly one of these states:
 - `exited-retained`: output remains after failure, stop, or configured retention.
 - `disposed`: no live registry entry or restorable view remains.
 
-Failures are retained. Successful exits dispose by default. `stop` keeps the
-buffer unless `policy.dispose_on_stop` is true; `dispose` stops a live process
-and closes its view. Synchronous exit callbacks during `backend.open` settle by
-the same rules, so quick exits cannot leave `starting` behind.
+Failures are retained. Successful exits dispose by default. `stop`, `restart`,
+and live `dispose` first request a stop and remain in their current active state
+until `on_exit` confirms process termination. `status` exposes `stop_pending`,
+`restart_pending`, and `dispose_pending`; `accepting_input` is false whenever
+any of them is pending. Repeated restarts coalesce to the latest spec, while
+dispose cancels a queued restart and wins. Duplicate exit callbacks are inert.
+After the confirmed exit, `stop` keeps the buffer unless
+`policy.dispose_on_stop` is true, `restart` creates exactly one replacement,
+and `dispose` closes the view. Synchronous exit callbacks during `backend.open`
+or `backend.stop` settle by the same rules, so quick exits cannot leave
+`starting` or a pending request behind.
 
 Plugin buffers are tagged with `b:terminal_lifecycle.ephemeral = true` and
 `b:terminal_lifecycle_ephemeral = true`. Host session adapters must exclude
@@ -72,6 +79,10 @@ dispose(handle)    lines(handle)
 
 Mutating methods return a truthy value on success or `nil, error`. The backend
 must start the process without a shell, retain output until disposal, and make
-`stop` a bounded request that does not create a replacement process. Buffer-local
-`q`, optional `gf`, passthrough keys, and hide keys are installed by the plugin.
-Commands and global mappings belong to the host adapter.
+`stop` a bounded request that does not create a replacement process or claim
+that it has already exited. It must eventually report the matching `on_exit`;
+if a non-blocking process probe already proves termination, it may report that
+exit synchronously from `stop`. A live `on_dispose` is also a stop request, not
+an exit notification. Buffer-local `q`, optional `gf`, passthrough keys, and
+hide keys are installed by the plugin. Commands and global mappings belong to
+the host adapter.

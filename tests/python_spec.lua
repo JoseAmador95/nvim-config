@@ -37,8 +37,10 @@ interpreter(python_b, false)
 
 local original_selector = package.loaded["venv-selector"]
 local original_terminal = package.loaded["config.terminal"]
+local original_project_settings = package.loaded["config.project_settings"]
 local original_clients = vim.lsp.get_clients
 local original_select = vim.ui.select
+local original_defer_fn = vim.defer_fn
 local original_path = vim.env.PATH
 local original_uv_project_environment = vim.env.UV_PROJECT_ENVIRONMENT
 local original_virtual_env = vim.env.VIRTUAL_ENV
@@ -61,6 +63,12 @@ local function with_python_env(values, callback)
 end
 
 local active_python
+local explicit_project_values = {}
+package.loaded["config.project_settings"] = {
+	get = function(key, default)
+		return vim.deepcopy(explicit_project_values[key] or default)
+	end,
+}
 package.loaded["venv-selector"] = {
 	python = function()
 		return active_python
@@ -72,13 +80,26 @@ end
 
 local terminal_exists = false
 local terminal_running = false
+local terminal_accepting_input = false
+local terminal_stop_pending = false
+local terminal_restart_pending = false
+local terminal_dispose_pending = false
 local toggled_specs = {}
+local restarted_specs = {}
 local opened_specs = {}
 local focused_specs = {}
 local sent = {}
 package.loaded["config.terminal"] = {
 	status = function()
-		return { exists = terminal_exists, running = terminal_running }
+		return {
+			exists = terminal_exists,
+			running = terminal_running,
+			accepting_input = terminal_running and terminal_accepting_input,
+			stop_pending = terminal_stop_pending,
+			restart_pending = terminal_restart_pending,
+			dispose_pending = terminal_dispose_pending,
+			state = terminal_exists and (terminal_running and "running" or "exited-retained") or "disposed",
+		}
 	end,
 	toggle = function(spec)
 		terminal_exists = true
@@ -95,7 +116,7 @@ package.loaded["config.terminal"] = {
 	restart = function(spec)
 		terminal_exists = true
 		terminal_running = true
-		toggled_specs[#toggled_specs + 1] = vim.deepcopy(spec)
+		restarted_specs[#restarted_specs + 1] = vim.deepcopy(spec)
 		return { spec = spec }
 	end,
 	focus = function(spec)
@@ -107,6 +128,23 @@ package.loaded["config.terminal"] = {
 		return true
 	end,
 }
+
+local deferred_callbacks = {}
+vim.defer_fn = function(callback)
+	deferred_callbacks[#deferred_callbacks + 1] = callback
+end
+
+local function drain_deferred(limit)
+	limit = limit or 200
+	for _ = 1, limit do
+		local callback = table.remove(deferred_callbacks, 1)
+		if not callback then
+			return
+		end
+		callback()
+	end
+	assert(#deferred_callbacks == 0, "deferred callback queue exceeded its test bound")
+end
 
 local python = require("config.python")
 local buf_a = vim.fn.bufadd(fixture .. "/a/src/test_a.py")
@@ -290,18 +328,13 @@ test("host snapshots are copied and explicit project failures never fall back", 
 	local root = fixture .. "/explicit-invalid"
 	local automatic = root .. "/.venv/bin/python"
 	interpreter(automatic, false)
-	local original_neoconf = package.loaded.neoconf
-	package.loaded.neoconf = {
-		get = function(key)
-			return key == "vscode" and { python = { pythonPath = root .. "/missing/python" } } or {}
-		end,
-	}
+	explicit_project_values.vscode = { python = { pythonPath = root .. "/missing/python" } }
 	local snapshot = python.snapshot(root)
 	assert(snapshot.source == "explicit" and snapshot.validity == "invalid")
 	assert(python.for_root(root) == nil, "invalid explicit interpreter fell back to .venv")
 	snapshot.value.interpreter = "mutated"
 	assert(python.snapshot(root).value.interpreter == nil, "snapshot mutation leaked into plugin state")
-	package.loaded.neoconf = original_neoconf
+	explicit_project_values.vscode = nil
 end)
 
 test("host discovery and Neotest runner never execute Python", function()
@@ -406,15 +439,21 @@ test("sending code opens and focuses the project REPL automatically", function()
 	python.refresh_current()
 	terminal_exists = false
 	terminal_running = false
+	terminal_accepting_input = false
 	opened_specs = {}
 	focused_specs = {}
 	sent = {}
 	python.send(false)
 	assert(#opened_specs == 1 and vim.deep_equal(opened_specs[1].launch.argv, { python_a, "-i" }))
+	assert(#sent == 0, "code was sent before the terminal accepted input")
+	terminal_accepting_input = true
+	drain_deferred()
 	assert(#sent == 1 and sent[1].text == 'exec("answer = 6 * 7")')
 	python.send(false)
 	assert(#opened_specs == 1, "an existing REPL was opened twice")
 	assert(#focused_specs == 1, "a hidden live REPL was not focused before sending")
+	assert(#sent == 1, "second code send bypassed the deferred FIFO")
+	drain_deferred()
 	assert(#sent == 2, "the second line was not sent to the live REPL")
 end)
 
@@ -422,13 +461,123 @@ test("sending code restarts a retained stopped REPL", function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = true
 	terminal_running = false
-	toggled_specs = {}
+	terminal_accepting_input = false
+	restarted_specs = {}
 	opened_specs = {}
 	sent = {}
 	python.send(false)
 	assert(#opened_specs == 0, "a stopped retained REPL was duplicated")
-	assert(#toggled_specs == 1, "a stopped retained REPL was not restarted")
+	assert(#restarted_specs == 1, "a stopped retained REPL was not restarted")
+	assert(#sent == 0, "code was sent while REPL restart was pending")
+	terminal_accepting_input = true
+	drain_deferred()
 	assert(#sent == 1, "code was not sent after restarting the REPL")
+end)
+
+test("an exited REPL adopts the newly selected interpreter on explicit restart", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	terminal_exists = false
+	terminal_running = false
+	toggled_specs = {}
+	restarted_specs = {}
+	active_python = python_a
+	python.refresh_current()
+	python.open_repl()
+	assert(#toggled_specs == 1 and vim.deep_equal(toggled_specs[1].launch.argv, { python_a, "-i" }))
+	terminal_running = false
+	active_python = python_a2
+	python.refresh_current()
+	python.open_repl()
+	assert(#restarted_specs == 1)
+	assert(vim.deep_equal(restarted_specs[1].launch.argv, { python_a2, "-i" }))
+end)
+
+test("opening an unchanged live REPL toggles it without restarting", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	terminal_exists = false
+	terminal_running = false
+	toggled_specs = {}
+	restarted_specs = {}
+	active_python = python_a
+	python.refresh_current()
+	python.open_repl()
+	assert(#toggled_specs == 1 and #restarted_specs == 0)
+	python.open_repl()
+	assert(#toggled_specs == 2, "second open did not toggle the live REPL")
+	assert(#restarted_specs == 0, "second open restarted an unchanged live REPL")
+end)
+
+test("queued REPL sends preserve FIFO order while startup is pending", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	terminal_exists = false
+	terminal_running = false
+	terminal_accepting_input = false
+	opened_specs = {}
+	focused_specs = {}
+	sent = {}
+	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "first = 1" })
+	python.send(false)
+	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "second = 2" })
+	python.send(false)
+	assert(#opened_specs == 1 and #focused_specs == 1 and #sent == 0)
+	terminal_accepting_input = true
+	drain_deferred()
+	assert(#sent == 2)
+	assert(sent[1].text == 'exec("first = 1")' and sent[2].text == 'exec("second = 2")')
+end)
+
+test("sending during a pending restart waits without refocusing the old process", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	terminal_exists = true
+	terminal_running = true
+	terminal_accepting_input = false
+	terminal_restart_pending = true
+	focused_specs = {}
+	sent = {}
+	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "after_restart = true" })
+	python.send(false)
+	assert(#focused_specs == 0 and #sent == 0, "pending restart reused the old REPL")
+	terminal_restart_pending = false
+	terminal_accepting_input = true
+	drain_deferred()
+	assert(#sent == 1 and sent[1].text == 'exec("after_restart = true")')
+end)
+
+test("queued REPL sends abort visibly when the process exits before input", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	terminal_exists = false
+	terminal_running = false
+	terminal_accepting_input = false
+	sent = {}
+	local previous_notify = vim.notify
+	local notices = {}
+	vim.notify = function(message, level)
+		notices[#notices + 1] = { message = message, level = level }
+	end
+	python.send(false)
+	terminal_running = false
+	drain_deferred()
+	vim.notify = previous_notify
+	assert(#sent == 0 and #notices == 1)
+	assert(notices[1].message:find("exited before it accepted input", 1, true))
+end)
+
+test("queued REPL sends time out instead of retrying forever", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	terminal_exists = false
+	terminal_running = false
+	terminal_accepting_input = false
+	sent = {}
+	local previous_notify = vim.notify
+	local notices = {}
+	vim.notify = function(message, level)
+		notices[#notices + 1] = { message = message, level = level }
+	end
+	python.send(false)
+	drain_deferred()
+	vim.notify = previous_notify
+	assert(#sent == 0 and #notices == 1)
+	assert(notices[1].message:find("Timed out waiting for Python REPL input", 1, true))
 end)
 
 test("a live REPL asks before adopting a changed interpreter", function()
@@ -436,6 +585,7 @@ test("a live REPL asks before adopting a changed interpreter", function()
 	terminal_exists = false
 	terminal_running = false
 	toggled_specs = {}
+	restarted_specs = {}
 	active_python = python_a
 	python.refresh_current()
 	python.open_repl()
@@ -447,7 +597,7 @@ test("a live REPL asks before adopting a changed interpreter", function()
 	active_python = python_a2
 	python.refresh_current()
 	assert(prompt and prompt.opts.prompt:find("environment changed", 1, true))
-	assert(#toggled_specs == 1, "REPL restarted without confirmation")
+	assert(#restarted_specs == 0, "REPL restarted without confirmation")
 end)
 
 local venv_spec = require("plugins.python")
@@ -558,8 +708,10 @@ end)
 
 package.loaded["venv-selector"] = original_selector
 package.loaded["config.terminal"] = original_terminal
+package.loaded["config.project_settings"] = original_project_settings
 vim.lsp.get_clients = original_clients
 vim.ui.select = original_select
+vim.defer_fn = original_defer_fn
 vim.env.UV_PROJECT_ENVIRONMENT = original_uv_project_environment
 vim.env.VIRTUAL_ENV = original_virtual_env
 vim.env.CONDA_PREFIX = original_conda_prefix

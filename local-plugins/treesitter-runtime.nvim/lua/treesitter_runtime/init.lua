@@ -104,7 +104,10 @@ end
 
 local function parser_is_started(buf, language)
 	local ok, started = pcall(config.is_started, buf, language)
-	return ok and started == true
+	if not ok or type(started) ~= "boolean" then
+		return nil
+	end
+	return started
 end
 
 local function restore_indent(buf, record)
@@ -154,15 +157,15 @@ local function ensure_indent(buf, record)
 	end
 end
 
-local function stop_owned_parser(buf, record)
-	if not record.parser_owned then
+local function stop_managed_parser(buf, record)
+	if not record.parser_managed then
 		return true
 	end
 	local ok, result = pcall(record.stop, buf, record.language)
 	if not ok or result == false then
 		return false
 	end
-	record.parser_owned = false
+	record.parser_managed = false
 	return true
 end
 
@@ -172,7 +175,7 @@ local function detach(buf)
 		return true
 	end
 	restore_indent(buf, record)
-	if not stop_owned_parser(buf, record) then
+	if not stop_managed_parser(buf, record) then
 		return false
 	end
 	attached[buf] = nil
@@ -217,12 +220,33 @@ local function evaluate(buf)
 		end
 		record = nil
 	end
+	if record then
+		local started = parser_is_started(buf, language)
+		if started == nil then
+			return false
+		end
+		if not started then
+			record.parser_managed = false
+			local ok, result = pcall(config.start, buf, language)
+			if not ok or result == false then
+				if record.indent_owned and current_indentexpr(buf) ~= record.indent_value then
+					record.indent_external = true
+				end
+				restore_indent(buf, record)
+				return false
+			end
+			record.parser_managed = true
+		end
+	end
 
 	if not record then
 		local preexisting = parser_is_started(buf, language)
+		if preexisting == nil then
+			return false
+		end
 		record = {
 			language = language,
-			parser_owned = false,
+			parser_managed = false,
 			stop = config.stop,
 			indent_owned = false,
 			indent_external = false,
@@ -232,8 +256,8 @@ local function evaluate(buf)
 			if not ok or result == false then
 				return false
 			end
-			record.parser_owned = true
 		end
+		record.parser_managed = true
 		attached[buf] = record
 	end
 	ensure_indent(buf, record)

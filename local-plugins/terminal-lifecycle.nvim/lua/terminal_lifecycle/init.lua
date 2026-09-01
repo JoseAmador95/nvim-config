@@ -4,6 +4,8 @@ local contracts = require("local_plugins.contracts")
 local uv = vim.uv
 local records = {}
 local dependencies
+local create
+local dispose_record
 
 local function copy(value)
 	return vim.deepcopy(value)
@@ -19,8 +21,9 @@ local function normalize_argv(argv)
 	end
 	local normalized = {}
 	for index, value in ipairs(argv) do
-		if not non_empty_string(value) then
-			return nil, ("launch.argv[%d] must be a non-empty string without NUL bytes"):format(index)
+		if type(value) ~= "string" or value:find("\0", 1, true) or (index == 1 and value == "") then
+			local requirement = index == 1 and "a non-empty string without NUL bytes" or "a string without NUL bytes"
+			return nil, ("launch.argv[%d] must be %s"):format(index, requirement)
 		end
 		normalized[index] = value
 	end
@@ -236,11 +239,30 @@ local function mark_disposed(record, close_visual)
 end
 
 local function handle_exit(record, exit_code)
-	if record.state == "disposed" then
+	if record.exit_seen then
 		return
 	end
+	record.exit_seen = true
 	record.exit_code = tonumber(exit_code) or 0
-	if record.stop_requested then
+	local dispose_pending = record.dispose_pending
+	local restart_pending = record.restart_pending
+	local stop_pending = record.stop_pending
+	record.dispose_pending = false
+	record.restart_pending = nil
+	record.stop_pending = false
+	if dispose_pending then
+		mark_disposed(record, true)
+		return
+	end
+	if restart_pending then
+		mark_disposed(record, true)
+		local replacement, restart_err = create(restart_pending)
+		if not replacement then
+			notify(record, "Could not restart terminal: " .. tostring(restart_err), vim.log.levels.ERROR)
+		end
+		return
+	end
+	if stop_pending then
 		if record.spec.policy.dispose_on_stop then
 			mark_disposed(record, true)
 		else
@@ -309,7 +331,11 @@ local function configure_buffer(record, buf)
 	end
 end
 
-local function create(spec)
+local function active(record)
+	return record.state == "starting" or record.state == "running"
+end
+
+create = function(spec)
 	if not dependencies then
 		return nil, "terminal_lifecycle.setup(opts) must be called before opening a terminal"
 	end
@@ -321,7 +347,10 @@ local function create(spec)
 		exit_code = nil,
 		backend = dependencies.backend,
 		dependencies = dependencies,
-		stop_requested = false,
+		stop_pending = false,
+		dispose_pending = false,
+		restart_pending = nil,
+		exit_seen = false,
 		visual_disposed = false,
 	}
 	records[record.key] = record
@@ -336,7 +365,18 @@ local function create(spec)
 			handle_exit(record, exit_code)
 		end,
 		on_dispose = function()
-			mark_disposed(record, false)
+			if not active(record) then
+				mark_disposed(record, false)
+				return
+			end
+			if record.handle == nil then
+				record.dispose_pending = true
+				return
+			end
+			local disposed, dispose_err = dispose_record(record)
+			if not disposed then
+				notify(record, "Could not stop disposed terminal: " .. tostring(dispose_err), vim.log.levels.ERROR)
+			end
 		end,
 	}
 	local ok, handle, open_err = pcall(record.backend.open, copy(spec), callbacks)
@@ -349,6 +389,13 @@ local function create(spec)
 		local buf = backend_value(record, "buffer")
 		if type(buf) == "number" then
 			configure_buffer(record, buf)
+		end
+	end
+	if record.state == "starting" and record.dispose_pending then
+		record.dispose_pending = false
+		local disposed, dispose_err = dispose_record(record)
+		if not disposed then
+			notify(record, "Could not stop disposed terminal: " .. tostring(dispose_err), vim.log.levels.ERROR)
 		end
 	end
 	if record.state == "starting" then
@@ -449,6 +496,37 @@ function M.focus(spec)
 	return show_and_focus(record)
 end
 
+local function request_stop(record, intent, restart_spec)
+	local previous = {
+		stop_pending = record.stop_pending,
+		dispose_pending = record.dispose_pending,
+		restart_pending = record.restart_pending,
+	}
+	if intent == "dispose" then
+		record.dispose_pending = true
+		record.restart_pending = nil
+	elseif intent == "restart" then
+		if record.dispose_pending then
+			return nil, "terminal disposal is already pending"
+		end
+		record.restart_pending = restart_spec
+	elseif not record.dispose_pending then
+		record.restart_pending = nil
+	end
+	record.stop_pending = true
+	if previous.stop_pending then
+		return records[record.key] or record
+	end
+	local stopped, stop_err = backend_call(record, "stop")
+	if stopped or record.exit_seen then
+		return records[record.key] or record
+	end
+	record.stop_pending = previous.stop_pending
+	record.dispose_pending = previous.dispose_pending
+	record.restart_pending = previous.restart_pending
+	return nil, stop_err
+end
+
 local function stop_record(record)
 	if record.state == "disposed" then
 		return nil, "terminal does not exist"
@@ -456,33 +534,18 @@ local function stop_record(record)
 	if record.state == "exited-retained" then
 		return record
 	end
-	record.stop_requested = true
-	local stopped, stop_err = backend_call(record, "stop")
-	if not stopped then
-		record.stop_requested = false
-		return nil, stop_err
-	end
-	if record.state == "starting" or record.state == "running" then
-		if record.spec.policy.dispose_on_stop then
-			mark_disposed(record, true)
-		else
-			record.state = "exited-retained"
-		end
-	end
-	return record
+	return request_stop(record, "stop")
 end
 
-local function dispose_record(record)
-	if record.state == "starting" or record.state == "running" then
-		record.stop_requested = true
-		local stopped, stop_err = backend_call(record, "stop")
-		if not stopped then
-			record.stop_requested = false
-			return nil, stop_err
-		end
+dispose_record = function(record)
+	if record.state == "disposed" then
+		return nil, "terminal does not exist"
 	end
-	mark_disposed(record, true)
-	return record
+	if record.state == "exited-retained" then
+		mark_disposed(record, true)
+		return record
+	end
+	return request_stop(record, "dispose")
 end
 
 function M.restart(spec)
@@ -492,10 +555,11 @@ function M.restart(spec)
 	end
 	local record = records[normalized.key]
 	if record then
-		local disposed, dispose_err = dispose_record(record)
-		if not disposed then
-			return nil, dispose_err
+		if record.state == "exited-retained" then
+			mark_disposed(record, true)
+			return create(normalized)
 		end
+		return request_stop(record, "restart", normalized)
 	end
 	return create(normalized)
 end
@@ -531,8 +595,23 @@ function M.status(identity)
 	end
 	local record = records[key]
 	if not record then
-		return { key = key, state = "disposed", exit_code = nil, visible = false, buf = nil }
+		return {
+			key = key,
+			state = "disposed",
+			exit_code = nil,
+			visible = false,
+			buf = nil,
+			stop_pending = false,
+			dispose_pending = false,
+			restart_pending = false,
+			accepting_input = false,
+		}
 	end
+	local accepting_input = active(record)
+		and not record.stop_pending
+		and not record.dispose_pending
+		and record.restart_pending == nil
+		and not record.exit_seen
 	return {
 		key = key,
 		state = record.state,
@@ -540,6 +619,10 @@ function M.status(identity)
 		visible = backend_value(record, "visible", false) == true,
 		buf = record.buf or backend_value(record, "buffer"),
 		metadata = copy(record.spec.metadata),
+		stop_pending = record.stop_pending,
+		dispose_pending = record.dispose_pending,
+		restart_pending = record.restart_pending ~= nil,
+		accepting_input = accepting_input,
 	}
 end
 

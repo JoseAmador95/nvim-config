@@ -33,8 +33,11 @@ idempotent: its autocmds are replaced and eligible existing attachments remain.
 buffers. Hosts call it after an explicit parser installation. This plugin never
 installs or downloads parsers itself.
 
-`teardown([buf])` stops only a parser started by this plugin. A parser already
-active before attachment is never stopped. When indentation is enabled, the
-exact previous `indentexpr` is restored only while the plugin still owns the
+`teardown([buf])` stops every parser managed by the runtime, including one that
+was already active when an eligible buffer was first observed. The same parser
+is stopped when the buffer becomes ineligible and is started again on eligible
+re-entry. An attachment whose parser was stopped externally is recovered by the
+next lifecycle evaluation or explicit `retry()`. When indentation is enabled,
+the exact previous `indentexpr` is restored only while the plugin still owns the
 value it wrote; a pre-existing value or later external change is left untouched.
 After complete teardown, a later `setup()` creates a fresh runtime profile.

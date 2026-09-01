@@ -46,9 +46,10 @@ package.loaded["config.terminal"] = {
 		status_by_key[spec.key] = { state = "running", exists = true }
 		return { spec = spec }
 	end,
-	focus = function(spec)
+	focus = function(identity)
+		assert(type(identity) == "string", "Just focus did not use the stable terminal key")
 		focused = focused + 1
-		return { spec = spec }
+		return { key = identity }
 	end,
 	status = function(key)
 		return vim.deepcopy(status_by_key[key] or { state = "disposed", exists = false })
@@ -160,9 +161,8 @@ test("second host run presents focus replace cancel and never replaces implicitl
 	assert(#selection == 3)
 	assert(selection[1].value == "focus" and selection[2].value == "replace" and selection[3].value == "cancel")
 	assert(restarted == nil, "dismissing the prompt replaced a running process")
-
 	vim.ui.select = function(items, _, callback)
-		callback(items[2])
+		callback(items[1])
 	end
 	just.run("build", {
 		system = function(_, _, callback)
@@ -170,8 +170,19 @@ test("second host run presents focus replace cancel and never replaces implicitl
 			return { pid = 3 }
 		end,
 	})
+	assert(focused == 1 and restarted == nil, "focus reused the newly requested launch")
+
+	vim.ui.select = function(items, _, callback)
+		callback(items[2])
+	end
+	just.run("build", {
+		system = function(_, _, callback)
+			callback(dump({ build = { parameters = {} } }))
+			return { pid = 4 }
+		end,
+	})
 	assert(restarted and restarted.metadata.recipe == "build")
-	assert(focused == 0)
+	assert(focused == 1)
 end)
 
 test("location import remains bounded to existing repository files", function()

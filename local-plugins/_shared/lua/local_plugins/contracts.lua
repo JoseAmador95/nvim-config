@@ -193,11 +193,11 @@ local function normalize_argv(value)
 	end
 	local result = {}
 	for index, argument in ipairs(value) do
-		local normalized, argument_err = string_field(argument, ("TerminalSpec.launch.argv[%d]"):format(index))
-		if not normalized then
-			return nil, argument_err
+		if type(argument) ~= "string" or argument:find("\0", 1, true) or (index == 1 and argument == "") then
+			local requirement = index == 1 and "a non-empty string without NUL bytes" or "a string without NUL bytes"
+			return nil, ("TerminalSpec.launch.argv[%d] must be %s"):format(index, requirement)
 		end
-		result[index] = normalized
+		result[index] = argument
 	end
 	return result
 end

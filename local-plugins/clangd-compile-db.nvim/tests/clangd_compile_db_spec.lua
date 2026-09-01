@@ -46,10 +46,14 @@ local function configure()
 				return true
 			end,
 			config = function(config_root, active)
-				return {
+				local config = {
 					root_dir = config_root,
-					cmd = { "clangd", "--compile-commands-dir=" .. active.directory },
+					cmd = { "clangd" },
 				}
+				if active then
+					config.cmd[#config.cmd + 1] = "--compile-commands-dir=" .. active.directory
+				end
+				return config
 			end,
 			start = function(config, bufnr)
 				starts[#starts + 1] = { config = vim.deepcopy(config), bufnr = bufnr }
@@ -99,7 +103,47 @@ test("files over 256 MiB require explicit unchecked candidate and apply", functi
 	assert(candidate.validity == "unchecked")
 	value, err = router.apply(root, { provider = "cmake" })
 	assert(value == nil and err:find("requires bang", 1, true))
-	assert(router.apply(root, { provider = "cmake", unchecked = true }).state == "active")
+	assert(vim.fn.writefile({ "[]" }, path) == 0)
+	local downgraded = assert(router.apply(root, { provider = "cmake" }))
+	assert(downgraded.active.validity == "structural")
+
+	local growing = database("growing", "[]")
+	local candidate = assert(router.candidate(root, "cmake", growing))
+	local growing_path = growing .. "/compile_commands.json"
+	fd = assert(vim.uv.fs_open(growing_path, "w", tonumber("600", 8)))
+	assert(vim.uv.fs_ftruncate(fd, router.MAX_BYTES + 1))
+	assert(vim.uv.fs_close(fd))
+	value, err = router.apply(root, { provider = "cmake" })
+	assert(value == nil and err:find("use bang", 1, true))
+	assert(router.active(root).fingerprint == downgraded.active.fingerprint, "failed growth replaced active state")
+	local unchecked = assert(router.apply(root, { provider = "cmake", unchecked = true }))
+	assert(unchecked.active.validity == "unchecked" and unchecked.active.fingerprint ~= candidate.fingerprint)
+end)
+
+test("apply refreshes a mutated candidate and preserves active on invalid revalidation", function()
+	configure()
+	local stable = database("mutation-stable", "[]")
+	local changing = database("mutation-changing", "[]")
+	assert(router.set_provider(root, "meson", stable))
+	local previous = assert(router.active(root))
+	local candidate = assert(router.candidate(root, "cmake", changing))
+	assert(
+		vim.fn.writefile(
+			{ '[{"directory":"/tmp","file":"probe.c","command":"cc probe.c"}]' },
+			changing .. "/compile_commands.json"
+		) == 0
+	)
+	local applied = assert(router.apply(root, { provider = "cmake" }))
+	assert(applied.active.fingerprint ~= candidate.fingerprint, "apply published the stale candidate fingerprint")
+	assert(applied.active.validity == "structural")
+
+	local invalid = database("mutation-invalid", "[]")
+	assert(router.candidate(root, "cmake", invalid))
+	assert(vim.fn.writefile({ "{" }, invalid .. "/compile_commands.json") == 0)
+	local result, err = router.apply(root, { provider = "cmake" })
+	assert(result == nil and err:find("expected a JSON array", 1, true))
+	assert(router.active(root).fingerprint == applied.active.fingerprint, "invalid revalidation replaced active state")
+	assert(router.active(root).fingerprint ~= previous.fingerprint)
 end)
 
 test("candidate and apply are distinct with deterministic providers and RAM override", function()
@@ -162,6 +206,44 @@ test("restarts coalesce, build latest cmd first, and create one ordered client p
 	}))
 	assert(router.set_provider(root, "cmake", second))
 	assert(#deferred == 1, "unchanged active database scheduled another restart")
+end)
+
+test("clear override coalesces one restart for provider fallback and no database", function()
+	configure()
+	clients = { { id = 1, root = root, attached_buffers = { [1] = true } } }
+	local fallback = database("clear-fallback")
+	local manual = database("clear-manual")
+	assert(router.set_provider(root, "cmake", fallback))
+	assert(router.set_override(root, manual))
+	local cleared = assert(router.clear_override(root))
+	assert(cleared.active.provider == "cmake" and cleared.active.directory == fallback)
+	assert(#deferred == 1, "fallback transitions did not coalesce to one restart")
+	deferred[1]()
+	assert(#starts == 1 and starts[1].config.cmd[2] == "--compile-commands-dir=" .. fallback)
+
+	configure()
+	clients = { { id = 2, root = root, attached_buffers = { [2] = true } } }
+	fallback = database("clear-invalid-fallback")
+	manual = database("clear-invalid-manual")
+	assert(router.set_provider(root, "cmake", fallback))
+	assert(router.set_override(root, manual))
+	assert(vim.fn.writefile({ "{" }, fallback .. "/compile_commands.json") == 0)
+	local failed, clear_err = router.clear_override(root)
+	assert(failed == nil and clear_err:find("expected a JSON array", 1, true))
+	assert(router.active(root) == nil, "invalid fallback retained the cleared manual database")
+	assert(#deferred == 1, "invalid fallback did not coalesce the removal restart")
+	deferred[1]()
+	assert(#starts == 1 and vim.deep_equal(starts[1].config.cmd, { "clangd" }))
+
+	configure()
+	clients = { { id = 3, root = root, attached_buffers = { [3] = true } } }
+	manual = database("clear-only-manual")
+	assert(router.set_override(root, manual))
+	cleared = assert(router.clear_override(root))
+	assert(cleared.active == nil and cleared.state == "candidate")
+	assert(#deferred == 1, "no-database transitions did not coalesce to one restart")
+	deferred[1]()
+	assert(#starts == 1 and vim.deep_equal(starts[1].config.cmd, { "clangd" }))
 end)
 
 vim.fn.delete(fixture, "rf")
