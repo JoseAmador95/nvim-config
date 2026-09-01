@@ -38,13 +38,17 @@ local function fresh(selected, override)
 end
 
 local function fake_dap()
-	return {
+	local dap = {
 		defaults = { fallback = {} },
 		listeners = {
 			after = { event_initialized = {} },
-			before = { event_terminated = {}, event_exited = {} },
+			on_session = {},
 		},
 	}
+	dap.session = function()
+		return dap.current_session
+	end
+	return dap
 end
 
 test("local config accepts the versioned DAP UI selection", function()
@@ -112,11 +116,23 @@ test("dap-ui is the only implementation loaded and owns the shared lifecycle", f
 	assert(dap.defaults.fallback.switchbuf == "usevisible,usetab,newtab")
 
 	dap.listeners.after.event_initialized.nvim_config_dap_ui()
-	dap.listeners.before.event_terminated.nvim_config_dap_ui()
-	dap.listeners.before.event_exited.nvim_config_dap_ui()
+	local active_session = { id = 1 }
+	local replacement_session = { id = 2 }
+	dap.current_session = replacement_session
+	dap.listeners.on_session.nvim_config_dap_ui(active_session, replacement_session)
+	vim.wait(20)
+	assert(calls.close == 0, "UI closed while another debug session remained")
+	dap.current_session = nil
+	dap.listeners.on_session.nvim_config_dap_ui(replacement_session, nil)
+	assert(
+		vim.wait(1000, function()
+			return calls.close == 1
+		end),
+		"UI did not close after the final debug session"
+	)
 	ui.toggle()
 	ui.eval()
-	assert(vim.deep_equal(calls, { open = 1, close = 2, toggle = 1, eval = 1, setup = 1 }))
+	assert(vim.deep_equal(calls, { open = 1, close = 1, toggle = 1, eval = 1, setup = 1 }))
 end)
 
 test("dap-view is exclusive, closes its terminal and routes jumps through editor tabs", function()
@@ -161,12 +177,18 @@ test("dap-view is exclusive, closes its terminal and routes jumps through editor
 	assert(win == vim.api.nvim_get_current_win())
 
 	dap.listeners.after.event_initialized.nvim_config_dap_ui()
-	dap.listeners.before.event_terminated.nvim_config_dap_ui()
-	dap.listeners.before.event_exited.nvim_config_dap_ui()
+	dap.current_session = nil
+	dap.listeners.on_session.nvim_config_dap_ui({ id = 1 }, nil)
+	assert(
+		vim.wait(1000, function()
+			return #calls.close == 1
+		end),
+		"dap-view did not close after the final debug session"
+	)
 	ui.toggle()
 	ui.eval()
 	assert(calls.open == 1)
-	assert(vim.deep_equal(calls.close, { true, true }))
+	assert(vim.deep_equal(calls.close, { true }))
 	assert(vim.deep_equal(calls.toggle, { true }))
 	assert(calls.hover[1].enter == true and calls.hover[1].options.context == "repl")
 end)

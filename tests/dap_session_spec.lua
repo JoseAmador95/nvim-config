@@ -141,8 +141,6 @@ local function spawn_server()
 	end
 	handlers.terminate = function(request)
 		respond(request)
-		event("terminated")
-		event("exited", { exitCode = 0 })
 	end
 	handlers.disconnect = function(request)
 		respond(request)
