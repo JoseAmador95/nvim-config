@@ -3,10 +3,13 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
+vim.opt.runtimepath:prepend(repo .. "/local-plugins/_shared")
 vim.opt.runtimepath:prepend(repo .. "/local-plugins/verified-tools.nvim")
 package.path = table.concat({
 	repo .. "/lua/?.lua",
 	repo .. "/lua/?/init.lua",
+	repo .. "/local-plugins/_shared/lua/?.lua",
+	repo .. "/local-plugins/_shared/lua/?/init.lua",
 	repo .. "/local-plugins/verified-tools.nvim/lua/?.lua",
 	repo .. "/local-plugins/verified-tools.nvim/lua/?/init.lua",
 	package.path,
@@ -30,28 +33,27 @@ fixture = assert(vim.uv.fs_realpath(fixture))
 local managed = fixture .. "/managed"
 local mason = fixture .. "/mason"
 local state = fixture .. "/state"
+local host = fixture .. "/host"
+for _, directory in ipairs({ managed, mason, state, host }) do
+	assert(vim.fn.mkdir(directory, "p") == 1)
+end
+
+local toolchain = require("config.toolchain")
+local fs = require("config.fs")
 local release_install_count = 0
 local registry_refresh_count = 0
 local mason_install_count = 0
-local toolchain = require("config.toolchain")
+local mason_version_checks = 0
+local mutate_mason_at_check
+local network_allowed = true
+local external = {}
 
-local legacy_root = state .. "/tool-bootstrap"
-assert(vim.fn.mkdir(legacy_root, "p") == 1)
-assert(vim.fn.mkdir(managed .. "/bin", "p") == 1)
-local legacy_plantuml = managed .. "/bin/plantuml"
-assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, legacy_plantuml) == 0)
-assert(vim.uv.fs_chmod(legacy_plantuml, tonumber("700", 8)))
-assert(vim.fn.writefile({
-	vim.json.encode({
-		schema = 1,
-		name = "plantuml",
-		version = toolchain.managed_tools.plantuml.version,
-		identity = "plantuml@1.2026.6",
-		status = "succeeded",
-		updated_at = os.time(),
-		pid = vim.uv.os_getpid(),
-	}),
-}, legacy_root .. "/plantuml@1.2026.6.json") == 0)
+local function write_executable(path, contents)
+	assert(vim.fn.mkdir(vim.fs.dirname(path), "p") >= 0)
+	assert(vim.fn.writefile({ contents or "#!/bin/sh\nexit 0" }, path, "b") == 0)
+	assert(vim.uv.fs_chmod(path, tonumber("755", 8)))
+	return path
+end
 
 local fake_paths = {
 	primary_state_root = function()
@@ -63,8 +65,20 @@ local fake_paths = {
 	mason_root = function()
 		return mason
 	end,
-	external_executable = function()
-		return nil
+	external_executable = function(name)
+		return external[name] and external[name][1] or nil
+	end,
+	external_candidates = function(name)
+		return vim.deepcopy(external[name] or {})
+	end,
+	is_managed_path = function(path)
+		return path:sub(1, #managed + 1) == managed .. "/"
+	end,
+	is_mason_path = function(path)
+		return path:sub(1, #mason + 1) == mason .. "/"
+	end,
+	is_verified_shim_path = function()
+		return false
 	end,
 }
 
@@ -74,47 +88,80 @@ function fake_release.plan(name)
 	if not entry then
 		return nil, "unknown"
 	end
+	local asset = entry.assets["darwin-arm64"] or entry.assets["darwin-x86_64"]
 	return {
 		name = name,
-		entry = entry,
-		asset = { sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-		target = "test-x86_64",
+		entry = vim.deepcopy(entry),
+		asset = vim.deepcopy(asset),
+		target = entry.assets["darwin-arm64"] and "darwin-arm64" or "darwin-x86_64",
+		install_root = managed,
+		layout = toolchain.release_layout(entry, asset),
+		requirements = {},
+		url = toolchain.release_url(entry, asset),
 	}
+end
+function fake_release.preflight()
+	return true
 end
 function fake_release.install(plan, callback)
 	release_install_count = release_install_count + 1
-	assert(vim.fn.mkdir(managed .. "/bin", "p") >= 0)
-	local path = managed .. "/bin/" .. plan.entry.executable
-	assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, path) == 0)
-	assert(vim.uv.fs_chmod(path, tonumber("700", 8)))
-	callback(true)
-	return true
+	local evidence = { kind = "release-install-evidence", archive_sha256 = plan.asset.sha256, artifacts = {} }
+	for _, relative in pairs(plan.layout.commands) do
+		local path = write_executable(vim.fs.joinpath(managed, relative), "#!/bin/sh\nexit 0")
+		evidence.artifacts[relative] = vim.fn.sha256(assert(fs.read_binary(path)))
+	end
+	for _, relative in ipairs(plan.layout.artifacts) do
+		local path = vim.fs.joinpath(managed, relative)
+		assert(vim.fn.mkdir(vim.fs.dirname(path), "p") >= 0)
+		assert(vim.fn.writefile({ "artifact" }, path, "b") == 0)
+		evidence.artifacts[relative] = vim.fn.sha256(assert(fs.read_binary(path)))
+	end
+	callback(true, evidence)
+	return { cancel = function() end }
 end
 
 package.loaded["config.tool_paths"] = fake_paths
 package.loaded["config.release_installer"] = fake_release
 package.loaded["config.tool_bootstrap"] = nil
 local bootstrap = require("config.tool_bootstrap")
-bootstrap._network_authorized = function()
-	return true
-end
 bootstrap._notify = function() end
+bootstrap._network_authorized = function()
+	return network_allowed
+end
 
 local fake_package = {}
 function fake_package:install(options, callback)
 	mason_install_count = mason_install_count + 1
 	assert(options.version == toolchain.mason_entry("clangd").version)
+	local package_root = mason .. "/packages/clangd"
+	local source = write_executable(package_root .. "/clangd", "#!/bin/sh\nexit 0")
 	assert(vim.fn.mkdir(mason .. "/bin", "p") >= 0)
-	local path = mason .. "/bin/clangd"
-	assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, path) == 0)
-	assert(vim.uv.fs_chmod(path, tonumber("700", 8)))
+	local link = mason .. "/bin/clangd"
+	pcall(vim.uv.fs_unlink, link)
+	assert(vim.uv.fs_symlink("../packages/clangd/clangd", link))
+	assert(vim.fn.writefile({
+		vim.json.encode({
+			name = "clangd",
+			schema_version = "2.0",
+			source = { id = "pkg:github/clangd/clangd@" .. toolchain.mason_entry("clangd").version },
+			links = { bin = { clangd = "clangd" }, share = {}, opt = {} },
+		}),
+	}, package_root .. "/mason-receipt.json") == 0)
+	assert(vim.fn.executable(source) == 1)
 	callback(true)
+	return { terminate = function() end }
 end
 function fake_package:is_installed()
 	return mason_install_count > 0
 end
 function fake_package:get_installed_version()
-	return toolchain.mason_entry("clangd").version
+	mason_version_checks = mason_version_checks + 1
+	if mutate_mason_at_check == mason_version_checks then
+		local source = mason .. "/packages/clangd/clangd"
+		assert(vim.uv.fs_rename(source, source .. ".previous"))
+		write_executable(source, "#!/bin/sh\nexit 7")
+	end
+	return mason_install_count > 0 and toolchain.mason_entry("clangd").version or nil
 end
 
 local registry = {}
@@ -133,7 +180,41 @@ bootstrap._registry = function()
 	return registry
 end
 
-test("setup and Mason readiness only plan and probe", function()
+local legacy_root = state .. "/tool-bootstrap"
+assert(vim.fn.mkdir(legacy_root, "p") == 1)
+assert(vim.fn.writefile({
+	vim.json.encode({
+		schema = 1,
+		name = "plantuml",
+		version = toolchain.managed_tools.plantuml.version,
+		identity = "plantuml@1.2026.6",
+		status = "succeeded",
+		updated_at = os.time(),
+		pid = vim.uv.os_getpid(),
+	}),
+}, legacy_root .. "/plantuml@1.2026.6.json") == 0)
+
+test("setup publishes the manual command before fallible startup planning", function()
+	local verified_tools = require("verified_tools")
+	local original_plan = verified_tools.plan
+	verified_tools.plan = function()
+		error("injected startup planning failure")
+	end
+	local ok, setup_err = pcall(bootstrap.setup)
+	verified_tools.plan = original_plan
+	assert(ok, setup_err)
+	assert(vim.fn.exists(":NvimConfigToolsInstall") == 2)
+	assert(bootstrap.setup(), "startup planning was not retryable")
+	bootstrap._reset_for_tests()
+end)
+
+test("Mason readiness repairs a skipped Lazy init hook", function()
+	assert(vim.fn.exists(":NvimConfigToolsInstall") == 0)
+	bootstrap.mason_ready()
+	assert(vim.fn.exists(":NvimConfigToolsInstall") == 2)
+end)
+
+test("setup and Mason readiness perform no network or install", function()
 	bootstrap.setup()
 	local plans = bootstrap.plan_all()
 	assert(plans.mmdflux and plans.clangd)
@@ -141,41 +222,176 @@ test("setup and Mason readiness only plan and probe", function()
 	bootstrap.mason_ready()
 	assert(release_install_count == 0 and registry_refresh_count == 0 and mason_install_count == 0)
 	local migrated = assert(bootstrap.engine().status(assert(bootstrap.spec("plantuml")).identity))
-	assert(migrated.status == "succeeded" and migrated.attestation.path == legacy_plantuml)
+	assert(migrated.status == "repair-required")
 	assert(vim.fn.exists(":NvimConfigToolsInstall") == 2)
-	assert(vim.fn.exists(":MasonToolsInstallSync") == 0)
 end)
 
-test("manual release and Mason installs route through the shared engine", function()
+test("release and Mason specs expose exact executable and integrity maps", function()
+	local release_spec = assert(bootstrap.spec("mmdflux"))
+	assert(vim.deep_equal(release_spec.executables, { mmdflux = "mmdflux" }))
+	assert(release_spec.manifest.integrity.kind == "release-sha256")
+	assert(release_spec.manifest.integrity.commands.mmdflux == "bin/mmdflux")
+	local mason_spec = assert(bootstrap.spec("pyright"))
+	assert(
+		vim.deep_equal(mason_spec.executables, { pyright = "pyright", ["pyright-langserver"] = "pyright-langserver" })
+	)
+	assert(mason_spec.manifest.integrity.receipt_path == ".verified-tools/receipts/pyright.json")
+	assert(mason_spec.manifest.integrity.commands.pyright == "bin/pyright")
+end)
+
+test("manual release and Mason installs produce persisted proofs", function()
 	assert(bootstrap.install("mmdflux", false))
 	assert(release_install_count == 1)
 	assert(bootstrap.install("clangd", false))
 	assert(registry_refresh_count == 1 and mason_install_count == 1)
-	local statuses = bootstrap.engine().status()
-	local seen = {}
-	for _, value in ipairs(statuses) do
-		seen[value.identity.backend .. ":" .. value.identity.name] = value.status
-	end
-	assert(seen["release:mmdflux"] == "succeeded")
-	assert(seen["mason:clangd"] == "succeeded")
+	local release_record = assert(bootstrap.engine().status(assert(bootstrap.spec("mmdflux")).identity))
+	assert(release_record.status == "succeeded" and release_record.proof.kind == "release-sha256")
+	local mason_record = assert(bootstrap.engine().status(assert(bootstrap.spec("clangd")).identity))
+	assert(mason_record.status == "succeeded" and mason_record.proof.kind == "mason-local-integrity")
+	local private = mason .. "/.verified-tools/receipts/clangd.json"
+	assert(vim.uv.fs_lstat(private).mode % 512 == tonumber("600", 8))
 end)
 
-test("offline manual denial consumes no attempt", function()
-	bootstrap._network_authorized = function()
-		return false
+test("Mason state changing between validation and proof is rejected", function()
+	local spec = assert(bootstrap.spec("clangd"))
+	local plan = assert(bootstrap.engine().plan(spec))
+	mutate_mason_at_check = mason_version_checks + 2
+	local observation, reason = bootstrap._mason_observation(plan, false)
+	mutate_mason_at_check = nil
+	assert(observation == nil and reason == "mason-state-changed")
+	local source = mason .. "/packages/clangd/clangd"
+	assert(vim.uv.fs_unlink(source))
+	assert(vim.uv.fs_rename(source .. ".previous", source))
+end)
+
+test("private receipt permission changes during a read fail closed", function()
+	local spec = assert(bootstrap.spec("clangd"))
+	local plan = assert(bootstrap.engine().plan(spec))
+	local private = mason .. "/.verified-tools/receipts/clangd.json"
+	local original_read = vim.uv.fs_read
+	local reads = 0
+	vim.uv.fs_read = function(...)
+		reads = reads + 1
+		local data, err = original_read(...)
+		if reads == 2 then
+			assert(vim.uv.fs_chmod(private, tonumber("644", 8)))
+		end
+		return data, err
 	end
-	-- Reconfigure the injected authorization callback without starting work.
-	local engine = bootstrap.engine()
-	engine.setup({
-		state_root = state .. "/offline",
-		backends = {},
-		network_authorized = bootstrap._network_authorized,
-	})
-	local spec = assert(bootstrap.spec("plantuml"))
-	local plan = assert(engine.plan(spec))
-	local claim, reason = engine.claim(plan)
+	local ok, observation, reason = xpcall(function()
+		local value, failure = bootstrap._mason_observation(plan, false)
+		return value, failure
+	end, debug.traceback)
+	vim.uv.fs_read = original_read
+	assert(vim.uv.fs_chmod(private, tonumber("600", 8)))
+	assert(ok, observation)
+	assert(observation == nil and tostring(reason):find("private%-receipt%-invalid"))
+end)
+
+test("Mason receipt tamper becomes drift without registry refresh", function()
+	local private = mason .. "/.verified-tools/receipts/clangd.json"
+	assert(
+		vim.fn.writefile(
+			{ vim.json.encode({ package = "clangd", version = "wrong", source_version = "wrong" }) },
+			private
+		) == 0
+	)
+	assert(vim.uv.fs_chmod(private, tonumber("600", 8)))
+	local identity = assert(bootstrap.spec("clangd")).identity
+	local attested
+	assert(bootstrap.engine().attest(identity, function(ok)
+		attested = ok
+	end))
+	assert(attested == false)
+	assert(bootstrap.engine().status(identity).status == "drift")
+	assert(registry_refresh_count == 1, "local attestation refreshed the Mason registry")
+end)
+
+test("bang bypasses a compatible external probe while prerequisites block before claim", function()
+	local external_markdown = write_executable(host .. "/markdown-preview")
+	external["markdown-preview"] = { external_markdown }
+	bootstrap._system = function()
+		return {
+			wait = function()
+				return { code = 0, stdout = "markdown-preview 0.0.10", stderr = "" }
+			end,
+		}
+	end
+	local before = release_install_count
+	assert(bootstrap.install("markdown-preview", false))
+	assert(
+		release_install_count == before
+			and bootstrap.engine().status(assert(bootstrap.spec("markdown-preview")).identity) == nil
+	)
+	assert(bootstrap.install("markdown-preview", true))
+	assert(release_install_count == before + 1)
+	external["markdown-preview"] = nil
+
+	local pyright = assert(bootstrap.spec("pyright", { force_managed = true }))
+	assert(not bootstrap.install("pyright", true))
+	assert(bootstrap.engine().status(pyright.identity) == nil, "missing prerequisites consumed an attempt")
+end)
+
+test("strict probes inspect every candidate and reject errors", function()
+	local first = write_executable(host .. "/one/probe")
+	local second = write_executable(host .. "/two/probe")
+	external.probe = { first, second }
+	local calls = {}
+	bootstrap._system = function(argv)
+		calls[#calls + 1] = argv[1]
+		return {
+			wait = function()
+				return { code = 0, stdout = argv[1] == second and "probe 1.2.3" or "probe 1.2.30", stderr = "" }
+			end,
+		}
+	end
+	local observed = bootstrap._external_probe({ version = "1.2.3" }, { executables = { probe = "probe" } })
+	assert(observed.outcome == "incompatible" and #calls == 2)
+	bootstrap._system = function(argv)
+		return {
+			wait = function()
+				return { code = 0, stdout = "probe 1.2.3", stderr = "" }
+			end,
+		}
+	end
+	observed = bootstrap._external_probe({ version = "1.2.3" }, { executables = { probe = "probe" } })
+	assert(observed.outcome == "compatible" and observed.paths.probe == first)
+	bootstrap._system = function()
+		return {
+			wait = function()
+				return { code = 124, stdout = "", stderr = "" }
+			end,
+		}
+	end
+	observed = bootstrap._external_probe({ version = "1.2.3" }, { executables = { probe = "probe" } })
+	assert(observed.outcome == "error" and observed.detail:find("timeout", 1, true))
+
+	local companion = write_executable(host .. "/two/probe-helper")
+	external["probe-helper"] = { companion }
+	bootstrap._system = function()
+		return {
+			wait = function()
+				return { code = 0, stdout = "probe 1.2.3", stderr = "" }
+			end,
+		}
+	end
+	observed = bootstrap._external_probe(
+		{ version = "1.2.3" },
+		{ executables = { probe = "probe", ["probe-helper"] = "probe-helper" } }
+	)
+	assert(observed.outcome == "incompatible" and observed.detail:find("different%-install%-root"))
+	external.probe = nil
+	external["probe-helper"] = nil
+end)
+
+test("offline denial consumes no attempt", function()
+	network_allowed = false
+	local spec = assert(bootstrap.spec("marksman", { force_managed = true }))
+	local plan = assert(bootstrap.engine().plan(spec))
+	local claim, reason = bootstrap.engine().claim(plan)
 	assert(claim == nil and reason == "blocked/offline")
-	assert(engine.status(plan.identity) == nil)
+	assert(bootstrap.engine().status(plan.identity) == nil)
+	network_allowed = true
 end)
 
 vim.fn.delete(fixture, "rf")

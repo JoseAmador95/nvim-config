@@ -109,11 +109,14 @@ function M.compose_segments(local_paths, inherited)
 	local parts = {}
 	local seen = {}
 
+	-- A verified command must win over every host, workspace, release, and
+	-- Mason path. Ownership and content are enforced by verified-tools before
+	-- anything is published in this directory.
+	append_unique(parts, seen, M.verified_shim_bin())
 	for _, path in ipairs(local_paths or {}) do
 		append_unique(parts, seen, path)
 	end
 	append_unique(parts, seen, "~/.local/bin")
-	append_unique(parts, seen, M.verified_shim_bin())
 
 	for _, path in ipairs(split_path(inherited)) do
 		if not M.is_managed_path(path) and not M.is_mason_path(path) and not M.is_verified_shim_path(path) then
@@ -150,19 +153,38 @@ end
 -- Mason shims. This lets installers decide whether a tool is already supplied
 -- externally before they claim a one-shot attempt.
 function M.external_executable(name, path)
+	return M.external_candidates(name, path)[1]
+end
+
+-- Return every eligible host/user candidate in PATH order. Probes must inspect
+-- the complete set so that an earlier broken executable cannot be hidden by a
+-- later compatible one. Managed roots and verified shims never count as an
+-- external source.
+function M.external_candidates(name, path)
+	local result = {}
+	local seen = {}
 	if not nonempty(name) then
-		return nil
+		return result
 	end
 	if name:find("/", 1, true) then
-		return acceptable_external(expand(name))
+		local candidate = acceptable_external(expand(name))
+		if candidate then
+			result[1] = candidate
+		end
+		return result
 	end
 	for _, directory in ipairs(split_path(path or vim.env.PATH)) do
-		local candidate = acceptable_external(join(expand(directory), name))
+		local expanded = expand(directory)
+		local candidate = expanded and acceptable_external(join(expanded, name)) or nil
 		if candidate then
-			return candidate
+			local lexical = vim.fs.normalize(vim.fn.fnamemodify(candidate, ":p"))
+			if not seen[lexical] then
+				seen[lexical] = true
+				result[#result + 1] = lexical
+			end
 		end
 	end
-	return nil
+	return result
 end
 
 return M

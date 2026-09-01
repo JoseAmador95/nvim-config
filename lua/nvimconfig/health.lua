@@ -34,16 +34,16 @@ local function path_origin(path, configured)
 		root = root:gsub("/+$", "")
 		return path == root or path:sub(1, #root + 1) == root .. "/"
 	end
+	if tool_paths.is_verified_shim_path(path) then
+		return "verified-shim", 1
+	end
 	for root in pairs(configured) do
 		if within(root) then
-			return "local_config", 1
+			return "local_config", 2
 		end
 	end
 	if within(normalized("~/.local/bin")) then
-		return "user-local", 2
-	end
-	if tool_paths.is_verified_shim_path(path) then
-		return "verified-shim", 3
+		return "user-local", 3
 	end
 	if tool_paths.is_managed_path(path) then
 		return "managed", 5
@@ -59,7 +59,7 @@ local function check_path_order()
 	local previous_rank = 0
 	local ordered = true
 	health.info(
-		"PATH precedence contract: local_config.path > ~/.local/bin > verified shims > host PATH > managed > Mason"
+		"PATH precedence contract: verified shims > local_config.path > ~/.local/bin > host PATH > managed > Mason"
 	)
 	for index, path in ipairs(split_path(vim.env.PATH)) do
 		local origin, rank = path_origin(path, configured)
@@ -233,17 +233,46 @@ local function state_summary()
 	end
 end
 
+local function safe_relative(value)
+	if type(value) ~= "string" or value == "" or value:sub(1, 1) == "/" or vim.fs.normalize(value) ~= value then
+		return false
+	end
+	for segment in value:gmatch("[^/]+") do
+		if segment == "." or segment == ".." then
+			return false
+		end
+	end
+	return true
+end
+
 local function mason_receipt_status(name, expected)
-	local receipt = vim.fs.joinpath(tool_paths.mason_root(), "packages", name, "mason-receipt.json")
-	if vim.fn.filereadable(receipt) ~= 1 then
+	local entry = toolchain.mason_entry(name)
+	if not entry then
 		return "missing"
+	end
+	local receipt = vim.fs.joinpath(tool_paths.mason_root(), "packages", name, "mason-receipt.json")
+	local receipt_stat = vim.uv.fs_lstat(receipt)
+	if not receipt_stat then
+		return "missing"
+	end
+	if receipt_stat.type ~= "file" or receipt_stat.nlink ~= 1 or receipt_stat.size > 262144 then
+		return "corrupt"
 	end
 	local ok, lines = pcall(vim.fn.readfile, receipt)
 	if not ok then
 		return "corrupt"
 	end
 	local decoded_ok, value = pcall(vim.json.decode, table.concat(lines, "\n"))
-	local source_id = decoded_ok and type(value) == "table" and type(value.source) == "table" and value.source.id
+	if
+		not decoded_ok
+		or type(value) ~= "table"
+		or value.name ~= name
+		or not ({ ["1.0"] = true, ["1.1"] = true, ["2.0"] = true })[value.schema_version]
+	then
+		return "corrupt"
+	end
+	local source = value.schema_version == "2.0" and value.source or value.primary_source
+	local source_id = type(source) == "table" and source.id or nil
 	if type(source_id) ~= "string" then
 		return "corrupt"
 	end
@@ -251,11 +280,63 @@ local function mason_receipt_status(name, expected)
 	if not actual or actual == "" then
 		return "corrupt"
 	end
-	return actual == expected and "exact" or "wrong", actual
+	if actual ~= expected then
+		return "wrong", actual
+	end
+	local links = type(value.links) == "table" and value.links.bin or nil
+	local executables = toolchain.executable_map(entry)
+	if type(links) ~= "table" or vim.tbl_count(links) ~= vim.tbl_count(executables) then
+		return "corrupt"
+	end
+	local package_root = vim.fs.joinpath(tool_paths.mason_root(), "packages", name)
+	local canonical_package = vim.uv.fs_realpath(package_root)
+	if not canonical_package then
+		return "corrupt"
+	end
+	for command in pairs(executables) do
+		local relative = links[command]
+		if not safe_relative(relative) then
+			return "corrupt"
+		end
+		local command_path = vim.fs.joinpath(tool_paths.mason_root(), "bin", command)
+		local source_path = vim.fs.joinpath(package_root, relative)
+		local source_real = vim.uv.fs_realpath(source_path)
+		local source_stat = source_real and vim.uv.fs_stat(source_real) or nil
+		if
+			not source_real
+			or not (source_real == canonical_package or source_real:sub(1, #canonical_package + 1) == canonical_package .. "/")
+			or vim.uv.fs_realpath(command_path) ~= source_real
+			or not source_stat
+			or source_stat.type ~= "file"
+			or vim.fn.executable(command_path) ~= 1
+		then
+			return "corrupt"
+		end
+	end
+	for command in pairs(links) do
+		if not executables[command] then
+			return "corrupt"
+		end
+	end
+	local private = vim.fs.joinpath(tool_paths.mason_root(), ".verified-tools", "receipts", name .. ".json")
+	local private_stat = vim.uv.fs_lstat(private)
+	if not private_stat then
+		return "unverified"
+	end
+	if private_stat.type ~= "file" or private_stat.nlink ~= 1 or private_stat.mode % 512 ~= 384 then
+		return "corrupt"
+	end
+	local private_ok, private_lines = pcall(vim.fn.readfile, private)
+	local private_decoded, private_value = false, nil
+	if private_ok then
+		private_decoded, private_value = pcall(vim.json.decode, table.concat(private_lines, "\n"))
+	end
+	local expected_private = { package = name, version = expected, source_version = expected }
+	return private_decoded and vim.deep_equal(private_value, expected_private) and "exact" or "corrupt", actual
 end
 
 local function check_mason_receipts()
-	local grouped = { exact = {}, wrong = {}, missing = {}, corrupt = {} }
+	local grouped = { exact = {}, wrong = {}, missing = {}, unverified = {}, corrupt = {} }
 	for _, name in ipairs(toolchain.mason_order) do
 		local entry = toolchain.mason_tools[name]
 		local status, actual = mason_receipt_status(name, entry.version)
@@ -265,10 +346,10 @@ local function check_mason_receipts()
 		end
 		grouped[status][#grouped[status] + 1] = label
 	end
-	for _, status in ipairs({ "exact", "wrong", "missing", "corrupt" }) do
+	for _, status in ipairs({ "exact", "wrong", "missing", "unverified", "corrupt" }) do
 		if #grouped[status] > 0 then
 			local message = "Mason receipts " .. status .. ": " .. table.concat(grouped[status], ", ")
-			if status == "wrong" or status == "corrupt" then
+			if status == "wrong" or status == "unverified" or status == "corrupt" then
 				health.warn(message)
 			else
 				health.info(message)
@@ -427,7 +508,7 @@ function M.check()
 	health.start("Pinned tool bootstrap")
 	health.info("Managed release pins: " .. joined_pins(toolchain.managed_order, toolchain.managed_tools))
 	health.info("Mason exact pins: " .. joined_pins(toolchain.mason_order, toolchain.mason_tools))
-	health.ok("Startup is probe/plan only; installation and repair are always explicit")
+	health.ok("Startup is local probe/plan/attest only; installation and repair are always explicit")
 	state_summary()
 	check_managed_release_eligibility()
 	check_mason_receipts()
