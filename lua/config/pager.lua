@@ -8,6 +8,9 @@
 -- instead of `{ import = "plugins" }` -- an allowlist that is safe by default.
 local M = {}
 
+local MAX_STRIP_BYTES = 64 * 1024 * 1024
+local STRIP_CHUNK_BYTES = 256 * 1024
+
 -- nvimpager exports NVIM_APPNAME=nvimpager before nvim starts (see the
 -- nvimpager script). Available immediately in init.lua, no load-order caveats.
 M.active = vim.env.NVIM_APPNAME == "nvimpager"
@@ -82,27 +85,162 @@ end
 -- and also handles OSC (e.g. OSC 8 hyperlinks) and other string sequences.
 -- Exposed so `:SetFileType` (lua/config/viewer_commands.lua) can call it in
 -- pager mode. Never call this in normal nvim: it would edit real file buffers.
-function M.strip_ansi(buf)
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+local function current_buffer_bytes(buf)
+	local line_count = vim.api.nvim_buf_line_count(buf)
+	local ok, bytes = pcall(vim.api.nvim_buf_get_offset, buf, line_count)
+	if not ok or type(bytes) ~= "number" or bytes < 0 then
+		return nil, "Could not measure current pager contents: " .. tostring(bytes)
+	end
+	return bytes, line_count
+end
+
+local function stripped_contents(buf, line_count)
+	local output = {}
+	local pending = {}
+	local pending_bytes = 0
+	local mode = "text"
+	local osc = false
 	local changed = false
-	for i, line in ipairs(lines) do
-		local new = line
-			:gsub("\27%[[%d;:?]*%a", "") -- CSI: colors, cursor moves, erase, ...
-			:gsub("\27%].-\7", "") -- OSC ... BEL
-			:gsub("\27%].-\27\\", "") -- OSC ... ST
-			:gsub("\27[PX^_].-\27\\", "") -- DCS/SOS/PM/APC ... ST
-		if new ~= line then
-			changed = true
-			lines[i] = new
+
+	local function flush()
+		if pending_bytes > 0 then
+			output[#output + 1] = table.concat(pending)
+			pending = {}
+			pending_bytes = 0
 		end
 	end
-	if changed then
-		local modifiable = vim.bo[buf].modifiable
-		vim.bo[buf].modifiable = true
-		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-		vim.bo[buf].modifiable = modifiable
-		vim.bo[buf].modified = false
+
+	local function append(value)
+		if value == "" then
+			return
+		end
+		pending[#pending + 1] = value
+		pending_bytes = pending_bytes + #value
+		if pending_bytes >= STRIP_CHUNK_BYTES then
+			flush()
+		end
 	end
+
+	local function feed(chunk)
+		local index = 1
+		while index <= #chunk do
+			if mode == "text" then
+				local escape = chunk:find("\27", index, true)
+				if not escape then
+					append(chunk:sub(index))
+					break
+				end
+				append(chunk:sub(index, escape - 1))
+				changed = true
+				mode = "escape"
+				index = escape + 1
+			elseif mode == "escape" then
+				local byte = chunk:byte(index)
+				index = index + 1
+				if byte == 91 then -- CSI: ESC [
+					mode = "csi"
+				elseif byte == 93 then -- OSC: ESC ]
+					mode = "string"
+					osc = true
+				elseif byte == 80 or byte == 88 or byte == 94 or byte == 95 then -- DCS/SOS/PM/APC
+					mode = "string"
+					osc = false
+				else
+					mode = "text"
+				end
+			elseif mode == "csi" then
+				local byte = chunk:byte(index)
+				index = index + 1
+				if byte >= 64 and byte <= 126 then
+					mode = "text"
+				end
+			elseif mode == "string" then
+				local byte = chunk:byte(index)
+				index = index + 1
+				if osc and byte == 7 then
+					mode = "text"
+				elseif byte == 27 then
+					mode = "string_escape"
+				end
+			else -- string_escape
+				local byte = chunk:byte(index)
+				index = index + 1
+				if byte == 92 or (osc and byte == 7) then
+					mode = "text"
+				elseif byte ~= 27 then
+					mode = "string"
+				end
+			end
+		end
+	end
+
+	for row = 0, line_count - 1 do
+		local ok_start, start_offset = pcall(vim.api.nvim_buf_get_offset, buf, row)
+		local ok_finish, finish_offset = pcall(vim.api.nvim_buf_get_offset, buf, row + 1)
+		if not ok_start or not ok_finish then
+			return nil, "Could not locate current pager contents"
+		end
+		local line_bytes = finish_offset - start_offset - 1
+		if line_bytes < 0 then
+			return nil, "Pager buffer offsets are inconsistent"
+		end
+		local column = 0
+		while column < line_bytes do
+			local finish = math.min(column + STRIP_CHUNK_BYTES, line_bytes)
+			local ok, parts = pcall(vim.api.nvim_buf_get_text, buf, row, column, row, finish, {})
+			if not ok or type(parts) ~= "table" or type(parts[1]) ~= "string" then
+				return nil, "Could not read current pager contents: " .. tostring(parts)
+			end
+			feed(parts[1])
+			column = finish
+		end
+		if row < line_count - 1 then
+			feed("\n")
+		end
+	end
+	flush()
+	return table.concat(output), changed
+end
+
+function M.strip_ansi(buf)
+	buf = buf == 0 and vim.api.nvim_get_current_buf() or buf
+	if type(buf) ~= "number" or not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then
+		return nil, "Pager buffer is invalid or unloaded"
+	end
+	local bytes, line_count_or_err = current_buffer_bytes(buf)
+	if not bytes then
+		return nil, line_count_or_err
+	end
+	if bytes > MAX_STRIP_BYTES then
+		return nil, ("Pager contents exceed the %d MiB stripping limit"):format(MAX_STRIP_BYTES / 1024 / 1024)
+	end
+	local contents, changed_or_err = stripped_contents(buf, line_count_or_err)
+	if not contents then
+		return nil, changed_or_err
+	end
+	if not changed_or_err then
+		return true
+	end
+
+	local modifiable = vim.bo[buf].modifiable
+	local modified = vim.bo[buf].modified
+	local ok, set_err = pcall(function()
+		vim.bo[buf].modifiable = true
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(contents, "\n", { plain = true }))
+	end)
+	local modified_ok, modified_err = pcall(function()
+		vim.bo[buf].modified = modified
+	end)
+	local modifiable_ok, modifiable_err = pcall(function()
+		vim.bo[buf].modifiable = modifiable
+	end)
+	if not modified_ok or not modifiable_ok then
+		return nil, "Could not restore pager buffer state: " .. tostring(modified_err or modifiable_err)
+	end
+	if not ok then
+		return nil, "Could not strip pager escapes: " .. tostring(set_err)
+	end
+	return true
 end
 
 -- Apply the chosen filetype to `win`'s (paged) buffer: strip ANSI, then set the
@@ -112,11 +250,15 @@ end
 -- `nvim_exec2()` with an opaque, truncated error. Any failure is reported whole.
 local function apply_filetype(win, ft)
 	if not ft or ft == "" or not vim.api.nvim_win_is_valid(win) then
-		return
+		return nil, "Filetype or pager window is invalid"
 	end
 	local buf = vim.api.nvim_win_get_buf(win)
+	local stripped, strip_err = M.strip_ansi(buf)
+	if not stripped then
+		vim.notify("Set filetype failed: " .. tostring(strip_err), vim.log.levels.ERROR, { title = "pager" })
+		return nil, strip_err
+	end
 	local ok, err = pcall(function()
-		M.strip_ansi(buf)
 		vim.bo[buf].filetype = ft
 		-- Keep the paged buffer read-only: setting the filetype (and any ftplugin
 		-- it triggers) can flip 'modifiable' back on, which would expose editing
@@ -126,7 +268,9 @@ local function apply_filetype(win, ft)
 	end)
 	if not ok then
 		vim.notify("Set filetype failed: " .. tostring(err), vim.log.levels.ERROR, { title = "pager" })
+		return nil, tostring(err)
 	end
+	return true
 end
 
 -- Pick a filetype with the snacks picker (falls back to vim.ui.select).
@@ -224,5 +368,8 @@ function M.setup()
 	-- add the pager-only picker keymap that drives it.
 	vim.keymap.set("n", "<leader>ft", pick_filetype, { desc = "Set filetype (picker)" })
 end
+
+M.MAX_STRIP_BYTES = MAX_STRIP_BYTES
+M._apply_filetype = apply_filetype
 
 return M

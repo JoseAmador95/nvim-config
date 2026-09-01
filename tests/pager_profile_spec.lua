@@ -39,6 +39,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"JustRun",
 					"JustImportLast",
 					"MermaidPreview",
+					"NvimConfigTrustProjectSettings",
 					"NvimConfigToolsInstall",
 					"Mason",
 					"PlantumlAscii",
@@ -55,6 +56,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into the pager profile")
 				end
 				assert(package.loaded["config.exact_editor"] == nil, "exact editor adapter loaded in the pager")
+				assert(package.loaded["config.project_settings"] == nil, "project settings adapter loaded in the pager")
 				assert(package.loaded.tab_first == nil, "tab-first runtime loaded in the pager")
 				assert(_G.ExactEditorRequest == nil, "exact editor RPC function leaked into the pager")
 				assert(
@@ -63,6 +65,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				)
 				assert(vim.fn.exists(":SetFileType") == 2, "pager SetFileType command is missing")
 				assert(vim.fn.exists(":DiagramShow") == 2, "pager diagram command is missing")
+				assert(vim.fn.exists(":JsonTree") == 0, "JsonTree leaked into the pager")
+				assert(vim.fn.exists(":JqxList") == 0, "JqxList leaked into the pager")
 
 				local runtime_paths = vim.api.nvim_list_runtime_paths()
 				local function has_plugin(name)

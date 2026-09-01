@@ -67,7 +67,11 @@ local function set_filetype_with_scratch(ft)
 	-- of showing the raw sequences as garbage. Guarded to pager mode so we never
 	-- rewrite a real file buffer in normal nvim.
 	if pager.active then
-		pager.strip_ansi(0)
+		local stripped, strip_err = pager.strip_ansi(0)
+		if not stripped then
+			notify("Could not set filetype: " .. tostring(strip_err), vim.log.levels.ERROR)
+			return nil, strip_err
+		end
 	end
 
 	local name = vim.api.nvim_buf_get_name(0)
@@ -83,20 +87,23 @@ local function set_filetype_with_scratch(ft)
 	if not pager.active then
 		try_lsp_start()
 	end
+	return true
 end
 
-vim.api.nvim_create_user_command("JsonTree", function()
-	if not ensure_filetype({ "json" }) then
-		return
-	end
+if not pager.active then
+	vim.api.nvim_create_user_command("JsonTree", function()
+		if not ensure_filetype({ "json" }) then
+			return
+		end
 
-	if vim.fn.executable("jq") ~= 1 then
-		notify("jq not found in PATH", vim.log.levels.ERROR)
-		return
-	end
+		if vim.fn.executable("jq") ~= 1 then
+			notify("jq not found in PATH", vim.log.levels.ERROR)
+			return
+		end
 
-	vim.cmd("JqxList")
-end, { desc = "JSON tree view" })
+		vim.cmd("JqxList")
+	end, { desc = "JSON tree view" })
+end
 
 -- The menu backend and its public entry points belong only to the full terminal
 -- editor profile. The pager never loads the plugin.

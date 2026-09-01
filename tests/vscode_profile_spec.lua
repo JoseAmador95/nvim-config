@@ -36,6 +36,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"DevContainerHostEditor",
 					"JustRun",
 					"JustImportLast",
+					"NvimConfigTrustProjectSettings",
 					"NvimConfigToolsInstall",
 					"LogWatchCurrentFile",
 					"Mason",
@@ -51,6 +52,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into VSCode")
 				end
 				assert(package.loaded["config.exact_editor"] == nil, "exact editor adapter loaded in VSCode")
+				assert(package.loaded["config.project_settings"] == nil, "project settings adapter loaded in VSCode")
 				assert(package.loaded.tab_first == nil, "tab-first runtime loaded in VSCode")
 				assert(
 					vim.tbl_isempty(vim.fn.maparg("<leader><leader>", "n", false, true)),

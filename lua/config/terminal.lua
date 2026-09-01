@@ -62,6 +62,31 @@ local function count_for(key)
 	return (tonumber(vim.fn.sha256(key):sub(1, 7), 16) % 999999) + 1
 end
 
+local function buffer_job(buf)
+	if type(buf) ~= "number" or not vim.api.nvim_buf_is_valid(buf) then
+		return nil
+	end
+	local ok, job = pcall(function()
+		return vim.b[buf].terminal_job_id
+	end)
+	return ok and type(job) == "number" and job > 0 and job or nil
+end
+
+local function remember_terminal_job(win)
+	if not win then
+		return nil
+	end
+	local cached = win._terminal_lifecycle_job_id
+	if type(cached) == "number" and cached > 0 then
+		return cached
+	end
+	local job = buffer_job(win.buf)
+	if job then
+		win._terminal_lifecycle_job_id = job
+	end
+	return job
+end
+
 local function window_options(spec, callbacks)
 	local view = spec.view
 	local bound = false
@@ -71,6 +96,15 @@ local function window_options(spec, callbacks)
 		end
 		bound = true
 		local buf = win.buf
+		local exit_reported = false
+		local function report_exit(status)
+			if exit_reported then
+				return
+			end
+			exit_reported = true
+			callbacks.on_exit(tonumber(status) or 0)
+		end
+		win._terminal_lifecycle_on_exit = report_exit
 		callbacks.on_buffer(buf)
 		vim.b[buf].nvim_config_terminal = {
 			runtime = spec.metadata.runtime,
@@ -79,9 +113,18 @@ local function window_options(spec, callbacks)
 		}
 		win:on("TermClose", function(_, event)
 			local fallback = type(vim.v.event) == "table" and vim.v.event or {}
-			callbacks.on_exit(tonumber((event or {}).status) or tonumber(fallback.status) or 0)
+			local status = tonumber((event or {}).status) or tonumber(fallback.status) or 0
+			win._terminal_lifecycle_observed_exit = status
+			if status == -1 then
+				vim.schedule(function()
+					report_exit(status)
+				end)
+			else
+				report_exit(status)
+			end
 		end, { buf = true })
 		win:on("BufWipeout", function()
+			remember_terminal_job(win)
 			callbacks.on_dispose()
 		end, { buf = true })
 	end
@@ -113,6 +156,7 @@ function snacks_backend.open(spec, callbacks)
 		win = window,
 	})
 	bind(win)
+	remember_terminal_job(win)
 	return win
 end
 
@@ -140,20 +184,27 @@ function snacks_backend.hide(win)
 end
 
 local function terminal_job(win)
-	if not win or not win.buf_valid or not win:buf_valid() then
-		return nil
-	end
-	local job = vim.b[win.buf].terminal_job_id
-	return type(job) == "number" and job > 0 and job or nil
+	return remember_terminal_job(win)
 end
 
 function snacks_backend.stop(win)
+	if type(win._terminal_lifecycle_observed_exit) == "number" then
+		win._terminal_lifecycle_on_exit(win._terminal_lifecycle_observed_exit)
+		return true
+	end
 	local job = terminal_job(win)
 	if not job then
 		return nil, "terminal process has no job id"
 	end
-	if vim.fn.jobwait({ job }, 0)[1] ~= -1 then
+	local status = vim.fn.jobwait({ job }, 0)[1]
+	if type(status) == "number" and status >= 0 then
+		if type(win._terminal_lifecycle_on_exit) == "function" then
+			win._terminal_lifecycle_on_exit(status)
+		end
 		return true
+	end
+	if status ~= -1 then
+		return nil, "terminal process state could not be confirmed"
 	end
 	local stopped = vim.fn.jobstop(job)
 	return stopped == 1 and true or nil, stopped == 1 and nil or "terminal process could not be stopped"
@@ -227,6 +278,13 @@ function M.toggle(spec)
 end
 
 function M.focus(spec)
+	if type(spec) ~= "table" or spec.launch == nil then
+		local key, err = key_for(spec)
+		if not key then
+			return nil, err
+		end
+		return lifecycle.focus(key)
+	end
 	return call_with_spec("focus", spec)
 end
 
@@ -252,13 +310,13 @@ end
 
 function M.send(identity, text, options)
 	local status = M.status(identity)
-	if not status.running then
-		return nil, "terminal process is not running"
+	if not status.accepting_input then
+		return nil, "terminal process is not accepting input"
 	end
 	if type(text) ~= "string" or text:find("\0", 1, true) then
 		return nil, "terminal input must be a string without NUL bytes"
 	end
-	local job = status.buf and vim.b[status.buf].terminal_job_id or nil
+	local job = buffer_job(status.buf)
 	if type(job) ~= "number" or job <= 0 or vim.fn.jobwait({ job }, 0)[1] ~= -1 then
 		return nil, "terminal process is not running"
 	end
@@ -275,6 +333,11 @@ function M.status(identity)
 	local status = lifecycle.status(key)
 	status.exists = status.state ~= "disposed"
 	status.running = status.state == "starting" or status.state == "running"
+	local job = buffer_job(status.buf)
+	status.accepting_input = status.accepting_input == true
+		and type(job) == "number"
+		and job > 0
+		and vim.fn.jobwait({ job }, 0)[1] == -1
 	return status
 end
 

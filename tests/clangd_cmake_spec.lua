@@ -7,7 +7,7 @@ vim.opt.runtimepath:prepend(repo .. "/local-plugins/clangd-compile-db.nvim")
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
 local fixture = vim.fn.tempname()
-for _, path in ipairs({ "/one/build", "/one/manual", "/two/build" }) do
+for _, path in ipairs({ "/one/build", "/one/manual", "/two/build", "/three/manual" }) do
 	vim.fn.mkdir(fixture .. path, "p")
 	vim.fn.writefile({ "[]" }, fixture .. path .. "/compile_commands.json")
 end
@@ -30,6 +30,7 @@ package.loaded["config.local_config"] = {
 
 local buf_one = vim.api.nvim_create_buf(false, true)
 local buf_two = vim.api.nvim_create_buf(false, true)
+local buf_three = vim.api.nvim_create_buf(false, true)
 local stopped = {}
 local started = {}
 local clients = {
@@ -43,6 +44,13 @@ local clients = {
 	{
 		config = { root_dir = fixture .. "/two" },
 		attached_buffers = { [buf_two] = true },
+		stop = function(self)
+			stopped[#stopped + 1] = self
+		end,
+	},
+	{
+		config = { root_dir = fixture .. "/three" },
+		attached_buffers = { [buf_three] = true },
 		stop = function(self)
 			stopped[#stopped + 1] = self
 		end,
@@ -98,6 +106,22 @@ test("manual compile database override wins without touching other roots", funct
 	assert(state.state == "active" and state.source == "manual" and state.directory == fixture .. "/one/manual")
 	assert(vim.tbl_contains(clangd.command(fixture .. "/one"), "--compile-commands-dir=" .. fixture .. "/one/manual"))
 	assert(#stopped == 1 and stopped[1] == clients[1] and #started == 1)
+end)
+
+test("clearing the only manual database restarts clangd without a compile directory flag", function()
+	stopped = {}
+	started = {}
+	assert(clangd.set_manual(fixture .. "/three", fixture .. "/three/manual"))
+	stopped = {}
+	started = {}
+	assert(clangd.clear_manual(fixture .. "/three"))
+	local state = clangd.status(fixture .. "/three")
+	assert(state.state == "candidate" and state.directory == nil and state.source == nil)
+	assert(#stopped == 1 and stopped[1] == clients[3])
+	assert(#started == 1 and started[1].options.bufnr == buf_three)
+	assert(not vim.iter(started[1].config.cmd):any(function(arg)
+		return arg:find("^%-%-compile%-commands%-dir=") ~= nil
+	end))
 end)
 
 test("full is default and trusted light profile has an explicit flag surface", function()

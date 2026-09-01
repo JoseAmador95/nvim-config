@@ -56,7 +56,7 @@ test("primary roots are shared with the pager profile", function()
 	assert(paths.primary_data_root() == root .. "/data/nvim")
 end)
 
-test("PATH order puts verified shims before host and managed backends after host", function()
+test("PATH order puts verified shims before every local, host, and managed path", function()
 	local managed = paths.managed_bin()
 	local mason = paths.mason_bin()
 	local segments = paths.compose_segments(
@@ -69,10 +69,10 @@ test("PATH order puts verified shims before host and managed backends after host
 			"/usr/bin",
 		}, ":")
 	)
-	assert(segments[1] == root .. "/local-a")
-	assert(segments[2] == root .. "/local-b")
-	assert(segments[3] == vim.fs.normalize(vim.fn.expand("~/.local/bin")))
-	assert(segments[4] == paths.verified_shim_bin())
+	assert(segments[1] == paths.verified_shim_bin())
+	assert(segments[2] == root .. "/local-a")
+	assert(segments[3] == root .. "/local-b")
+	assert(segments[4] == vim.fs.normalize(vim.fn.expand("~/.local/bin")))
 	assert(segments[5] == "/usr/bin")
 	assert(segments[6] == "/opt/bin")
 	assert(segments[7] == managed)
@@ -80,11 +80,12 @@ test("PATH order puts verified shims before host and managed backends after host
 	assert(#segments == 8, "PATH segments were not exactly deduplicated")
 end)
 
-test("an explicit local override may outrank managed roots", function()
+test("an explicit local override remains after verified shims but before managed roots", function()
 	local managed = paths.managed_bin()
 	local segments = paths.compose_segments({ managed, root .. "/custom" }, managed .. ":/usr/bin")
-	assert(segments[1] == managed)
-	assert(segments[2] == root .. "/custom")
+	assert(segments[1] == paths.verified_shim_bin())
+	assert(segments[2] == managed)
+	assert(segments[3] == root .. "/custom")
 	local occurrences = 0
 	for _, segment in ipairs(segments) do
 		if segment == managed then
@@ -114,6 +115,9 @@ test("external executable probes ignore verified shims, managed, and Mason binar
 	)
 	assert(paths.external_executable("probe-tool", paths.managed_bin() .. ":" .. paths.mason_bin()) == nil)
 	assert(paths.external_executable("probe-tool", paths.verified_shim_bin()) == nil)
+	assert(vim.deep_equal(paths.external_candidates("probe-tool", external_bin .. ":" .. external_bin), {
+		external_bin .. "/probe-tool",
+	}))
 end)
 
 for _, name in ipairs(environment_names) do

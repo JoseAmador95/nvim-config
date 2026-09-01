@@ -105,8 +105,16 @@ function M.setup(dap)
 	-- config.editor above.
 	dap.defaults.fallback.switchbuf = "usevisible,usetab,newtab"
 	dap.listeners.after.event_initialized[LISTENER_ID] = M.open
-	dap.listeners.before.event_terminated[LISTENER_ID] = M.close
-	dap.listeners.before.event_exited[LISTENER_ID] = M.close
+	dap.listeners.on_session[LISTENER_ID] = function(old_session, new_session)
+		if old_session == nil or new_session ~= nil then
+			return
+		end
+		vim.schedule(function()
+			if dap.session() == nil then
+				M.close()
+			end
+		end)
+	end
 end
 
 return M

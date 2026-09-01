@@ -484,10 +484,6 @@ function M.run(catalog, name, values, opts)
 	if not normalized_values then
 		return nil, values_err
 	end
-	local valid, valid_err = revalidate(record)
-	if not valid then
-		return nil, valid_err
-	end
 	local spec = terminal_spec(record, action, normalized_values)
 	local deps = record.dependencies
 	local key = spec.key
@@ -503,13 +499,17 @@ function M.run(catalog, name, values, opts)
 		elseif decision == "cancel" then
 			return { outcome = "cancelled", key = key }
 		elseif decision == "focus" then
-			local focused, focus_err = deps.terminal.focus(spec)
+			local focused, focus_err = deps.terminal.focus(key)
 			return focused and { outcome = "focused", key = key } or nil, focus_err
 		elseif decision ~= "replace" then
 			return nil, "decision must be focus, replace, or cancel"
 		end
 	elseif decision ~= nil and decision ~= "replace" then
 		return nil, "there is no existing execution to " .. tostring(decision)
+	end
+	local valid, valid_err = revalidate(record)
+	if not valid then
+		return nil, valid_err
 	end
 
 	local launched, launch_err

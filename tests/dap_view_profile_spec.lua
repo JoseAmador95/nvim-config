@@ -24,8 +24,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				local dap = require("dap")
 				assert(dap.defaults.fallback.switchbuf == "usevisible,usetab,newtab")
 				assert(type(dap.listeners.after.event_initialized.nvim_config_dap_ui) == "function")
-				assert(type(dap.listeners.before.event_terminated.nvim_config_dap_ui) == "function")
-				assert(type(dap.listeners.before.event_exited.nvim_config_dap_ui) == "function")
+				assert(type(dap.listeners.on_session.nvim_config_dap_ui) == "function")
 				assert(dap.listeners.after.event_initialized.dapui_config == nil, "legacy dap-ui listener remains")
 			end, debug.traceback)
 

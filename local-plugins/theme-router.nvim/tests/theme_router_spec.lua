@@ -35,6 +35,14 @@ local function write(path, lines)
 	assert(vim.fn.writefile(lines, path) == 0, "could not write " .. path)
 end
 
+local function read_bytes(path)
+	local stat = assert(vim.uv.fs_stat(path))
+	local fd = assert(vim.uv.fs_open(path, "r", 0))
+	local contents = assert(vim.uv.fs_read(fd, stat.size, 0))
+	assert(vim.uv.fs_close(fd))
+	return contents
+end
+
 local function callbacks(overrides)
 	overrides = overrides or {}
 	return {
@@ -80,6 +88,76 @@ local function has_message(observed, needle)
 		end
 	end
 	return false
+end
+
+local function legacy_lines(name)
+	return {
+		"-- lua/localconfig/theme.lua -- machine-local theme selection.",
+		"-- Written by :Theme. NOT under version control; see .gitignore.",
+		"-- The versioned starting point lives in lua/config/theme_default.lua,",
+		"-- and :ThemeReset deletes this file to come back to it.",
+		"",
+		"return {",
+		('\tcolorscheme = "%s",'):format(name),
+		"}",
+	}
+end
+
+local function same_object(left, right)
+	return left and right and left.type == right.type and left.dev == right.dev and left.ino == right.ino
+end
+
+local function with_uv_override(name, replacement, callback)
+	local original = assert(vim.uv[name], "missing uv function " .. name)
+	vim.uv[name] = function(...)
+		return replacement(original, ...)
+	end
+	local result = { xpcall(callback, debug.traceback) }
+	vim.uv[name] = original
+	if not result[1] then
+		error(result[2])
+	end
+	return unpack(result, 2)
+end
+
+local function make_fifo(path)
+	local result = vim.system({ "mkfifo", path }, { text = true }):wait()
+	assert(result.code == 0, "could not create FIFO: " .. tostring(result.stderr))
+end
+
+if vim.env.THEME_ROUTER_EXCHANGE_CRASH_CHILD == "1" then
+	local path = assert(vim.env.THEME_ROUTER_EXCHANGE_CRASH_PATH)
+	local ready = assert(vim.env.THEME_ROUTER_EXCHANGE_CRASH_READY)
+	setup(path, callbacks())
+	theme_router._set_test_hook(function(phase)
+		if phase ~= "after_exchange" then
+			return
+		end
+		assert(vim.fn.writefile({ "ready" }, ready) == 0)
+		vim.wait(60000, function()
+			return false
+		end, 10)
+		error("exchange crash child was not killed")
+	end)
+	theme_router.persist("tokyonight")
+	error("exchange crash child unexpectedly completed")
+end
+
+if vim.env.THEME_ROUTER_LOCK_CHILD == "1" then
+	local path = assert(vim.env.THEME_ROUTER_LOCK_PATH)
+	local ready = assert(vim.env.THEME_ROUTER_LOCK_READY)
+	theme_router._set_test_hook(function(phase)
+		if phase ~= "lock_acquired" then
+			return
+		end
+		assert(vim.fn.writefile({ "ready" }, ready) == 0)
+		vim.wait(60000, function()
+			return false
+		end, 10)
+		error("theme namespace lock child was not killed")
+	end)
+	setup(path, callbacks())
+	error("theme namespace lock child unexpectedly completed")
 end
 
 test("manual YAML accepts comments and returns independent selections", function()
@@ -137,7 +215,7 @@ test("strict YAML rejects malformed, duplicate, unknown, missing, and future dat
 	end
 end)
 
-test("persist and reset use atomic owner-only YAML", function()
+test("persist and reset use owner-only state and a migration tombstone", function()
 	local root = temp_dir()
 	local state_dir = vim.fs.joinpath(root, "nvim")
 	local path = vim.fs.joinpath(state_dir, "theme.yaml")
@@ -160,8 +238,119 @@ test("persist and reset use atomic owner-only YAML", function()
 	assert(theme_router.reset(), "reset failed")
 	equal("vscode", theme_router.selection().colorscheme, "reset did not restore default")
 	equal("vscode", painted[#painted], "reset did not repaint default")
-	contents = table.concat(vim.fn.readfile(path), "\n")
-	assert(contents:find('colorscheme: "vscode"', 1, true), "reset did not persist the default")
+	assert(vim.fn.filereadable(path) == 0, "reset persisted the default instead of removing YAML")
+	local marker = vim.fs.joinpath(state_dir, ".legacy-migrated")
+	equal({ "version: 1" }, vim.fn.readfile(marker), "reset wrote an invalid migration marker")
+	equal("rw-------", vim.fn.getfperm(marker), "migration marker is not 0600")
+	local legacy = vim.fs.joinpath(root, "legacy.lua")
+	write(legacy, legacy_lines("catppuccin"))
+	local reloaded = setup(path, callbacks(), { legacy_path = legacy, default = "habamax" })
+	equal("habamax", reloaded.colorscheme, "reset marker did not use the new default on the next setup")
+	equal("default", reloaded.source, "reset marker reported the wrong source")
+	assert(vim.fn.filereadable(path) == 0, "reset marker allowed legacy YAML remigration")
+	vim.fn.delete(root, "rf")
+end)
+
+test("persistent namespace lock serializes processes with bounded contention", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local ready = vim.fs.joinpath(root, "lock.ready")
+	local child = vim.system({ vim.v.progpath, "--headless", "-u", "NONE", "-i", "NONE", "-l", source }, {
+		env = {
+			THEME_ROUTER_LOCK_CHILD = "1",
+			THEME_ROUTER_LOCK_PATH = path,
+			THEME_ROUTER_LOCK_READY = ready,
+		},
+		text = true,
+	})
+	local reached = vim.wait(5000, function()
+		return vim.uv.fs_lstat(ready) ~= nil
+	end, 5)
+	if not reached then
+		child:kill(9)
+		local failed = child:wait(5000)
+		error("child did not acquire the theme namespace lock: " .. tostring(failed.stderr))
+	end
+
+	local observed = callbacks()
+	local started = vim.uv.hrtime()
+	local selection = setup(path, observed)
+	local elapsed_ms = (vim.uv.hrtime() - started) / 1000000
+	equal(false, selection.validity.valid, "contended setup was marked valid")
+	assert(has_message(observed, "locked by another process"), "bounded lock contention was not reported")
+	assert(elapsed_ms >= 200 and elapsed_ms < 2000, "lock acquisition was not bounded: " .. tostring(elapsed_ms))
+	local lock_path = vim.fs.joinpath(state_dir, ".theme-router.lock")
+	local lock_stat = assert(vim.uv.fs_lstat(lock_path))
+	equal("file", lock_stat.type, "theme namespace lock is not a regular file")
+	equal(1, lock_stat.nlink, "theme namespace lock is hard-linked")
+	equal("rw-------", vim.fn.getfperm(lock_path), "theme namespace lock is not 0600")
+
+	child:kill(9)
+	local killed = child:wait(5000)
+	assert(killed.signal == 9, "theme namespace lock child was not killed")
+	selection = setup(path, callbacks())
+	equal(true, selection.validity.valid, "released namespace lock did not permit setup")
+	assert(theme_router.persist("catppuccin"), "released namespace lock did not permit persistence")
+	assert(vim.uv.fs_lstat(lock_path), "theme namespace lock was unlinked after release")
+	vim.fn.delete(root, "rf")
+end)
+
+test("namespace lock rejects symlinks and hardlinks without touching peers", function()
+	for _, kind in ipairs({ "symlink", "hardlink" }) do
+		local root = temp_dir()
+		local state_dir = vim.fs.joinpath(root, "state")
+		assert(vim.fn.mkdir(state_dir, "p", 448) == 1)
+		local path = vim.fs.joinpath(state_dir, "theme.yaml")
+		local lock_path = vim.fs.joinpath(state_dir, ".theme-router.lock")
+		local peer = vim.fs.joinpath(root, kind .. ".peer")
+		write(peer, { "peer" })
+		assert(vim.uv.fs_chmod(peer, 384))
+		if kind == "symlink" then
+			assert(vim.uv.fs_symlink(peer, lock_path))
+		else
+			assert(vim.uv.fs_link(peer, lock_path))
+		end
+		local before = assert(vim.uv.fs_lstat(peer))
+		local observed = callbacks()
+		local selection = setup(path, observed)
+		equal(false, selection.validity.valid, kind .. " lock was accepted")
+		assert(has_message(observed, "namespace lock"), kind .. " lock rejection was not reported")
+		equal({ "peer" }, vim.fn.readfile(peer), kind .. " lock changed peer contents")
+		local after = assert(vim.uv.fs_lstat(peer))
+		equal(before.mode, after.mode, kind .. " lock changed peer permissions")
+		assert(vim.uv.fs_lstat(path) == nil, kind .. " lock allowed theme publication")
+		vim.fn.delete(root, "rf")
+	end
+end)
+
+test("namespace lock close failure is a postcommit persistence warning", function()
+	local root = temp_dir()
+	local path = vim.fs.joinpath(root, "state", "theme.yaml")
+	local observed = callbacks()
+	setup(path, observed)
+	local lock_fd
+	theme_router._set_test_hook(function(phase, details)
+		if phase == "lock_acquired" then
+			lock_fd = details.fd
+		end
+	end)
+	local persisted, warning = with_uv_override("fs_close", function(original, fd)
+		if fd == lock_fd then
+			local closed, close_err = original(fd)
+			assert(closed, close_err)
+			return nil, "simulated namespace lock close failure"
+		end
+		return original(fd)
+	end, function()
+		return theme_router.persist("catppuccin")
+	end)
+	theme_router._set_test_hook(nil)
+	assert(persisted, "lock close warning turned a committed persist into failure")
+	assert(tostring(warning):find("lock close failure", 1, true), "lock close warning was not returned")
+	equal("catppuccin", theme_router.selection().colorscheme, "lock close warning did not advance selection")
+	assert(read_bytes(path):find("catppuccin", 1, true), "lock close warning lost committed theme")
+	assert(has_message(observed, "durability warning"), "lock close warning was not notified")
 	vim.fn.delete(root, "rf")
 end)
 
@@ -191,27 +380,43 @@ test("write failures and symlink targets preserve the current selection", functi
 	vim.fn.delete(root, "rf")
 end)
 
+test("pre-commit file fsync failures do not publish or advance the selection", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	assert(vim.fn.mkdir(state_dir, "p", 448) == 1)
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local observed = callbacks()
+	setup(path, observed)
+	local failed = false
+	local persisted = with_uv_override("fs_fsync", function(original, fd)
+		local info = vim.uv.fs_fstat(fd)
+		if not failed and info and info.type == "file" then
+			failed = true
+			return nil, "simulated file fsync failure"
+		end
+		return original(fd)
+	end, function()
+		return theme_router.persist("catppuccin")
+	end)
+	assert(failed and not persisted, "a failed pre-commit file fsync published the theme")
+	assert(vim.uv.fs_lstat(path) == nil, "failed pre-commit fsync left a visible theme")
+	equal("vscode", theme_router.selection().colorscheme, "failed pre-commit fsync advanced memory")
+	assert(has_message(observed, "Could not flush temporary theme state"), "file fsync failure was not reported")
+	vim.fn.delete(root, "rf")
+end)
+
 test("only the exact generated legacy Lua is migrated and retained", function()
 	local root = temp_dir()
 	local state_path = vim.fs.joinpath(root, "nvim", "theme.yaml")
 	local legacy = vim.fs.joinpath(root, "legacy.lua")
-	local legacy_lines = {
-		"-- lua/localconfig/theme.lua -- machine-local theme selection.",
-		"-- Written by :Theme. NOT under version control; see .gitignore.",
-		"-- The versioned starting point lives in lua/config/theme_default.lua,",
-		"-- and :ThemeReset deletes this file to come back to it.",
-		"",
-		"return {",
-		'\tcolorscheme = "catppuccin",',
-		"}",
-	}
-	write(legacy, legacy_lines)
+	local generated = legacy_lines("catppuccin")
+	write(legacy, generated)
 	local observed = callbacks()
 	local selection = setup(state_path, observed, { legacy_path = legacy })
 	equal("catppuccin", selection.colorscheme, "exact legacy selection was not migrated")
 	equal(true, selection.validity.migrated, "migration was not reported")
 	assert(vim.fn.filereadable(state_path) == 1, "migration did not write YAML")
-	equal(legacy_lines, vim.fn.readfile(legacy), "migration modified the legacy recovery file")
+	equal(generated, vim.fn.readfile(legacy), "migration modified the legacy recovery file")
 
 	local malformed_root = temp_dir()
 	local malformed = vim.fs.joinpath(malformed_root, "legacy.lua")
@@ -229,6 +434,580 @@ test("only the exact generated legacy Lua is migrated and retained", function()
 
 	vim.fn.delete(root, "rf")
 	vim.fn.delete(malformed_root, "rf")
+end)
+
+test("migration markers repair permissions and fail closed when invalid", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	assert(vim.fn.mkdir(state_dir, "p", 448) == 1)
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local marker = vim.fs.joinpath(state_dir, ".legacy-migrated")
+	local legacy = vim.fs.joinpath(root, "legacy.lua")
+	write(legacy, legacy_lines("catppuccin"))
+	write(marker, { "version: 1" })
+	assert(vim.uv.fs_chmod(marker, 420))
+	local selection = setup(path, callbacks(), { legacy_path = legacy })
+	equal("vscode", selection.colorscheme, "valid marker did not suppress legacy migration")
+	equal("rw-------", vim.fn.getfperm(marker), "valid marker was not repaired to 0600")
+	assert(vim.fn.filereadable(path) == 0, "valid marker created YAML")
+
+	write(marker, { "version: 2" })
+	local observed = callbacks()
+	selection = setup(path, observed, { legacy_path = legacy })
+	equal(false, selection.validity.valid, "invalid marker was accepted")
+	assert(has_message(observed, "marker is invalid"), "invalid marker was not reported")
+	assert(vim.fn.filereadable(path) == 0, "invalid marker allowed legacy migration")
+
+	vim.fn.delete(marker)
+	local outside = vim.fs.joinpath(root, "outside")
+	write(outside, { "do not touch" })
+	assert(vim.uv.fs_symlink(outside, marker))
+	observed = callbacks()
+	selection = setup(path, observed, { legacy_path = legacy })
+	equal(false, selection.validity.valid, "symlink marker was accepted")
+	equal("do not touch", vim.fn.readfile(outside)[1], "symlink marker target was modified")
+	assert(vim.fn.filereadable(path) == 0, "symlink marker allowed legacy migration")
+
+	vim.fn.delete(marker)
+	assert(vim.fn.mkdir(marker, "p", 448) == 1)
+	observed = callbacks()
+	selection = setup(path, observed, { legacy_path = legacy })
+	equal(false, selection.validity.valid, "non-regular marker was accepted")
+	assert(has_message(observed, "regular file"), "non-regular marker was not reported")
+	assert(vim.fn.filereadable(path) == 0, "non-regular marker allowed legacy migration")
+	vim.fn.delete(root, "rf")
+end)
+
+test("reset failures preserve the current selection and YAML", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local marker = vim.fs.joinpath(state_dir, ".legacy-migrated")
+	local observed = callbacks()
+	setup(path, observed)
+	assert(theme_router.persist("catppuccin"), "persist failed")
+	local before = vim.fn.readfile(path)
+
+	local marker_result = with_uv_override("fs_write", function()
+		return nil, "forced marker write failure"
+	end, function()
+		return theme_router.reset()
+	end)
+	assert(not marker_result, "reset ignored the marker write failure")
+	equal("catppuccin", theme_router.selection().colorscheme, "marker failure changed selection")
+	equal(before, vim.fn.readfile(path), "marker failure changed YAML")
+	assert(vim.fn.filereadable(marker) == 0, "failed marker write left a marker")
+
+	local yaml_identity = assert(vim.uv.fs_lstat(path))
+	local delete_result = with_uv_override("fs_fchmod", function(original, fd, mode)
+		local opened = vim.uv.fs_fstat(fd)
+		if same_object(yaml_identity, opened) then
+			return nil, "forced YAML delete failure"
+		end
+		return original(fd, mode)
+	end, function()
+		return theme_router.reset()
+	end)
+	assert(not delete_result, "reset ignored the YAML delete failure")
+	equal("catppuccin", theme_router.selection().colorscheme, "delete failure changed selection")
+	equal(before, vim.fn.readfile(path), "delete failure changed YAML")
+	equal({ "version: 1" }, vim.fn.readfile(marker), "delete failure corrupted the completed marker")
+
+	local backup_dir = vim.fs.joinpath(root, "state.backup")
+	local outside_dir = vim.fs.joinpath(root, "outside")
+	assert(vim.fn.mkdir(outside_dir, "p", 448) == 1)
+	local swapped = false
+	local swap_result = with_uv_override("fs_fchmod", function(original, fd, mode)
+		local opened = vim.uv.fs_fstat(fd)
+		local result, chmod_err = original(fd, mode)
+		if not swapped and same_object(yaml_identity, opened) then
+			swapped = true
+			assert(vim.uv.fs_rename(state_dir, backup_dir))
+			assert(vim.uv.fs_symlink(outside_dir, state_dir))
+		end
+		return result, chmod_err
+	end, function()
+		return theme_router.reset()
+	end)
+	assert(swapped, "reset ancestor-swap hook did not run: " .. vim.inspect(observed.notifications))
+	assert(not swap_result, "reset deleted through an ancestor swap")
+	assert(vim.fn.filereadable(vim.fs.joinpath(outside_dir, "theme.yaml")) == 0, "reset touched swapped directory")
+	assert(vim.uv.fs_unlink(state_dir))
+	assert(vim.uv.fs_rename(backup_dir, state_dir))
+	equal("catppuccin", theme_router.selection().colorscheme, "delete ancestor swap changed selection")
+	equal(before, vim.fn.readfile(path), "delete ancestor swap changed YAML")
+	vim.fn.delete(root, "rf")
+end)
+
+test("FIFO state and marker targets fail without blocking", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	assert(vim.fn.mkdir(state_dir, "p", 448) == 1)
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local marker = vim.fs.joinpath(state_dir, ".legacy-migrated")
+	setup(path, callbacks())
+	make_fifo(path)
+	assert(not theme_router.persist("catppuccin"), "FIFO state target accepted a write")
+	equal("vscode", theme_router.selection().colorscheme, "FIFO state target changed selection")
+	assert(vim.fn.delete(path) == 0)
+
+	assert(theme_router.persist("catppuccin"), "persist before marker FIFO failed")
+	local before = vim.fn.readfile(path)
+	make_fifo(marker)
+	assert(not theme_router.reset(), "FIFO marker target accepted reset")
+	equal("catppuccin", theme_router.selection().colorscheme, "FIFO marker changed selection")
+	equal(before, vim.fn.readfile(path), "FIFO marker changed YAML")
+	vim.fn.delete(root, "rf")
+end)
+
+test("hard-linked state is rejected without modifying its peer", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	assert(vim.fn.mkdir(state_dir, "p", 448) == 1)
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local peer = vim.fs.joinpath(root, "peer.yaml")
+	local peer_lines = { "version: 1", 'colorscheme: "habamax"' }
+	write(peer, peer_lines)
+	assert(vim.uv.fs_chmod(peer, 420))
+	assert(vim.uv.fs_link(peer, path))
+	local observed = callbacks()
+	local selection = setup(path, observed)
+	equal(false, selection.validity.valid, "hard-linked theme state was accepted")
+	assert(has_message(observed, "single-link"), "hard-linked theme state was not reported")
+	assert(not theme_router.persist("catppuccin"), "hard-linked theme state accepted persistence")
+	equal(peer_lines, vim.fn.readfile(peer), "theme persistence changed a hardlink peer")
+	equal("rw-r--r--", vim.fn.getfperm(peer), "theme inspection changed hardlink peer permissions")
+	vim.fn.delete(root, "rf")
+end)
+
+test("atomic writes fail closed across ancestor swaps", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local backup_dir = vim.fs.joinpath(root, "state.backup")
+	local outside_dir = vim.fs.joinpath(root, "outside")
+	assert(vim.fn.mkdir(state_dir, "p", 448) == 1)
+	assert(vim.fn.mkdir(outside_dir, "p", 448) == 1)
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	setup(path, callbacks())
+	local swapped = false
+	local persisted = with_uv_override("fs_write", function(original, fd, contents, offset)
+		local written, write_err = original(fd, contents, offset)
+		if not swapped then
+			swapped = true
+			assert(vim.uv.fs_rename(state_dir, backup_dir))
+			assert(vim.uv.fs_symlink(outside_dir, state_dir))
+		end
+		return written, write_err
+	end, function()
+		return theme_router.persist("catppuccin")
+	end)
+	assert(not persisted, "atomic write accepted an ancestor swap")
+	assert(
+		vim.fn.filereadable(vim.fs.joinpath(outside_dir, "theme.yaml")) == 0,
+		"atomic write touched swapped directory"
+	)
+	assert(vim.uv.fs_unlink(state_dir))
+	assert(vim.uv.fs_rename(backup_dir, state_dir))
+	equal("vscode", theme_router.selection().colorscheme, "failed atomic write changed selection")
+	assert(vim.fn.filereadable(path) == 0, "failed atomic write left YAML")
+	vim.fn.delete(root, "rf")
+end)
+
+test("compare-and-swap persistence preserves a rival created after the target check", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local displaced = vim.fs.joinpath(state_dir, "theme.external-previous.yaml")
+	local observed = callbacks()
+	setup(path, observed)
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+
+	local rival = {
+		"# external writer won the race",
+		"version: 1",
+		'colorscheme: "habamax"',
+	}
+	local raced = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase ~= "target_checked" or details.path ~= path or raced then
+			return
+		end
+		raced = true
+		assert(vim.uv.fs_rename(path, displaced))
+		write(path, rival)
+	end)
+	local called, persisted = xpcall(function()
+		return theme_router.persist("tokyonight")
+	end, debug.traceback)
+	theme_router._set_test_hook(nil)
+	assert(called, persisted)
+	assert(raced, "compare-and-swap race hook did not run")
+	assert(not persisted, "persist clobbered a target created after validation")
+	equal(rival, vim.fn.readfile(path), "persist did not preserve the external rival")
+	equal("catppuccin", theme_router.selection().colorscheme, "failed CAS advanced the in-memory selection")
+	equal({}, vim.fn.glob(vim.fs.joinpath(state_dir, "*.quarantine.*"), false, true), "CAS left quarantine debris")
+	assert(vim.fn.filereadable(displaced) == 1, "race fixture lost the displaced prior state")
+	vim.fn.delete(root, "rf")
+end)
+
+test("compare-and-swap restores a symlink introduced at the exchange boundary", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local displaced = vim.fs.joinpath(state_dir, "theme.before-symlink.yaml")
+	local outside = vim.fs.joinpath(root, "outside.yaml")
+	setup(path, callbacks())
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+	write(outside, { "outside unchanged" })
+
+	local raced = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase ~= "target_checked" or details.path ~= path or raced then
+			return
+		end
+		raced = true
+		assert(vim.uv.fs_rename(path, displaced))
+		assert(vim.uv.fs_symlink(outside, path))
+	end)
+	local called, persisted = xpcall(function()
+		return theme_router.persist("tokyonight")
+	end, debug.traceback)
+	theme_router._set_test_hook(nil)
+	assert(called, persisted)
+	assert(raced and not persisted, "boundary symlink was reported as a committed theme")
+	assert(assert(vim.uv.fs_lstat(path)).type == "link", "boundary symlink was not restored")
+	equal(outside, vim.uv.fs_readlink(path), "boundary symlink destination changed")
+	equal({ "outside unchanged" }, vim.fn.readfile(outside), "boundary symlink was followed")
+	equal("catppuccin", theme_router.selection().colorscheme, "failed CAS advanced the in-memory selection")
+	assert(vim.fn.filereadable(displaced) == 1, "race fixture lost the displaced prior state")
+	vim.fn.delete(root, "rf")
+end)
+
+test("staging byte drift is rejected before the visible theme changes", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	setup(path, callbacks())
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+	local before = read_bytes(path)
+	local before_identity = assert(vim.uv.fs_lstat(path))
+	local changed = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase ~= "stage_ready" or details.path ~= path or changed then
+			return
+		end
+		changed = true
+		local stat = assert(vim.uv.fs_stat(details.staging_path))
+		local fd = assert(vim.uv.fs_open(details.staging_path, "r+", 384))
+		assert(vim.uv.fs_write(fd, string.rep("x", stat.size), 0) == stat.size)
+		assert(vim.uv.fs_close(fd))
+	end)
+	local persisted = theme_router.persist("tokyonight")
+	theme_router._set_test_hook(nil)
+	assert(changed and not persisted, "same-size staging drift was published")
+	equal(before, read_bytes(path), "staging drift changed the visible theme bytes")
+	local after_identity = assert(vim.uv.fs_lstat(path))
+	assert(same_object(before_identity, after_identity), "staging drift replaced the visible theme inode")
+	equal("catppuccin", theme_router.selection().colorscheme, "staging drift advanced the in-memory selection")
+	vim.fn.delete(root, "rf")
+end)
+
+test("exchange keeps the target visible and crash leaves an exact new theme", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local ready = vim.fs.joinpath(root, "exchange.ready")
+	setup(path, callbacks())
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+	local child = vim.system({ vim.v.progpath, "--headless", "-u", "NONE", "-i", "NONE", "-l", source }, {
+		env = {
+			THEME_ROUTER_EXCHANGE_CRASH_CHILD = "1",
+			THEME_ROUTER_EXCHANGE_CRASH_PATH = path,
+			THEME_ROUTER_EXCHANGE_CRASH_READY = ready,
+		},
+		text = true,
+	})
+	local reached = vim.wait(5000, function()
+		return vim.uv.fs_lstat(ready) ~= nil
+	end, 5)
+	if not reached then
+		child:kill(9)
+		local failed = child:wait(5000)
+		error("child did not reach the exchange boundary: " .. tostring(failed.stderr))
+	end
+	assert(vim.uv.fs_lstat(path), "atomic exchange exposed a missing theme target")
+	assert(read_bytes(path):find('colorscheme: "tokyonight"', 1, true), "exchange did not expose exact NEW bytes")
+	child:kill(9)
+	local killed = child:wait(5000)
+	assert(killed.signal == 9, "exchange child was not killed")
+	local reloaded = setup(path, callbacks())
+	equal("tokyonight", reloaded.colorscheme, "crash after exchange did not leave a readable NEW theme")
+	vim.fn.delete(root, "rf")
+end)
+
+test("post-commit cleanup preserves a replacement without reporting a false write failure", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local retained_old = vim.fs.joinpath(state_dir, "retained-old.yaml")
+	local observed = callbacks()
+	setup(path, observed)
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+	local replaced = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase ~= "before_displaced_cleanup" or details.path == path or replaced then
+			return
+		end
+		replaced = true
+		assert(vim.uv.fs_rename(details.reserved_path, retained_old))
+		write(details.reserved_path, { "version: 1", 'colorscheme: "habamax"' })
+		assert(vim.uv.fs_chmod(details.reserved_path, 384))
+	end)
+	local persisted = theme_router.persist("tokyonight")
+	theme_router._set_test_hook(nil)
+	assert(replaced and persisted, "cleanup replacement turned a committed write into failure")
+	equal("tokyonight", theme_router.selection().colorscheme, "committed cleanup warning did not advance memory")
+	assert(read_bytes(path):find('colorscheme: "tokyonight"', 1, true), "committed NEW theme changed")
+	assert(read_bytes(retained_old):find('colorscheme: "catppuccin"', 1, true), "displaced OLD theme was lost")
+	assert(has_message(observed, "deferred cleanup"), "deferred cleanup was not reported")
+	local preserved_foreign = false
+	for name in vim.fs.dir(state_dir) do
+		local candidate = vim.fs.joinpath(state_dir, name)
+		if name:find(".theme.yaml.tmp.", 1, true) == 1 and read_bytes(candidate):find("habamax", 1, true) then
+			preserved_foreign = true
+		end
+	end
+	assert(preserved_foreign, "cleanup deleted the unknown replacement")
+	vim.fn.delete(root, "rf")
+end)
+
+test("cleanup quarantines a replacement introduced after its final validation", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local retained_old = vim.fs.joinpath(state_dir, "retained-after-validation.yaml")
+	local observed = callbacks()
+	setup(path, observed)
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+	local replaced = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase ~= "cleanup_validated_before_quarantine" or details.label ~= "Displaced Theme state" or replaced then
+			return
+		end
+		replaced = true
+		assert(vim.uv.fs_rename(details.reserved_path, retained_old))
+		write(details.reserved_path, { "version: 1", 'colorscheme: "habamax"' })
+		assert(vim.uv.fs_chmod(details.reserved_path, 384))
+	end)
+	local persisted = theme_router.persist("tokyonight")
+	theme_router._set_test_hook(nil)
+	assert(replaced and persisted, "post-validation replacement turned a committed persist into failure")
+	assert(read_bytes(path):find("tokyonight", 1, true), "post-validation replacement changed NEW theme")
+	assert(read_bytes(retained_old):find("catppuccin", 1, true), "post-validation race lost displaced OLD theme")
+	local preserved_foreign = false
+	for name in vim.fs.dir(state_dir) do
+		local candidate = vim.fs.joinpath(state_dir, name)
+		if name:find(".theme.yaml.tmp.", 1, true) == 1 and read_bytes(candidate):find("habamax", 1, true) then
+			preserved_foreign = true
+		end
+	end
+	assert(preserved_foreign, "cleanup deleted the post-validation replacement")
+	assert(has_message(observed, "deferred cleanup"), "post-validation cleanup conflict was not warned")
+	vim.fn.delete(root, "rf")
+end)
+
+test("directory fsync failures after exchange preserve committed success and recovery", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local observed = callbacks()
+	setup(path, observed)
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+	local injected = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase == "directory_fsync" and details.operation == "Theme state exchange" and not injected then
+			injected = true
+			error("simulated directory fsync failure")
+		end
+	end)
+	local persisted, warning = theme_router.persist("tokyonight")
+	theme_router._set_test_hook(nil)
+	assert(injected and persisted, "post-commit directory fsync failure was reported as a failed write")
+	assert(tostring(warning):find("directory fsync hook failed", 1, true), "fsync warning was not returned")
+	equal("tokyonight", theme_router.selection().colorscheme, "committed fsync warning did not advance memory")
+	assert(read_bytes(path):find("tokyonight", 1, true), "committed theme bytes were lost")
+	local recovery
+	for name in vim.fs.dir(state_dir) do
+		if name:find(".theme.yaml.tmp.", 1, true) == 1 then
+			recovery = vim.fs.joinpath(state_dir, name)
+			break
+		end
+	end
+	assert(recovery and read_bytes(recovery):find("catppuccin", 1, true), "uncertain exchange lost recovery OLD")
+	assert(has_message(observed, "durability warning"), "post-commit fsync warning was not notified")
+	local warning_event = false
+	for _, event in ipairs(observed.events) do
+		warning_event = warning_event or (event.kind == "warning" and event.operation == "persist")
+	end
+	assert(warning_event, "post-commit fsync warning was not emitted structurally")
+	vim.fn.delete(root, "rf")
+end)
+
+test("conditional reset preserves a same-path replacement", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local displaced = vim.fs.joinpath(state_dir, "theme-before-delete.yaml")
+	setup(path, callbacks())
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+	local replacement_identity
+	local replaced = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase ~= "delete_target_checked" or details.path ~= path or replaced then
+			return
+		end
+		replaced = true
+		assert(vim.uv.fs_rename(path, displaced))
+		write(path, { "version: 1", 'colorscheme: "habamax"' })
+		assert(vim.uv.fs_chmod(path, 384))
+		replacement_identity = assert(vim.uv.fs_lstat(path))
+	end)
+	local reset = theme_router.reset()
+	theme_router._set_test_hook(nil)
+	assert(replaced and not reset, "reset deleted or accepted a same-path replacement")
+	local current = assert(vim.uv.fs_lstat(path))
+	assert(same_object(replacement_identity, current), "reset changed the replacement inode")
+	assert(read_bytes(path):find("habamax", 1, true), "reset changed the replacement bytes")
+	equal("catppuccin", theme_router.selection().colorscheme, "failed conditional reset changed selection")
+	assert(vim.uv.fs_lstat(displaced), "conditional reset lost the displaced original")
+	vim.fn.delete(root, "rf")
+end)
+
+test("post-operation drift is reported without claiming rollback", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local backup_dir = vim.fs.joinpath(root, "state.backup")
+	local outside_dir = vim.fs.joinpath(root, "outside")
+	assert(vim.fn.mkdir(state_dir, "p", 448) == 1)
+	assert(vim.fn.mkdir(outside_dir, "p", 448) == 1)
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local observed = callbacks()
+	setup(path, observed)
+	assert(theme_router.persist("catppuccin"), "initial persist failed")
+	local swapped = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase ~= "after_exchange" or details.path ~= path or swapped then
+			return
+		end
+		swapped = true
+		assert(vim.uv.fs_rename(state_dir, backup_dir))
+		assert(vim.uv.fs_symlink(outside_dir, state_dir))
+	end)
+	local persisted = theme_router.persist("tokyonight")
+	theme_router._set_test_hook(nil)
+	assert(not persisted, "post-rename ancestor swap was reported as success")
+	assert(has_message(observed, "no rollback is claimed"), "post-rename drift semantics were not reported")
+	equal("catppuccin", theme_router.selection().colorscheme, "post-rename drift changed in-memory selection")
+	assert(vim.fn.filereadable(vim.fs.joinpath(outside_dir, "theme.yaml")) == 0, "post-rename drift touched outside")
+	assert(vim.uv.fs_unlink(state_dir))
+	assert(vim.uv.fs_rename(backup_dir, state_dir))
+	assert(vim.fn.filereadable(path) == 1, "post-rename test incorrectly claimed disk rollback")
+
+	observed = callbacks()
+	local loaded = setup(path, observed)
+	equal("tokyonight", loaded.colorscheme, "committed YAML was not observable after the parent returned")
+	swapped = false
+	theme_router._set_test_hook(function(phase, details)
+		if phase ~= "before_delete_cleanup" or details.label ~= "Reserved Theme state" or swapped then
+			return
+		end
+		swapped = true
+		assert(vim.uv.fs_rename(state_dir, backup_dir))
+		assert(vim.uv.fs_symlink(outside_dir, state_dir))
+	end)
+	local reset = theme_router.reset()
+	theme_router._set_test_hook(nil)
+	assert(not reset, "post-unlink ancestor swap was reported as success")
+	assert(has_message(observed, "conditionally delete"), "post-unlink drift semantics were not reported")
+	equal("tokyonight", theme_router.selection().colorscheme, "post-unlink drift changed in-memory selection")
+	assert(vim.fn.filereadable(vim.fs.joinpath(outside_dir, "theme.yaml")) == 0, "post-unlink drift touched outside")
+	assert(vim.uv.fs_unlink(state_dir))
+	assert(vim.uv.fs_rename(backup_dir, state_dir))
+	assert(vim.fn.filereadable(path) == 1, "conditional delete did not restore the checked entry")
+	vim.fn.delete(root, "rf")
+end)
+
+test("bounded reads reject oversize, post-read replacement, and ancestor swaps", function()
+	local oversized_root = temp_dir()
+	local oversized_dir = vim.fs.joinpath(oversized_root, "state")
+	assert(vim.fn.mkdir(oversized_dir, "p", 448) == 1)
+	local oversized = vim.fs.joinpath(oversized_dir, "theme.yaml")
+	write(oversized, { string.rep("x", 64 * 1024 + 1) })
+	local observed = callbacks()
+	local selection = setup(oversized, observed)
+	equal(false, selection.validity.valid, "oversize YAML was accepted")
+	assert(has_message(observed, "64 KiB"), "oversize YAML was not reported")
+	vim.fn.delete(oversized_root, "rf")
+
+	local replaced_root = temp_dir()
+	local replaced_dir = vim.fs.joinpath(replaced_root, "state")
+	assert(vim.fn.mkdir(replaced_dir, "p", 448) == 1)
+	local replaced = vim.fs.joinpath(replaced_dir, "theme.yaml")
+	write(replaced, { "version: 1", "colorscheme: catppuccin" })
+	local replaced_identity = assert(vim.uv.fs_lstat(replaced))
+	local swapped = false
+	observed = callbacks()
+	selection = with_uv_override("fs_read", function(original, fd, size, offset)
+		local contents, read_err = original(fd, size, offset)
+		if not swapped and same_object(replaced_identity, vim.uv.fs_fstat(fd)) then
+			swapped = true
+			assert(vim.uv.fs_rename(replaced, replaced .. ".old"))
+			write(replaced, { "version: 1", "colorscheme: habamax" })
+		end
+		return contents, read_err
+	end, function()
+		return setup(replaced, observed)
+	end)
+	equal(false, selection.validity.valid, "post-read replacement was accepted")
+	assert(has_message(observed, "changed while it was read"), "post-read replacement was not reported")
+	vim.fn.delete(replaced_root, "rf")
+
+	local swapped_root = temp_dir()
+	local state_dir = vim.fs.joinpath(swapped_root, "state")
+	local backup_dir = vim.fs.joinpath(swapped_root, "state.backup")
+	local outside_dir = vim.fs.joinpath(swapped_root, "outside")
+	assert(vim.fn.mkdir(state_dir, "p", 448) == 1)
+	assert(vim.fn.mkdir(outside_dir, "p", 448) == 1)
+	local state_path = vim.fs.joinpath(state_dir, "theme.yaml")
+	write(state_path, { "version: 1", "colorscheme: catppuccin" })
+	write(vim.fs.joinpath(outside_dir, "theme.yaml"), { "version: 1", "colorscheme: habamax" })
+	local parent_chmods = 0
+	observed = callbacks()
+	selection = with_uv_override("fs_fchmod", function(original, fd, mode)
+		local opened = vim.uv.fs_fstat(fd)
+		local current = vim.uv.fs_lstat(state_dir)
+		local result, chmod_err = original(fd, mode)
+		if same_object(opened, current) then
+			parent_chmods = parent_chmods + 1
+			if parent_chmods == 2 then
+				assert(vim.uv.fs_rename(state_dir, backup_dir))
+				assert(vim.uv.fs_symlink(outside_dir, state_dir))
+			end
+		end
+		return result, chmod_err
+	end, function()
+		return setup(state_path, observed)
+	end)
+	equal(false, selection.validity.valid, "ancestor swap was accepted")
+	assert(has_message(observed, "directory changed"), "ancestor swap was not reported")
+	equal(
+		"colorscheme: habamax",
+		vim.fn.readfile(vim.fs.joinpath(outside_dir, "theme.yaml"))[2],
+		"outside YAML changed"
+	)
+	assert(vim.uv.fs_unlink(state_dir))
+	assert(vim.uv.fs_rename(backup_dir, state_dir))
+	vim.fn.delete(swapped_root, "rf")
 end)
 
 test("painter failures fall back and emit caller-owned events", function()

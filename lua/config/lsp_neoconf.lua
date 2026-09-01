@@ -1,4 +1,5 @@
 local M = {}
+local project_settings = require("config.project_settings")
 
 local before_init_wrappers = setmetatable({}, { __mode = "k" })
 local root_dir_wrappers = setmetatable({}, { __mode = "k" })
@@ -8,29 +9,23 @@ local function warn_once(message)
 	vim.notify_once(message, vim.log.levels.WARN, { title = "LSP" })
 end
 
-local function project_value(key, default, file)
-	local ok, neoconf = pcall(require, "neoconf")
-	if not ok or type(neoconf.get) ~= "function" then
-		warn_once("neoconf public API is unavailable; project LSP settings were not merged")
-		return false, default
-	end
-
-	local success, value = pcall(neoconf.get, key, default, { file = file })
+local function setting_value(key, default, file)
+	local success, value = pcall(project_settings.get, key, default, file)
 	if not success then
-		warn_once("neoconf could not read project LSP settings: " .. tostring(value))
+		warn_once("approved project LSP settings could not be read: " .. tostring(value))
 		return false, default
 	end
 	return true, value
 end
 
 function M.is_enabled(name, file)
-	local ok, server = project_value("lspconfig." .. name, {}, file)
+	local ok, server = setting_value("lspconfig." .. name, {}, file)
 	return not ok or server ~= false
 end
 
 local function merge_settings(name, config, file)
-	local ok_vscode, vscode = project_value("vscode", {}, file or config.root_dir)
-	local ok_server, server = project_value("lspconfig." .. name, {}, file or config.root_dir)
+	local ok_vscode, vscode = setting_value("vscode", {}, file or config.root_dir)
+	local ok_server, server = setting_value("lspconfig." .. name, {}, file or config.root_dir)
 	if not ok_vscode or not ok_server then
 		return false
 	end
@@ -38,14 +33,22 @@ local function merge_settings(name, config, file)
 	if config.original_settings == nil then
 		config.original_settings = vim.deepcopy(config.settings or {})
 	end
+	local baseline = vim.deepcopy(config.original_settings)
+	local settings = config.settings or {}
 	if server == false then
+		for key in pairs(settings) do
+			settings[key] = nil
+		end
+		for key, value in pairs(baseline) do
+			settings[key] = value
+		end
+		config.settings = settings
 		return false
 	end
-	local settings = config.settings or {}
 	local merged = vim.tbl_deep_extend(
 		"force",
 		{},
-		settings,
+		baseline,
 		type(vscode) == "table" and vscode or {},
 		type(server) == "table" and server or {}
 	)

@@ -20,11 +20,16 @@ Desde el editor terminal completo:
 :DevContainerHostEditor
 ```
 
-El lifecycle sólo puede reemplazar la ventana tmux `editor` cuando contiene un
-único pane. Primero persiste estado `starting` y después ejecuta
-`devcontainer up`; desde ese instante un editor activo pero roto nunca cae al
-editor host. `DevContainerHostEditor` es la salida explícita que marca el
-registro `stopped` antes de restaurar Neovim host.
+El adapter valida la ventana tmux `editor` de un único pane y arranca un
+coordinador detached con `tmux run-shell -b`; el identificador `%N` del pane se
+transmite explícitamente, nunca se redescubre desde el entorno del coordinador.
+El adapter no confirma el arranque hasta observar el `claim_id` exacto en un
+record `starting` o `running`; un timeout no retira ningún record fail-closed.
+El coordinador persiste `starting`, ejecuta `devcontainer up`, reemplaza el pane mediante
+un `respawn-pane` comprobado y sólo publica `running` tras verificar PID vivo y
+el marker exacto del workspace. Una salida rápida queda `dead` o `error`, nunca
+como éxito. `DevContainerHostEditor` restaura Neovim host, verifica PID nuevo y
+marker retirado, persiste la transición y elimina explícitamente el record.
 
 `!` transmite autorización de red al runtime como
 `NVIM_CONFIG_OFFLINE=0`. Sin `!`, el editor recibe
@@ -37,7 +42,7 @@ runtime.
 La CLI pública es:
 
 ```sh
-scripts/devcontainer-editor up [--repo RUTA] [--config RUTA] [--recreate] [--allow-network]
+scripts/devcontainer-editor up --tmux-pane %N --claim-id UUID [--repo RUTA] [--config RUTA] [--recreate] [--allow-network]
 scripts/devcontainer-editor exec [--cwd RUTA] -- programa argumento...
 scripts/devcontainer-editor status [--json] [--repo RUTA]
 scripts/devcontainer-editor log [--repo RUTA] [--pager]
@@ -53,18 +58,57 @@ filesystem host antes de escribir una petición.
 
 Cada repo usa directorios privados `0700` y registros, locks, peticiones y ACKs
 `0600` bajo `NVIM_DEVCONTAINER_STATE_HOME` o
-`$XDG_STATE_HOME/nvim-devcontainer`. El launcher monta únicamente el spool de
-ese workspace y esta configuración read-only. Cada mensaje incluye un token
-aleatorio, UUID y schema cerrado; symlinks, traversal, permisos amplios,
-payloads truncados/sobredimensionados y ACKs con identidad distinta fallan
-cerrado. El proceso host que ejecuta `devcontainer exec` reconcilia el outbox
-para LazyGit, log, retorno host y refresh de sesión. La publicación no forma
-parte del transporte.
+`$XDG_STATE_HOME/nvim-devcontainer`. El único secreto vive en
+`spool/auth.json`, que es owner-only y se lee con comprobaciones de identidad;
+nunca entra en argv, variables de entorno, records ni logs. Peticiones y ACKs
+transportan un HMAC-SHA256, UUIDv4 canónico, action y schemas cerrados ligados
+también a su filename. La escritura de mensajes no reemplaza archivos
+existentes. Symlinks, traversal, permisos amplios, payloads
+truncados/sobredimensionados y bindings distintos fallan cerrado.
 
-Los locks cross-process sólo se recuperan cuando son archivos privados
-regulares y su PID propietario ya no existe. Un record `starting`, `running` o
-`error` deshabilita fallback. Sólo la ausencia de record o el estado explícito
-`stopped` devuelve el código reservado para fallback host.
+El coordinador fija con descriptores el root de estado y sus hijos; locks,
+records y spool se crean, leen, publican y retiran por basename respecto a esos
+descriptores. El editor del container fija igualmente `inbox`, `outbox` y
+`acks`: renombrar un directorio y sustituir su ruta por un symlink no redirige
+un scan, una lectura, una publicación ni un borrado. Los retiros son
+condicionales a la identidad exacta leída: primero reservan con rename
+no-clobber, vuelven a comprobar y restauran un reemplazo detectado. Un fallo de
+validación retira su snapshot sin ocultar el error original; una petición
+autenticada se retira antes de ejecutar cualquier acción host, y desaparición o
+reemplazo abortan sin ese side effect. Un fallo de
+`fsync` posterior a un rename/unlink ya ejecutado se
+reporta como advertencia de durabilidad, no como una falsa reversión.
+
+POSIX no ofrece un syscall compare-and-unlink. Tras la última comprobación de
+la reserva, el unlink final conserva como trust boundary los demás procesos
+host del mismo UID; no se afirma cierre absoluto frente a uno que mute esa
+reserva en la última ventana de syscall. El container y las rutas montadas no
+se confían para elegir paths o identidades: siguen sujetos a descriptores,
+basenames, owner/mode/nlink y a la reserva condicional anterior.
+
+La fuente de un bind mount sigue siendo una ruta que
+`@devcontainers/cli`/Docker resuelve fuera de este proceso: no existe aquí una
+fuente descriptor-bound portable y demostrada para ese contrato externo. Por
+ello `devcontainer up` revalida que la ruta lexical del spool todavía nombra el
+descriptor fijado inmediatamente antes y después de la llamada; cualquier
+cambio detectado detiene el lifecycle y deja estado fail-closed. Ese chequeo
+acota y detecta la carrera, pero no puede eliminar la ventana de resolución
+interna del CLI/runtime.
+
+El coordinador host conserva un `fcntl.flock` advisory sobre un inode privado
+`0600` durante toda su vida: un fichero unlocked antiguo se reutiliza, pero un
+coordinador concurrente no puede entrar. También reconcilia el outbox para
+LazyGit, log, retorno host y refresh de sesión mientras monitoriza el pane. Un
+record existente en cualquier estado (`starting`, `running`, `stopped`,
+`error` o `dead`) deshabilita fallback. Sólo la ausencia real del record emite
+la señal reservada para el editor host. Antes del fallback, el launcher toma
+ese mismo lock y vuelve a comprobar la ausencia; el descriptor se marca
+inheritable y sobrevive al `exec` de `exact-editor-open` hasta que termina su
+RPC o su espera bloqueante. Los subprocesses de ese router cierran descriptores
+ajenos, por lo que no prolongan el lock. Así ningún lifecycle cooperativo puede
+publicar `starting` entre la decisión de ausencia y el handoff host. El handoff
+verificado es quien retira un record existente. La publicación no forma parte
+del transporte.
 
 Si `SSH_AUTH_SOCK` es un socket vivo propiedad del usuario, se monta como socket
 y se verifica con `test -S` dentro del container. Si no existe, no se inventa

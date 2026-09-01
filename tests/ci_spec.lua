@@ -50,6 +50,7 @@ assert(bootstrap:find("command -v cc", 1, true), "parser compiler preflight is m
 local gate = read_file(repo .. "/scripts/check-config")
 assert(gate:find("TREE_SITTER_BIN", 1, true), "canonical gate does not validate tree-sitter")
 assert(gate:find("command -v cc", 1, true), "canonical gate does not require cc")
+assert(gate:find("PYTHONDONTWRITEBYTECODE=1", 1, true), "canonical gate leaves Python bytecode in the tree")
 assert(gate:find("tool_paths_spec", 1, true), "canonical gate omits tool_paths_spec")
 assert(gate:find("menu_lifecycle_spec", 1, true), "canonical gate omits the real menu lifecycle regression")
 

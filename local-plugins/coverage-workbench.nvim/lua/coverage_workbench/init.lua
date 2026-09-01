@@ -1,12 +1,40 @@
 local M = {}
 
 local uv = vim.uv
+local ffi_ok, ffi = pcall(require, "ffi")
+if ffi_ok then
+	pcall(ffi.cdef, "int fcntl(int fd, int cmd, ...);")
+end
+
 local config = { max_bytes = 50 * 1024 * 1024 }
 local registry = {}
 local generation = 0
 local SIGN_GROUP_PREFIX = "coverage-workbench:"
 local SIGN_COVERED = "CoverageWorkbenchCovered"
 local SIGN_MISSING = "CoverageWorkbenchMissing"
+local DARWIN_F_GETPATH = 50
+local DARWIN_PATH_BYTES = 1024
+
+local function default_descriptor_path(handle)
+	local system = uv.os_uname().sysname
+	if system == "Linux" then
+		return uv.fs_readlink("/proc/self/fd/" .. tostring(handle))
+	end
+	if system ~= "Darwin" or not ffi_ok then
+		return nil, "descriptor path inspection is unavailable"
+	end
+	local ok, path = pcall(function()
+		local buffer = ffi.new("char[?]", DARWIN_PATH_BYTES)
+		if ffi.C.fcntl(handle, DARWIN_F_GETPATH, buffer) ~= 0 then
+			return nil
+		end
+		return ffi.string(buffer)
+	end)
+	if not ok or type(path) ~= "string" or path == "" then
+		return nil, "descriptor path inspection failed"
+	end
+	return path
+end
 
 local function canonical(path)
 	if type(path) ~= "string" or path == "" then
@@ -22,8 +50,51 @@ local function contains(root, path)
 	return root ~= nil and path ~= nil and (path == root or vim.fs.relpath(root, path) ~= nil)
 end
 
+local function same_time(left, right)
+	left = left or {}
+	right = right or {}
+	return left.sec == right.sec and left.nsec == right.nsec
+end
+
+local function same_file_snapshot(left, right)
+	return left
+		and right
+		and left.type == "file"
+		and right.type == "file"
+		and left.dev == right.dev
+		and left.ino == right.ino
+		and left.size == right.size
+		and same_time(left.mtime, right.mtime)
+		and same_time(left.ctime, right.ctime)
+end
+
+local function report_path_is_bound(root, resolved)
+	local current = uv.fs_realpath(resolved)
+	return current ~= nil and current == resolved and (current == root or vim.fs.relpath(root, current) ~= nil)
+end
+
+local function path_snapshot_matches(root, resolved, expected)
+	if not report_path_is_bound(root, resolved) then
+		return false
+	end
+	local current = uv.fs_lstat(resolved)
+	if not same_file_snapshot(expected, current) then
+		return false
+	end
+	return report_path_is_bound(root, resolved)
+end
+
 local function is_absolute(path)
 	return path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil
+end
+
+local function descriptor_path_is_bound(root, resolved, handle)
+	local ok, current = pcall(default_descriptor_path, handle)
+	if not ok or type(current) ~= "string" or current == "" or current:find("\0", 1, true) then
+		return false
+	end
+	current = vim.fs.normalize(current)
+	return is_absolute(current) and current == resolved and (current == root or vim.fs.relpath(root, current) ~= nil)
 end
 
 local function source_path(root, name)
@@ -89,6 +160,9 @@ function M.parse_coverage_json(root, raw)
 	end
 	if type(decoded.files) ~= "table" or type(decoded.totals) ~= "table" then
 		return nil, "coverage.py JSON requires files and totals objects"
+	end
+	if decoded.meta ~= nil and (type(decoded.meta) ~= "table" or vim.islist(decoded.meta)) then
+		return nil, "coverage.py JSON meta must be an object"
 	end
 	local format = decoded.meta and decoded.meta.format or nil
 	if format ~= nil and (type(format) ~= "number" or format % 1 ~= 0 or format < 1 or format > 3) then
@@ -194,23 +268,61 @@ function M.parse_lcov(root, raw)
 	return { kind = "lcov", schema_version = 1, root = root, files = files, totals = totals(files) }
 end
 
-local function read_report(path)
+local function read_report(root, path)
 	local resolved = uv.fs_realpath(path)
-	local stat = resolved and uv.fs_stat(resolved) or nil
-	if not resolved or not stat or stat.type ~= "file" then
+	if not resolved then
 		return nil, "report is not a regular file"
 	end
-	if stat.size > config.max_bytes then
+	if not report_path_is_bound(root, resolved) then
+		return nil, "report is outside the project"
+	end
+	local before, before_err = uv.fs_lstat(resolved)
+	if not before or before.type ~= "file" then
+		return nil, before_err and tostring(before_err) or "report is not a regular file"
+	end
+	if before.size > config.max_bytes then
 		return nil, ("report exceeds %d bytes"):format(config.max_bytes)
 	end
 	local handle, open_err = uv.fs_open(resolved, "r", 0)
 	if not handle then
 		return nil, tostring(open_err)
 	end
-	local data, read_err = uv.fs_read(handle, stat.size, 0)
+	local opened, stat_err = uv.fs_fstat(handle)
+	if not opened or opened.type ~= "file" then
+		uv.fs_close(handle)
+		return nil, tostring(stat_err or "report changed while opening")
+	end
+	if opened.size > config.max_bytes then
+		uv.fs_close(handle)
+		return nil, ("report exceeds %d bytes"):format(config.max_bytes)
+	end
+	if not same_file_snapshot(before, opened) then
+		uv.fs_close(handle)
+		return nil, "report changed while opening"
+	end
+	if not descriptor_path_is_bound(root, resolved, handle) or not path_snapshot_matches(root, resolved, opened) then
+		uv.fs_close(handle)
+		return nil, "report changed while opening"
+	end
+
+	local data, read_err = uv.fs_read(handle, opened.size, 0)
+	local after_handle, after_handle_err = uv.fs_fstat(handle)
+	local descriptor_unchanged = after_handle and descriptor_path_is_bound(root, resolved, handle)
+	local path_unchanged = after_handle and path_snapshot_matches(root, resolved, after_handle)
 	local close_ok, close_err = uv.fs_close(handle)
 	if not data then
 		return nil, tostring(read_err)
+	end
+	if #data ~= opened.size then
+		return nil, "report changed while reading"
+	end
+	if
+		not after_handle
+		or not descriptor_unchanged
+		or not path_unchanged
+		or not same_file_snapshot(opened, after_handle)
+	then
+		return nil, tostring(after_handle_err or "report changed while reading")
 	end
 	if not close_ok then
 		return nil, tostring(close_err)
@@ -226,13 +338,13 @@ local function render_buffer(buf, model)
 	if not vim.api.nvim_buf_is_valid(buf) then
 		return
 	end
+	local group = sign_group(model.root)
+	vim.fn.sign_unplace(group, { buffer = buf })
 	local name = canonical(vim.api.nvim_buf_get_name(buf))
 	local entry = name and model.files[name] or nil
 	if not entry then
 		return
 	end
-	local group = sign_group(model.root)
-	vim.fn.sign_unplace(group, { buffer = buf })
 	local id = 1
 	for _, line in ipairs(entry.executed_lines) do
 		vim.fn.sign_place(id, group, SIGN_COVERED, buf, { lnum = line, priority = 8 })
@@ -263,14 +375,11 @@ function M.load(options)
 	if not is_absolute(path) then
 		path = vim.fs.joinpath(root, path)
 	end
-	local raw, resolved_or_err = read_report(path)
+	local raw, resolved_or_err = read_report(root, path)
 	if not raw then
 		return nil, resolved_or_err
 	end
 	local resolved = resolved_or_err
-	if not contains(root, resolved) then
-		return nil, "report is outside the project"
-	end
 	local format = options.format or (resolved:lower():match("%.json$") and "coverage.py-json" or "lcov")
 	local model, parse_err
 	if format == "coverage.py-json" then

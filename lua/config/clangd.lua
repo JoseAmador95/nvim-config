@@ -54,11 +54,11 @@ local lsp = {
 	buffer_valid = function(bufnr)
 		return vim.api.nvim_buf_is_valid(bufnr)
 	end,
-	config = function(root)
+	config = function(root, _active)
 		local config = vim.deepcopy(vim.lsp.config.clangd or {})
 		config.root_dir = root
-		-- The router publishes active state before this callback, so no clangd
-		-- process can start with the previous compile database.
+		-- The router publishes active state (including nil) before this callback,
+		-- so no clangd process can start with the previous compile database.
 		config.cmd = M.command(root)
 		return config
 	end,

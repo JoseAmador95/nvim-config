@@ -183,6 +183,34 @@ local function same_record(left, right)
 		and left.validity == right.validity
 end
 
+local function refresh_record(record, options)
+	options = options or {}
+	local validated, err = M.validate(record.directory, {
+		unchecked = options.unchecked == true or record.validity == "unchecked",
+	})
+	if not validated then
+		return nil, err
+	end
+	return vim.tbl_extend("force", validated, {
+		provider = record.provider,
+		priority = record.priority,
+	})
+end
+
+local function store_record(state, record)
+	if record.provider == "manual" then
+		state.override = record
+	else
+		state.candidates[record.provider] = record
+	end
+end
+
+local function unchecked_requires_bang(state, record, options)
+	return record.validity == "unchecked"
+		and (not options or options.unchecked ~= true)
+		and not same_record(state.active, record)
+end
+
 local function client_root(lsp, client)
 	if type(lsp.client_root) == "function" then
 		return canonical(lsp.client_root(client))
@@ -256,13 +284,19 @@ function M.apply(root, options)
 		publish(root, "error", { error = err })
 		return nil, err
 	end
-	if record.validity == "unchecked" and options.unchecked ~= true and not same_record(state.active, record) then
+	local refreshed, refresh_err = refresh_record(record, options)
+	if not refreshed then
+		publish(root, "error", { error = refresh_err })
+		return nil, refresh_err
+	end
+	store_record(state, refreshed)
+	if unchecked_requires_bang(state, refreshed, options) then
 		local err = "unchecked compile database requires bang"
-		publish(root, "error", { error = err })
+		publish(root, "error", { error = err, candidate = refreshed })
 		return nil, err
 	end
-	local changed = not same_record(state.active, record)
-	publish(root, "active", { active = record }, { "candidate", "error" })
+	local changed = not same_record(state.active, refreshed)
+	publish(root, "active", { active = refreshed }, { "candidate", "error" })
 	if changed then
 		schedule_restart(root)
 	end
@@ -303,7 +337,47 @@ function M.clear_override(root)
 	end
 	local state = state_for(root)
 	state.override = nil
-	return M.apply(root)
+	local previous = state.active
+	local fallback = best_candidate(state)
+	if not fallback then
+		publish(root, "candidate", {}, { "active", "candidate", "error" })
+		if previous then
+			schedule_restart(root)
+		end
+		return M.status(root, { refresh = false })
+	end
+
+	local refreshed, refresh_err = refresh_record(fallback, {})
+	if refreshed then
+		store_record(state, refreshed)
+	end
+	local policy_err = refreshed
+			and unchecked_requires_bang(state, refreshed, {})
+			and "unchecked compile database requires bang"
+		or nil
+	local err = refresh_err or policy_err
+	if err then
+		local fields = { error = err }
+		if refreshed then
+			fields.candidate = refreshed
+		end
+		local clear = { "candidate" }
+		if previous and previous.provider == "manual" then
+			clear[#clear + 1] = "active"
+		end
+		publish(root, "error", fields, clear)
+		if previous and previous.provider == "manual" then
+			schedule_restart(root)
+		end
+		return nil, err
+	end
+
+	local changed = not same_record(previous, refreshed)
+	publish(root, "active", { active = refreshed }, { "candidate", "error" })
+	if changed then
+		schedule_restart(root)
+	end
+	return M.status(root, { refresh = false })
 end
 
 function M.active(root)

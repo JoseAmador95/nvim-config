@@ -37,7 +37,9 @@ local function setup_commands()
 			notify("Current buffer is not inside a Git repository", vim.log.levels.ERROR)
 		end
 	end)
-	command("ReviewScopeBack", controller.scope_back)
+	command("ReviewScopeBack", function()
+		controller.scope_back()
+	end)
 	command("ReviewSessions", function()
 		local root = controller._root_for_command()
 		if root then

@@ -3,9 +3,13 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 local terminal_plugin = repo .. "/local-plugins/terminal-lifecycle.nvim"
+local shared = repo .. "/local-plugins/_shared"
 vim.opt.runtimepath:prepend(terminal_plugin)
+vim.opt.runtimepath:prepend(shared)
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({
+	shared .. "/lua/?.lua",
+	shared .. "/lua/?/init.lua",
 	terminal_plugin .. "/lua/?.lua",
 	terminal_plugin .. "/lua/?/init.lua",
 	repo .. "/lua/?.lua",
@@ -37,6 +41,9 @@ local opened = {}
 local sent = {}
 local stopped = {}
 local notices = {}
+local jobwait_status = -1
+local defer_scheduled = false
+local scheduled = {}
 
 local function fake_win(opts, index)
 	local buf = vim.api.nvim_create_buf(false, true)
@@ -46,6 +53,7 @@ local function fake_win(opts, index)
 		visible = true,
 		events = {},
 		show_count = 0,
+		focus_count = 0,
 		hide_count = 0,
 		close_count = 0,
 	}
@@ -61,6 +69,7 @@ local function fake_win(opts, index)
 		return self
 	end
 	function win:focus()
+		self.focus_count = self.focus_count + 1
 		vim.api.nvim_set_current_buf(self.buf)
 		return self
 	end
@@ -95,7 +104,7 @@ local snacks = {
 
 package.loaded.snacks = snacks
 vim.fn.jobwait = function()
-	return { -1 }
+	return { jobwait_status }
 end
 vim.fn.jobstop = function(job)
 	stopped[#stopped + 1] = job
@@ -105,13 +114,25 @@ vim.api.nvim_chan_send = function(job, payload)
 	sent[#sent + 1] = { job = job, payload = payload }
 end
 vim.schedule = function(callback)
-	callback()
+	if defer_scheduled then
+		scheduled[#scheduled + 1] = callback
+	else
+		callback()
+	end
 end
 vim.notify = function(message, level)
 	notices[#notices + 1] = { message = message, level = level }
 end
 
 local terminal = require("config.terminal")
+
+local function drain_scheduled()
+	defer_scheduled = false
+	while scheduled[1] do
+		table.remove(scheduled, 1)()
+	end
+end
+
 local function spec(id, overrides)
 	return vim.tbl_deep_extend("force", {
 		key = assert(terminal._key("host", repo, id)),
@@ -126,6 +147,8 @@ test("specs require arrays, absolute directories, and explicit string env", func
 	for _, case in ipairs({
 		{ launch = { argv = "printf hello" } },
 		{ launch = { argv = {} } },
+		{ launch = { argv = { "", "value" } } },
+		{ launch = { argv = { "printf", "bad\0value" } } },
 		{ launch = { cwd = "relative" } },
 		{ launch = { cwd = "/definitely/missing" } },
 		{ launch = { env = false } },
@@ -135,6 +158,16 @@ test("specs require arrays, absolute directories, and explicit string env", func
 		local _, err = terminal._normalize(vim.tbl_deep_extend("force", spec("invalid"), case))
 		assert(type(err) == "string" and err ~= "")
 	end
+end)
+
+test("terminal adapter preserves empty arguments after a non-empty executable", function()
+	local value = spec("empty-argument", { launch = { argv = { "printf", "%s", "" } } })
+	local normalized = assert(terminal._normalize(value))
+	assert(vim.deep_equal(normalized.launch.argv, value.launch.argv), "normalization changed exact argv")
+	assert(terminal.open(value))
+	assert(#opened == 1 and vim.deep_equal(opened[1].argv, value.launch.argv), "backend did not receive exact argv")
+	terminal._reset()
+	opened = {}
 end)
 
 test("an empty environment map opens the default shell", function()
@@ -248,24 +281,43 @@ test("toggle creates visibly, then hides and restores one process", function()
 	assert(sent[#sent].payload == "print(1)\n")
 end)
 
-test("identity includes runtime, canonical root, and id", function()
-	assert(terminal.open(spec("one")))
-	assert(terminal.open(spec("two")))
-	assert(#opened == 3, "different ids did not create distinct processes")
-	assert(terminal.open(spec("one")))
-	assert(#opened == 3, "same identity created a duplicate process")
+test("focus accepts a stable key and reuses the existing process", function()
+	local value = spec("focus-key")
+	local opened_before = #opened
+	local record = assert(terminal.open(value))
+	local focused_before = record.handle.focus_count
+	assert(terminal.focus(value.key) == record, "focus did not resolve the existing record by key")
+	assert(#opened == opened_before + 1, "focus by key created a second process")
+	assert(record.handle.focus_count == focused_before + 1, "focus by key did not focus the existing view")
 end)
 
-test("changed launch is rejected until explicit restart and failed output remains available", function()
+test("identity includes runtime, canonical root, and id", function()
+	local opened_before = #opened
+	assert(terminal.open(spec("one")))
+	assert(terminal.open(spec("two")))
+	assert(#opened == opened_before + 2, "different ids did not create distinct processes")
+	assert(terminal.open(spec("one")))
+	assert(#opened == opened_before + 2, "same identity created a duplicate process")
+end)
+
+test("changed launch queues explicit restart until the old process exits", function()
 	local value = spec("restart")
 	local first = assert(terminal.open(value))
 	local changed = spec("restart", { launch = { argv = { "printf", "changed" } } })
 	local stopped_before = #stopped
+	local opened_before = #opened
 	local reopened, open_err = terminal.open(changed)
 	assert(reopened == nil and open_err:find("restart explicitly", 1, true), "changed argv was not rejected")
 	assert(terminal.status(value).running and #stopped == stopped_before, "changed argv silently stopped the process")
-	local second = assert(terminal.restart(changed))
-	assert(second ~= first and #stopped == stopped_before + 1, "explicit restart did not replace the process")
+	assert(terminal.restart(changed) == first)
+	local pending = terminal.status(changed)
+	assert(pending.running and pending.restart_pending and not pending.accepting_input)
+	assert(#opened == opened_before and #stopped == stopped_before + 1, "restart overlapped the old process")
+	local sent_before = #sent
+	assert(terminal.send(changed, "not yet") == nil and #sent == sent_before)
+	first.handle.events.TermClose(first.handle, { status = 0 })
+	local second = assert(terminal.open(changed))
+	assert(second ~= first and #opened == opened_before + 1, "replacement did not wait for exit")
 	second.handle.events.TermClose(second.handle, { status = 7 })
 	local status = terminal.status(changed)
 	assert(status.exists and not status.running and status.state == "exited-retained" and status.exit_code == 7)
@@ -281,14 +333,59 @@ test("successful short-lived terminals are reaped", function()
 	assert(not status.exists and status.state == "disposed", "successful terminal remained registered")
 end)
 
-test("stop retains output until explicit dispose", function()
+test("stop retains output after the actual exit until explicit dispose", function()
 	local value = spec("stopped")
 	local record = assert(terminal.open(value))
 	assert(terminal.stop(value) == record, "stop failed")
 	local status = terminal.status(value)
+	assert(status.exists and status.running and status.state == "running" and status.stop_pending)
+	assert(not status.accepting_input and terminal.send(value, "blocked") == nil)
+	record.handle.events.TermClose(record.handle, { status = 0 })
+	status = terminal.status(value)
 	assert(status.exists and not status.running and status.state == "exited-retained")
 	assert(type(terminal.lines(value)) == "table", "stop discarded output")
 	assert(terminal.dispose(value) == record and terminal.status(value).state == "disposed")
+end)
+
+test("an already-exited job settles synchronously without calling jobstop", function()
+	local value = spec("already-exited")
+	local record = assert(terminal.open(value))
+	local stopped_before = #stopped
+	jobwait_status = 0
+	assert(terminal.stop(value) == record)
+	jobwait_status = -1
+	local status = terminal.status(value)
+	assert(status.state == "exited-retained" and not status.stop_pending)
+	assert(#stopped == stopped_before, "jobstop was called for a confirmed exited job")
+end)
+
+test("wiping a live terminal requests stop and tracks it until exit", function()
+	local value = spec("wiped-live")
+	local record = assert(terminal.open(value))
+	local stopped_before = #stopped
+	local wipeout = assert(record.handle.events.BufWipeout)
+	vim.api.nvim_buf_delete(record.handle.buf, { force = true })
+	wipeout(record.handle, {})
+	local pending = terminal.status(value)
+	assert(pending.state == "running" and pending.dispose_pending and not pending.accepting_input)
+	assert(#stopped == stopped_before + 1, "BufWipeout orphaned the live terminal job")
+	record.handle.events.TermClose(record.handle, { status = 0 })
+	assert(terminal.status(value).state == "disposed", "wiped terminal remained registered after exit")
+end)
+
+test("TermClose before BufWipeout disposes without a false failure notice", function()
+	local value = spec("termclose-before-wipeout")
+	local record = assert(terminal.open(value))
+	local notices_before = #notices
+	local stopped_before = #stopped
+	defer_scheduled = true
+	record.handle.events.TermClose(record.handle, { status = -1 })
+	vim.api.nvim_buf_delete(record.handle.buf, { force = true })
+	record.handle.events.BufWipeout(record.handle, {})
+	assert(terminal.status(value).state == "disposed")
+	assert(#stopped == stopped_before, "an already-observed terminal exit requested jobstop")
+	drain_scheduled()
+	assert(#notices == notices_before, "buffer wipe reported a false retained-process failure")
 end)
 
 test("gf opens a contained location through the shared tab primitive", function()

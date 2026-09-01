@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import datetime as dt
+import errno
+import fcntl
 import hashlib
+import hmac
 import json
 import os
 import pathlib
+import posixpath
 import secrets
 import shlex
 import shutil
@@ -19,11 +24,13 @@ import sys
 import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
-VERSION = 1
+VERSION = 2
 MAX_JSON_BYTES = 64 * 1024
 MAX_LOG_BYTES = 256 * 1024
+MAX_RECORD_ERROR_CHARS = 4096
+RECORD_ERROR_SUFFIX = "... [truncated; see lifecycle log]"
 DEFAULT_TIMEOUT_SECONDS = 600.0
 SPOOL_TIMEOUT_SECONDS = 5.0
 POLL_SECONDS = 0.05
@@ -40,13 +47,14 @@ RECORD_KEYS = {
     "config_path",
     "container_root",
     "container_id",
+    "claim_id",
     "workspace_key",
     "pid",
     "status",
     "network_authorized",
     "ssh_agent_forwarding",
-    "token",
     "tmux_pane",
+    "pane_pid",
     "log_path",
     "updated_at",
     "exit_code",
@@ -54,7 +62,7 @@ RECORD_KEYS = {
 }
 REQUEST_KEYS = {
     "version",
-    "token",
+    "auth",
     "request_id",
     "action",
     "path",
@@ -64,13 +72,87 @@ REQUEST_KEYS = {
 }
 HOST_REQUEST_KEYS = {
     "version",
-    "token",
+    "auth",
     "request_id",
     "action",
     "created_at",
 }
-ACK_KEYS = {"version", "token", "request_id", "ok", "action", "error"}
+ACK_KEYS = {"version", "auth", "request_id", "ok", "action", "error"}
+AUTH_KEYS = {"version", "token"}
+MESSAGE_FIELDS = {
+    "open_location": ("version", "request_id", "action", "path", "line", "column", "created_at"),
+    "host_request": ("version", "request_id", "action", "created_at"),
+    "ack": ("version", "request_id", "ok", "action", "error"),
+}
+PANE_FORMAT = "#{pane_dead}\t#{pane_pid}\t#{pane_dead_status}\t#{@devcontainer_active}"
 CONFIG_ROOT = pathlib.Path(__file__).resolve().parent.parent
+LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+class PaneObservation(NamedTuple):
+    """One exact tmux pane observation."""
+
+    dead: bool
+    pid: int
+    exit_code: int | None
+    marker: str
+
+
+class SpoolDirectories(NamedTuple):
+    """Pinned directory descriptors for one authenticated workspace spool."""
+
+    root: pathlib.Path
+    root_fd: int
+    inbox_fd: int
+    outbox_fd: int
+    acks_fd: int
+
+
+class FileIdentity(NamedTuple):
+    """Exact identity of one private regular file."""
+
+    device: int
+    inode: int
+    size: int
+    mode: int
+    links: int
+    owner: int
+
+
+class StateDirectories(Mapping[str, pathlib.Path]):
+    """Pinned private state hierarchy with path-compatible projections."""
+
+    def __init__(self, paths: Mapping[str, pathlib.Path], descriptors: Mapping[str, int]) -> None:
+        self._paths = dict(paths)
+        self._descriptors = dict(descriptors)
+        self._closed = False
+
+    def __getitem__(self, name: str) -> pathlib.Path:
+        return self._paths[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._paths)
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
+    def descriptor(self, name: str) -> int:
+        """Return one live descriptor for a pinned state directory."""
+        if self._closed:
+            fail("private state hierarchy is already closed")
+        return self._descriptors[name]
+
+    def close(self) -> None:
+        """Close every pinned state descriptor exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        for descriptor in reversed(tuple(self._descriptors.values())):
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+    def __del__(self) -> None:
+        self.close()
 
 
 class EditorError(Exception):
@@ -79,6 +161,10 @@ class EditorError(Exception):
 
 class NoActiveEditor(EditorError):
     """Report the only state in which host-editor fallback is allowed."""
+
+
+class HostPaneTransitioned(EditorError):
+    """Report a failure after destructive host-pane restoration began."""
 
 
 def fail(message: str) -> NoReturn:
@@ -95,6 +181,12 @@ def progress(message: str) -> None:
     :param message: Progress detail.
     """
     print(f"devcontainer-editor: {message}", file=sys.stderr, flush=True)
+
+
+def warn_nonfatal(message: str) -> None:
+    """Emit one warning without changing an already-decided workflow result."""
+    with contextlib.suppress(OSError, ValueError):
+        progress(message)
 
 
 def state_root() -> pathlib.Path:
@@ -120,30 +212,177 @@ def ensure_dir(path: pathlib.Path) -> pathlib.Path:
         mode = path.lstat().st_mode
     except OSError as error:
         raise EditorError(f"could not prepare state directory {path}: {error}") from error
-    if path.is_symlink() or not stat.S_ISDIR(mode):
+    details = path.lstat()
+    if path.is_symlink() or not stat.S_ISDIR(mode) or details.st_uid != os.getuid():
         fail(f"state path is not a real directory: {path}")
     path.chmod(0o700)
     return path
 
 
-def prepare_state() -> dict[str, pathlib.Path]:
-    """Prepare every private lifecycle directory."""
+def prepare_state() -> StateDirectories:
+    """Prepare and pin every private lifecycle directory."""
     root = ensure_dir(state_root())
-    return {
-        "root": root,
-        "workspaces": ensure_dir(root / "workspaces"),
-        "locks": ensure_dir(root / "locks"),
-        "spool": ensure_dir(root / "spool"),
-        "logs": ensure_dir(root / "logs"),
-    }
+    descriptors: dict[str, int] = {}
+    try:
+        descriptors["root"] = open_directory_path(root, "state root")
+        for name in ("workspaces", "locks", "spool", "logs"):
+            descriptors[name] = open_child_directory(
+                descriptors["root"],
+                name,
+                f"state {name} directory",
+            )
+    except (OSError, EditorError):
+        for descriptor in reversed(tuple(descriptors.values())):
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise
+    paths = {"root": root, **{name: root / name for name in ("workspaces", "locks", "spool", "logs")}}
+    return StateDirectories(paths, descriptors)
 
 
-def prepare_spool(path: pathlib.Path) -> pathlib.Path:
-    """Prepare one workspace's authenticated spool."""
-    root = ensure_dir(path)
-    for name in ("inbox", "outbox", "acks"):
-        ensure_dir(root / name)
-    return root
+def directory_flags() -> int:
+    """Return flags for opening one directory without following its final name."""
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def private_basename(name: str) -> str:
+    """Require one non-special basename for descriptor-relative state access."""
+    if not name or name in {".", ".."} or pathlib.PurePath(name).name != name or "\0" in name:
+        fail("private state entry name is not a basename")
+    return name
+
+
+def validate_directory_descriptor(descriptor: int, label: str) -> None:
+    """Require one owner-only real directory descriptor."""
+    details = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(details.st_mode)
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) != 0o700
+    ):
+        fail(f"{label} is not one owner-only real directory")
+
+
+def open_directory_path(path: pathlib.Path, label: str) -> int:
+    """Open and identity-check one prepared directory path."""
+    ensure_dir(path)
+    try:
+        descriptor = os.open(path, directory_flags())
+        opened = os.fstat(descriptor)
+        lexical = path.lstat()
+    except OSError as error:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise EditorError(f"could not open {label}: {error}") from error
+    if (
+        stat.S_ISLNK(lexical.st_mode)
+        or (opened.st_dev, opened.st_ino) != (lexical.st_dev, lexical.st_ino)
+    ):
+        os.close(descriptor)
+        fail(f"{label} changed while opening")
+    try:
+        os.fchmod(descriptor, 0o700)
+        validate_directory_descriptor(descriptor, label)
+    except (OSError, EditorError):
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def open_existing_directory_path(path: pathlib.Path, label: str) -> int:
+    """Open and identity-check an already-private directory without mutating it."""
+    try:
+        descriptor = os.open(path, directory_flags())
+        opened = os.fstat(descriptor)
+        lexical = path.lstat()
+    except OSError as error:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise EditorError(f"could not open {label}: {error}") from error
+    if (
+        stat.S_ISLNK(lexical.st_mode)
+        or (opened.st_dev, opened.st_ino) != (lexical.st_dev, lexical.st_ino)
+    ):
+        os.close(descriptor)
+        fail(f"{label} changed while opening")
+    try:
+        validate_directory_descriptor(descriptor, label)
+    except EditorError:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def open_child_directory(parent_fd: int, name: str, label: str) -> int:
+    """Create, open, and pin one owner-only child directory by basename."""
+    name = private_basename(name)
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise EditorError(f"could not prepare {label}: {error}") from error
+    try:
+        descriptor = os.open(name, directory_flags(), dir_fd=parent_fd)
+        lexical = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        opened = os.fstat(descriptor)
+        if (
+            stat.S_ISLNK(lexical.st_mode)
+            or (opened.st_dev, opened.st_ino) != (lexical.st_dev, lexical.st_ino)
+        ):
+            fail(f"{label} changed while opening")
+        os.fchmod(descriptor, 0o700)
+        validate_directory_descriptor(descriptor, label)
+    except OSError as error:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise EditorError(f"could not open {label}: {error}") from error
+    except EditorError:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise
+    return descriptor
+
+
+@contextlib.contextmanager
+def workspace_spool(path: pathlib.Path, *, parent_fd: int | None = None) -> Iterator[SpoolDirectories]:
+    """Hold pinned descriptors for one workspace's authenticated spool."""
+    descriptors: list[int] = []
+    try:
+        root_fd = (
+            open_child_directory(parent_fd, path.name, "workspace spool")
+            if parent_fd is not None
+            else open_directory_path(path, "workspace spool")
+        )
+        descriptors.append(root_fd)
+        inbox_fd = open_child_directory(root_fd, "inbox", "workspace spool inbox")
+        descriptors.append(inbox_fd)
+        outbox_fd = open_child_directory(root_fd, "outbox", "workspace spool outbox")
+        descriptors.append(outbox_fd)
+        acks_fd = open_child_directory(root_fd, "acks", "workspace spool acknowledgements")
+        descriptors.append(acks_fd)
+        yield SpoolDirectories(path, root_fd, inbox_fd, outbox_fd, acks_fd)
+    finally:
+        for descriptor in reversed(descriptors):
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
+def revalidate_directory_path(path: pathlib.Path, descriptor: int, label: str) -> None:
+    """Require a lexical directory path to still name one pinned identity."""
+    try:
+        lexical = path.lstat()
+        opened = os.fstat(descriptor)
+    except OSError as error:
+        raise EditorError(f"could not revalidate {label}: {error}") from error
+    if (
+        stat.S_ISLNK(lexical.st_mode)
+        or not stat.S_ISDIR(lexical.st_mode)
+        or lexical.st_uid != os.getuid()
+        or stat.S_IMODE(lexical.st_mode) != 0o700
+        or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        fail(f"{label} path no longer names its pinned directory")
 
 
 def regular_owner_file(path: pathlib.Path) -> bool:
@@ -152,7 +391,14 @@ def regular_owner_file(path: pathlib.Path) -> bool:
         mode = path.lstat().st_mode
     except OSError:
         return False
-    return stat.S_ISREG(mode) and not stat.S_ISLNK(mode) and stat.S_IMODE(mode) == 0o600
+    details = path.lstat()
+    return (
+        stat.S_ISREG(mode)
+        and not stat.S_ISLNK(mode)
+        and stat.S_IMODE(mode) == 0o600
+        and details.st_uid == os.getuid()
+        and details.st_nlink == 1
+    )
 
 
 def unlink_regular(path: pathlib.Path) -> None:
@@ -166,48 +412,368 @@ def unlink_regular(path: pathlib.Path) -> None:
             path.unlink()
 
 
+def fsync_directory(descriptor: int, label: str) -> None:
+    """Persist directory-entry changes through one pinned descriptor."""
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        raise EditorError(f"could not persist {label}: {error}") from error
+
+
+def fsync_parent(path: pathlib.Path, label: str) -> None:
+    """Persist one path's parent directory after a namespace change."""
+    try:
+        descriptor = os.open(path.parent, directory_flags())
+        opened = os.fstat(descriptor)
+        lexical = path.parent.lstat()
+        if (
+            stat.S_ISLNK(lexical.st_mode)
+            or (opened.st_dev, opened.st_ino) != (lexical.st_dev, lexical.st_ino)
+        ):
+            fail(f"{label} directory changed while opening")
+        validate_directory_descriptor(descriptor, f"{label} directory")
+    except OSError as error:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise EditorError(f"could not open {label} directory: {error}") from error
+    except EditorError:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise
+    try:
+        fsync_directory(descriptor, f"{label} directory")
+    finally:
+        os.close(descriptor)
+
+
+def file_identity(details: os.stat_result) -> FileIdentity:
+    """Project one filesystem result into an exact private-file identity."""
+    return FileIdentity(
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_mode,
+        details.st_nlink,
+        details.st_uid,
+    )
+
+
+def validate_private_file(details: os.stat_result, label: str, maximum: int = MAX_JSON_BYTES) -> FileIdentity:
+    """Require one bounded owner-only, single-link regular file."""
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) != 0o600
+        or details.st_nlink != 1
+        or details.st_size > maximum
+    ):
+        fail(f"{label} is unsafe, not single-link owner-only, or exceeds {maximum} bytes")
+    return file_identity(details)
+
+
+def exclusive_rename_at(directory_fd: int, source: str, destination: str) -> bool:
+    """Move one basename without clobbering through the pinned directory."""
+    source = private_basename(source)
+    destination = private_basename(destination)
+    try:
+        if sys.platform == "darwin":
+            operation = LIBC.renameatx_np
+            flag = 0x00000004
+        elif sys.platform.startswith("linux"):
+            operation = LIBC.renameat2
+            flag = 0x00000001
+        else:
+            fail("exclusive private-state rename requires Darwin or Linux")
+    except AttributeError as error:
+        raise EditorError("exclusive private-state rename is unavailable") from error
+    operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    operation.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = operation(
+        directory_fd,
+        os.fsencode(source),
+        directory_fd,
+        os.fsencode(destination),
+        flag,
+    )
+    if result == 0:
+        return True
+    number = ctypes.get_errno()
+    if number == errno.EEXIST:
+        return False
+    if number == errno.ENOENT:
+        raise FileNotFoundError(source)
+    raise EditorError(
+        f"could not rename private entry {source} to {destination}: {os.strerror(number)}"
+    )
+
+
+def restore_reserved_at(directory_fd: int, reserve: str, name: str) -> None:
+    """Restore a displaced replacement without clobbering a newer entry."""
+    try:
+        restored = exclusive_rename_at(directory_fd, reserve, name)
+    except FileNotFoundError as error:
+        raise EditorError(f"private replacement reservation disappeared: {reserve}") from error
+    if not restored:
+        fail(f"private replacement remains preserved at {reserve}")
+
+
+def reserve_private_entry_at(directory_fd: int, name: str) -> str | None:
+    """Move one current basename to a unique no-clobber reservation."""
+    for _ in range(64):
+        reserve = f".{name}.{os.getpid()}.{secrets.token_hex(16)}.retire"
+        try:
+            if exclusive_rename_at(directory_fd, name, reserve):
+                return reserve
+        except FileNotFoundError:
+            return None
+    fail(f"could not allocate a retirement reservation for {name}")
+
+
+def unlink_regular_at(
+    directory_fd: int,
+    name: str,
+    *,
+    durable: bool = False,
+    expected: FileIdentity | None = None,
+) -> bool:
+    """Conditionally retire one exact private file through a pinned directory."""
+    name = private_basename(name)
+    try:
+        details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise EditorError(f"could not inspect private entry {name}: {error}") from error
+    current = validate_private_file(details, f"private entry {name}")
+    expected = expected or current
+    reserve = reserve_private_entry_at(directory_fd, name)
+    if reserve is None:
+        return False
+    try:
+        reserved = os.stat(reserve, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as error:
+        raise EditorError(f"could not inspect retirement reservation {reserve}: {error}") from error
+    if file_identity(reserved) != expected:
+        restore_reserved_at(directory_fd, reserve, name)
+        fail(f"private entry changed during conditional retirement: {name}")
+    try:
+        os.unlink(reserve, dir_fd=directory_fd)
+    except OSError as error:
+        raise EditorError(f"could not retire private entry {name}: {error}") from error
+    if durable:
+        try:
+            fsync_directory(directory_fd, f"private entry removal {name}")
+        except EditorError as warning:
+            warn_nonfatal(f"warning: {warning}; retirement was already committed")
+    return True
+
+
+def entry_exists_at(directory_fd: int, name: str) -> bool:
+    """Return whether one basename exists without following it."""
+    name = private_basename(name)
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise EditorError(f"could not inspect private entry {name}: {error}") from error
+    return True
+
+
 def atomic_bytes(
     path: pathlib.Path,
     payload: bytes,
     maximum: int = MAX_JSON_BYTES,
 ) -> None:
-    """Atomically write owner-only bytes without following a target symlink.
+    """Atomically write owner-only bytes through one pinned parent.
 
     :param path: Destination file.
     :param payload: Bounded payload bytes.
     """
-    if len(payload) > maximum:
-        fail("private payload exceeds its size limit")
+    descriptor = open_existing_directory_path(path.parent, f"private parent for {path.name}")
     try:
-        existing = path.lstat()
-    except FileNotFoundError:
-        existing = None
-    except OSError as error:
-        raise EditorError(f"could not inspect private target: {error}") from error
-    if existing is not None and not stat.S_ISREG(existing.st_mode):
-        fail(f"private target is not a regular file: {path}")
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(temporary, flags, 0o600)
-        with os.fdopen(descriptor, "wb", closefd=True) as stream:
-            descriptor = None
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        path.chmod(0o600)
-    except OSError as error:
-        if descriptor is not None:
-            os.close(descriptor)
-        unlink_regular(temporary)
-        raise EditorError(f"could not persist private file {path}: {error}") from error
+        atomic_replace_bytes_at(descriptor, path.name, payload, maximum)
+    finally:
+        os.close(descriptor)
 
 
 def atomic_json(path: pathlib.Path, value: Mapping[str, object]) -> None:
     """Atomically serialize one owner-only JSON object."""
     atomic_bytes(path, (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+
+
+def write_descriptor(descriptor: int, payload: bytes) -> None:
+    """Write and fsync one already-created private file descriptor."""
+    with os.fdopen(descriptor, "wb", closefd=True) as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fchmod(stream.fileno(), 0o600)
+        os.fsync(stream.fileno())
+
+
+def create_temporary_at(directory_fd: int, name: str, payload: bytes) -> str:
+    """Persist one private temporary file in a pinned directory."""
+    name = private_basename(name)
+    temporary = f".{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        write_descriptor(descriptor, payload)
+    except OSError as error:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary, dir_fd=directory_fd)
+        raise EditorError(f"could not persist private temporary file: {error}") from error
+    return temporary
+
+
+def atomic_replace_bytes_at(
+    directory_fd: int,
+    name: str,
+    payload: bytes,
+    maximum: int = MAX_JSON_BYTES,
+) -> FileIdentity:
+    """Replace one private basename and return its committed identity."""
+    name = private_basename(name)
+    if len(payload) > maximum:
+        fail("private payload exceeds its size limit")
+    try:
+        existing = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    except OSError as error:
+        raise EditorError(f"could not inspect private target {name}: {error}") from error
+    if existing is not None:
+        validate_private_file(existing, f"private target {name}", maximum)
+    temporary = create_temporary_at(directory_fd, name, payload)
+    committed = False
+    try:
+        prepared = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+        identity = validate_private_file(prepared, f"private temporary file {temporary}", maximum)
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        committed = True
+        persisted = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if file_identity(persisted) != identity:
+            fail(f"private target changed after replacement: {name}")
+        try:
+            fsync_directory(directory_fd, f"private file {name}")
+        except EditorError as warning:
+            warn_nonfatal(f"warning: {warning}; replacement was already committed")
+        return identity
+    except OSError as error:
+        raise EditorError(f"could not replace private file {name}: {error}") from error
+    finally:
+        if not committed:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=directory_fd)
+
+
+def atomic_replace_json_at(
+    directory_fd: int,
+    name: str,
+    value: Mapping[str, object],
+) -> FileIdentity:
+    """Replace one private JSON basename and return its committed identity."""
+    payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return atomic_replace_bytes_at(directory_fd, name, payload)
+
+
+def atomic_create_bytes_at(
+    directory_fd: int,
+    name: str,
+    payload: bytes,
+    maximum: int = MAX_JSON_BYTES,
+) -> None:
+    """Durably publish owner-only bytes by basename without clobbering."""
+    name = private_basename(name)
+    if len(payload) > maximum:
+        fail("private payload exceeds its size limit")
+    temporary = create_temporary_at(directory_fd, name, payload)
+    committed = False
+    try:
+        try:
+            committed = exclusive_rename_at(directory_fd, temporary, name)
+        except (EditorError, FileNotFoundError) as error:
+            raise EditorError(f"could not publish private file {name}: {error}") from error
+        if not committed:
+            fail(f"private message already exists: {name}")
+        try:
+            fsync_directory(directory_fd, f"private message {name}")
+        except EditorError as warning:
+            warn_nonfatal(f"warning: {warning}; publication was already committed")
+    finally:
+        if not committed:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=directory_fd)
+
+
+def atomic_create_json_at(
+    directory_fd: int,
+    name: str,
+    value: Mapping[str, object],
+) -> None:
+    """Durably publish one exact JSON message by basename."""
+    payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    atomic_create_bytes_at(directory_fd, name, payload)
+
+
+def direct_create_bytes_at(directory_fd: int, name: str, payload: bytes) -> None:
+    """Create one durable owner-only single-link file at its final basename."""
+    name = private_basename(name)
+    descriptor: int | None = None
+    created = False
+    created_identity: FileIdentity | None = None
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        created = True
+        opened = os.fstat(descriptor)
+        created_identity = validate_private_file(opened, "private authentication file")
+        writer = descriptor
+        descriptor = None
+        write_descriptor(writer, payload)
+        persisted = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(persisted.st_mode)
+            or persisted.st_uid != os.getuid()
+            or stat.S_IMODE(persisted.st_mode) != 0o600
+            or persisted.st_nlink != 1
+            or (persisted.st_dev, persisted.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            fail("private authentication file changed while creating")
+        fsync_directory(directory_fd, f"private authentication file {name}")
+    except FileExistsError as error:
+        raise EditorError(f"private message already exists: {name}") from error
+    except OSError as error:
+        raise EditorError(f"could not create private authentication file: {error}") from error
+    except EditorError:
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created and created_identity is not None and sys.exc_info()[0] is not None:
+            try:
+                unlink_regular_at(
+                    directory_fd,
+                    name,
+                    durable=True,
+                    expected=created_identity,
+                )
+            except EditorError as cleanup_error:
+                warn_nonfatal(f"warning: private authentication cleanup failed: {cleanup_error}")
 
 
 def read_private_json(path: pathlib.Path, label: str) -> dict[str, Any]:
@@ -219,7 +785,9 @@ def read_private_json(path: pathlib.Path, label: str) -> dict[str, Any]:
     if (
         not stat.S_ISREG(before.st_mode)
         or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
         or before.st_size > MAX_JSON_BYTES
     ):
         fail(f"{label} is unsafe or exceeds 64 KiB")
@@ -228,10 +796,17 @@ def read_private_json(path: pathlib.Path, label: str) -> dict[str, Any]:
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as stream:
             opened = os.fstat(stream.fileno())
-            if (opened.st_dev, opened.st_ino, opened.st_size) != (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mode) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mode,
+                )
             ):
                 fail(f"{label} changed while opening")
             payload = stream.read(MAX_JSON_BYTES + 1)
@@ -241,19 +816,110 @@ def read_private_json(path: pathlib.Path, label: str) -> dict[str, Any]:
         after = path.lstat()
     except OSError as error:
         raise EditorError(f"{label} changed while validating: {error}") from error
-    if (after.st_dev, after.st_ino, after.st_size, after.st_mode) != (
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mode, after.st_nlink, after.st_uid) != (
         opened.st_dev,
         opened.st_ino,
         opened.st_size,
         opened.st_mode,
+        opened.st_nlink,
+        opened.st_uid,
     ):
         fail(f"{label} changed while validating")
+    return decode_json_object(payload, label)
+
+
+def decode_json_object(payload: bytes, label: str) -> dict[str, Any]:
+    """Decode one bounded payload as an exact JSON object."""
     try:
         value = json.loads(payload)
-    except (UnicodeError, json.JSONDecodeError) as error:
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
         raise EditorError(f"{label} is not valid JSON: {error}") from error
     if not isinstance(value, dict):
         fail(f"{label} must contain one JSON object")
+    return value
+
+
+def read_private_snapshot_at(
+    directory_fd: int,
+    name: str,
+    label: str,
+) -> tuple[bytes, FileIdentity]:
+    """Read exact private bytes and return their descriptor-bound identity."""
+    name = private_basename(name)
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as error:
+        raise EditorError(f"{label} is unavailable: {error}") from error
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+        or before.st_size > MAX_JSON_BYTES
+    ):
+        fail(f"{label} is unsafe or exceeds 64 KiB")
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mode) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mode,
+                )
+            ):
+                fail(f"{label} changed while opening")
+            payload = stream.read(MAX_JSON_BYTES + 1)
+            if len(payload) != opened.st_size:
+                fail(f"{label} changed while reading")
+    except OSError as error:
+        raise EditorError(f"could not read {label}: {error}") from error
+    try:
+        after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as error:
+        raise EditorError(f"{label} changed while validating: {error}") from error
+    if (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mode,
+        after.st_nlink,
+        after.st_uid,
+    ) != (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_size,
+        opened.st_mode,
+        opened.st_nlink,
+        opened.st_uid,
+    ):
+        fail(f"{label} changed while validating")
+    return payload, file_identity(opened)
+
+
+def read_private_json_snapshot_at(
+    directory_fd: int,
+    name: str,
+    label: str,
+) -> tuple[dict[str, Any], FileIdentity]:
+    """Read and decode one private JSON snapshot with its exact identity."""
+    payload, identity = read_private_snapshot_at(directory_fd, name, label)
+    return decode_json_object(payload, label), identity
+
+
+def read_private_json_at(directory_fd: int, name: str, label: str) -> dict[str, Any]:
+    """Read one bounded owner-only JSON basename from a pinned directory."""
+    value, _ = read_private_json_snapshot_at(directory_fd, name, label)
     return value
 
 
@@ -277,6 +943,67 @@ def recent_timestamp(value: object, now: dt.datetime | None = None) -> bool:
     return -300 <= age <= 600
 
 
+def canonical_uuid4(value: object, label: str) -> str:
+    """Validate and return one lowercase canonical RFC 4122 UUIDv4."""
+    if not isinstance(value, str):
+        fail(f"{label} is invalid")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, TypeError, AttributeError) as error:
+        raise EditorError(f"{label} is invalid") from error
+    if parsed.version != 4 or parsed.variant != uuid.RFC_4122 or str(parsed) != value:
+        fail(f"{label} is not one canonical UUIDv4")
+    return value
+
+
+def canonical_request_id(value: object) -> str:
+    """Validate one exact spool request UUIDv4."""
+    return canonical_uuid4(value, "spool request id")
+
+
+def message_scalar(value: object) -> str:
+    """Project one protocol scalar into its language-neutral signed form."""
+    if value is None:
+        return ""
+    if value is True:
+        return "1"
+    if value is False:
+        return "0"
+    if isinstance(value, (str, int)) and not isinstance(value, bool):
+        return str(value)
+    fail("authenticated message contains an invalid scalar")
+
+
+def message_payload(kind: str, value: Mapping[str, object]) -> bytes:
+    """Build one deterministic length-prefixed authentication payload."""
+    fields = MESSAGE_FIELDS.get(kind)
+    if fields is None:
+        fail("authenticated message kind is invalid")
+    parts = [kind.encode()]
+    for field in fields:
+        encoded = message_scalar(value.get(field)).encode("utf-8")
+        parts.append(str(len(encoded)).encode("ascii") + b":" + encoded)
+    return b"|".join(parts)
+
+
+def message_auth(token: str, kind: str, value: Mapping[str, object]) -> str:
+    """Return one HMAC-SHA256 over the exact protocol projection."""
+    return hmac.new(token.encode("utf-8"), message_payload(kind, value), hashlib.sha256).hexdigest()
+
+
+def signed_message(token: str, kind: str, value: Mapping[str, object]) -> dict[str, object]:
+    """Copy and authenticate one protocol message without exposing the secret."""
+    result = dict(value)
+    result["auth"] = message_auth(token, kind, result)
+    return result
+
+
+def valid_message_auth(token: str, kind: str, value: Mapping[str, object]) -> bool:
+    """Constant-time validate one exact protocol message authentication code."""
+    supplied = value.get("auth")
+    return isinstance(supplied, str) and hmac.compare_digest(supplied, message_auth(token, kind, value))
+
+
 def pid_alive(pid: object) -> bool:
     """Return whether a positive process identifier is still live."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
@@ -290,6 +1017,30 @@ def pid_alive(pid: object) -> bool:
         return True
     except OSError:
         return False
+
+
+def valid_tmux_pane(value: object) -> bool:
+    """Return whether a value is one exact tmux pane identifier."""
+    return (
+        isinstance(value, str)
+        and len(value) >= 2
+        and value[0] == "%"
+        and value[1:].isdigit()
+        and "\n" not in value
+        and "\r" not in value
+        and "\0" not in value
+    )
+
+
+def canonical_posix_absolute(value: object) -> bool:
+    """Return whether a path is absolute and lexically normalized for POSIX."""
+    return (
+        isinstance(value, str)
+        and value.startswith("/")
+        and not value.startswith("//")
+        and "\0" not in value
+        and posixpath.normpath(value) == value
+    )
 
 
 def canonical_root(value: str | os.PathLike[str]) -> pathlib.Path:
@@ -385,14 +1136,58 @@ def workspace_id(root: pathlib.Path) -> str:
     return hashlib.sha256(os.fsencode(root)).hexdigest()
 
 
+def pinned_state(paths: Mapping[str, pathlib.Path]) -> StateDirectories:
+    """Require the descriptor-owning state hierarchy used by CLI operations."""
+    if not isinstance(paths, StateDirectories):
+        fail("private state hierarchy is not pinned")
+    return paths
+
+
+def record_name(root: pathlib.Path) -> str:
+    """Return one workspace record basename."""
+    return f"{workspace_id(root)}.json"
+
+
 def record_path(paths: Mapping[str, pathlib.Path], root: pathlib.Path) -> pathlib.Path:
     """Return the exact record path for one host repository."""
-    return paths["workspaces"] / f"{workspace_id(root)}.json"
+    return paths["workspaces"] / record_name(root)
 
 
 def spool_path(paths: Mapping[str, pathlib.Path], root: pathlib.Path) -> pathlib.Path:
     """Return the exact authenticated spool root for one repository."""
     return paths["spool"] / workspace_id(root)
+
+
+def auth_path(spool: pathlib.Path | SpoolDirectories) -> pathlib.Path:
+    """Return the sole on-disk location allowed to contain the spool secret."""
+    root = spool.root if isinstance(spool, SpoolDirectories) else spool
+    return root / "auth.json"
+
+
+def create_auth(spool: SpoolDirectories, token: str) -> None:
+    """Create a private lifecycle authentication file without replacement."""
+    if len(token) < 32 or "\0" in token:
+        fail("spool authentication token is invalid")
+    payload = (
+        json.dumps({"version": VERSION, "token": token}, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    direct_create_bytes_at(spool.root_fd, "auth.json", payload)
+
+
+def read_auth(spool: SpoolDirectories) -> str:
+    """Read the exact private authentication secret for one active spool."""
+    value = read_private_json_at(spool.root_fd, "auth.json", "spool authentication")
+    token = value.get("token")
+    if set(value) != AUTH_KEYS or value.get("version") != VERSION:
+        fail("spool authentication schema is invalid")
+    if not isinstance(token, str) or len(token) < 32 or "\0" in token:
+        fail("spool authentication token is invalid")
+    return token
+
+
+def remove_auth(spool: SpoolDirectories) -> None:
+    """Durably remove the active spool authentication secret if present."""
+    unlink_regular_at(spool.root_fd, "auth.json", durable=True)
 
 
 def log_path(paths: Mapping[str, pathlib.Path], root: pathlib.Path) -> pathlib.Path:
@@ -404,19 +1199,71 @@ def append_log(path: pathlib.Path, message: str) -> None:
     """Append one bounded line to a private lifecycle log."""
     if path.exists() and not regular_owner_file(path):
         fail("private lifecycle log is unsafe")
+    if path.exists() and path.lstat().st_size > MAX_LOG_BYTES:
+        fail("private lifecycle log exceeds 256 KiB")
     data = (message.rstrip() + "\n").encode("utf-8", "replace")
     previous = path.read_bytes() if path.exists() else b""
     atomic_bytes(path, (previous + data)[-MAX_LOG_BYTES:], MAX_LOG_BYTES)
 
 
-def validate_record(value: object, root: pathlib.Path) -> dict[str, Any]:
-    """Validate one exact lifecycle record."""
-    if not isinstance(value, dict) or set(value) != RECORD_KEYS:
-        fail("workspace record schema is invalid")
+def validate_record_identity(value: Mapping[str, object], root: pathlib.Path) -> None:
+    """Validate lifecycle identity, ownership, and status fields."""
     if value.get("version") != VERSION or value.get("host_root") != str(root):
         fail("workspace record identity is invalid")
-    if value.get("status") not in {"starting", "running", "stopped", "error"}:
+    if value.get("status") not in {"starting", "running", "stopped", "error", "dead"}:
         fail("workspace record status is invalid")
+    if not isinstance(value.get("pid"), int) or isinstance(value.get("pid"), bool) or value["pid"] < 1:
+        fail("workspace record coordinator pid is invalid")
+    if not valid_tmux_pane(value.get("tmux_pane")):
+        fail("workspace record tmux pane is invalid")
+    if not isinstance(value.get("pane_pid"), int) or isinstance(value.get("pane_pid"), bool) or value["pane_pid"] < 1:
+        fail("workspace record pane pid is invalid")
+    canonical_uuid4(value.get("claim_id"), "workspace record claim id")
+    if type(value.get("network_authorized")) is not bool or type(value.get("ssh_agent_forwarding")) is not bool:
+        fail("workspace record authorization flags are invalid")
+    container_id = value.get("container_id")
+    if container_id is not None and (not isinstance(container_id, str) or not container_id or "\0" in container_id):
+        fail("workspace record container id is invalid")
+    if value.get("status") in {"running", "stopped", "dead"} and container_id is None:
+        fail("workspace record is missing its container id")
+
+
+def validate_record_optional_fields(value: Mapping[str, object]) -> None:
+    """Validate optional outcome fields and the persisted timestamp."""
+    exit_code = value.get("exit_code")
+    if exit_code is not None and (not isinstance(exit_code, int) or isinstance(exit_code, bool)):
+        fail("workspace record exit code is invalid")
+    error = value.get("error")
+    if error is not None and (
+        not isinstance(error, str)
+        or len(error) > MAX_RECORD_ERROR_CHARS
+        or "\0" in error
+    ):
+        fail("workspace record error is invalid")
+    try:
+        dt.datetime.strptime(str(value.get("updated_at")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except ValueError as timestamp_error:
+        raise EditorError("workspace record timestamp is invalid") from timestamp_error
+
+
+def validate_record_paths(value: Mapping[str, object], root: pathlib.Path) -> None:
+    """Validate host paths without permitting lexical escapes."""
+    config_path = value.get("config_path")
+    if (
+        not isinstance(config_path, str)
+        or not config_path.startswith("/")
+        or "\0" in config_path
+        or os.path.normpath(config_path) != config_path
+        or not contained(root, pathlib.Path(config_path))
+    ):
+        fail("workspace record config path is invalid")
+    log = value.get("log_path")
+    if not isinstance(log, str) or not log.startswith("/") or "\0" in log or os.path.normpath(log) != log:
+        fail("workspace record log path is invalid")
+
+
+def validate_workspace_key(value: Mapping[str, object], root: pathlib.Path) -> None:
+    """Validate the all-or-none container workspace identity."""
     key = value.get("workspace_key")
     if not isinstance(key, dict) or set(key) != {"runtime", "root", "repo_identity"}:
         fail("workspace key schema is invalid")
@@ -424,32 +1271,55 @@ def validate_record(value: object, root: pathlib.Path) -> dict[str, Any]:
         fail("workspace key identity is invalid")
     for field in ("root", "container_root"):
         item = value.get(field) if field == "container_root" else key.get(field)
-        if not isinstance(item, str) or not item.startswith("/") or "\0" in item:
+        if not canonical_posix_absolute(item):
             fail("container root is invalid")
+    if key.get("root") != value.get("container_root"):
+        fail("workspace record roots do not match")
+
+
+def validate_record(value: object, root: pathlib.Path) -> dict[str, Any]:
+    """Validate one exact lifecycle record."""
+    if not isinstance(value, dict) or set(value) != RECORD_KEYS:
+        fail("workspace record schema is invalid")
+    validate_record_identity(value, root)
+    validate_record_optional_fields(value)
+    validate_record_paths(value, root)
+    validate_workspace_key(value, root)
     return dict(value)
+
+
+def validate_workspace_record(
+    paths: Mapping[str, pathlib.Path],
+    root: pathlib.Path,
+    value: object,
+) -> dict[str, Any]:
+    """Validate one record including its exact workspace-bound host paths."""
+    candidate = validate_record(value, root)
+    if candidate["log_path"] != str(log_path(paths, root)):
+        fail("workspace record log path does not match its host root")
+    return candidate
 
 
 def load_record(paths: Mapping[str, pathlib.Path], root: pathlib.Path) -> dict[str, Any]:
     """Read and validate one workspace record."""
-    return validate_record(read_private_json(record_path(paths, root), "workspace record"), root)
+    state = pinned_state(paths)
+    return validate_workspace_record(
+        paths,
+        root,
+        read_private_json_at(state.descriptor("workspaces"), record_name(root), "workspace record"),
+    )
 
 
 def selected_record(paths: Mapping[str, pathlib.Path], root: pathlib.Path) -> dict[str, Any]:
     """Return an active record or the exact safe-fallback signal."""
-    path = record_path(paths, root)
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        raise NoActiveEditor(f"no Dev Container editor owns repository {root}")
-    except OSError as error:
-        raise EditorError(f"could not inspect workspace record: {error}") from error
+    state = pinned_state(paths)
+    if not entry_exists_at(state.descriptor("workspaces"), record_name(root)):
+        raise NoActiveEditor(f"no Dev Container editor owns repository {root}") from None
     record = load_record(paths, root)
-    if record["status"] == "stopped":
-        raise NoActiveEditor(f"no Dev Container editor owns repository {root}")
     if record["status"] != "running":
         fail(f"Dev Container lifecycle is {record['status']}; host fallback is disabled")
     if not pid_alive(record["pid"]):
-        fail("registered Dev Container editor is unreachable; host fallback is disabled")
+        fail("registered Dev Container coordinator is unreachable; host fallback is disabled")
     return record
 
 
@@ -459,34 +1329,50 @@ def lock_value() -> dict[str, object]:
 
 
 @contextlib.contextmanager
-def workspace_lock(paths: Mapping[str, pathlib.Path], root: pathlib.Path) -> Iterator[None]:
-    """Claim one cross-process repository lock with stale-owner recovery."""
-    path = paths["locks"] / f"{workspace_id(root)}.json"
+def workspace_lock(paths: Mapping[str, pathlib.Path], root: pathlib.Path) -> Iterator[int]:
+    """Hold one advisory lock across a lifecycle or exact-host handoff."""
+    state = pinned_state(paths)
+    directory_fd = state.descriptor("locks")
+    name = record_name(root)
     payload = (json.dumps(lock_value(), sort_keys=True) + "\n").encode()
-    for attempt in range(2):
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            if attempt == 1 or not regular_owner_file(path):
-                fail("Dev Container lifecycle lock is busy or unsafe")
-            current = read_private_json(path, "lifecycle lock")
-            if set(current) != {"version", "pid", "created_at"} or pid_alive(current.get("pid")):
-                fail("Dev Container lifecycle lock is busy or corrupt")
-            unlink_regular(path)
-            continue
-        except OSError as error:
-            raise EditorError(f"could not claim lifecycle lock: {error}") from error
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        break
-    else:
-        fail("could not claim lifecycle lock")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     try:
-        yield
+        descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        os.set_inheritable(descriptor, False)
+        opened = os.fstat(descriptor)
+        lexical = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or lexical.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (lexical.st_dev, lexical.st_ino)
+        ):
+            fail("Dev Container lifecycle lock is unsafe")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise EditorError("Dev Container lifecycle lock is busy") from error
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+        fsync_directory(directory_fd, "Dev Container lifecycle lock directory")
+    except EditorError:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise
+    except OSError as error:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise EditorError(f"could not claim lifecycle lock: {error}") from error
+    try:
+        yield descriptor
     finally:
-        unlink_regular(path)
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def cli_path() -> str:
@@ -515,8 +1401,13 @@ def ssh_agent() -> pathlib.Path | None:
 
 def mount_argument(source: pathlib.Path, target: str, *, readonly: bool = False) -> str:
     """Build one non-shell Dev Container bind mount argument."""
+    source_text = os.fspath(source)
+    if any(character in source_text or character in target for character in (",", "\n", "\r", "\0")):
+        fail("Dev Container mount paths contain an unsupported delimiter")
+    if not source_text.startswith("/") or not canonical_posix_absolute(target):
+        fail("Dev Container mount paths must be absolute and lexically normalized")
     suffix = ",readonly" if readonly else ""
-    return f"type=bind,source={source},target={target}{suffix}"
+    return f"type=bind,source={source_text},target={target}{suffix}"
 
 
 def up_argv(
@@ -555,6 +1446,25 @@ def up_argv(
     return argv, remote_spool
 
 
+def run_up_with_pinned_spool(
+    command: Sequence[str],
+    spool: SpoolDirectories,
+    timeout: float,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the external lifecycle across exact spool-path identity checks."""
+    revalidate_directory_path(spool.root, spool.root_fd, "workspace spool")
+    try:
+        result = run(command, timeout=timeout)
+    except EditorError as primary:
+        try:
+            revalidate_directory_path(spool.root, spool.root_fd, "workspace spool")
+        except EditorError as mismatch:
+            raise EditorError(f"{primary}; {mismatch}") from primary
+        raise
+    revalidate_directory_path(spool.root, spool.root_fd, "workspace spool")
+    return result
+
+
 def decode_up(result: subprocess.CompletedProcess[bytes]) -> tuple[str, str]:
     """Validate the exact successful ``devcontainer up`` projection."""
     try:
@@ -567,12 +1477,7 @@ def decode_up(result: subprocess.CompletedProcess[bytes]) -> tuple[str, str]:
     container_root = value.get("remoteWorkspaceFolder")
     if not isinstance(container_id, str) or not container_id or "\0" in container_id:
         fail("devcontainer up returned an invalid container id")
-    if (
-        not isinstance(container_root, str)
-        or not container_root.startswith("/")
-        or "\0" in container_root
-        or pathlib.PurePosixPath(container_root).as_posix() != container_root
-    ):
+    if not canonical_posix_absolute(container_root):
         fail("devcontainer up returned an invalid remote workspace folder")
     return container_id, container_root
 
@@ -581,9 +1486,11 @@ def base_record(
     root: pathlib.Path,
     config: pathlib.Path,
     log: pathlib.Path,
-    token: str,
     allow_network: bool,
     agent: pathlib.Path | None,
+    tmux_pane: str,
+    pane_pid: int,
+    claim_id: str,
 ) -> dict[str, object]:
     """Build the fail-closed starting lifecycle record."""
     guessed_root = f"/workspaces/{root.name}"
@@ -593,6 +1500,7 @@ def base_record(
         "config_path": str(config),
         "container_root": guessed_root,
         "container_id": None,
+        "claim_id": claim_id,
         "workspace_key": {
             "runtime": "container",
             "root": guessed_root,
@@ -602,8 +1510,8 @@ def base_record(
         "status": "starting",
         "network_authorized": allow_network,
         "ssh_agent_forwarding": agent is not None,
-        "token": token,
-        "tmux_pane": os.environ.get("TMUX_PANE"),
+        "tmux_pane": tmux_pane,
+        "pane_pid": pane_pid,
         "log_path": str(log),
         "updated_at": utc_now(),
         "exit_code": None,
@@ -615,7 +1523,6 @@ def remote_environment(record: Mapping[str, object], remote_spool: str) -> list[
     """Build explicit editor environment arguments for ``devcontainer exec``."""
     values = {
         "NVIM_DEVCONTAINER": "1",
-        "NVIM_DEVCONTAINER_TOKEN": str(record["token"]),
         "NVIM_DEVCONTAINER_HOST_ROOT": str(record["host_root"]),
         "NVIM_DEVCONTAINER_CONTAINER_ROOT": str(record["container_root"]),
         "NVIM_DEVCONTAINER_SPOOL_ROOT": remote_spool,
@@ -656,28 +1563,25 @@ def editor_argv(
     ]
 
 
-def validate_host_request(value: object, record: Mapping[str, object]) -> dict[str, Any]:
+def validate_host_request(value: object, token: str, name: str) -> dict[str, Any]:
     """Validate one authenticated container-to-host request."""
     if not isinstance(value, dict) or set(value) != HOST_REQUEST_KEYS:
         fail("host spool request schema is invalid")
+    request_id = canonical_request_id(value.get("request_id"))
     if (
         value.get("version") != VERSION
-        or value.get("token") != record["token"]
         or value.get("action") not in HOST_ACTIONS
         or not recent_timestamp(value.get("created_at"))
+        or not valid_message_auth(token, "host_request", value)
     ):
         fail("host spool request authentication failed")
-    try:
-        parsed = uuid.UUID(str(value.get("request_id")))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise EditorError("host spool request id is invalid") from error
-    if str(parsed) != value["request_id"]:
-        fail("host spool request id is not canonical")
+    if name != f"{request_id}.json":
+        fail("host spool request filename does not match its id")
     return dict(value)
 
 
 def tmux_action(record: Mapping[str, object], action: str) -> None:
-    """Execute one host-owned action selected by the authenticated allowlist."""
+    """Execute one checked host-owned action selected by the allowlist."""
     pane = record.get("tmux_pane")
     if action in {"tmux_dev_refresh_check", "tmux_dev_refresh"}:
         if not isinstance(pane, str) or not pane:
@@ -689,14 +1593,15 @@ def tmux_action(record: Mapping[str, object], action: str) -> None:
         run([str(helper), operation, pane], timeout=30.0)
         return
     tmux = shutil.which("tmux")
-    if not isinstance(pane, str) or not pane or not tmux:
+    if not valid_tmux_pane(pane) or not tmux:
         fail("host action requires the registered tmux pane")
     repo = str(record["host_root"])
     if action == "lazygit":
-        session = run([tmux, "display-message", "-p", "-t", pane, "#{session_name}"], check=False)
-        if session.returncode == 0:
-            name = session.stdout.decode("utf-8", "replace").strip()
-            run([tmux, "select-window", "-t", name + ":=git"], check=False)
+        session = run([tmux, "display-message", "-p", "-t", pane, "#{session_name}"])
+        name = session.stdout.decode("utf-8", "replace").strip()
+        if not name or "\0" in name or "\n" in name:
+            fail("tmux returned an invalid session name")
+        run([tmux, "select-window", "-t", name + ":=git"])
     elif action == "container_log":
         command = shlex.join([str(pathlib.Path(__file__).resolve()), "log", "--repo", repo, "--pager"])
         run(
@@ -716,64 +1621,314 @@ def tmux_action(record: Mapping[str, object], action: str) -> None:
                 " Dev Container log ",
                 command,
             ],
-            check=False,
         )
-    elif action == "host_editor":
-        time.sleep(0.1)
-        run([tmux, "select-pane", "-t", pane, "-T", ""], check=False)
-        run([tmux, "set-option", "-p", "-u", "-t", pane, "@devcontainer_active"], check=False)
-        run([tmux, "respawn-pane", "-k", "-t", pane, "-c", repo, "nvim"], check=False)
 
 
-def consume_outbox(spool: pathlib.Path, record: Mapping[str, object]) -> int:
-    """Consume all safe authenticated container-to-host spool files."""
-    consumed = 0
-    for path in sorted((spool / "outbox").glob("*.json")):
-        if path.name.startswith("."):
-            continue
-        request: dict[str, Any] | None = None
-        error: str | None = None
+def pane_marker(root: pathlib.Path) -> str:
+    """Return the exact marker binding one tmux pane to a workspace."""
+    return f"nvim-devcontainer:{workspace_id(root)}"
+
+
+def observe_pane(record: Mapping[str, object]) -> PaneObservation:
+    """Read and validate the exact tmux pane lifecycle projection."""
+    pane = record.get("tmux_pane")
+    tmux = shutil.which("tmux")
+    if not valid_tmux_pane(pane) or not tmux:
+        fail("lifecycle requires the registered tmux pane")
+    result = run([tmux, "display-message", "-p", "-t", str(pane), PANE_FORMAT], timeout=5.0)
+    fields = result.stdout.decode("utf-8", "replace").rstrip("\n").split("\t")
+    if len(fields) != 4 or fields[0] not in {"0", "1"} or not fields[1].isdigit():
+        fail("tmux returned an invalid pane observation")
+    exit_code: int | None = None
+    if fields[2]:
         try:
-            request = validate_host_request(read_private_json(path, "host spool request"), record)
-            if request["action"] == "host_editor":
-                if not isinstance(record, dict):
-                    fail("host editor action requires mutable lifecycle state")
-                root = pathlib.Path(str(record["host_root"]))
-                update_record(
-                    record_path(prepare_state(), root),
-                    record,
-                    status="stopped",
-                    error=None,
-                )
-                ack = {
-                    "version": VERSION,
-                    "token": record["token"],
-                    "request_id": request["request_id"],
-                    "ok": True,
-                    "action": request["action"],
-                    "error": None,
-                }
-                atomic_json(spool / "acks" / f"{request['request_id']}.json", ack)
-                tmux_action(record, request["action"])
-                request = None
-            else:
-                tmux_action(record, request["action"])
-        except EditorError as caught:
-            error = str(caught)
-        finally:
-            unlink_regular(path)
-        if request is not None:
-            ack = {
-                "version": VERSION,
-                "token": record["token"],
-                "request_id": request["request_id"],
-                "ok": error is None,
-                "action": request["action"],
-                "error": error,
-            }
-            atomic_json(spool / "acks" / f"{request['request_id']}.json", ack)
+            exit_code = int(fields[2])
+        except ValueError as error:
+            raise EditorError("tmux returned an invalid pane exit status") from error
+    dead = fields[0] == "1"
+    if dead and exit_code is None:
+        fail("tmux omitted the dead pane exit status")
+    return PaneObservation(dead, int(fields[1]), exit_code, fields[3])
+
+
+def verify_container_pane(record: Mapping[str, object]) -> PaneObservation:
+    """Require an alive pane process carrying this workspace's exact marker."""
+    observation = observe_pane(record)
+    expected = pane_marker(pathlib.Path(str(record["host_root"])))
+    if observation.dead or observation.pid < 1 or observation.marker != expected:
+        fail("tmux did not verify the Dev Container editor pane")
+    return observation
+
+
+def verify_registered_container_pane(
+    record: Mapping[str, object],
+    *,
+    allow_dead: bool,
+) -> PaneObservation:
+    """Require the exact registered pane PID and workspace marker."""
+    observation = observe_pane(record)
+    expected = pane_marker(pathlib.Path(str(record["host_root"])))
+    if (
+        (observation.dead and not allow_dead)
+        or observation.pid != record.get("pane_pid")
+        or observation.marker != expected
+    ):
+        fail("tmux pane no longer matches the registered Dev Container editor")
+    return observation
+
+
+def respawn_container_editor(record: Mapping[str, object], command: Sequence[str]) -> PaneObservation:
+    """Replace the target pane with container Neovim and verify ownership."""
+    pane = str(record["tmux_pane"])
+    root = pathlib.Path(str(record["host_root"]))
+    tmux = shutil.which("tmux")
+    if not tmux:
+        fail("tmux is unavailable")
+    before = observe_pane(record)
+    if before.dead or before.pid != record.get("pane_pid") or before.marker:
+        fail("tmux editor pane changed before Dev Container replacement")
+    run([tmux, "set-option", "-p", "-t", pane, "remain-on-exit", "on"])
+    run([tmux, "respawn-pane", "-k", "-t", pane, "-c", str(root), "exec " + shlex.join(command)])
+    run([tmux, "set-option", "-p", "-t", pane, "@devcontainer_active", pane_marker(root)])
+    run([tmux, "select-pane", "-t", pane, "-T", f"Dev Container · {root.name}"])
+    return verify_container_pane(record)
+
+
+def respawn_host_editor(record: Mapping[str, object], *, allow_dead: bool = False) -> PaneObservation:
+    """Restore host Neovim, then verify a live new PID and cleared marker."""
+    before = verify_registered_container_pane(record, allow_dead=allow_dead)
+    pane = str(record["tmux_pane"])
+    root = pathlib.Path(str(record["host_root"]))
+    tmux = shutil.which("tmux")
+    if not tmux:
+        fail("tmux is unavailable")
+    try:
+        run([tmux, "respawn-pane", "-k", "-t", pane, "-c", str(root), "exec nvim"])
+        run([tmux, "set-option", "-p", "-u", "-t", pane, "@devcontainer_active"])
+        run([tmux, "select-pane", "-t", pane, "-T", ""])
+        after = observe_pane(record)
+        if (
+            after.dead
+            or after.pid < 1
+            or (before.pid > 0 and after.pid == before.pid)
+            or after.marker
+        ):
+            fail("tmux did not verify the restored host editor pane")
+    except EditorError as error:
+        raise HostPaneTransitioned(str(error)) from error
+    return after
+
+
+def restore_or_verify_host_pane(record: Mapping[str, object]) -> PaneObservation:
+    """Restore host Neovim only from the exact registered container pane."""
+    observation = observe_pane(record)
+    expected_marker = pane_marker(pathlib.Path(str(record["host_root"])))
+    if observation.pid != record.get("pane_pid"):
+        fail("tmux pane PID no longer matches the lifecycle record")
+    if observation.marker == expected_marker:
+        return respawn_host_editor(record, allow_dead=True)
+    if (
+        not observation.dead
+        and not observation.marker
+        and record.get("status") in {"starting", "stopped", "error"}
+    ):
+        return observation
+    fail("tmux pane is not the exact registered Dev Container or restored host editor")
+
+
+def remove_record(path: pathlib.Path) -> None:
+    """Explicitly retire one exact owner-only lifecycle record."""
+    descriptor = open_directory_path(path.parent, "workspace record directory")
+    try:
+        unlink_regular_at(descriptor, path.name, durable=True)
+    finally:
+        os.close(descriptor)
+
+
+def remove_workspace_record(
+    paths: Mapping[str, pathlib.Path],
+    root: pathlib.Path,
+    expected: FileIdentity,
+) -> None:
+    """Retire only the record identity committed by this coordinator."""
+    state = pinned_state(paths)
+    unlink_regular_at(
+        state.descriptor("workspaces"),
+        record_name(root),
+        durable=True,
+        expected=expected,
+    )
+
+
+def write_ack(
+    spool: SpoolDirectories,
+    token: str,
+    request: Mapping[str, object],
+    ok: bool,
+    error: str | None,
+) -> None:
+    """Publish one authenticated no-clobber acknowledgement."""
+    value = signed_message(
+        token,
+        "ack",
+        {
+            "version": VERSION,
+            "request_id": request["request_id"],
+            "ok": ok,
+            "action": request["action"],
+            "error": error,
+        },
+    )
+    atomic_create_json_at(spool.acks_fd, f"{request['request_id']}.json", value)
+
+
+def record_request_error(
+    paths: Mapping[str, pathlib.Path],
+    spool: SpoolDirectories,
+    record: dict[str, object],
+    token: str,
+    request: Mapping[str, object] | None,
+    primary: EditorError,
+    positive_ack: bool,
+) -> None:
+    """Attempt every request reconciliation while preserving its primary error."""
+    root = pathlib.Path(str(record["host_root"]))
+    failures: list[tuple[str, str]] = []
+    if request is not None and positive_ack:
+        try:
+            removed = unlink_regular_at(
+                spool.acks_fd,
+                f"{request['request_id']}.json",
+                durable=True,
+            )
+            if not removed:
+                failures.append(("positive acknowledgement", "entry disappeared"))
+        except (EditorError, OSError) as cleanup_error:
+            failures.append(("positive acknowledgement", str(cleanup_error)))
+    if request is not None:
+        try:
+            write_ack(spool, token, request, False, str(primary))
+        except (EditorError, OSError) as cleanup_error:
+            failures.append(("negative acknowledgement", str(cleanup_error)))
+    try:
+        update_workspace_record(paths, root, record, status="error", error=str(primary))
+    except (EditorError, OSError) as cleanup_error:
+        failures.append(("record", str(cleanup_error)))
+    if failures:
+        summary = "; ".join(f"{label}: {message}" for label, message in failures)
+        raise EditorError(f"{primary}; request reconciliation failures: {summary}") from primary
+    if request is None:
+        raise primary
+
+
+def retire_invalid_request(
+    spool: SpoolDirectories,
+    name: str,
+    identity: FileIdentity,
+    primary: EditorError,
+) -> None:
+    """Best-effort retire one invalid snapshot without masking validation."""
+    try:
+        unlink_regular_at(spool.outbox_fd, name, durable=True, expected=identity)
+    except (EditorError, OSError) as cleanup_error:
+        warn_nonfatal(
+            f"warning: {primary}; invalid request retirement also failed: {cleanup_error}"
+        )
+        raise EditorError(
+            f"{primary}; invalid request retirement failed: {cleanup_error}"
+        ) from primary
+
+
+def consume_request(
+    paths: Mapping[str, pathlib.Path],
+    spool: SpoolDirectories,
+    record: dict[str, object],
+    token: str,
+    name: str,
+) -> bool:
+    """Consume one request and return whether host handoff completed."""
+    request: dict[str, Any] | None = None
+    positive_ack = False
+    host_restored = False
+    request_retired = False
+    try:
+        payload, request_identity = read_private_snapshot_at(
+            spool.outbox_fd,
+            name,
+            "host spool request",
+        )
+        try:
+            raw_request = decode_json_object(payload, "host spool request")
+            request = validate_host_request(
+                raw_request,
+                token,
+                name,
+            )
+        except EditorError as validation_error:
+            retire_invalid_request(spool, name, request_identity, validation_error)
+            raise
+        if not unlink_regular_at(
+            spool.outbox_fd,
+            name,
+            durable=True,
+            expected=request_identity,
+        ):
+            fail("host spool request disappeared before execution")
+        request_retired = True
+        if request["action"] == "host_editor":
+            root = pathlib.Path(str(record["host_root"]))
+            observation = respawn_host_editor(record)
+            host_restored = True
+            stopped_identity = update_workspace_record(
+                paths,
+                root,
+                record,
+                status="stopped",
+                pane_pid=observation.pid,
+                error=None,
+                exit_code=0,
+            )
+            append_log(pathlib.Path(str(record["log_path"])), f"{utc_now()} host editor handoff verified")
+            write_ack(spool, token, request, True, None)
+            positive_ack = True
+            remove_auth(spool)
+            remove_workspace_record(paths, root, stopped_identity)
+            return True
+        tmux_action(record, request["action"])
+    except EditorError as caught:
+        host_restored = host_restored or isinstance(caught, HostPaneTransitioned)
+        record_request_error(paths, spool, record, token, request, caught, positive_ack)
+        if host_restored:
+            raise EditorError(f"host editor was restored; coordinator stopped after: {caught}") from caught
+        if request is not None and not request_retired:
+            raise
+        return False
+    write_ack(spool, token, request, True, None)
+    return False
+
+
+def consume_outbox(
+    paths: Mapping[str, pathlib.Path],
+    spool: SpoolDirectories,
+    record: dict[str, object],
+    token: str,
+) -> tuple[int, bool]:
+    """Consume authenticated host requests and report a completed handoff."""
+    consumed = 0
+    try:
+        with os.scandir(spool.outbox_fd) as entries:
+            names = sorted(
+                entry.name
+                for entry in entries
+                if entry.name.endswith(".json") and not entry.name.startswith(".")
+            )
+    except OSError as error:
+        raise EditorError(f"could not scan host spool outbox: {error}") from error
+    for name in names:
         consumed += 1
-    return consumed
+        if consume_request(paths, spool, record, token, name):
+            return consumed, True
+    return consumed, False
 
 
 def verify_agent(cli: str, root: pathlib.Path, config: pathlib.Path) -> None:
@@ -797,53 +1952,136 @@ def verify_agent(cli: str, root: pathlib.Path, config: pathlib.Path) -> None:
         fail("host SSH agent was available but is not a socket inside the container")
 
 
-def run_editor(
-    command: Sequence[str],
-    spool: pathlib.Path,
-    record: Mapping[str, object],
-) -> int:
-    """Run foreground Neovim while servicing authenticated host requests."""
+def monitor_editor(
+    paths: Mapping[str, pathlib.Path],
+    spool: SpoolDirectories,
+    record: dict[str, object],
+    token: str,
+) -> tuple[int, bool]:
+    """Reconcile the spool until the pane exits or host handoff completes."""
     try:
-        process = subprocess.Popen(list(command), stdin=None, stdout=None, stderr=None, start_new_session=False)
-    except OSError as error:
-        raise EditorError(f"could not enter Dev Container editor: {error}") from error
-    try:
-        while process.poll() is None:
-            consume_outbox(spool, record)
+        while True:
+            _, handed_off = consume_outbox(paths, spool, record, token)
+            if handed_off:
+                return 0, True
+            observation = verify_registered_container_pane(record, allow_dead=True)
+            if observation.dead:
+                _, handed_off = consume_outbox(paths, spool, record, token)
+                if handed_off:
+                    return 0, True
+                return observation.exit_code or 0, False
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt as error:
-        process.terminate()
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5.0)
-        raise EditorError("Dev Container editor was cancelled") from error
-    consume_outbox(spool, record)
-    return process.returncode
+        raise EditorError("Dev Container coordinator was cancelled") from error
 
 
-def require_editor_pane() -> str:
+def require_editor_pane(pane: str) -> tuple[str, int]:
     """Validate the exact single-pane tmux replacement contract."""
-    pane = os.environ.get("TMUX_PANE")
     tmux = shutil.which("tmux")
-    if not pane or not tmux:
+    if not valid_tmux_pane(pane) or not tmux:
         fail("DevContainerUp requires tmux's single-pane editor window")
     result = run(
-        [tmux, "display-message", "-p", "-t", pane, "#{window_name}\t#{window_panes}"],
+        [
+            tmux,
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{window_name}\t#{window_panes}\t#{pane_dead}\t#{pane_pid}",
+        ],
         timeout=5.0,
         check=False,
     )
-    if result.returncode != 0 or result.stdout.decode("utf-8", "replace").strip() != "editor\t1":
+    fields = result.stdout.decode("utf-8", "replace").strip().split("\t")
+    if result.returncode != 0 or len(fields) != 4 or fields[:3] != ["editor", "1", "0"] or not fields[3].isdigit():
         fail("DevContainerUp requires tmux's single-pane editor window")
-    return pane
+    return pane, int(fields[3])
 
 
-def update_record(path: pathlib.Path, record: dict[str, object], **changes: object) -> None:
-    """Persist one exact lifecycle state transition."""
-    record.update(changes)
-    record["updated_at"] = utc_now()
-    atomic_json(path, record)
+def project_record_error(value: object) -> str | None:
+    """Project one lifecycle diagnostic into the bounded record contract."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        fail("workspace record error is invalid")
+    sanitized = value.replace("\0", "\\0")
+    if len(sanitized) <= MAX_RECORD_ERROR_CHARS:
+        return sanitized
+    prefix_size = MAX_RECORD_ERROR_CHARS - len(RECORD_ERROR_SUFFIX)
+    return sanitized[:prefix_size] + RECORD_ERROR_SUFFIX
+
+
+def log_projected_record_error(candidate: Mapping[str, object], raw: object, projected: str | None) -> None:
+    """Retain a fuller bounded diagnostic when the record projection loses detail."""
+    if not isinstance(raw, str) or raw == projected:
+        return
+    detail = raw.replace("\0", "\\0")
+    append_log(
+        pathlib.Path(str(candidate["log_path"])),
+        f"{utc_now()} full lifecycle error: {detail}",
+    )
+
+
+def update_workspace_record(
+    paths: Mapping[str, pathlib.Path],
+    root: pathlib.Path,
+    record: dict[str, object],
+    **changes: object,
+) -> FileIdentity:
+    """Persist one state transition through the pinned workspace directory."""
+    state = pinned_state(paths)
+    candidate = dict(record)
+    candidate.update(changes)
+    candidate["updated_at"] = utc_now()
+    if set(candidate) != RECORD_KEYS:
+        fail("workspace record schema is invalid")
+    raw_error = candidate["error"]
+    candidate["error"] = project_record_error(raw_error)
+    candidate = validate_workspace_record(paths, root, candidate)
+    log_projected_record_error(candidate, raw_error, candidate["error"])
+    identity = atomic_replace_json_at(
+        state.descriptor("workspaces"),
+        record_name(root),
+        candidate,
+    )
+    record.clear()
+    record.update(candidate)
+    return identity
+
+
+def reconcile_lifecycle_failure(
+    paths: Mapping[str, pathlib.Path],
+    spool: SpoolDirectories,
+    root: pathlib.Path,
+    record: dict[str, object],
+    log: pathlib.Path,
+    primary: EditorError,
+) -> None:
+    """Attempt every fail-closed cleanup and retain the primary error first."""
+    failures: list[tuple[str, str]] = []
+    if record.get("status") != "dead":
+        try:
+            update_workspace_record(paths, root, record, status="error", error=str(primary))
+        except (EditorError, OSError) as cleanup_error:
+            failures.append(("record", str(cleanup_error)))
+    try:
+        remove_auth(spool)
+    except (EditorError, OSError) as cleanup_error:
+        failures.append(("authentication", str(cleanup_error)))
+    detail = f"{utc_now()} lifecycle error: {primary}"
+    if failures:
+        detail += "; reconciliation warnings: " + "; ".join(
+            f"{label}: {message}" for label, message in failures
+        )
+    try:
+        append_log(log, detail)
+    except (EditorError, OSError) as cleanup_error:
+        failures.append(("log", str(cleanup_error)))
+    for label, message in failures:
+        warn_nonfatal(f"warning: lifecycle {label} reconciliation failed: {message}")
+    if failures:
+        summary = "; ".join(f"{label}: {message}" for label, message in failures)
+        raise EditorError(f"{primary}; lifecycle reconciliation failures: {summary}") from primary
 
 
 def cmd_up(arguments: argparse.Namespace) -> None:
@@ -851,23 +2089,26 @@ def cmd_up(arguments: argparse.Namespace) -> None:
     paths = prepare_state()
     root = repo_root(arguments.repo or os.getcwd())
     config = discover_config(root, arguments.config)
-    require_editor_pane()
-    spool = prepare_spool(spool_path(paths, root))
+    pane, pane_pid = require_editor_pane(arguments.tmux_pane)
+    claim_id = canonical_uuid4(arguments.claim_id, "lifecycle claim id")
+    spool_root = spool_path(paths, root)
     log = log_path(paths, root)
     token = secrets.token_urlsafe(32)
     agent = ssh_agent()
-    record = base_record(root, config, log, token, arguments.allow_network, agent)
-    path = record_path(paths, root)
-    with workspace_lock(paths, root):
-        update_record(path, record)
+    record = base_record(root, config, log, arguments.allow_network, agent, pane, pane_pid, claim_id)
+    with workspace_spool(spool_root, parent_fd=paths.descriptor("spool")) as spool, workspace_lock(paths, root):
+        update_workspace_record(paths, root, record)
         append_log(log, f"{utc_now()} lifecycle starting with @devcontainers/cli")
         try:
+            unlink_regular_at(spool.root_fd, "auth.json", durable=True)
+            create_auth(spool, token)
             cli = cli_path()
-            command, remote_spool = up_argv(cli, root, config, spool, arguments.recreate, agent)
-            result = run(command, timeout=arguments.timeout)
+            command, remote_spool = up_argv(cli, root, config, spool.root, arguments.recreate, agent)
+            result = run_up_with_pinned_spool(command, spool, arguments.timeout)
             container_id, container_root = decode_up(result)
-            update_record(
-                path,
+            update_workspace_record(
+                paths,
+                root,
                 record,
                 container_id=container_id,
                 container_root=container_root,
@@ -876,24 +2117,23 @@ def cmd_up(arguments: argparse.Namespace) -> None:
                     "root": container_root,
                     "repo_identity": str(root),
                 },
-                status="running",
             )
             if agent:
                 verify_agent(cli, root, config)
+            observation = respawn_container_editor(record, editor_argv(cli, root, config, record, remote_spool))
+            update_workspace_record(paths, root, record, status="running", pane_pid=observation.pid)
             append_log(log, f"{utc_now()} lifecycle running container={container_id}")
-            pane = record.get("tmux_pane")
-            tmux = shutil.which("tmux")
-            if isinstance(pane, str) and tmux:
-                run([tmux, "select-pane", "-t", pane, "-T", f"Dev Container · {root.name}"], check=False)
-                run([tmux, "set-option", "-p", "-t", pane, "@devcontainer_active", "1"], check=False)
-            code = run_editor(editor_argv(cli, root, config, record, remote_spool), spool, record)
-            update_record(path, record, status="stopped", exit_code=code)
-            append_log(log, f"{utc_now()} editor stopped exit={code}")
+            code, handed_off = monitor_editor(paths, spool, record, token)
+            if handed_off:
+                return
+            error = None if code == 0 else f"Dev Container editor exited {code}"
+            update_workspace_record(paths, root, record, status="dead", exit_code=code, error=error)
+            remove_auth(spool)
+            append_log(log, f"{utc_now()} editor dead exit={code}")
             if code != 0:
-                fail(f"Dev Container editor exited {code}")
+                raise EditorError(error)
         except EditorError as error:
-            update_record(path, record, status="error", error=str(error))
-            append_log(log, f"{utc_now()} lifecycle error: {error}")
+            reconcile_lifecycle_failure(paths, spool, root, record, log, error)
             raise
 
 
@@ -903,28 +2143,76 @@ def relative_host_file(root: pathlib.Path, value: str) -> tuple[pathlib.Path, st
     return target, target.relative_to(root).as_posix()
 
 
-def wait_ack(spool: pathlib.Path, request: Mapping[str, object], timeout: float) -> None:
-    """Wait for one exact authenticated spool acknowledgement."""
-    path = spool / "acks" / f"{request['request_id']}.json"
-    deadline = time.monotonic() + timeout
+def validate_ack(
+    value: Mapping[str, object],
+    token: str,
+    request: Mapping[str, object],
+) -> None:
+    """Validate one exact authenticated acknowledgement snapshot."""
+    if set(value) != ACK_KEYS:
+        fail("spool acknowledgement schema is invalid")
+    if (
+        value.get("version") != VERSION
+        or value.get("request_id") != request["request_id"]
+        or value.get("action") != request["action"]
+        or type(value.get("ok")) is not bool
+        or (value.get("error") is not None and not isinstance(value.get("error"), str))
+        or not valid_message_auth(token, "ack", value)
+        or value.get("ok") is not True
+    ):
+        fail(str(value.get("error") or "Dev Container editor rejected the request"))
+
+
+def retire_ack_snapshot(
+    spool: SpoolDirectories,
+    name: str,
+    identity: FileIdentity,
+    primary: EditorError | None = None,
+) -> None:
+    """Durably retire one exact acknowledgement without masking validation."""
     try:
-        while not path.exists():
-            if time.monotonic() >= deadline:
-                fail("Dev Container editor request timed out; host fallback is disabled")
-            time.sleep(POLL_SECONDS)
-        value = read_private_json(path, "spool acknowledgement")
-        if set(value) != ACK_KEYS:
-            fail("spool acknowledgement schema is invalid")
-        if (
-            value.get("version") != VERSION
-            or value.get("token") != request["token"]
-            or value.get("request_id") != request["request_id"]
-            or value.get("action") != request["action"]
-            or value.get("ok") is not True
-        ):
-            fail(str(value.get("error") or "Dev Container editor rejected the request"))
-    finally:
-        unlink_regular(path)
+        unlink_regular_at(
+            spool.acks_fd,
+            name,
+            durable=True,
+            expected=identity,
+        )
+    except (EditorError, OSError) as cleanup_error:
+        if primary is None:
+            raise
+        warn_nonfatal(
+            f"warning: {primary}; acknowledgement retirement also failed: {cleanup_error}"
+        )
+        raise EditorError(
+            f"{primary}; acknowledgement retirement failed: {cleanup_error}"
+        ) from primary
+
+
+def wait_ack(
+    spool: SpoolDirectories,
+    token: str,
+    request: Mapping[str, object],
+    timeout: float,
+) -> None:
+    """Wait for one exact authenticated spool acknowledgement."""
+    name = f"{request['request_id']}.json"
+    deadline = time.monotonic() + timeout
+    while not entry_exists_at(spool.acks_fd, name):
+        if time.monotonic() >= deadline:
+            fail("Dev Container editor request timed out; host fallback is disabled")
+        time.sleep(POLL_SECONDS)
+    payload, identity = read_private_snapshot_at(
+        spool.acks_fd,
+        name,
+        "spool acknowledgement",
+    )
+    try:
+        value = decode_json_object(payload, "spool acknowledgement")
+        validate_ack(value, token, request)
+    except EditorError as primary:
+        retire_ack_snapshot(spool, name, identity, primary)
+        raise
+    retire_ack_snapshot(spool, name, identity)
 
 
 def open_location(
@@ -938,25 +2226,30 @@ def open_location(
     """Route one host file to the exact active container editor."""
     if line < 1 or column < 1:
         fail("line and column must be positive integers")
-    record = selected_record(paths, root)
+    selected_record(paths, root)
     _, relative = relative_host_file(root, file)
-    request = {
-        "version": VERSION,
-        "token": record["token"],
-        "request_id": str(uuid.uuid4()),
-        "action": "open_location",
-        "path": relative,
-        "line": line,
-        "column": column,
-        "created_at": utc_now(),
-    }
-    spool = prepare_spool(spool_path(paths, root))
-    atomic_json(spool / "inbox" / f"{request['request_id']}.json", request)
-    wait_ack(spool, request, timeout)
+    state = pinned_state(paths)
+    with workspace_spool(spool_path(paths, root), parent_fd=state.descriptor("spool")) as spool:
+        token = read_auth(spool)
+        request = signed_message(
+            token,
+            "open_location",
+            {
+                "version": VERSION,
+                "request_id": str(uuid.uuid4()),
+                "action": "open_location",
+                "path": relative,
+                "line": line,
+                "column": column,
+                "created_at": utc_now(),
+            },
+        )
+        atomic_create_json_at(spool.inbox_fd, f"{request['request_id']}.json", request)
+        wait_ack(spool, token, request, timeout)
 
 
-def exact_fallback(arguments: argparse.Namespace) -> NoReturn:
-    """Exec the exact host editor after the explicit no-container signal."""
+def exact_fallback(arguments: argparse.Namespace, lock_descriptor: int) -> NoReturn:
+    """Exec the exact host editor while retaining the lifecycle exclusion lock."""
     exact = CONFIG_ROOT / "scripts" / "exact-editor-open"
     argv = [str(exact)]
     if arguments.wait_editor:
@@ -974,7 +2267,29 @@ def exact_fallback(arguments: argparse.Namespace) -> NoReturn:
                 str(arguments.column),
             ]
         )
-    os.execv(exact, argv)
+    try:
+        # Only the exact-host router inherits this FD. Its subprocess calls use
+        # Python's close-fds default, so the router process owns the lifetime.
+        os.set_inheritable(lock_descriptor, True)
+        os.execv(exact, argv)
+    except OSError as error:
+        with contextlib.suppress(OSError):
+            os.set_inheritable(lock_descriptor, False)
+        raise EditorError(f"could not hand off to the exact host editor: {error}") from error
+
+
+def exact_fallback_if_absent(
+    paths: Mapping[str, pathlib.Path],
+    root: pathlib.Path,
+    arguments: argparse.Namespace,
+) -> NoReturn:
+    """Recheck lifecycle absence under the lock retained by the host router."""
+    with workspace_lock(paths, root) as lock_descriptor:
+        try:
+            selected_record(paths, root)
+        except NoActiveEditor:
+            exact_fallback(arguments, lock_descriptor)
+        fail("a Dev Container lifecycle became active; host fallback is disabled")
 
 
 def cmd_open_location(arguments: argparse.Namespace) -> None:
@@ -985,7 +2300,7 @@ def cmd_open_location(arguments: argparse.Namespace) -> None:
         open_location(paths, root, arguments.file, arguments.line, arguments.column, arguments.wait_timeout)
     except NoActiveEditor:
         if arguments.fallback_exact:
-            exact_fallback(arguments)
+            exact_fallback_if_absent(paths, root, arguments)
         raise
 
 
@@ -997,15 +2312,23 @@ def cmd_editor_open(arguments: argparse.Namespace) -> None:
         try:
             selected_record(paths, root)
         except NoActiveEditor:
-            exact_fallback(arguments)
+            exact_fallback_if_absent(paths, root, arguments)
         fail("blocking host temporary files cannot be mapped into an active container editor")
     cmd_open_location(arguments)
 
 
 def cmd_exec(arguments: argparse.Namespace) -> None:
     """Execute argv in the exact active Dev Container without a shell."""
+    if isinstance(arguments.argv, (str, bytes)) or not isinstance(arguments.argv, Sequence):
+        fail("exec requires -- followed by non-empty argv")
     argv = list(arguments.argv)
-    if not argv or argv.pop(0) != "--" or not argv or any(not item or "\0" in item for item in argv):
+    if not argv or argv.pop(0) != "--" or not argv:
+        fail("exec requires -- followed by non-empty argv")
+    if (
+        any(not isinstance(item, str) for item in argv)
+        or not argv[0]
+        or any("\0" in item for item in argv)
+    ):
         fail("exec requires -- followed by non-empty argv")
     paths = prepare_state()
     cwd = canonical_root(arguments.cwd or os.getcwd())
@@ -1034,24 +2357,45 @@ def cmd_exec(arguments: argparse.Namespace) -> None:
     raise SystemExit(result.returncode)
 
 
+def load_all_records(paths: StateDirectories) -> list[dict[str, Any]]:
+    """Load every filename-bound record through the pinned workspace directory."""
+    workspaces_fd = paths.descriptor("workspaces")
+    records: list[dict[str, Any]] = []
+    try:
+        with os.scandir(workspaces_fd) as entries:
+            candidates = sorted(
+                entry.name
+                for entry in entries
+                if entry.name.endswith(".json") and not entry.name.startswith(".")
+            )
+    except OSError as error:
+        raise EditorError(f"could not scan workspace records: {error}") from error
+    for name in candidates:
+        stem = name.removesuffix(".json")
+        if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
+            fail("workspace record filename is invalid")
+        value = read_private_json_at(workspaces_fd, name, "workspace record")
+        host_root = value.get("host_root")
+        if not isinstance(host_root, str):
+            fail("workspace record host root is invalid")
+        root = canonical_root(host_root)
+        if name != record_name(root):
+            fail("workspace record filename does not match its host root")
+        records.append(validate_record(value, root))
+    return records
+
+
 def cmd_status(arguments: argparse.Namespace) -> None:
     """Print private lifecycle state without exposing authentication tokens."""
     paths = prepare_state()
-    records: list[dict[str, Any]] = []
+    workspaces_fd = paths.descriptor("workspaces")
     if arguments.all:
-        candidates = sorted(paths["workspaces"].glob("*.json"))
-        for path in candidates:
-            value = read_private_json(path, "workspace record")
-            host_root = value.get("host_root")
-            if isinstance(host_root, str):
-                records.append(validate_record(value, pathlib.Path(host_root)))
+        records = load_all_records(paths)
     else:
+        records = []
         root = repo_root(arguments.repo or os.getcwd())
-        path = record_path(paths, root)
-        if path.exists():
+        if entry_exists_at(workspaces_fd, record_name(root)):
             records.append(load_record(paths, root))
-    for value in records:
-        value.pop("token", None)
     payload = {"ok": True, "command": "status", "records": records}
     if arguments.json:
         print(json.dumps(payload, sort_keys=True))
@@ -1088,15 +2432,32 @@ def cmd_host(arguments: argparse.Namespace) -> None:
     """Explicitly stop fail-closed routing and restore host Neovim."""
     paths = prepare_state()
     root = repo_root(arguments.repo or os.getcwd())
-    record = load_record(paths, root)
-    pane = record.get("tmux_pane")
-    tmux = shutil.which("tmux")
-    if not isinstance(pane, str) or not pane or not tmux:
-        fail("DevContainerHostEditor requires the registered tmux pane")
-    update_record(record_path(paths, root), record, status="stopped", error=None)
-    run([tmux, "select-pane", "-t", pane, "-T", ""], check=False)
-    run([tmux, "set-option", "-p", "-u", "-t", pane, "@devcontainer_active"], check=False)
-    run([tmux, "respawn-pane", "-k", "-t", pane, "-c", str(root), "nvim"], check=False)
+    state = pinned_state(paths)
+    with workspace_spool(
+        spool_path(paths, root),
+        parent_fd=state.descriptor("spool"),
+    ) as spool, workspace_lock(paths, root):
+        record = load_record(paths, root)
+        host_observation: PaneObservation | None = None
+        try:
+            host_observation = restore_or_verify_host_pane(record)
+            stopped_identity = update_workspace_record(
+                paths,
+                root,
+                record,
+                status="stopped",
+                pane_pid=host_observation.pid,
+                error=None,
+                exit_code=0,
+            )
+            remove_auth(spool)
+            remove_workspace_record(paths, root, stopped_identity)
+        except EditorError as error:
+            changes: dict[str, object] = {"status": "error", "error": str(error)}
+            if host_observation is not None:
+                changes["pane_pid"] = host_observation.pid
+            update_workspace_record(paths, root, record, **changes)
+            raise
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1108,6 +2469,8 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--config")
     up.add_argument("--recreate", action="store_true")
     up.add_argument("--allow-network", action="store_true")
+    up.add_argument("--tmux-pane", required=True)
+    up.add_argument("--claim-id", required=True)
     up.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     up.set_defaults(callback=cmd_up)
     execute = commands.add_parser("exec")

@@ -107,9 +107,10 @@ local function setup(overrides)
 				states[spec.key] = { state = "running", exists = true }
 				return { key = spec.key }
 			end,
-			focus = function(spec)
+			focus = function(identity)
+				assert(type(identity) == "string", "focus received a requested launch instead of the existing key")
 				focused = focused + 1
-				return { key = spec.key }
+				return { key = identity }
 			end,
 			replace = function(spec)
 				replaced = replaced + 1
@@ -187,13 +188,22 @@ test("changed closure fails closed between authorization and execution", functio
 	write(external, { "shared:", "  echo shared" })
 end)
 
-test("existing execution requires focus replace or cancel and transcript is workspace keyed", function()
+test("empty recipe values remain exact terminal argv entries", function()
+	setup()
+	local catalog = catalog_sync()
+	local result = assert(workbench.run(catalog, "build", { "" }))
+	assert(result.outcome == "started")
+	assert(opened[1].launch.argv[#opened[1].launch.argv] == "", "empty recipe value was dropped")
+end)
+
+test("closure drift permits conflict focus and cancel but blocks replace", function()
 	setup()
 	local catalog = catalog_sync()
 	local unsafe = "name; touch /tmp/never"
 	local first = assert(workbench.run(catalog, "build", { unsafe }))
 	assert(first.outcome == "started")
 	assert(opened[1].launch.argv[#opened[1].launch.argv] == unsafe)
+	write(external, { "shared:", "  echo changed" })
 
 	local second, conflict = workbench.run(catalog, "build", { "other" })
 	assert(second == nil and conflict.kind == "conflict")
@@ -203,6 +213,10 @@ test("existing execution requires focus replace or cancel and transcript is work
 	assert(replaced == 0)
 	assert(workbench.run(catalog, "build", {}, { decision = "focus" }).outcome == "focused")
 	assert(focused == 1 and replaced == 0)
+	local replacement, replacement_err = workbench.run(catalog, "build", { "new" }, { decision = "replace" })
+	assert(replacement == nil and tostring(replacement_err):find("closure changed", 1, true))
+	assert(replaced == 0, "closure drift replaced the existing execution")
+	write(external, { "shared:", "  echo shared" })
 	assert(workbench.run(catalog, "build", { "new" }, { decision = "replace" }).outcome == "replaced")
 	assert(replaced == 1)
 

@@ -4,9 +4,16 @@ local M = {}
 local engine = require("project_python")
 local repo = require("config.repo")
 local terminal = require("config.terminal")
+local project_settings = require("config.project_settings")
 local uv = vim.uv
 local repl_interpreters = {}
+local repl_queues = {}
+local repl_drain_attempts = {}
+local repl_drain_scheduled = {}
 local dap_python_module
+
+local REPL_DRAIN_INTERVAL_MS = 50
+local REPL_DRAIN_MAX_ATTEMPTS = 100
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Python" })
@@ -35,13 +42,9 @@ local function attached_pyright_root(buf, start)
 	return best
 end
 
-local function explicit_from_neoconf(root)
-	local neoconf = package.loaded.neoconf
-	if type(neoconf) ~= "table" or type(neoconf.get) ~= "function" then
-		return nil
-	end
+local function explicit_from_project_settings(root)
 	for _, key in ipairs({ "vscode", "lspconfig.pyright" }) do
-		local ok, settings = pcall(neoconf.get, key, {}, { file = root })
+		local ok, settings = pcall(project_settings.get, key, {}, root)
 		if ok and type(settings) == "table" then
 			local direct = type(settings.python) == "table" and settings.python or nil
 			local nested = type(settings.settings) == "table" and settings.settings.python or nil
@@ -91,7 +94,7 @@ local terminal_bridge = {
 }
 
 engine.setup({
-	explicit = explicit_from_neoconf,
+	explicit = explicit_from_project_settings,
 	fallback = fallback_python,
 	terminal = terminal_bridge,
 	neotest_runner = "pytest",
@@ -174,6 +177,73 @@ end
 
 local function repl_status(root)
 	return engine.repl("status", root) or { exists = false, running = false }
+end
+
+local function clear_repl_queue(root)
+	repl_queues[root] = nil
+	repl_drain_attempts[root] = nil
+	repl_drain_scheduled[root] = nil
+end
+
+local function fail_repl_queue(root, message)
+	clear_repl_queue(root)
+	notify(message, vim.log.levels.ERROR)
+end
+
+local schedule_repl_drain
+
+local function drain_repl_queue(root)
+	local queue = repl_queues[root]
+	if not queue or #queue == 0 then
+		clear_repl_queue(root)
+		return
+	end
+	local status = repl_status(root)
+	if status.accepting_input then
+		while queue[1] do
+			local ok, send_err = engine.repl("send", root, { text = queue[1] })
+			if not ok then
+				fail_repl_queue(root, "Could not send code to REPL: " .. tostring(send_err))
+				return
+			end
+			table.remove(queue, 1)
+		end
+		clear_repl_queue(root)
+		return
+	end
+	if status.exists == false or status.state == "disposed" or status.state == "exited-retained" then
+		fail_repl_queue(root, "Python REPL exited before it accepted input")
+		return
+	end
+	local attempts = (repl_drain_attempts[root] or 0) + 1
+	repl_drain_attempts[root] = attempts
+	if attempts >= REPL_DRAIN_MAX_ATTEMPTS then
+		fail_repl_queue(root, "Timed out waiting for Python REPL input")
+		return
+	end
+	schedule_repl_drain(root)
+end
+
+schedule_repl_drain = function(root)
+	if repl_drain_scheduled[root] then
+		return
+	end
+	repl_drain_scheduled[root] = true
+	vim.defer_fn(function()
+		repl_drain_scheduled[root] = nil
+		drain_repl_queue(root)
+	end, REPL_DRAIN_INTERVAL_MS)
+end
+
+local function queue_repl_text(root, text)
+	local queue = repl_queues[root]
+	if not queue then
+		queue = {}
+		repl_queues[root] = queue
+		repl_drain_attempts[root] = 0
+	end
+	queue[#queue + 1] = text
+	schedule_repl_drain(root)
 end
 
 local function restart_repl(root, python)
@@ -263,7 +333,8 @@ function M.open_repl()
 		end)
 		return
 	end
-	local record, err = engine.repl("toggle", root, { interpreter = python })
+	local action = status.running and "toggle" or (status.exists and "restart" or "toggle")
+	local record, err = engine.repl(action, root, { interpreter = python })
 	if not record then
 		notify("Could not open REPL: " .. tostring(err), vim.log.levels.ERROR)
 		return
@@ -288,7 +359,12 @@ function M.send(selection)
 		return
 	end
 	local status = repl_status(root)
-	local python = repl_interpreters[root] or M.for_root(root)
+	local python = status.running and repl_interpreters[root] or M.for_root(root)
+	local payload = "exec(" .. vim.json.encode(text) .. ")"
+	if status.stop_pending or status.restart_pending or status.dispose_pending then
+		queue_repl_text(root, payload)
+		return
+	end
 	local record, err
 	if not status.running then
 		if status.exists then
@@ -304,10 +380,7 @@ function M.send(selection)
 		notify("Could not prepare REPL: " .. tostring(err), vim.log.levels.ERROR)
 		return
 	end
-	local ok, send_err = engine.repl("send", root, { text = "exec(" .. vim.json.encode(text) .. ")" })
-	if not ok then
-		notify(send_err, vim.log.levels.ERROR)
-	end
+	queue_repl_text(root, payload)
 end
 
 function M.venv_name(root)

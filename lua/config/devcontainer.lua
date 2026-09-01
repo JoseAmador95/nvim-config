@@ -7,6 +7,7 @@ local M = {}
 local uv = vim.uv
 local core = require("devcontainer_editor")
 local launcher = vim.fs.joinpath(config_root, "scripts", "devcontainer-editor")
+local CLAIM_TIMEOUT_MS = 2000
 
 local function state_root()
 	local configured = vim.env.NVIM_DEVCONTAINER_STATE_HOME
@@ -50,18 +51,50 @@ end
 
 local function exact_pane()
 	local pane = vim.env.TMUX_PANE
-	if not pane or pane == "" then
+	if type(pane) ~= "string" or not pane:match("^%%%d+$") then
 		return nil, "DevContainerUp requires tmux's single-pane editor window"
 	end
-	local result = vim.system(
-		{ "tmux", "display-message", "-p", "-t", pane, "#{window_name}\t#{window_panes}" },
+	local ok, process = pcall(
+		vim.system,
+		{ "tmux", "display-message", "-p", "-t", pane, "#{window_name}\t#{window_panes}\t#{pane_dead}" },
 		{ text = true }
 	)
-		:wait()
-	if result.code ~= 0 or vim.trim(result.stdout or "") ~= "editor\t1" then
+	if not ok then
+		return nil, "could not inspect tmux editor pane: " .. tostring(process)
+	end
+	local result = process:wait()
+	if result.code ~= 0 or vim.trim(result.stdout or "") ~= "editor\t1\t0" then
 		return nil, "DevContainerUp requires tmux's single-pane editor window"
 	end
 	return pane
+end
+
+local function wait_for_claim(project_root, claim_id, timeout_ms)
+	local failure
+	local last_error
+	local ready = vim.wait(timeout_ms or CLAIM_TIMEOUT_MS, function()
+		local status, status_err = core.status(project_root)
+		if not status then
+			last_error = status_err
+			return false
+		end
+		if status.claim_id ~= claim_id then
+			last_error = "another lifecycle record still owns the workspace"
+			return false
+		end
+		if status.status == "starting" or status.status == "running" then
+			return true
+		end
+		failure = "detached coordinator entered " .. tostring(status.status)
+		return true
+	end, 20, false)
+	if failure then
+		return nil, failure
+	end
+	if not ready then
+		return nil, "detached coordinator did not publish its starting claim: " .. tostring(last_error or "timeout")
+	end
+	return true
 end
 
 local function replace_editor(recreate, allow_network)
@@ -72,8 +105,15 @@ local function replace_editor(recreate, allow_network)
 	if not pane then
 		return nil, pane_err
 	end
+	local project_root = root()
+	local claim_id, claim_err = core.new_claim_id()
+	if not claim_id then
+		return nil, claim_err
+	end
 	local argv, argv_err = core.lifecycle_argv("up", {
-		root = root(),
+		root = project_root,
+		tmux_pane = pane,
+		claim_id = claim_id,
 		recreate = recreate,
 		allow_network = allow_network,
 	})
@@ -81,14 +121,17 @@ local function replace_editor(recreate, allow_network)
 		return nil, argv_err
 	end
 	local shell_command = "exec " .. table.concat(vim.tbl_map(vim.fn.shellescape, argv), " ")
-	vim.system({ "tmux", "set-option", "-p", "-t", pane, "remain-on-exit", "on" }):wait()
-	local result = vim.system({ "tmux", "respawn-pane", "-k", "-t", pane, "-c", root(), shell_command }, {
+	local started, process = pcall(vim.system, { "tmux", "run-shell", "-b", "-t", pane, shell_command }, {
 		text = true,
-	}):wait()
-	if result.code ~= 0 then
-		return nil, vim.trim(result.stderr or "tmux rejected the editor replacement")
+	})
+	if not started then
+		return nil, "could not start detached coordinator: " .. tostring(process)
 	end
-	return true
+	local result = process:wait()
+	if result.code ~= 0 then
+		return nil, vim.trim(result.stderr or "tmux rejected the detached coordinator")
+	end
+	return wait_for_claim(project_root, claim_id)
 end
 
 local function run_lifecycle(action, specification, callback)
@@ -193,5 +236,6 @@ M._core = core
 M._launcher = launcher
 M._replace_editor = replace_editor
 M._options = options
+M._wait_for_claim = wait_for_claim
 
 return M

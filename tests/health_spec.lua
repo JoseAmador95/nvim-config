@@ -16,13 +16,13 @@ local source = read_file(repo .. "/lua/nvimconfig/health.lua")
 
 for _, required in ipairs({
 	"PATH precedence contract",
-	"local_config.path > ~/.local/bin > verified shims > host PATH > managed > Mason",
+	"verified shims > local_config.path > ~/.local/bin > host PATH > managed > Mason",
 	"state_summary()",
 	"Mason receipts",
 	"Managed release platform/prerequisites",
 	"record.detail",
 	"Tool failures never auto-retry",
-	"Startup is probe/plan only",
+	"Startup is local probe/plan/attest only",
 	":NvimConfigToolsInstall",
 	"tree-sitter",
 	"Tree-sitter parser compilation",
@@ -58,17 +58,41 @@ assert(select(1, health._path_origin(require("config.tool_paths").mason_bin() ..
 local original_mason_root = vim.env.NVIM_CONFIG_MASON_ROOT
 local mason_root = vim.fn.tempname()
 vim.env.NVIM_CONFIG_MASON_ROOT = mason_root
-local receipt_dir = mason_root .. "/packages/example"
+local receipt_dir = mason_root .. "/packages/clangd"
 assert(vim.fn.mkdir(receipt_dir, "p") == 1)
 local receipt = receipt_dir .. "/mason-receipt.json"
-assert(vim.fn.writefile({ vim.json.encode({ source = { id = "pkg:github/example/example@1.2.3" } }) }, receipt) == 0)
-local status, actual = health._mason_receipt_status("example", "1.2.3")
-assert(status == "exact" and actual == "1.2.3", "exact Mason receipt was not recognized")
-status, actual = health._mason_receipt_status("example", "9.9.9")
-assert(status == "wrong" and actual == "1.2.3", "wrong Mason receipt did not report the installed pin")
+local version = require("config.toolchain").mason_entry("clangd").version
+local source = receipt_dir .. "/clangd"
+assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, source) == 0)
+assert(vim.uv.fs_chmod(source, tonumber("755", 8)))
+assert(vim.fn.mkdir(mason_root .. "/bin", "p") == 1)
+assert(vim.uv.fs_symlink("../packages/clangd/clangd", mason_root .. "/bin/clangd"))
+assert(vim.fn.writefile({
+	vim.json.encode({
+		name = "clangd",
+		schema_version = "2.0",
+		source = { id = "pkg:github/clangd/clangd@" .. version },
+		links = { bin = { clangd = "clangd" }, share = {}, opt = {} },
+	}),
+}, receipt) == 0)
+local private_dir = mason_root .. "/.verified-tools/receipts"
+assert(vim.fn.mkdir(private_dir, "p", tonumber("700", 8)) == 1)
+local private = private_dir .. "/clangd.json"
+assert(
+	vim.fn.writefile({ vim.json.encode({ package = "clangd", version = version, source_version = version }) }, private)
+		== 0
+)
+assert(vim.uv.fs_chmod(private, tonumber("600", 8)))
+local status, actual = health._mason_receipt_status("clangd", version)
+assert(
+	status == "exact" and actual == version,
+	"exact Mason receipt was not recognized: " .. vim.inspect({ status, actual })
+)
+status, actual = health._mason_receipt_status("clangd", "9.9.9")
+assert(status == "wrong" and actual == version, "wrong Mason receipt did not report the installed pin")
 assert(vim.fn.writefile({ "{" }, receipt) == 0)
-assert(health._mason_receipt_status("example", "1.2.3") == "corrupt", "corrupt Mason receipt was accepted")
-assert(health._mason_receipt_status("missing", "1.2.3") == "missing", "missing Mason receipt was not reported")
+assert(health._mason_receipt_status("clangd", version) == "corrupt", "corrupt Mason receipt was accepted")
+assert(health._mason_receipt_status("missing", version) == "missing", "missing Mason receipt was not reported")
 vim.env.NVIM_CONFIG_MASON_ROOT = original_mason_root
 vim.fn.delete(mason_root, "rf")
 

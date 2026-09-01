@@ -75,8 +75,12 @@ test("managed releases are prebuilt and target-aware", function()
 		local entry = assert(toolchain.managed_tools[name], name)
 		assert(entry.version == toolchain.versions[name])
 		assert(entry.repository and entry.tag and entry.executable)
+		assert(vim.deep_equal(toolchain.executable_map(entry), { [entry.executable] = entry.executable }))
 		for _, asset in pairs(entry.assets) do
 			assert(asset.archive and asset.sha256 and #asset.sha256 == 64)
+			local layout = toolchain.release_layout(entry, asset)
+			assert(layout.commands[entry.executable] == "bin/" .. entry.executable)
+			assert(#layout.artifacts == (asset.kind == "jar" and 1 or 0))
 		end
 	end
 	assert(toolchain.managed_tools.mmdflux.assets["linux-arm64"] == nil, "unsupported binary was invented")
@@ -157,6 +161,15 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 		local entry = assert(toolchain.mason_entry(name), name)
 		assert(entry.version == expected[name], name .. " pin drifted")
 		assert(entry.executables and #entry.executables > 0, name .. " lacks executable probes")
+		local executable_map = toolchain.executable_map(entry)
+		assert(executable_map[entry.version_probe], name .. " version probe is not a declared command")
+		assert(vim.tbl_count(executable_map) == #entry.executables)
+		local integrity = toolchain.mason_integrity(name, entry)
+		assert(integrity.kind == "mason-local-integrity")
+		assert(integrity.receipt.package == name and integrity.receipt.version == expected[name])
+		for command in pairs(executable_map) do
+			assert(integrity.commands[command] == "bin/" .. command)
+		end
 		assert(toolchain.identity(name, entry) == name .. "@" .. expected[name])
 	end
 	for _, removed in ipairs({ "gofumpt", "gopls", "delve", "goimports", "rust-analyzer" }) do

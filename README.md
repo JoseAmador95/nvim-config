@@ -49,19 +49,22 @@ The versioned editor and pager theme remains VSCode. `:Theme catppuccin`
 persists Catppuccin as a machine-local alternative; it follows the detected
 terminal background with Latte in light mode and Mocha in dark mode.
 `:Theme vscode` switches back, while `:ThemeReset` discards the local choice
-and restores the versioned VSCode default.
+and restores the current versioned default without persisting it; a private
+migration marker prevents the retained legacy Lua choice from returning.
 
 The effective executable order is deliberate:
 
-1. directories in `local_config.path`, in declared order;
-2. `~/.local/bin`;
-3. inherited host `PATH` entries;
-4. config-managed release binaries under the primary Neovim data root;
-5. Mason's `bin` directory.
+1. core-owned verified shims;
+2. directories in `local_config.path`, in declared order;
+3. `~/.local/bin`;
+4. inherited host `PATH` entries;
+5. config-managed release binaries under the primary Neovim data root;
+6. Mason's `bin` directory.
 
-This lets user/host tools win while the editor and `nvimpager` share the same
-managed fallback. `:checkhealth nvimconfig` prints the effective origin and
-order. External tools are optional unless their feature is used:
+External candidates are still probed before a managed claim, but once an exact
+pin is installed its content-attested shim wins consistently in the editor and
+`nvimpager`. `:checkhealth nvimconfig` prints the effective origin and order.
+External tools are optional unless their feature is used:
 
 | Feature | Tools |
 | --- | --- |
@@ -77,8 +80,14 @@ order. External tools are optional unless their feature is used:
 
 `mmdflux`, PlantUML, release tools and exact Mason packages share
 `:NvimConfigToolsInstall [all|name]`; append `!` for explicit repair or to
-install the managed pin when an external probe is incompatible. Mason's UI is
+force the managed pin when a compatible external tool would otherwise win.
+Mason's UI is
 read-only: its install, update and uninstall commands and mappings are removed.
+Release installs bind the verified source-archive SHA to hashes of every
+promoted command/artifact. Mason validates its exact raw source version and
+complete executable-link map, then binds them to a private `0600` receipt;
+subsequent attestation detects receipt or executable drift without refreshing
+the registry.
 The managed backends and their host prerequisites are:
 
 | Backend | Packages | Host prerequisite |
@@ -233,6 +242,14 @@ the request and path again inside Neovim before routing through the shared tab
 opener. Zero or multiple matches are errors: it never starts plain Neovim and
 never falls back to another editor.
 
+Workspace routing is an all-or-none `{runtime, root, repo_identity}` triplet.
+A complete CLI triplet overrides a complete
+`NVIM_EXACT_EDITOR_{RUNTIME,WORKSPACE_ROOT,REPO_IDENTITY}` environment triplet;
+without either, the helper derives the host Git workspace. Partial sources fail
+before lookup and values from different sources are never combined. A Dev
+Container editor requires the complete environment triplet with
+`runtime=container`, including while migrating an older registry record.
+
 The same helper has an explicit blocking mode for tools such as `gh` whose
 temporary editor file lives outside the repository:
 
@@ -253,7 +270,9 @@ closing a modified window aborts the caller while preserving the buffer.
 `<leader>t` opens a host shell in a lower split. Shells, Python REPLs, LazyGit
 and Just share one Snacks terminal
 lifecycle keyed by runtime, repository and purpose. Hiding a terminal preserves
-its process; a failed process keeps its output. LazyGit uses a 95% float, while
+its process; a failed process keeps its output. Stop, restart and disposal wait
+for the old job's actual exit before settling, and terminal input is rejected
+while any of those transitions is pending. LazyGit uses a 95% float, while
 shells, REPLs and recipe output use the lower split. `gf` on a contained
 `file:line[:column]` location opens or reuses the corresponding editor tab.
 Embedded LazyGit also sets a process-local `GH_EDITOR` to the blocking helper,
@@ -266,7 +285,10 @@ Resolution is filesystem-only: `UV_PROJECT_ENVIRONMENT`, `.venv`, Pixi's
 default environment, `venv`, `env`, `.conda`, and contained active virtual or
 Conda environments are considered in that order. `:VenvSelect` remains the
 manual override for cached or external environments. Explicit VSCode/neoconf
-Python settings take precedence, and selection never changes global `PATH`,
+Python settings take precedence only after
+`:NvimConfigTrustProjectSettings` approves the exact combined fingerprint of
+`.vscode/settings.json` and `.neoconf.json`; any edit revokes their effect until
+they are approved again. Selection never changes global `PATH`,
 `VIRTUAL_ENV` or terminal activation. The effective interpreter for each root
 is shared by Pyright, Neotest, DAP, the REPL and statusline. An attached Pyright
 root or the nearest Python project marker takes precedence over an enclosing Git
@@ -274,7 +296,9 @@ root, so nested Python projects stay independent. Opening a PEP 723 script never
 runs venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
 `<leader>Tn` runs the nearest test, `<leader>Td` debugs it, `<leader>pr` toggles
 the project REPL and `<leader>ps` opens or focuses that REPL before sending the
-current line or visual selection.
+current line or visual selection. Sends are queued FIFO per project until the
+terminal accepts input; a stopped/failed REPL or a bounded startup timeout
+aborts the queue visibly instead of writing into a replacement or dead job.
 Pytest is preferred when installed in that interpreter, with unittest as the
 fallback; a live REPL asks before changing interpreter.
 
@@ -296,8 +320,14 @@ project/branch `:Scratch` (`<leader>.`) is private under `stdpath("state")`,
 saved atomically and prunes only inactive files older than 30 days when opened.
 
 `Alt-Space` in tmux exposes stable container/host editor actions. The container
-action replaces only the dev session's single `editor` pane through the
-already-installed `@devcontainers/cli`; agent/Git/LazyGit remain on the host.
+action starts a detached coordinator for the dev session's exact single
+`editor` pane through the already-installed `@devcontainers/cli`;
+agent/Git/LazyGit remain on the host. The coordinator holds an advisory lock,
+the adapter waits for its unique `starting` claim, and the coordinator checks
+pane PID/ownership before publishing `running`. Routing state is removed only
+after a verified host-editor handoff and durable ACK. The spool secret stays
+solely in its private `auth.json`; requests and ACKs carry HMACs instead of that
+secret.
 `:DevContainerUp[!]`, `:DevContainerRecreate[!]`, `:DevContainerStatus`,
 `:DevContainerLog`, and `:DevContainerHostEditor` provide the editor surfaces.
 `!` authorizes network-dependent managed tools in the container; without it

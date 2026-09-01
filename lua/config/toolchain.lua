@@ -19,6 +19,8 @@ local function release(repository, tag, executable, assets)
 		repository = repository,
 		tag = tag,
 		executable = executable,
+		executables = { [executable] = executable },
+		version_probe = executable,
 		assets = assets,
 	}
 end
@@ -239,6 +241,7 @@ local function mason(version, executables, manager, requirements)
 	local entry = {
 		version = version,
 		executables = executables,
+		version_probe = executables[1],
 		manager = manager,
 	}
 	for key, value in pairs(requirements or {}) do
@@ -280,19 +283,19 @@ M.mason_tools = {
 	}),
 	prettierd = mason("0.29.0", { "prettierd" }, "npm", {
 		requires_all = { "node", "npm" },
-		satisfies_any = { "prettierd", "prettier" },
 	}),
 	["cmake-language-server"] = mason("0.1.11", { "cmake-language-server" }, "pypi", {
 		requires_any = { "python3", "python" },
 		requires_python_venv = true,
 	}),
-	["clang-format"] = mason("22.1.8", { "clang-format" }, "pypi", {
+	["clang-format"] = mason("22.1.8", { "clang-format", "clang-format-diff.py", "git-clang-format" }, "pypi", {
 		requires_any = { "python3", "python" },
 		requires_python_venv = true,
 	}),
 	debugpy = mason("1.8.21", { "debugpy-adapter", "debugpy" }, "pypi", {
 		requires_any = { "python3", "python" },
 		requires_python_venv = true,
+		version_probe = "debugpy",
 	}),
 }
 
@@ -337,6 +340,53 @@ end
 
 function M.mason_entry(name)
 	return M.mason_tools[name]
+end
+
+function M.executable_map(entry)
+	if not entry then
+		return nil
+	end
+	local result = {}
+	if entry.executable then
+		result[entry.executable] = entry.executable
+	else
+		for _, command in ipairs(entry.executables or {}) do
+			result[command] = command
+		end
+	end
+	return result
+end
+
+function M.release_layout(entry, asset)
+	assert(entry and entry.name and entry.version and entry.executable, "release entry is incomplete")
+	assert(asset and asset.sha256, "release asset is incomplete")
+	local commands = { [entry.executable] = "bin/" .. entry.executable }
+	local artifacts = {}
+	if asset.kind == "jar" then
+		artifacts[1] = table.concat({
+			"share",
+			entry.name,
+			entry.version,
+			asset.sha256:lower(),
+			"plantuml.jar",
+		}, "/")
+	end
+	return { commands = commands, artifacts = artifacts }
+end
+
+function M.mason_integrity(name, entry)
+	entry = entry or M.mason_tools[name]
+	assert(entry and entry.version, "Mason entry is incomplete")
+	local commands = {}
+	for command in pairs(M.executable_map(entry)) do
+		commands[command] = "bin/" .. command
+	end
+	return {
+		kind = "mason-local-integrity",
+		receipt_path = ".verified-tools/receipts/" .. name .. ".json",
+		receipt = { package = name, version = entry.version, source_version = entry.version },
+		commands = commands,
+	}
 end
 
 function M.identity(name, entry)

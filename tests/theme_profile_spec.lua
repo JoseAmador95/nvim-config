@@ -87,11 +87,10 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				vim.cmd("ThemeReset")
 				assert(theme.selection().colorscheme == "vscode", ":ThemeReset did not restore the versioned default")
 				assert(vim.g.colors_name == "vscode", ":ThemeReset did not repaint VSCode")
-				persisted = table.concat(vim.fn.readfile(state_path), "\n")
-				assert(
-					persisted:find('colorscheme: "vscode"', 1, true),
-					":ThemeReset did not persist the versioned default"
-				)
+				assert(vim.fn.filereadable(state_path) == 0, ":ThemeReset persisted the versioned default")
+				local marker = vim.fs.joinpath(vim.fs.dirname(state_path), ".legacy-migrated")
+				assert(vim.fn.readfile(marker)[1] == "version: 1", ":ThemeReset did not create its migration marker")
+				assert(vim.fn.getfperm(marker) == "rw-------", "theme migration marker is not 0600")
 			end, debug.traceback)
 
 			if not ok then

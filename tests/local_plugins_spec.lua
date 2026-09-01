@@ -160,7 +160,7 @@ test("TerminalSpec validates launch data and returns independent tables", functi
 	local contracts = require("local_plugins.contracts")
 	local input = {
 		key = '["host","/repo","shell"]',
-		launch = { argv = { "/bin/sh", "-l" }, cwd = "/repo", env = { TERM = "xterm" } },
+		launch = { argv = { "/bin/sh", "-c", "" }, cwd = "/repo", env = { TERM = "xterm" } },
 		policy = { dispose_on_success = true },
 		view = { layout = "bottom" },
 		metadata = { owner = { name = "host" } },
@@ -172,8 +172,15 @@ test("TerminalSpec validates launch data and returns independent tables", functi
 	input.metadata.owner.name = "changed"
 	assert(spec.key == '["host","/repo","shell"]', "TerminalSpec key changed")
 	assert(spec.launch.argv[1] == "/bin/sh", "TerminalSpec argv was not copied")
+	assert(spec.launch.argv[3] == "", "TerminalSpec dropped an empty argument")
 	assert(spec.policy.dispose_on_success == true, "TerminalSpec policy was not copied")
 	assert(spec.metadata.owner.name == "host", "TerminalSpec metadata was not copied")
+	local invalid_program = vim.deepcopy(spec)
+	invalid_program.launch.argv[1] = ""
+	assert(not contracts.normalize_terminal_spec(invalid_program))
+	local invalid_argument = vim.deepcopy(spec)
+	invalid_argument.launch.argv[2] = "bad\0value"
+	assert(not contracts.normalize_terminal_spec(invalid_argument))
 	assert(not contracts.normalize_terminal_spec(vim.tbl_deep_extend("force", {}, input, {
 		launch = { argv = {}, cwd = "/repo", env = {} },
 	})))
