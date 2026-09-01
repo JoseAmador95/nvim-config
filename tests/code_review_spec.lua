@@ -851,7 +851,7 @@ test("open presents in the ordinary tab, opens the native panel, and close owns 
 		assert(review._active_workspace() == child and child.mode_on and #review._scope_history == 1)
 		assert(#review_events == events_before_failed_back, "failed parent restore emitted an intermediate state")
 		parent.fail_enable = nil
-		assert(child.panel.callbacks.scope_back(), "scope back did not restore the frozen parent")
+		vim.cmd("ReviewScopeBack")
 		workspace = assert(review._active_workspace())
 		assert(workspace == parent and workspace.session == parent_session and workspace.model == parent_model)
 		assert(workspace.scope == parent_scope and workspace.panel == parent_panel and #review._scope_history == 0)
