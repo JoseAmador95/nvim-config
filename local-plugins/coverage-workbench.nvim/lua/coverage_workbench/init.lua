@@ -6,9 +6,12 @@ if ffi_ok then
 	pcall(ffi.cdef, "int fcntl(int fd, int cmd, ...);")
 end
 
-local config = { max_bytes = 50 * 1024 * 1024 }
+local DEFAULT_CONFIG = { max_report_bytes = 50 * 1024 * 1024, signs = "all", stale = "hide" }
+local config = vim.deepcopy(DEFAULT_CONFIG)
 local registry = {}
 local generation = 0
+local event_callback
+local configured = false
 local SIGN_GROUP_PREFIX = "coverage-workbench:"
 local SIGN_COVERED = "CoverageWorkbenchCovered"
 local SIGN_MISSING = "CoverageWorkbenchMissing"
@@ -68,12 +71,71 @@ local function same_file_snapshot(left, right)
 		and same_time(left.ctime, right.ctime)
 end
 
+local path_snapshot_matches
+local descriptor_path_is_bound
+
+local function source_identity(root, path)
+	local before = uv.fs_lstat(path)
+	if not before or before.type ~= "file" then
+		return nil, "source changed while binding coverage: " .. path
+	end
+	local handle, open_err = uv.fs_open(path, "r", 0)
+	if not handle then
+		return nil, tostring(open_err)
+	end
+	local opened = uv.fs_fstat(handle)
+	if
+		not opened
+		or not same_file_snapshot(before, opened)
+		or not descriptor_path_is_bound(root, path, handle)
+		or not path_snapshot_matches(root, path, opened)
+	then
+		uv.fs_close(handle)
+		return nil, "source changed while binding coverage: " .. path
+	end
+	local data, read_err = uv.fs_read(handle, opened.size, 0)
+	local after = uv.fs_fstat(handle)
+	local bound = after and descriptor_path_is_bound(root, path, handle) and path_snapshot_matches(root, path, after)
+	uv.fs_close(handle)
+	if not data or #data ~= opened.size or not after or not bound or not same_file_snapshot(opened, after) then
+		return nil, tostring(read_err or "source changed while binding coverage: " .. path)
+	end
+	return {
+		dev = opened.dev,
+		ino = opened.ino,
+		size = opened.size,
+		mtime = vim.deepcopy(opened.mtime),
+		ctime = vim.deepcopy(opened.ctime),
+		digest = vim.fn.sha256(data),
+	}
+end
+
+local function source_matches(root, path, expected)
+	local actual = source_identity(root, path)
+	return actual ~= nil
+		and actual.dev == expected.dev
+		and actual.ino == expected.ino
+		and actual.size == expected.size
+		and same_time(actual.mtime, expected.mtime)
+		and same_time(actual.ctime, expected.ctime)
+		and actual.digest == expected.digest
+end
+
+local function emit(kind, payload)
+	if type(event_callback) ~= "function" then
+		return
+	end
+	local event = vim.deepcopy(payload or {})
+	event.kind = kind
+	pcall(event_callback, event)
+end
+
 local function report_path_is_bound(root, resolved)
 	local current = uv.fs_realpath(resolved)
 	return current ~= nil and current == resolved and (current == root or vim.fs.relpath(root, current) ~= nil)
 end
 
-local function path_snapshot_matches(root, resolved, expected)
+path_snapshot_matches = function(root, resolved, expected)
 	if not report_path_is_bound(root, resolved) then
 		return false
 	end
@@ -88,7 +150,7 @@ local function is_absolute(path)
 	return path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil
 end
 
-local function descriptor_path_is_bound(root, resolved, handle)
+descriptor_path_is_bound = function(root, resolved, handle)
 	local ok, current = pcall(default_descriptor_path, handle)
 	if not ok or type(current) ~= "string" or current == "" or current:find("\0", 1, true) then
 		return false
@@ -108,6 +170,18 @@ local function source_path(root, name)
 		return nil, "source is missing or outside the project: " .. name
 	end
 	return resolved
+end
+
+local function source_entry(root, name)
+	local path, path_err = source_path(root, name)
+	if not path then
+		return nil, path_err
+	end
+	local identity, identity_err = source_identity(root, path)
+	if not identity then
+		return nil, identity_err
+	end
+	return path, identity
 end
 
 local function integer_list(value, field, name)
@@ -173,9 +247,9 @@ function M.parse_coverage_json(root, raw)
 		if type(entry) ~= "table" then
 			return nil, "invalid coverage.py file entry: " .. tostring(name)
 		end
-		local path, path_err = source_path(root, name)
+		local path, identity_or_err = source_entry(root, name)
 		if not path then
-			return nil, path_err
+			return nil, identity_or_err
 		end
 		if files[path] then
 			return nil, "duplicate canonical source: " .. name
@@ -192,7 +266,12 @@ function M.parse_coverage_json(root, raw)
 		if not excluded then
 			return nil, excluded_err
 		end
-		files[path] = { executed_lines = executed, missing_lines = missing, excluded_lines = excluded }
+		files[path] = {
+			executed_lines = executed,
+			missing_lines = missing,
+			excluded_lines = excluded,
+			source = identity_or_err,
+		}
 	end
 	return {
 		kind = "coverage.py-json",
@@ -207,9 +286,9 @@ local function finish_lcov_record(root, record, files)
 	if not record then
 		return true
 	end
-	local path, path_err = source_path(root, record.source)
+	local path, identity_or_err = source_entry(root, record.source)
 	if not path then
-		return nil, path_err
+		return nil, identity_or_err
 	end
 	if files[path] then
 		return nil, "duplicate LCOV source record: " .. record.source
@@ -221,7 +300,7 @@ local function finish_lcov_record(root, record, files)
 	end
 	table.sort(executed)
 	table.sort(missing)
-	files[path] = { executed_lines = executed, missing_lines = missing, excluded_lines = {} }
+	files[path] = { executed_lines = executed, missing_lines = missing, excluded_lines = {}, source = identity_or_err }
 	return true
 end
 
@@ -280,8 +359,8 @@ local function read_report(root, path)
 	if not before or before.type ~= "file" then
 		return nil, before_err and tostring(before_err) or "report is not a regular file"
 	end
-	if before.size > config.max_bytes then
-		return nil, ("report exceeds %d bytes"):format(config.max_bytes)
+	if before.size > config.max_report_bytes then
+		return nil, ("report exceeds %d bytes"):format(config.max_report_bytes)
 	end
 	local handle, open_err = uv.fs_open(resolved, "r", 0)
 	if not handle then
@@ -292,9 +371,9 @@ local function read_report(root, path)
 		uv.fs_close(handle)
 		return nil, tostring(stat_err or "report changed while opening")
 	end
-	if opened.size > config.max_bytes then
+	if opened.size > config.max_report_bytes then
 		uv.fs_close(handle)
-		return nil, ("report exceeds %d bytes"):format(config.max_bytes)
+		return nil, ("report exceeds %d bytes"):format(config.max_report_bytes)
 	end
 	if not same_file_snapshot(before, opened) then
 		uv.fs_close(handle)
@@ -345,14 +424,27 @@ local function render_buffer(buf, model)
 	if not entry then
 		return
 	end
-	local id = 1
-	for _, line in ipairs(entry.executed_lines) do
-		vim.fn.sign_place(id, group, SIGN_COVERED, buf, { lnum = line, priority = 8 })
-		id = id + 1
+	local stale = vim.bo[buf].modified or not source_matches(model.root, name, entry.source)
+	entry.stale = stale
+	if stale and config.stale == "hide" then
+		emit("stale", { root = model.root, path = name, bufnr = buf })
+		return
 	end
-	for _, line in ipairs(entry.missing_lines) do
-		vim.fn.sign_place(id, group, SIGN_MISSING, buf, { lnum = line, priority = 9 })
-		id = id + 1
+	if config.signs == "none" then
+		return
+	end
+	local id = 1
+	if config.signs == "all" or config.signs == "covered" then
+		for _, line in ipairs(entry.executed_lines) do
+			vim.fn.sign_place(id, group, SIGN_COVERED, buf, { lnum = line, priority = 8 })
+			id = id + 1
+		end
+	end
+	if config.signs == "all" or config.signs == "missing" then
+		for _, line in ipairs(entry.missing_lines) do
+			vim.fn.sign_place(id, group, SIGN_MISSING, buf, { lnum = line, priority = 9 })
+			id = id + 1
+		end
 	end
 end
 
@@ -364,6 +456,14 @@ end
 
 function M.load(options)
 	options = options or {}
+	if type(options) ~= "table" or (next(options) ~= nil and vim.islist(options)) then
+		return nil, "load options must be an object"
+	end
+	for key in pairs(options) do
+		if key ~= "root" and key ~= "path" and key ~= "format" then
+			return nil, "load options contain an unknown option: " .. tostring(key)
+		end
+	end
 	local root = canonical(options.root)
 	if not root then
 		return nil, "root is required"
@@ -395,6 +495,7 @@ function M.load(options)
 	generation = generation + 1
 	registry[root] = { generation = generation, path = resolved, model = model }
 	render(model)
+	emit("loaded", { root = root, path = resolved, generation = generation })
 	return M.snapshot(root)
 end
 
@@ -404,7 +505,12 @@ function M.refresh(root)
 	if not current then
 		return nil, "no report is registered for the project"
 	end
-	return M.load({ root = root, path = current.path, format = current.model.kind })
+	local loaded, load_err = M.load({ root = root, path = current.path, format = current.model.kind })
+	if not loaded then
+		render(current.model)
+		emit("refresh_failed", { root = root, path = current.path, error = tostring(load_err) })
+	end
+	return loaded, load_err
 end
 
 function M.snapshot(root)
@@ -425,23 +531,90 @@ function M.clear(root)
 	end
 	vim.fn.sign_unplace(sign_group(root))
 	registry[root] = nil
+	emit("cleared", { root = root })
 	return true
 end
 
 function M.setup(options)
-	options = options or {}
-	config.max_bytes = options.max_bytes or config.max_bytes
+	if options == nil then
+		options = {}
+	end
+	if type(options) ~= "table" or (next(options) ~= nil and vim.islist(options)) then
+		return nil, "setup options must be an object"
+	end
+	for key in pairs(options) do
+		if key ~= "max_report_bytes" and key ~= "signs" and key ~= "stale" and key ~= "event" then
+			return nil, "setup contains an unknown option: " .. tostring(key)
+		end
+	end
+	local max_report_bytes = options.max_report_bytes
+	if max_report_bytes == nil then
+		max_report_bytes = DEFAULT_CONFIG.max_report_bytes
+	end
+	if type(max_report_bytes) ~= "number" or max_report_bytes % 1 ~= 0 or max_report_bytes < 1 then
+		return nil, "setup.max_report_bytes must be a positive integer"
+	end
+	local signs = options.signs
+	if signs == nil then
+		signs = DEFAULT_CONFIG.signs
+	end
+	if signs ~= "all" and signs ~= "covered" and signs ~= "missing" and signs ~= "none" then
+		return nil, "setup.signs must be all, covered, missing, or none"
+	end
+	local stale = options.stale
+	if stale == nil then
+		stale = DEFAULT_CONFIG.stale
+	end
+	if stale ~= "hide" and stale ~= "show" then
+		return nil, "setup.stale must be hide or show"
+	end
+	if options.event ~= nil and type(options.event) ~= "function" then
+		return nil, "setup.event must be a function"
+	end
+	config = { max_report_bytes = max_report_bytes, signs = signs, stale = stale }
+	event_callback = options.event
+	configured = true
 	vim.fn.sign_define(SIGN_COVERED, { text = "▎", texthl = "DiagnosticOk" })
 	vim.fn.sign_define(SIGN_MISSING, { text = "▎", texthl = "DiagnosticError" })
 	local group = vim.api.nvim_create_augroup("coverage_workbench", { clear = true })
-	vim.api.nvim_create_autocmd({ "BufReadPost", "BufEnter" }, {
-		group = group,
-		callback = function(args)
-			for _, current in pairs(registry) do
-				render_buffer(args.buf, current.model)
-			end
-		end,
-	})
+	vim.api.nvim_create_autocmd(
+		{ "BufReadPost", "BufEnter", "BufModifiedSet", "TextChanged", "TextChangedI", "BufWritePost", "BufFilePost" },
+		{
+			group = group,
+			callback = function(args)
+				for _, current in pairs(registry) do
+					render_buffer(args.buf, current.model)
+				end
+			end,
+		}
+	)
+	return true
+end
+
+function M.effective_config()
+	return vim.deepcopy(config)
+end
+
+function M.status()
+	local projects = {}
+	for root, current in pairs(registry) do
+		projects[#projects + 1] = { root = root, generation = current.generation, path = current.path }
+	end
+	table.sort(projects, function(left, right)
+		return left.root < right.root
+	end)
+	return vim.deepcopy({ configured = configured, config = config, projects = projects })
+end
+
+function M.teardown()
+	for root in pairs(vim.deepcopy(registry)) do
+		M.clear(root)
+	end
+	pcall(vim.api.nvim_del_augroup_by_name, "coverage_workbench")
+	config = vim.deepcopy(DEFAULT_CONFIG)
+	event_callback = nil
+	configured = false
+	return true
 end
 
 return M

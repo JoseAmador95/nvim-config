@@ -47,7 +47,7 @@ local function cache_root()
 end
 
 package.loaded["config.local_config"] = {
-	get = function(_, fallback)
+	plugin = function(_, fallback)
 		return fallback
 	end,
 }
@@ -81,6 +81,19 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 	vim.api.nvim_set_current_buf(buf)
 	mapping = vim.fn.maparg("<leader>md", "n", false, true)
 	assert(not vim.tbl_isempty(mapping), "host markdown mapping is missing")
+	local visual_mapping = vim.fn.maparg("<leader>md", "x", false, true)
+	assert(not vim.tbl_isempty(visual_mapping), "host visual diagram mapping is missing")
+	assert(visual_mapping.rhs:find("'<,'>DiagramShow", 1, true), "visual mapping did not preserve its range")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "ignored", "A --> B", "B --> C", "ignored" })
+	local original_executable = vim.fn.executable
+	vim.fn.executable = function()
+		return 1
+	end
+	local command_ok, command_err = pcall(vim.cmd, "2,3DiagramShow ascii")
+	vim.fn.executable = original_executable
+	assert(command_ok, command_err)
+	equal("A --> B\nB --> C", jobs[#jobs].options.stdin, "visual command did not pass the selected lines")
 
 	local delivery = {}
 	assert(require("diagram_view").register_presenter("capture", {
@@ -97,8 +110,8 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 		kind = "plantuml",
 		source = "@startuml\nA -> B\n@enduml",
 	}))
-	equal({ "plantuml", "-ttxt", "-pipe" }, jobs[1].argv)
-	equal("SANDBOX", jobs[1].options.env.PLANTUML_SECURITY_PROFILE)
+	equal({ "plantuml", "-ttxt", "-pipe" }, jobs[#jobs].argv)
+	equal("SANDBOX", jobs[#jobs].options.env.PLANTUML_SECURITY_PROFILE)
 	equal("ASCII", delivery.result)
 	equal("presented", session:status().state)
 end)

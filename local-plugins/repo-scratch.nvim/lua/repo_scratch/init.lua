@@ -158,7 +158,9 @@ local options = {
 	lease_seconds = 5 * 60,
 	now = os.time,
 	root = nil,
+	event = nil,
 }
+local handles = {}
 local sequence = 0
 local MAX_STATE_BYTES = 1024 * 1024
 local MAX_LOCK_BYTES = 4096
@@ -187,6 +189,15 @@ end
 
 local function copy(value)
 	return vim.deepcopy(value)
+end
+
+local function emit(kind, payload)
+	if type(options.event) ~= "function" then
+		return
+	end
+	local event = copy(payload or {})
+	event.kind = kind
+	pcall(options.event, event)
 end
 
 local function missing_error(err)
@@ -2553,7 +2564,7 @@ function M.open(request)
 			return nil, meta_warning_or_err
 		end
 		warning = append_warning(warning, meta_warning_or_err)
-		return {
+		local handle = {
 			key = copy(request.key),
 			path = path,
 			meta_path = meta,
@@ -2562,8 +2573,10 @@ function M.open(request)
 			content = content,
 			revision = vim.fn.sha256(content),
 			adopted = adopted,
-		},
-			warning
+		}
+		handles[handle.lease_token] = handle
+		emit("opened", { path = handle.path, key = handle.key })
+		return handle, warning
 	end)
 end
 
@@ -2572,10 +2585,16 @@ function M.renew(handle)
 	if not managed then
 		return nil, handle_err
 	end
-	return with_arbiter(managed.path, function()
+	local renewed, renew_err = with_arbiter(managed.path, function()
 		local renewed, renew_warning_or_err = renewed_lease(handle)
 		return renewed and true or nil, renew_warning_or_err
 	end)
+	if renewed then
+		emit("renewed", { path = managed.path })
+	else
+		emit("lease_lost", { path = managed.path, error = tostring(renew_err) })
+	end
+	return renewed, renew_err
 end
 
 function M.save(handle, content)
@@ -2621,16 +2640,24 @@ function M.save(handle, content)
 		end
 		handle.content = content
 		handle.revision = vim.fn.sha256(content)
+		handles[handle.lease_token] = handle
+		emit("saved", { path = managed.path, revision = handle.revision })
 		return copy(handle), append_warning(renew_warning_or_err, write_warning_or_err)
 	end)
 end
 
 function M.release(handle)
+	-- Relinquish process-local authority first. Durable lease cleanup may fail
+	-- closed (for example after hostile replacement), but that must not leave an
+	-- unreleasable RAM handle that blocks teardown or safe reconfiguration.
+	if type(handle) == "table" and type(handle.lease_token) == "string" then
+		handles[handle.lease_token] = nil
+	end
 	local managed, handle_err = handle_paths(handle)
 	if not managed then
 		return nil, handle_err
 	end
-	return with_arbiter(managed.path, function()
+	local released, release_err = with_arbiter(managed.path, function()
 		local status, status_err = lease_status(managed.lease)
 		if not status then
 			return nil, status_err
@@ -2645,6 +2672,8 @@ function M.release(handle)
 			remove_cas(managed.lease, status.snapshot, "scratch lease", MAX_LEASE_BYTES)
 		return removed and true or false, remove_warning_or_err
 	end)
+	emit("released", { path = managed.path, released = released == true })
+	return released, release_err
 end
 
 local function managed_meta(path, scratch)
@@ -2806,16 +2835,120 @@ end
 
 function M.setup(config)
 	config = config or {}
-	local requested =
-		vim.fs.normalize(vim.fs.abspath(assert(config.state_root, "repo_scratch.setup requires state_root")))
-	if options.state_root ~= requested then
-		close_root()
+	if type(config) ~= "table" or (next(config) ~= nil and vim.islist(config)) then
+		return nil, "repo_scratch.setup options must be an object"
 	end
-	options.state_root = requested
-	options.max_age_seconds = config.max_age_seconds or options.max_age_seconds
-	options.lease_seconds = config.lease_seconds or options.lease_seconds
-	options.now = config.now or options.now
-	return ensure_root()
+	for key in pairs(config) do
+		if
+			key ~= "state_root"
+			and key ~= "max_age_seconds"
+			and key ~= "lease_seconds"
+			and key ~= "now"
+			and key ~= "event"
+		then
+			return nil, "repo_scratch.setup contains an unknown option: " .. tostring(key)
+		end
+	end
+	if type(config.state_root) ~= "string" or config.state_root == "" or config.state_root:find("\0", 1, true) then
+		return nil, "repo_scratch.setup requires state_root without NUL bytes"
+	end
+	for _, key in ipairs({ "max_age_seconds", "lease_seconds" }) do
+		if config[key] ~= nil and (type(config[key]) ~= "number" or config[key] % 1 ~= 0 or config[key] < 1) then
+			return nil, "repo_scratch.setup " .. key .. " must be a positive integer"
+		end
+	end
+	if config.now ~= nil and type(config.now) ~= "function" then
+		return nil, "repo_scratch.setup now must be a function"
+	end
+	if config.event ~= nil and type(config.event) ~= "function" then
+		return nil, "repo_scratch.setup event must be a function"
+	end
+	local requested = vim.fs.normalize(vim.fs.abspath(config.state_root))
+	if options.state_root and options.state_root ~= requested and next(handles) ~= nil then
+		return nil, "repo_scratch.setup cannot change state_root while scratch handles are active"
+	end
+	local previous = options
+	local candidate = {
+		state_root = requested,
+		max_age_seconds = config.max_age_seconds or 30 * 24 * 60 * 60,
+		lease_seconds = config.lease_seconds or 5 * 60,
+		now = config.now or os.time,
+		root = nil,
+		event = config.event,
+	}
+	options = candidate
+	local root, root_warning_or_err = ensure_root()
+	if not root then
+		close_root()
+		options = previous
+		return nil, root_warning_or_err
+	end
+	if previous.root and previous.root.fd then
+		local closed, close_err = close_fd(previous.root.fd)
+		if not closed then
+			close_root()
+			options = previous
+			return nil, "could not close prior state root: " .. tostring(close_err)
+		end
+		previous.root = nil
+	end
+	return root, root_warning_or_err
+end
+
+function M.effective_config()
+	return {
+		state_root = options.state_root,
+		max_age_seconds = options.max_age_seconds,
+		lease_seconds = options.lease_seconds,
+	}
+end
+
+function M.status(handle)
+	local function one(value)
+		local status, status_err = lease_status(value.lease_path)
+		return {
+			path = value.path,
+			key = copy(value.key),
+			owned = status ~= nil
+				and status.kind == "active"
+				and status.lease ~= nil
+				and status.lease.token == value.lease_token,
+			lease = status and status.kind or "unsafe",
+			expires_at = status and status.lease and status.lease.expires_at or nil,
+			error = status_err,
+		}
+	end
+	if handle then
+		return copy(one(handle))
+	end
+	local result = {}
+	for _, value in pairs(handles) do
+		result[#result + 1] = one(value)
+	end
+	table.sort(result, function(left, right)
+		return left.path < right.path
+	end)
+	return copy({ configured = options.state_root ~= nil, config = M.effective_config(), handles = result })
+end
+
+function M.teardown()
+	local active = {}
+	for _, handle in pairs(handles) do
+		active[#active + 1] = handle
+	end
+	for _, handle in ipairs(active) do
+		pcall(M.release, handle)
+	end
+	handles = {}
+	close_root()
+	options = {
+		max_age_seconds = 30 * 24 * 60 * 60,
+		lease_seconds = 5 * 60,
+		now = os.time,
+		root = nil,
+		event = nil,
+	}
+	return true
 end
 
 M._private_file = private_file

@@ -1,18 +1,189 @@
 local M = {}
 
 local uv = vim.uv
+local bit = require("bit")
+local ffi = require("ffi")
 local DIRECTORY_MODE = 448 -- 0700
 local FILE_MODE = 384 -- 0600
 local DEFAULT_MAX_AGE = 30 * 24 * 60 * 60
 local DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 local MAX_ENTRY_BYTES = 256 * 1024 * 1024
 
+local declared, declare_err = pcall(
+	ffi.cdef,
+	[[
+		int openat(int dirfd, const char *pathname, int flags, ...);
+		int unlinkat(int dirfd, const char *pathname, int flags);
+		int renameatx_np(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags);
+		int renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags);
+	]]
+)
+if not declared and tostring(declare_err):find("redefin", 1, true) then
+	declared = true
+end
+
+local descriptor_api
+if declared and ffi.abi("64bit") then
+	local system = uv.os_uname().sysname
+	if system == "Darwin" then
+		descriptor_api = {
+			at_fdcwd = -2,
+			close_on_exec = 0x01000000,
+			directory = 0x00100000,
+			nonblock = 0x00000004,
+			no_follow = 0x00000100,
+			rename = "renameatx_np",
+			rename_noreplace_flag = 0x00000004,
+			eexist = 17,
+			noent = 2,
+		}
+	elseif system == "Linux" then
+		descriptor_api = {
+			at_fdcwd = -100,
+			close_on_exec = 0x00080000,
+			directory = 0x00010000,
+			nonblock = 0x00000800,
+			no_follow = 0x00020000,
+			rename = "renameat2",
+			rename_noreplace_flag = 0x00000001,
+			eexist = 17,
+			noent = 2,
+		}
+	end
+end
+
 local state = {
 	root = nil,
 	max_age = DEFAULT_MAX_AGE,
 	max_bytes = DEFAULT_MAX_BYTES,
 	live = {},
+	retire_counter = 0,
+	test_hook = nil,
 }
+
+local function identity_part(value)
+	return tostring(value):gsub("ULL$", ""):gsub("LL$", "")
+end
+
+local function same_identity(left, right)
+	return left
+		and right
+		and left.type == right.type
+		and identity_part(left.dev) == identity_part(right.dev)
+		and identity_part(left.ino) == identity_part(right.ino)
+end
+
+local function owned_file(actual, expected)
+	return same_identity(actual, expected)
+		and actual.type == "file"
+		and actual.nlink == 1
+		and expected.nlink == 1
+		and actual.size == expected.size
+		and actual.mode == expected.mode
+end
+
+local function close_fd(fd)
+	if fd then
+		pcall(uv.fs_close, fd)
+	end
+end
+
+local function open_root_anchor()
+	if not descriptor_api then
+		return nil, "descriptor-relative cache cleanup requires 64-bit Darwin or Linux"
+	end
+	local before = uv.fs_lstat(state.root)
+	if not before or before.type ~= "directory" then
+		return nil, "cache root is not a real directory"
+	end
+	local flags = bit.bor(
+		descriptor_api.directory,
+		descriptor_api.nonblock,
+		descriptor_api.no_follow,
+		descriptor_api.close_on_exec
+	)
+	local raw = ffi.C.openat(descriptor_api.at_fdcwd, state.root, flags)
+	if raw < 0 then
+		return nil, "could not pin cache root: errno " .. tostring(ffi.errno())
+	end
+	local fd = tonumber(raw)
+	local opened = uv.fs_fstat(fd)
+	local current = uv.fs_lstat(state.root)
+	if
+		not opened
+		or opened.type ~= "directory"
+		or not same_identity(before, opened)
+		or not same_identity(opened, current)
+	then
+		close_fd(fd)
+		return nil, "cache root changed while it was pinned"
+	end
+	return { fd = fd, identity = opened }
+end
+
+local function anchor_valid(anchor)
+	local opened = anchor and anchor.fd and uv.fs_fstat(anchor.fd) or nil
+	local current = state.root and uv.fs_lstat(state.root) or nil
+	return same_identity(opened, anchor and anchor.identity) and same_identity(opened, current)
+end
+
+local function open_anchored_file(anchor, name)
+	if not anchor_valid(anchor) then
+		return nil, "cache root changed before file inspection"
+	end
+	local flags = bit.bor(descriptor_api.nonblock, descriptor_api.no_follow, descriptor_api.close_on_exec)
+	local raw = ffi.C.openat(anchor.fd, name, flags)
+	if raw < 0 then
+		local number = ffi.errno()
+		if number == descriptor_api.noent then
+			return false
+		end
+		return nil, "could not inspect anchored cache entry: errno " .. tostring(number)
+	end
+	local fd = tonumber(raw)
+	local info = uv.fs_fstat(fd)
+	close_fd(fd)
+	if not info or info.type ~= "file" then
+		return nil, "anchored cache entry is not a regular file"
+	end
+	return info
+end
+
+local function exclusive_rename(anchor, source, destination)
+	if not anchor_valid(anchor) then
+		return nil, "cache root changed before reservation", -1
+	end
+	local ok, result = pcall(function()
+		if descriptor_api.rename == "renameatx_np" then
+			return ffi.C.renameatx_np(anchor.fd, source, anchor.fd, destination, descriptor_api.rename_noreplace_flag)
+		end
+		return ffi.C.renameat2(anchor.fd, source, anchor.fd, destination, descriptor_api.rename_noreplace_flag)
+	end)
+	if not ok then
+		return nil, "exclusive cache reservation is unavailable: " .. tostring(result), -1
+	end
+	if result == 0 then
+		return true
+	end
+	local number = ffi.errno()
+	return nil, "could not reserve cache entry: errno " .. tostring(number), number
+end
+
+local function run_test_hook(event, details)
+	if type(state.test_hook) ~= "function" then
+		return true
+	end
+	local ok, err = pcall(state.test_hook, event, vim.deepcopy(details))
+	return ok and true or nil, ok and nil or tostring(err)
+end
+
+local function close_anchor(anchor)
+	if anchor_valid(anchor) then
+		pcall(uv.fs_fsync, anchor.fd)
+	end
+	close_fd(anchor.fd)
+	anchor.fd = nil
+end
 
 local function lstat(path)
 	local info, err = uv.fs_lstat(path)
@@ -100,6 +271,91 @@ local function inspect_file(path)
 	return info or false
 end
 
+local function conditional_remove(path, expected)
+	if type(path) ~= "string" or vim.fs.dirname(vim.fs.normalize(path)) ~= state.root then
+		return nil, "cache cleanup path escapes its pinned root"
+	end
+	local name = vim.fs.basename(path)
+	if not safe_component(name, "cache cleanup entry") then
+		return nil, "cache cleanup entry has an unsafe name"
+	end
+	if not expected or expected.type ~= "file" then
+		return nil, "cache cleanup requires an exact regular-file identity"
+	end
+	local anchor, anchor_err = open_root_anchor()
+	if not anchor then
+		return nil, anchor_err
+	end
+	local current, current_err = open_anchored_file(anchor, name)
+	if current == false then
+		close_anchor(anchor)
+		return true
+	end
+	if not current or not owned_file(current, expected) then
+		close_anchor(anchor)
+		return nil, current_err or "cache entry identity changed before cleanup"
+	end
+	local reserved
+	for _ = 1, 64 do
+		state.retire_counter = state.retire_counter + 1
+		reserved = (".%s.retire.%d.%d"):format(name, uv.os_getpid(), state.retire_counter)
+		local moved, move_err, number = exclusive_rename(anchor, name, reserved)
+		if moved then
+			break
+		end
+		if number == descriptor_api.noent then
+			close_anchor(anchor)
+			return true
+		end
+		if number ~= descriptor_api.eexist then
+			close_anchor(anchor)
+			return nil, move_err
+		end
+		reserved = nil
+	end
+	if not reserved then
+		close_anchor(anchor)
+		return nil, "cache cleanup reservation namespace is exhausted"
+	end
+	local hook_ok, hook_err = run_test_hook("after_cleanup_reserve", {
+		path = path,
+		reserved = vim.fs.joinpath(state.root, reserved),
+	})
+	if not hook_ok then
+		close_anchor(anchor)
+		return nil, "cache cleanup hook failed; reserved entry preserved: " .. tostring(hook_err)
+	end
+	local reserved_info, reserved_err = open_anchored_file(anchor, reserved)
+	if not reserved_info or not owned_file(reserved_info, expected) then
+		close_anchor(anchor)
+		return nil, reserved_err or "reserved cache entry identity changed; it was preserved"
+	end
+	hook_ok, hook_err = run_test_hook("before_cleanup_unlink", {
+		path = path,
+		reserved = vim.fs.joinpath(state.root, reserved),
+	})
+	if not hook_ok then
+		close_anchor(anchor)
+		return nil, "cache cleanup hook failed; reserved entry preserved: " .. tostring(hook_err)
+	end
+	reserved_info, reserved_err = open_anchored_file(anchor, reserved)
+	if not reserved_info or not owned_file(reserved_info, expected) then
+		close_anchor(anchor)
+		return nil, reserved_err or "reserved cache entry changed at the cleanup boundary"
+	end
+	if ffi.C.unlinkat(anchor.fd, reserved, 0) ~= 0 then
+		local number = ffi.errno()
+		close_anchor(anchor)
+		return nil, "could not unlink reserved cache entry: errno " .. tostring(number)
+	end
+	close_anchor(anchor)
+	return true
+end
+
+function M.remove(path, expected)
+	return conditional_remove(path, expected)
+end
+
 function M.read(key, extension, validate)
 	local root_ok, root_err = ensure_root()
 	if not root_ok then
@@ -161,8 +417,11 @@ function M.read(key, extension, validate)
 	if not final or final.type ~= "file" or final.dev ~= opened.dev or final.ino ~= opened.ino then
 		return nil, "cache entry changed while reading"
 	end
-	if validate and not validate(data) then
-		return nil, "cached renderer output is invalid", path
+	if validate then
+		local valid_ok, valid = pcall(validate, data)
+		if not valid_ok or not valid then
+			return nil, "cached renderer output is invalid", path, opened
+		end
 	end
 	return data, nil, path
 end
@@ -273,13 +532,13 @@ function M.prune()
 		if not name then
 			break
 		end
-		if kind == "file" and not name:find(".tmp.", 1, true) then
+		if kind == "file" and not name:find(".tmp.", 1, true) and not name:find(".retire.", 1, true) then
 			local path = vim.fs.joinpath(state.root, name)
 			local info = uv.fs_lstat(path)
 			if info and info.type == "file" and not state.live[path] then
-				local entry = { path = path, size = info.size or 0, mtime = mtime_seconds(info) }
+				local entry = { path = path, size = info.size or 0, mtime = mtime_seconds(info), identity = info }
 				if now - entry.mtime > state.max_age then
-					pcall(uv.fs_unlink, path)
+					conditional_remove(path, entry.identity)
 				else
 					entries[#entries + 1] = entry
 					total = total + entry.size
@@ -298,7 +557,7 @@ function M.prune()
 			if total <= state.max_bytes then
 				break
 			end
-			if not state.live[entry.path] and uv.fs_unlink(entry.path) then
+			if not state.live[entry.path] and conditional_remove(entry.path, entry.identity) then
 				total = total - entry.size
 			end
 		end
@@ -308,6 +567,10 @@ end
 
 function M.root()
 	return state.root
+end
+
+function M._set_test_hook(callback)
+	state.test_hook = callback
 end
 
 return M

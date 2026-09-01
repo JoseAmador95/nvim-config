@@ -100,6 +100,19 @@ local function test(name, callback)
 	end
 end
 
+test("lifecycle defaults are copied and rejected setup is non-mutating", function()
+	local defaults = scratch.effective_config()
+	assert(defaults.max_age_seconds == 30 * 24 * 60 * 60)
+	assert(defaults.lease_seconds == 300)
+	assert(scratch.status().configured == false)
+	defaults.lease_seconds = 1
+	assert(scratch.effective_config().lease_seconds == 300, "effective config leaked mutable state")
+	local before = scratch.status()
+	local ok, err = scratch.setup({ state_root = "/tmp/unused", unknown = true })
+	assert(not ok and err:find("unknown option", 1, true), err)
+	assert(vim.deep_equal(before, scratch.status()), "rejected setup mutated state")
+end)
+
 local fixture = vim.fn.tempname()
 local state = fixture .. "/state/scratch"
 local now = 2_000_000_000
@@ -919,6 +932,7 @@ test("save fails closed after lease ownership changes", function()
 			== before
 	)
 	assert(scratch.release(vim.tbl_extend("force", handle, { lease_token = replacement.token })))
+	scratch.release(handle)
 end)
 
 test("lease claim and renewal CAS never overwrite a concurrent owner", function()
@@ -951,6 +965,7 @@ test("lease claim and renewal CAS never overwrite a concurrent owner", function(
 	assert(renewal_injected and renewed == nil and tostring(renew_err):find("changed during renewal", 1, true))
 	assert(read_bytes(renew_handle.lease_path) == replacement_bytes, "renewal clobbered a concurrent owner")
 	assert(scratch.release(vim.tbl_extend("force", renew_handle, { lease_token = replacement.token })))
+	scratch.release(renew_handle)
 
 	local released = assert(scratch.open({
 		key = { repo_identity = "/repo/lease-claim-race", ref = "refs/heads/main" },
@@ -1478,6 +1493,10 @@ test("unsafe leases fail closed in open, save, and prune", function()
 		assert(read_bytes(save_handle.path) == content_before, kind .. " lease allowed a content write")
 		save_fixture.assert_unchanged()
 		save_fixture.cleanup()
+		-- The hostile fixture intentionally removed the owned lease. release()
+		-- still unregisters the process-local handle while correctly returning
+		-- false because ownership can no longer be proven.
+		scratch.release(save_handle)
 
 		local prune_handle = assert(scratch.open({
 			key = { repo_identity = "/repo/unsafe-prune-" .. kind, ref = "refs/heads/main" },
@@ -1699,6 +1718,60 @@ test("state root substitution is rejected after setup", function()
 		lease_seconds = 60,
 		max_age_seconds = 30 * 24 * 60 * 60,
 	}))
+end)
+
+test("repeated setup replaces callbacks and teardown is deterministic", function()
+	local events = {}
+	assert(scratch.setup({
+		state_root = state,
+		now = function()
+			return now
+		end,
+		lease_seconds = 60,
+		event = function(event)
+			events[#events + 1] = vim.deepcopy(event)
+			event.kind = "mutated"
+		end,
+	}))
+	local handle = assert(scratch.open({ key = { repo_identity = "/repo/events", ref = "refs/heads/main" } }))
+	assert(events[1].kind == "opened", "event callback did not receive an isolated copy")
+	assert(scratch.status(handle).owned, "event callback mutated the active handle")
+	assert(scratch.release(handle))
+	local before = scratch.status()
+	local ok = scratch.setup({ state_root = state, unknown = true })
+	assert(not ok)
+	assert(vim.deep_equal(before, scratch.status()), "invalid repeated setup mutated state")
+	assert(scratch.teardown())
+	assert(scratch.teardown())
+	assert(not scratch.status().configured)
+	assert(scratch.effective_config().lease_seconds == 300)
+	assert(scratch.setup({ state_root = state, lease_seconds = 60 }))
+end)
+
+test("failed state-root reconfiguration preserves the prior anchor and policy", function()
+	local prior = scratch.effective_config()
+	local target = fixture .. "/reconfigure-target"
+	local candidate = fixture .. "/reconfigure-link"
+	assert(vim.fn.mkdir(target, "p", tonumber("700", 8)) == 1)
+	assert(vim.uv.fs_symlink(target, candidate))
+	local configured, err = scratch.setup({ state_root = candidate, lease_seconds = 120 })
+	assert(not configured and tostring(err):find("symlink", 1, true), "unsafe candidate root was accepted")
+	assert(vim.deep_equal(scratch.effective_config(), prior), "failed setup replaced the effective policy")
+	assert(scratch.status().configured, "failed setup closed the prior root")
+	local handle = assert(scratch.open({ key = { repo_identity = "/repo/reconfigure", ref = "refs/heads/main" } }))
+	assert(handle.path:sub(1, #state + 1) == state .. "/", "failed setup redirected scratch state")
+	assert(scratch.release(handle))
+	vim.fn.delete(candidate)
+end)
+
+test("NUL state roots fail before normalization or filesystem mutation", function()
+	local prefix = fixture .. "/nul-root"
+	assert(vim.uv.fs_lstat(prefix) == nil)
+	local before = scratch.status()
+	local configured, err = scratch.setup({ state_root = prefix .. "\0suffix" })
+	assert(not configured and tostring(err):find("NUL", 1, true), tostring(err))
+	assert(vim.uv.fs_lstat(prefix) == nil, "NUL state root was truncated into a filesystem mutation")
+	assert(vim.deep_equal(before, scratch.status()), "NUL state root mutated plugin state")
 end)
 
 vim.fn.delete(fixture, "rf")

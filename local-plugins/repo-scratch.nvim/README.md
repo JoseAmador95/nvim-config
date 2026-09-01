@@ -36,3 +36,16 @@ because POSIX lacks atomic compare-and-unlink after a final exact snapshot, the
 OS owner UID is the trust boundary. Quarantine preserves replacements made by
 cooperating writers but cannot defend against hostile same-UID mutation after
 that last snapshot.
+
+The core defaults are 30-day retention and a 300-second lease. `renew()` must be
+called by a presenting host while a scratch stays open; the host adapter in this
+repository uses a heartbeat every lease/3, stops it on release or buffer
+deletion, and disables saving after renewal proves lease loss. `status()`
+reports copied lease ownership and expiry, and lifecycle events are copied into
+the optional callback.
+
+`setup()` rejects unknown options without changing active state, replaces
+injected time/event adapters on repetition, and requires an explicit private
+state root. `effective_config()` and `status()` work before setup and return
+copies. `teardown()` releases all tracked handles, closes the pinned root, and
+is safe to repeat.

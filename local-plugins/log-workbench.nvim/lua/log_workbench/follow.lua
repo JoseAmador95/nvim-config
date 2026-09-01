@@ -16,13 +16,17 @@ local state = {
 
 local Session = {}
 Session.__index = Session
+local start_poll
+local start_fs_event
 
-local function positive_integer(value, fallback)
-	value = tonumber(value)
-	if not value or value < 1 or value ~= value or value == math.huge then
+local function positive_integer(value, fallback, label)
+	if value == nil then
 		return fallback
 	end
-	return math.floor(value)
+	if type(value) ~= "number" or value % 1 ~= 0 or value < 1 or value ~= value or value == math.huge then
+		return nil, label .. " must be a positive integer"
+	end
+	return value
 end
 
 local function copy(value)
@@ -33,6 +37,12 @@ local function notify(message, level)
 	if state.options and state.options.notify then
 		pcall(state.options.notify, message, level)
 	end
+end
+
+local function session_error(session, message, level)
+	session.error = tostring(message)
+	session.health = level == vim.log.levels.WARN and "degraded" or "error"
+	notify(message, level)
 end
 
 local function emit(kind, session, extra)
@@ -174,6 +184,12 @@ local function enforce_bounds(session)
 		total = total - session.sizes[drop]
 	end
 	if drop > 0 then
+		local dropped_bytes = 0
+		for index = 1, drop do
+			dropped_bytes = dropped_bytes + session.sizes[index]
+		end
+		session.dropped.lines = session.dropped.lines + drop
+		session.dropped.bytes = session.dropped.bytes + dropped_bytes
 		vim.api.nvim_buf_set_lines(session.buf, 0, drop, false, {})
 		local remaining = {}
 		for index = drop + 1, #session.sizes do
@@ -184,6 +200,7 @@ local function enforce_bounds(session)
 
 	if total > session.max_bytes and #session.sizes == 1 then
 		local line = vim.api.nvim_buf_get_lines(session.buf, 0, 1, false)[1] or ""
+		local previous_size = session.sizes[1]
 		local newline_bytes = session.partial_text ~= nil and 0 or 1
 		local keep = math.max(0, session.max_bytes - newline_bytes)
 		line = assert(decoder.suffix(line, keep))
@@ -192,6 +209,7 @@ local function enforce_bounds(session)
 			session.partial_text = line
 		end
 		session.sizes[1] = #line + newline_bytes
+		session.dropped.bytes = session.dropped.bytes + math.max(0, previous_size - session.sizes[1])
 		total = session.sizes[1]
 	end
 	session.buffer_bytes = total
@@ -274,6 +292,16 @@ local function append_data(session, raw)
 	end)
 end
 
+local function update_continuity(session, raw, reload)
+	local existing = reload and "" or session.continuity
+	local combined = (existing or "") .. raw
+	local limit = session.max_bytes
+	if #combined > limit then
+		combined = combined:sub(#combined - limit + 1)
+	end
+	session.continuity = combined
+end
+
 local request_refresh
 
 local function finish_refresh(session)
@@ -300,6 +328,7 @@ local function read_file(session, stat, reload)
 			apply_reload(session, "")
 		end
 		session.offset = 0
+		session.continuity = ""
 		session.identity = file_identity(stat)
 		session.mtime = mtime_identity(stat)
 		session.missing = false
@@ -319,7 +348,7 @@ local function read_file(session, stat, reload)
 				return
 			end
 			if err then
-				notify("Could not read followed file: " .. tostring(err), vim.log.levels.ERROR)
+				session_error(session, "Could not read followed file: " .. tostring(err), vim.log.levels.ERROR)
 				finish_refresh(session)
 				return
 			end
@@ -342,11 +371,14 @@ local function read_file(session, stat, reload)
 				applied = append_data(session, raw)
 			end
 			if applied then
+				update_continuity(session, raw, reload)
 				session.offset = read_start + #raw
 				session.identity = file_identity(stat)
 				session.mtime = mtime_identity(stat)
 				session.missing = false
 				session.state = "following"
+				session.error = nil
+				session.health = session.watcher_error and "degraded" or "healthy"
 				emit(reload and "reload" or "append", session, { bytes = #raw })
 			end
 			if #raw < length then
@@ -358,7 +390,54 @@ local function read_file(session, stat, reload)
 	)
 	if not ok or request == nil then
 		local reason = ok and request_err or request
-		notify("Could not start followed-file read: " .. tostring(reason), vim.log.levels.ERROR)
+		session_error(session, "Could not start followed-file read: " .. tostring(reason), vim.log.levels.ERROR)
+		finish_refresh(session)
+	end
+end
+
+local function verify_append_continuity(session, stat)
+	local expected = session.continuity or ""
+	if session.offset == 0 then
+		read_file(session, stat, false)
+		return
+	end
+	if expected == "" then
+		read_file(session, stat, true)
+		return
+	end
+
+	local length = math.min(#expected, session.offset)
+	local expected_suffix = expected:sub(#expected - length + 1)
+	local read_start = session.offset - length
+	local ok, request, request_err = pcall(
+		session.options.uv.fs_read,
+		session.fd,
+		length,
+		read_start,
+		schedule_call(session, function(err, raw)
+			if not live(session) then
+				close_fd(session)
+				return
+			end
+			if err then
+				session_error(
+					session,
+					"Could not verify followed-file continuity: " .. tostring(err),
+					vim.log.levels.ERROR
+				)
+				finish_refresh(session)
+				return
+			end
+			read_file(session, stat, (raw or "") ~= expected_suffix)
+		end)
+	)
+	if not ok or request == nil then
+		local reason = ok and request_err or request
+		session_error(
+			session,
+			"Could not start followed-file continuity check: " .. tostring(reason),
+			vim.log.levels.ERROR
+		)
 		finish_refresh(session)
 	end
 end
@@ -373,7 +452,8 @@ local function inspect_open_file(session, force_reload)
 				return
 			end
 			if err or not stat or stat.type ~= "file" then
-				notify(
+				session_error(
+					session,
 					"Could not inspect followed file: " .. tostring(err or "not a regular file"),
 					vim.log.levels.ERROR
 				)
@@ -397,22 +477,30 @@ local function inspect_open_file(session, force_reload)
 				finish_refresh(session)
 				return
 			end
-			read_file(session, stat, reload)
+			if reload then
+				read_file(session, stat, true)
+			else
+				verify_append_continuity(session, stat)
+			end
 		end)
 	)
 	if not ok or request == nil then
 		local reason = ok and request_err or request
-		notify("Could not start followed-file inspection: " .. tostring(reason), vim.log.levels.ERROR)
+		session_error(session, "Could not start followed-file inspection: " .. tostring(reason), vim.log.levels.ERROR)
 		finish_refresh(session)
 	end
 end
 
 request_refresh = function(session, force_reload)
-	if not live(session) then
+	if not live(session) or session.paused then
+		if live(session) and session.paused then
+			session.dropped.events = session.dropped.events + 1
+		end
 		return false
 	end
 	force_reload = force_reload or session.force_reload or false
 	if session.busy then
+		session.dropped.events = session.dropped.events + 1
 		session.pending = true
 		session.pending_force = session.pending_force or force_reload
 		return true
@@ -437,7 +525,7 @@ request_refresh = function(session, force_reload)
 					session.state = "missing"
 					emit("missing", session)
 				else
-					notify("Could not open followed file: " .. tostring(err), vim.log.levels.ERROR)
+					session_error(session, "Could not open followed file: " .. tostring(err), vim.log.levels.ERROR)
 				end
 				finish_refresh(session)
 				return
@@ -448,7 +536,7 @@ request_refresh = function(session, force_reload)
 	)
 	if not ok or request == nil then
 		local reason = ok and request_err or request
-		notify("Could not start followed-file open: " .. tostring(reason), vim.log.levels.ERROR)
+		session_error(session, "Could not start followed-file open: " .. tostring(reason), vim.log.levels.ERROR)
 		finish_refresh(session)
 		return false
 	end
@@ -491,6 +579,39 @@ function Session:refresh(force_reload)
 	return request_refresh(self, force_reload == true)
 end
 
+function Session:pause()
+	if self.closed or self.paused then
+		return false
+	end
+	self.paused = true
+	self.state = "paused"
+	close_handle(self.poll)
+	close_handle(self.fs_event)
+	self.poll = nil
+	self.fs_event = nil
+	emit("paused", self)
+	return true
+end
+
+function Session:resume()
+	if self.closed or not self.paused then
+		return false
+	end
+	self.paused = false
+	self.state = "starting"
+	local poll_ok, poll_err = start_poll(self)
+	if not poll_ok then
+		self.paused = true
+		self.state = "paused"
+		session_error(self, poll_err, vim.log.levels.ERROR)
+		return nil, poll_err
+	end
+	start_fs_event(self)
+	emit("resumed", self)
+	request_refresh(self, true)
+	return true
+end
+
 function Session:buffer()
 	return self.buf
 end
@@ -510,6 +631,10 @@ function Session:status()
 		max_lines = self.max_lines,
 		max_bytes = self.max_bytes,
 		missing = self.missing,
+		paused = self.paused,
+		health = self.paused and "paused" or self.health,
+		dropped = copy(self.dropped),
+		error = self.error,
 		metadata = copy(self.metadata),
 	}
 end
@@ -534,7 +659,7 @@ local function create_tail_buffer(path, id)
 	return buf
 end
 
-local function start_poll(session)
+start_poll = function(session)
 	local poll, poll_err = session.options.new_fs_poll()
 	if not poll then
 		return nil, "could not create polling watcher: " .. tostring(poll_err)
@@ -549,7 +674,8 @@ local function start_poll(session)
 				return
 			end
 			if err then
-				notify("Follow poll failed: " .. tostring(err), vim.log.levels.WARN)
+				session.watcher_error = "Follow poll failed: " .. tostring(err)
+				session_error(session, session.watcher_error, vim.log.levels.WARN)
 			end
 			local force = session.missing
 				or (previous and current and file_identity(previous) ~= file_identity(current))
@@ -565,10 +691,11 @@ local function start_poll(session)
 	return true
 end
 
-local function start_fs_event(session)
+start_fs_event = function(session)
 	local handle, handle_err = session.options.new_fs_event()
 	if not handle then
-		notify("Could not create event watcher: " .. tostring(handle_err), vim.log.levels.WARN)
+		session.watcher_error = "Could not create event watcher: " .. tostring(handle_err)
+		session_error(session, session.watcher_error, vim.log.levels.WARN)
 		return
 	end
 	local directory = vim.fs.dirname(session.source_path)
@@ -578,27 +705,51 @@ local function start_fs_event(session)
 		handle,
 		directory,
 		{},
-		schedule_call(session, function(err, filename, _events)
+		schedule_call(session, function(err, filename, events)
 			if not live(session) or (filename and filename ~= "" and vim.fs.basename(filename) ~= basename) then
 				return
 			end
 			if err then
-				notify("Follow event watcher failed: " .. tostring(err), vim.log.levels.WARN)
+				session.watcher_error = "Follow event watcher failed: " .. tostring(err)
+				session_error(session, session.watcher_error, vim.log.levels.WARN)
 			end
-			request_refresh(session, true)
+			local known = type(events) == "table" and (events.change == true or events.rename == true)
+			local force = err ~= nil
+				or filename == nil
+				or filename == ""
+				or not known
+				or (type(events) == "table" and events.rename == true)
+			request_refresh(session, force)
 		end)
 	)
 	if not ok or result == nil then
 		close_handle(handle)
-		notify("Could not start event watcher: " .. tostring(ok and start_err or result), vim.log.levels.WARN)
+		session.watcher_error = "Could not start event watcher: " .. tostring(ok and start_err or result)
+		session_error(session, session.watcher_error, vim.log.levels.WARN)
 		return
 	end
 	session.fs_event = handle
 end
 
 function M.setup(opts)
-	if type(opts) ~= "table" then
-		return nil, "setup options must be a table"
+	if type(opts) ~= "table" or (next(opts) ~= nil and vim.islist(opts)) then
+		return nil, "setup options must be an object"
+	end
+	local allowed = {
+		uv = true,
+		notify = true,
+		event = true,
+		schedule = true,
+		new_fs_poll = true,
+		new_fs_event = true,
+		poll_interval_ms = true,
+		max_lines = true,
+		max_bytes = true,
+	}
+	for key in pairs(opts) do
+		if not allowed[key] then
+			return nil, "setup contains an unknown option: " .. tostring(key)
+		end
 	end
 	for _, name in ipairs({ "notify", "event", "schedule", "new_fs_poll", "new_fs_event" }) do
 		if opts[name] ~= nil and type(opts[name]) ~= "function" then
@@ -619,6 +770,19 @@ function M.setup(opts)
 	if type(new_fs_poll) ~= "function" or type(new_fs_event) ~= "function" then
 		return nil, "setup requires fs_poll and fs_event factories"
 	end
+	local poll_interval_ms, poll_err =
+		positive_integer(opts.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS, "setup.poll_interval_ms")
+	if not poll_interval_ms then
+		return nil, poll_err
+	end
+	local max_lines, lines_err = positive_integer(opts.max_lines, DEFAULT_MAX_LINES, "setup.max_lines")
+	if not max_lines then
+		return nil, lines_err
+	end
+	local max_bytes, bytes_err = positive_integer(opts.max_bytes, DEFAULT_MAX_BYTES, "setup.max_bytes")
+	if not max_bytes then
+		return nil, bytes_err
+	end
 	local sessions = {}
 	for _, session in pairs(state.sessions_by_buf) do
 		sessions[#sessions + 1] = session
@@ -633,14 +797,28 @@ function M.setup(opts)
 		schedule = opts.schedule or vim.schedule,
 		new_fs_poll = new_fs_poll,
 		new_fs_event = new_fs_event,
-		poll_interval_ms = positive_integer(opts.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS),
-		max_lines = positive_integer(opts.max_lines, DEFAULT_MAX_LINES),
-		max_bytes = positive_integer(opts.max_bytes, DEFAULT_MAX_BYTES),
+		poll_interval_ms = poll_interval_ms,
+		max_lines = max_lines,
+		max_bytes = max_bytes,
 	}
 	state.sessions_by_buf = {}
 	state.sessions_by_source = {}
 	state.configured = true
 	return true
+end
+
+function M.effective_config()
+	return state.options
+			and {
+				poll_interval_ms = state.options.poll_interval_ms,
+				max_lines = state.options.max_lines,
+				max_bytes = state.options.max_bytes,
+			}
+		or {
+			poll_interval_ms = DEFAULT_POLL_INTERVAL_MS,
+			max_lines = DEFAULT_MAX_LINES,
+			max_bytes = DEFAULT_MAX_BYTES,
+		}
 end
 
 function M.open(path, opts)
@@ -661,12 +839,30 @@ function M.open(path, opts)
 	if not stat or stat.type ~= "file" then
 		return nil, "follow path must be a readable regular file"
 	end
-	opts = opts or {}
-	if type(opts) ~= "table" then
-		return nil, "follow options must be a table"
+	if opts == nil then
+		opts = {}
 	end
-	if opts.metadata ~= nil and type(opts.metadata) ~= "table" then
-		return nil, "follow metadata must be a table"
+	if type(opts) ~= "table" or (next(opts) ~= nil and vim.islist(opts)) then
+		return nil, "follow options must be an object"
+	end
+	if
+		opts.metadata ~= nil
+		and (type(opts.metadata) ~= "table" or (next(opts.metadata) ~= nil and vim.islist(opts.metadata)))
+	then
+		return nil, "follow metadata must be an object"
+	end
+	for key in pairs(opts) do
+		if key ~= "metadata" and key ~= "max_lines" and key ~= "max_bytes" then
+			return nil, "follow options contain an unknown option: " .. tostring(key)
+		end
+	end
+	local max_lines, lines_err = positive_integer(opts.max_lines, state.options.max_lines, "follow.max_lines")
+	if not max_lines then
+		return nil, lines_err
+	end
+	local max_bytes, bytes_err = positive_integer(opts.max_bytes, state.options.max_bytes, "follow.max_bytes")
+	if not max_bytes then
+		return nil, bytes_err
 	end
 	state.next_id = state.next_id + 1
 	local buf, buffer_err = create_tail_buffer(path, state.next_id)
@@ -680,17 +876,23 @@ function M.open(path, opts)
 		state = "starting",
 		closed = false,
 		options = state.options,
-		max_lines = positive_integer(opts.max_lines, state.options.max_lines),
-		max_bytes = positive_integer(opts.max_bytes, state.options.max_bytes),
+		max_lines = max_lines,
+		max_bytes = max_bytes,
 		offset = 0,
 		sizes = {},
 		buffer_bytes = 0,
 		decode_carry = "",
+		continuity = "",
 		partial_text = nil,
 		busy = false,
 		pending = false,
 		pending_force = false,
 		missing = false,
+		paused = false,
+		health = "healthy",
+		error = nil,
+		watcher_error = nil,
+		dropped = { lines = 0, bytes = 0, events = 0 },
 		pin_all_once = true,
 		metadata = copy(opts.metadata or {}),
 	}, Session)
@@ -729,6 +931,16 @@ end
 function M.stop(session_or_buf, options)
 	local session = resolve(session_or_buf)
 	return session and session:stop(options) or false
+end
+
+function M.pause(session_or_buf)
+	local session = resolve(session_or_buf)
+	return session and session:pause() or false
+end
+
+function M.resume(session_or_buf)
+	local session = resolve(session_or_buf)
+	return session and session:resume() or false
 end
 
 function M.stop_all(options)
@@ -771,6 +983,8 @@ end
 function M.teardown()
 	M.stop_all()
 	state.configured = false
+	state.options = nil
+	return true
 end
 
 return M

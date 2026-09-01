@@ -3,6 +3,16 @@ local source = require("diagram_view.source")
 
 local M = {}
 
+local DEFAULT_CONFIG = {
+	default_mode = "svg",
+	stage_timeout_ms = 30000,
+	max_stage_output_bytes = 16 * 1024 * 1024,
+	cache = {
+		max_age_seconds = 30 * 24 * 60 * 60,
+		max_bytes = 256 * 1024 * 1024,
+	},
+}
+
 local SECURITY_PROFILES = {
 	SANDBOX = true,
 	ALLOWLIST = true,
@@ -57,6 +67,21 @@ end
 
 local function default_schedule(callback)
 	vim.schedule(callback)
+end
+
+local function default_defer(callback, milliseconds)
+	return vim.defer_fn(callback, milliseconds)
+end
+
+local function stop_timer(timer)
+	if not timer then
+		return
+	end
+	pcall(timer.stop, timer)
+	local ok, closing = pcall(timer.is_closing, timer)
+	if not ok or not closing then
+		pcall(timer.close, timer)
+	end
 end
 
 local function ordered_keys(value)
@@ -225,6 +250,8 @@ local function plan_key(renderer_name, request, plan, security_profile)
 end
 
 local function present_error(session, message)
+	stop_timer(session.timeout)
+	session.timeout = nil
 	session.state = "error"
 	session.error = message
 	notify(message, vim.log.levels.ERROR)
@@ -264,6 +291,8 @@ function Session:_finish_stage(generation, result)
 		return
 	end
 	self.active = nil
+	stop_timer(self.timeout)
+	self.timeout = nil
 	if type(result) ~= "table" or result.code ~= 0 then
 		local detail = type(result) == "table" and vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
 			or ""
@@ -271,6 +300,14 @@ function Session:_finish_stage(generation, result)
 		return
 	end
 	local output = result.stdout or ""
+	local error_output = result.stderr or ""
+	if #output + #error_output > state.options.config.max_stage_output_bytes then
+		present_error(
+			self,
+			("diagram renderer output exceeds %d bytes"):format(state.options.config.max_stage_output_bytes)
+		)
+		return
+	end
 	self.stage_input = output
 	self.stage_index = self.stage_index + 1
 	if self.stage_index <= #self.plan.stages then
@@ -313,10 +350,26 @@ function Session:_start_stage(generation)
 			self:_finish_stage(generation, result)
 		end)
 	end
+	self.timeout = state.options.defer(function()
+		if completed or self.closed or generation ~= self.generation then
+			return
+		end
+		completed = true
+		self.generation = self.generation + 1
+		if self.active and self.active.kill then
+			pcall(self.active.kill, self.active, 15)
+		end
+		self.active = nil
+		present_error(
+			self,
+			("diagram renderer stage timed out after %d ms"):format(state.options.config.stage_timeout_ms)
+		)
+	end, state.options.config.stage_timeout_ms)
 	local ok, handle = pcall(state.options.spawn, copy(stage.argv), {
 		stdin = self.stage_input,
 		text = stage.text,
 		env = env,
+		timeout = state.options.config.stage_timeout_ms,
 	}, callback)
 	if not ok then
 		callback({ code = -1, stdout = "", stderr = tostring(handle) })
@@ -330,16 +383,33 @@ function Session:cancel(reason)
 		return false
 	end
 	self.generation = self.generation + 1
-	self.closed = true
-	self.state = "cancelled"
 	self.cancel_reason = reason or "cancelled"
 	if self.active and self.active.kill then
-		pcall(self.active.kill, self.active, 15)
+		local killed, result = pcall(self.active.kill, self.active, 15)
+		if not killed or result == false then
+			stop_timer(self.timeout)
+			self.timeout = nil
+			self.state = "cancel-failed"
+			self.error = "diagram process could not be stopped: " .. tostring(killed and result or result)
+			emit("cancel-failed", self, { reason = self.cancel_reason, error = self.error })
+			return nil, self.error
+		end
 	end
-	self.active = nil
+	stop_timer(self.timeout)
+	self.timeout = nil
 	if self.presenter.close then
-		pcall(self.presenter.close, self.presentation, self)
+		local closed, result = pcall(self.presenter.close, self.presentation, self)
+		if not closed or result == false then
+			self.state = "cancel-failed"
+			self.error = "diagram presentation could not be closed: " .. tostring(closed and result or result)
+			emit("cancel-failed", self, { reason = self.cancel_reason, error = self.error })
+			return nil, self.error
+		end
 	end
+	self.closed = true
+	self.state = "cancelled"
+	self.error = nil
+	self.active = nil
 	cache.release(self.retained)
 	self.retained = nil
 	state.sessions[self.id] = nil
@@ -365,6 +435,24 @@ function M.setup(opts)
 	if type(opts) ~= "table" then
 		return nil, "setup options must be a table"
 	end
+	local allowed = {
+		cache_root = true,
+		default_mode = true,
+		stage_timeout_ms = true,
+		max_stage_output_bytes = true,
+		cache = true,
+		notify = true,
+		event = true,
+		spawn = true,
+		schedule = true,
+		defer = true,
+		plantuml_policy = true,
+	}
+	for key in pairs(opts) do
+		if not allowed[key] then
+			return nil, "setup contains an unknown option: " .. tostring(key)
+		end
+	end
 	for _, callback in ipairs({ "notify", "event" }) do
 		if opts[callback] ~= nil and type(opts[callback]) ~= "function" then
 			return nil, ("setup.%s must be a function"):format(callback)
@@ -376,30 +464,103 @@ function M.setup(opts)
 	if opts.schedule ~= nil and type(opts.schedule) ~= "function" then
 		return nil, "setup.schedule must be a function"
 	end
+	if opts.defer ~= nil and type(opts.defer) ~= "function" then
+		return nil, "setup.defer must be a function"
+	end
 	if opts.plantuml_policy ~= nil and type(opts.plantuml_policy) ~= "function" then
 		return nil, "setup.plantuml_policy must be a function"
 	end
-	local cache_ok, cache_err = cache.setup({
-		root = opts.cache_root,
-		max_age_seconds = opts.max_age_seconds,
-		max_bytes = opts.max_bytes,
-	})
-	if not cache_ok then
-		return nil, cache_err
+	local cache_options = opts.cache
+	if cache_options == nil then
+		cache_options = {}
+	end
+	if type(cache_options) ~= "table" or (next(cache_options) ~= nil and vim.islist(cache_options)) then
+		return nil, "setup.cache must be an object"
+	end
+	for key in pairs(cache_options) do
+		if key ~= "max_age_seconds" and key ~= "max_bytes" then
+			return nil, "setup.cache contains an unknown option: " .. tostring(key)
+		end
+	end
+	local default_mode = opts.default_mode
+	if default_mode == nil then
+		default_mode = DEFAULT_CONFIG.default_mode
+	end
+	if default_mode ~= "svg" and default_mode ~= "ascii" then
+		return nil, "setup.default_mode must be svg or ascii"
+	end
+	local function positive_integer(value, fallback, label)
+		value = value == nil and fallback or value
+		if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+			return nil, label .. " must be a positive integer"
+		end
+		return value
+	end
+	local stage_timeout_ms, timeout_err =
+		positive_integer(opts.stage_timeout_ms, DEFAULT_CONFIG.stage_timeout_ms, "setup.stage_timeout_ms")
+	if not stage_timeout_ms then
+		return nil, timeout_err
+	end
+	local max_stage_output_bytes, output_err = positive_integer(
+		opts.max_stage_output_bytes,
+		DEFAULT_CONFIG.max_stage_output_bytes,
+		"setup.max_stage_output_bytes"
+	)
+	if not max_stage_output_bytes then
+		return nil, output_err
+	end
+	local max_age_seconds, age_err = positive_integer(
+		cache_options.max_age_seconds,
+		DEFAULT_CONFIG.cache.max_age_seconds,
+		"setup.cache.max_age_seconds"
+	)
+	if not max_age_seconds then
+		return nil, age_err
+	end
+	local max_bytes, bytes_err =
+		positive_integer(cache_options.max_bytes, DEFAULT_CONFIG.cache.max_bytes, "setup.cache.max_bytes")
+	if not max_bytes then
+		return nil, bytes_err
+	end
+	local effective = {
+		default_mode = default_mode,
+		stage_timeout_ms = stage_timeout_ms,
+		max_stage_output_bytes = max_stage_output_bytes,
+		cache = { max_age_seconds = max_age_seconds, max_bytes = max_bytes },
+	}
+	if type(opts.cache_root) ~= "string" or opts.cache_root == "" or opts.cache_root:find("\0", 1, true) then
+		return nil, "cache root must be a non-empty path"
+	end
+	local normalized_cache_root = vim.fs.normalize(opts.cache_root)
+	if normalized_cache_root:sub(1, 1) ~= "/" then
+		return nil, "cache root must be absolute"
 	end
 	local existing = {}
 	for _, session in pairs(state.sessions) do
 		existing[#existing + 1] = session
 	end
 	for _, session in ipairs(existing) do
-		session:cancel("reconfigured")
+		local cancelled, cancel_err = session:cancel("reconfigured")
+		if not cancelled then
+			return nil, "could not reconfigure diagram view: " .. tostring(cancel_err)
+		end
+	end
+	local cache_ok, cache_err = cache.setup({
+		root = normalized_cache_root,
+		max_age_seconds = effective.cache.max_age_seconds,
+		max_bytes = effective.cache.max_bytes,
+	})
+	if not cache_ok then
+		return nil, cache_err
 	end
 	state.options = {
 		notify = opts.notify,
 		event = opts.event,
 		spawn = opts.spawn or default_spawn,
 		schedule = opts.schedule or default_schedule,
+		defer = opts.defer or default_defer,
 		plantuml_policy = opts.plantuml_policy,
+		config = effective,
 	}
 	state.renderers = {}
 	state.presenters = {}
@@ -517,7 +678,7 @@ function M.open(request)
 	session.presentation = presentation
 	emit("opened", session)
 
-	local cached, read_err, path = cache.read(cache_key, plan.extension, function(data)
+	local cached, read_err, path, cache_identity = cache.read(cache_key, plan.extension, function(data)
 		return valid_output(plan, data)
 	end)
 	if cached then
@@ -525,7 +686,10 @@ function M.open(request)
 		return session
 	end
 	if read_err and path then
-		pcall(vim.uv.fs_unlink, path)
+		local removed, remove_err = cache.remove(path, cache_identity)
+		if not removed then
+			notify("invalid diagram cache entry was preserved: " .. tostring(remove_err), vim.log.levels.WARN)
+		end
 	elseif read_err then
 		present_error(session, "could not read diagram cache: " .. tostring(read_err))
 		return session
@@ -562,7 +726,36 @@ function M.status()
 	table.sort(sessions, function(left, right)
 		return left.id < right.id
 	end)
-	return { configured = state.configured, renderers = renderers, presenters = presenters, sessions = sessions }
+	return vim.deepcopy({
+		configured = state.configured,
+		config = M.effective_config(),
+		renderers = renderers,
+		presenters = presenters,
+		sessions = sessions,
+	})
+end
+
+function M.effective_config()
+	return state.options and copy(state.options.config) or copy(DEFAULT_CONFIG)
+end
+
+function M.teardown()
+	local sessions = {}
+	for _, session in pairs(state.sessions) do
+		sessions[#sessions + 1] = session
+	end
+	for _, session in ipairs(sessions) do
+		local cancelled, cancel_err = session:cancel("teardown")
+		if not cancelled then
+			return nil, cancel_err
+		end
+	end
+	state.renderers = {}
+	state.presenters = {}
+	state.sessions = {}
+	state.options = nil
+	state.configured = false
+	return true
 end
 
 return M

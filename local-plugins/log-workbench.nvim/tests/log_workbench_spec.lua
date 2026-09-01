@@ -8,6 +8,7 @@ package.path = table.concat({ plugin .. "/lua/?.lua", plugin .. "/lua/?/init.lua
 local follow = require("log_workbench.follow")
 local matches = require("log_workbench.matches")
 local workbench = require("log_workbench")
+local decoder = require("log_workbench.decoder")
 local failures = {}
 local count = 0
 local temporary = {}
@@ -97,12 +98,42 @@ local function watchers()
 	return result
 end
 
+test("decoder replaces an invalid available continuation without hiding following ASCII", function()
+	local decoded, carry = assert(decoder.feed("", string.char(0xE2) .. "A"))
+	equal("\239\191\189A", decoded)
+	equal("", carry, "invalid lead plus ASCII remained hidden in carry")
+	decoded, carry = assert(decoder.feed("", string.char(0xE2, 0x82)))
+	equal("", decoded)
+	equal(string.char(0xE2, 0x82), carry, "genuinely incomplete UTF-8 was replaced")
+	decoded, carry = assert(decoder.feed(carry, string.char(0xAC)))
+	equal("\226\130\172", decoded)
+	equal("", carry)
+end)
+
 test("top-level setup configures both modules with an exact option object", function()
+	equal({ poll_interval_ms = 500, max_lines = 100000, max_bytes = 64 * 1024 * 1024 }, workbench.effective_config())
+	assert(workbench.status().configured == false)
+	local defaults = workbench.effective_config()
+	defaults.max_lines = 1
+	equal(100000, workbench.effective_config().max_lines, "effective config leaked mutable state")
 	local invalid, invalid_err = workbench.setup({ injected = true })
 	assert(not invalid and invalid_err:find("unknown field", 1, true))
+	invalid, invalid_err = workbench.setup(false)
+	assert(not invalid and invalid_err:find("object", 1, true), "false setup options were accepted")
 	assert(workbench.setup({ follow = {}, matches = {} }))
-	follow.teardown()
-	matches.teardown()
+	local before = workbench.status()
+	local coerced, coerced_err = workbench.setup({ follow = { max_lines = "bogus" } })
+	assert(not coerced and coerced_err:find("positive integer", 1, true), "invalid follow limit was coerced")
+	equal(before, workbench.status(), "invalid numeric setup mutated state")
+	local nested, nested_err = workbench.setup({ follow = { injected = true }, matches = {} })
+	assert(not nested and nested_err:find("unknown option", 1, true), nested_err)
+	equal(before, workbench.status(), "rejected nested setup mutated state")
+	local status = workbench.status()
+	status.config.max_lines = 1
+	equal(100000, workbench.status().config.max_lines, "status leaked mutable config")
+	assert(workbench.teardown())
+	assert(workbench.teardown())
+	assert(workbench.status().configured == false)
 end)
 
 local function setup_follow(opts)
@@ -116,6 +147,7 @@ local function setup_follow(opts)
 		new_fs_event = observed.new_fs_event,
 		schedule = opts.schedule or vim.schedule,
 		notify = function() end,
+		event = opts.event,
 	})
 	assert(ok, err)
 	return observed
@@ -165,6 +197,7 @@ test("follow reconciles partial append, copytruncate, rotation, deletion, and re
 	wait_for(function()
 		return vim.deep_equal(lines(buf), { "two", "three", "four" })
 	end, "initial line bound was not enforced")
+	assert(session:status().dropped.lines == 1, "line retention did not report dropped data")
 
 	local previous = vim.uv.fs_stat(path)
 	append_raw(path, "-x")
@@ -202,6 +235,156 @@ test("follow reconciles partial append, copytruncate, rotation, deletion, and re
 	wait_for(function()
 		return vim.deep_equal(lines(buf), { "recreated" })
 	end, "recreated path did not reload")
+	session:stop()
+end)
+
+test("change event detects copytruncate after the replacement regrows beyond the previous offset", function()
+	local events = {}
+	local observed = setup_follow({
+		event = function(event)
+			events[#events + 1] = vim.deepcopy(event)
+		end,
+	})
+	local path = temporary_file("old-a\nold-b\n")
+	local session = assert(follow.open(path))
+	wait_for(function()
+		return vim.deep_equal(lines(session:buffer()), { "old-a", "old-b" })
+	end, "initial tail did not settle")
+	local previous_offset = session:status().offset
+
+	write_raw(path, "replacement-a\nreplacement-b\n")
+	assert(vim.uv.fs_stat(path).size > previous_offset, "fixture did not regrow beyond the previous offset")
+	observed.events[1].callback(nil, vim.fs.basename(path), { change = true })
+	wait_for(function()
+		return vim.deep_equal(lines(session:buffer()), { "replacement-a", "replacement-b" })
+	end, "regrown copytruncate was mistaken for an append")
+	assert(
+		vim.tbl_contains(
+			vim.tbl_map(function(event)
+				return event.kind
+			end, events),
+			"reload"
+		),
+		"continuity break did not emit a reload"
+	)
+	session:stop()
+end)
+
+test("copytruncate cannot collide only on a short continuity suffix", function()
+	local observed = setup_follow({ max_bytes = 200000 })
+	local shared = string.rep("x", 65536)
+	local path = temporary_file("OLD\n" .. shared)
+	local session = assert(follow.open(path))
+	wait_for(function()
+		return lines(session:buffer())[1] == "OLD"
+	end, "initial long tail did not settle")
+	local previous_offset = session:status().offset
+
+	write_raw(path, "NEW\n" .. shared .. "extra")
+	assert(vim.uv.fs_stat(path).size > previous_offset, "fixture did not regrow beyond the previous offset")
+	observed.events[1].callback(nil, vim.fs.basename(path), { change = true })
+	wait_for(function()
+		return lines(session:buffer())[1] == "NEW"
+	end, "copytruncate prefix change collided on a shared 64 KiB suffix")
+	session:stop()
+end)
+
+test("invalid per-session bounds fail before publishing a buffer or identity", function()
+	setup_follow()
+	local path = temporary_file("bounded\n")
+	local before = #follow.status()
+	local session, err = follow.open(path, { max_lines = "bad" })
+	assert(not session and err:find("positive integer", 1, true))
+	equal(before, #follow.status(), "invalid open published a follow session")
+	assert(follow.find(path) == nil, "invalid open claimed the source path")
+end)
+
+test("fs-event storms coalesce, change appends incrementally, and uncertain identity reloads", function()
+	local events = {}
+	local observed = setup_follow({
+		event = function(event)
+			events[#events + 1] = vim.deepcopy(event)
+			event.path = "mutated"
+		end,
+	})
+	local path = temporary_file("base")
+	local session = assert(follow.open(path))
+	wait_for(function()
+		return session:status().state == "following"
+	end, "initial follow did not settle")
+	local event_watcher = observed.events[1]
+	append_raw(path, "-append")
+	for _ = 1, 8 do
+		event_watcher.callback(nil, vim.fs.basename(path), { change = true })
+	end
+	wait_for(function()
+		return vim.deep_equal(lines(session:buffer()), { "base-append" })
+	end, "change event did not append incrementally")
+	wait_for(function()
+		return session:status().dropped.events > 0
+	end, "event storm did not report coalesced notifications")
+	assert(
+		vim.tbl_contains(
+			vim.tbl_map(function(event)
+				return event.kind
+			end, events),
+			"append"
+		),
+		"change event forced a full reload"
+	)
+	assert(events[1].path == path, "event callback mutated plugin event state")
+
+	local reloads = 0
+	for _, event in ipairs(events) do
+		reloads = reloads + (event.kind == "reload" and 1 or 0)
+	end
+	event_watcher.callback(nil, vim.fs.basename(path), { rename = true })
+	wait_for(function()
+		local count = 0
+		for _, event in ipairs(events) do
+			count = count + (event.kind == "reload" and 1 or 0)
+		end
+		return count > reloads
+	end, "rename event did not force identity revalidation")
+	reloads = reloads + 1
+	event_watcher.callback(nil, vim.fs.basename(path), { unexpected = true })
+	wait_for(function()
+		local count = 0
+		for _, event in ipairs(events) do
+			count = count + (event.kind == "reload" and 1 or 0)
+		end
+		return count > reloads
+	end, "unknown event flags did not force identity revalidation")
+	session:stop()
+end)
+
+test("pause closes watchers, resume revalidates, and status exposes health and drops", function()
+	local observed = setup_follow()
+	local path = temporary_file("paused")
+	local session = assert(follow.open(path))
+	wait_for(function()
+		return session:status().state == "following"
+	end, "initial follow did not settle")
+	local poll_watcher = observed.polls[1]
+	local event_watcher = observed.events[1]
+	assert(session:pause())
+	local paused = session:status()
+	assert(paused.paused and paused.health == "paused")
+	assert(type(paused.dropped.lines) == "number" and paused.error == nil)
+	assert(poll_watcher.stopped and poll_watcher.closed)
+	assert(event_watcher.stopped and event_watcher.closed)
+	event_watcher.callback(nil, vim.fs.basename(path), { change = true })
+	wait_for(function()
+		return session:status().dropped.events >= 1
+	end, "paused event was not counted as dropped")
+	append_raw(path, "-resume")
+	assert(session:resume())
+	equal(2, #observed.polls, "resume did not replace the poll watcher")
+	equal(2, #observed.events, "resume did not replace the event watcher")
+	wait_for(function()
+		return vim.deep_equal(lines(session:buffer()), { "paused-resume" })
+	end, "resume did not force a current-path reload")
+	assert(not session:status().paused and session:status().health == "healthy")
 	session:stop()
 end)
 

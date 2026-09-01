@@ -65,7 +65,16 @@ function M.summary()
 end
 
 function M.setup()
-	workbench.setup()
+	local configured = require("config.local_config").plugin("coverage_workbench", {
+		max_report_bytes = 50 * 1024 * 1024,
+		signs = "all",
+		stale = "hide",
+	})
+	local ok, err = workbench.setup(configured)
+	if not ok then
+		notify("Could not initialize coverage workbench: " .. tostring(err), vim.log.levels.ERROR)
+		return nil, err
+	end
 	vim.api.nvim_create_user_command("CoverageLoad", function(opts)
 		M.load(opts.args)
 	end, { nargs = "?", complete = "file", desc = "Load an existing coverage.py JSON or LCOV report" })
@@ -77,6 +86,7 @@ function M.setup()
 		nargs = 0,
 		desc = "Clear loaded coverage data",
 	})
+	return true
 end
 
 M._workbench = workbench
