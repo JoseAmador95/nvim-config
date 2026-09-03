@@ -1,7 +1,8 @@
 local M = {}
-local controller = require("config.native_review").controller
+local native_review = require("config.native_review")
+local controller = native_review.controller
 
-local REVIEW_TYPES = { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }
+local REVIEW_TYPES = native_review.comment_types.ids()
 local setup_done = false
 
 local function notify(message, level)

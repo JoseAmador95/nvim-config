@@ -273,6 +273,99 @@ test("session restoration gives a rebuilt review target to a focused preview", f
 	assert(vim.api.nvim_get_current_win() == fallback_win, "preview did not return to the rebuilt review target")
 end)
 
+test("failed restore owns its replacement buffer for one exact retry and cleanup", function()
+	local source_win = vim.api.nvim_get_current_win()
+	local result = assert(exporter.deliver(session(), false, { has_clipboard = false }))
+	assert(result.previewed)
+	local suspended = assert(exporter.suspend_preview())
+	local expired_buf = suspended.buf
+	vim.api.nvim_buf_delete(expired_buf, { force = true })
+	assert(not vim.api.nvim_buf_is_valid(expired_buf))
+
+	local original_open_win = vim.api.nvim_open_win
+	vim.api.nvim_open_win = function()
+		error("injected preview open failure")
+	end
+	local called, restored = pcall(exporter.restore_preview, suspended, source_win)
+	vim.api.nvim_open_win = original_open_win
+	assert(called and not restored, "injected preview open failure was not reported")
+
+	local replacement_buf = suspended.buf
+	assert(replacement_buf ~= expired_buf and vim.api.nvim_buf_is_valid(replacement_buf))
+	assert(vim.api.nvim_buf_get_name(replacement_buf) == "review-export://markdown")
+	assert(#vim.fn.win_findbuf(replacement_buf) == 0, "failed restore exposed its retained replacement")
+	local owned_previews = {}
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == "review-export://markdown" then
+			owned_previews[#owned_previews + 1] = buf
+		end
+	end
+	assert(vim.deep_equal(owned_previews, { replacement_buf }), "failed restore orphaned another preview buffer")
+
+	assert(exporter.restore_preview(suspended, source_win), "retained replacement could not be retried")
+	assert(vim.api.nvim_get_current_buf() == replacement_buf, "retry created a second replacement buffer")
+	vim.api.nvim_feedkeys("q", "xt", false)
+	assert(vim.api.nvim_get_current_win() == source_win)
+	assert(not vim.api.nvim_buf_is_valid(replacement_buf), "restored replacement was not cleaned up")
+end)
+
+test("replacement setup failure removes its allocation and preserves a rival name", function()
+	local source_win = vim.api.nvim_get_current_win()
+	local result = assert(exporter.deliver(session(), false, { has_clipboard = false }))
+	assert(result.previewed)
+	local suspended = assert(exporter.suspend_preview())
+	vim.api.nvim_buf_delete(suspended.buf, { force = true })
+
+	local rival = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(rival, "review-export://markdown")
+	local before = {}
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_valid(buf) then
+			before[buf] = true
+		end
+	end
+	local called, restored = pcall(exporter.restore_preview, suspended, source_win)
+	assert(called and not restored, "preview name collision was not reported safely")
+	assert(vim.api.nvim_buf_is_valid(rival), "replacement setup removed the rival buffer")
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		assert(not vim.api.nvim_buf_is_valid(buf) or before[buf], "replacement setup leaked an allocated buffer")
+	end
+
+	vim.api.nvim_buf_delete(rival, { force = true })
+	assert(exporter.restore_preview(suspended, source_win), "receipt could not retry after setup cleanup")
+	local replacement = vim.api.nvim_get_current_buf()
+	assert(vim.api.nvim_buf_get_name(replacement) == "review-export://markdown")
+	vim.api.nvim_feedkeys("q", "xt", false)
+	assert(not vim.api.nvim_buf_is_valid(replacement), "retried replacement was not cleaned up")
+end)
+
+test("failed replacement cleanup retains one owned buffer for retry", function()
+	local source_win = vim.api.nvim_get_current_win()
+	assert(exporter.deliver(session(), false, { has_clipboard = false }).previewed)
+	local suspended = assert(exporter.suspend_preview())
+	vim.api.nvim_buf_delete(suspended.buf, { force = true })
+	local rival = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(rival, "review-export://markdown")
+
+	local original_delete = vim.api.nvim_buf_delete
+	vim.api.nvim_buf_delete = function()
+		error("injected replacement cleanup failure")
+	end
+	local called, restored = pcall(exporter.restore_preview, suspended, source_win)
+	vim.api.nvim_buf_delete = original_delete
+	assert(called and not restored, "double failure was not reported safely")
+	local retained = suspended.buf
+	assert(vim.api.nvim_buf_is_valid(retained) and retained ~= rival)
+	assert(vim.api.nvim_buf_get_name(retained) == "", "partially configured buffer gained the rival name")
+	assert(#vim.fn.win_findbuf(retained) == 0, "partially configured buffer became visible")
+
+	vim.api.nvim_buf_delete(rival, { force = true })
+	assert(exporter.restore_preview(suspended, source_win), "owned partial buffer could not be retried")
+	assert(vim.api.nvim_get_current_buf() == retained, "retry allocated over the retained owned buffer")
+	vim.api.nvim_feedkeys("q", "xt", false)
+	assert(not vim.api.nvim_buf_is_valid(retained), "retried owned buffer was not cleaned up")
+end)
+
 test("clipboard export is complete while legacy delivery history remains inert", function()
 	local value = session()
 	value.items[1].resolution = "resolved"

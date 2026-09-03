@@ -5,6 +5,7 @@ local DEFAULTS = {
 	layout = "inline",
 	context = "hunks",
 	inline_comments = true,
+	composer = { style = "card" },
 	panel = { max_width = 200, max_height = 48 },
 }
 local effective = vim.deepcopy(DEFAULTS)
@@ -14,17 +15,20 @@ local ALLOWED = {
 	repo = true,
 	fs = true,
 	editor = true,
+	tabs = true,
 	lsp_navigation = true,
 	event = true,
 	hunk_context = true,
 	layout = true,
 	context = true,
 	inline_comments = true,
+	composer = true,
 	panel = true,
 }
 
 local MODULES = {
 	changes = "native_review.changes",
+	comment_types = "native_review.comment_types",
 	controller = "native_review.controller",
 	editor = "native_review.editor",
 	export = "native_review.export",
@@ -71,6 +75,21 @@ function M.setup(opts)
 		opts.inline_comments == nil or type(opts.inline_comments) == "boolean",
 		"native-review inline_comments must be boolean"
 	)
+	local composer = opts.composer
+	if composer == nil then
+		composer = {}
+	end
+	assert(
+		type(composer) == "table" and (next(composer) == nil or not vim.islist(composer)),
+		"native-review composer must be an object"
+	)
+	for key in pairs(composer) do
+		assert(key == "style", "native-review composer contains an unknown option: " .. tostring(key))
+	end
+	assert(
+		composer.style == nil or composer.style == "card" or composer.style == "minimal",
+		"native-review composer.style must be card or minimal"
+	)
 	local panel = opts.panel
 	if panel == nil then
 		panel = {}
@@ -100,6 +119,9 @@ function M.setup(opts)
 		layout = opts.layout or DEFAULTS.layout,
 		context = opts.context or DEFAULTS.context,
 		inline_comments = opts.inline_comments == nil and DEFAULTS.inline_comments or opts.inline_comments,
+		composer = {
+			style = composer.style or DEFAULTS.composer.style,
+		},
 		panel = {
 			max_width = panel.max_width == nil and DEFAULTS.panel.max_width or panel.max_width,
 			max_height = panel.max_height == nil and DEFAULTS.panel.max_height or panel.max_height,
@@ -109,6 +131,7 @@ function M.setup(opts)
 		repo = opts.repo,
 		fs = opts.fs,
 		editor = opts.editor,
+		tabs = opts.tabs,
 		lsp_navigation = opts.lsp_navigation,
 		event = opts.event or function() end,
 		config = config,

@@ -63,6 +63,19 @@ merged. VSCode Neovim and `nvimpager` always keep `full`.
 The choice is fixed at startup; restart Neovim after changing it. `full`
 preserves the existing interactive behavior and remains the default.
 
+Markdown rendering has three host-only palette presets under
+`plugins.render_markdown.preset`: `subtle` (the default), `minimal` (no code or
+heading backgrounds), and `semantic` (level-colored headings). For example,
+`plugins = { render_markdown = { preset = "semantic" } }` belongs in
+`~/.nvim-local.lua`; project-local configuration cannot override it. In the
+full terminal editor, buffer-local `gd` opens existing regular-file links
+through the tab-aware editor adapter, sends headings, fragments, and reference
+links to Marksman, and opens HTTP(S)/email targets through the host UI. Under
+SSH, external targets are copied through the configured clipboard provider
+instead of launching a remote browser. Plain Markdown text falls back to the
+ordinary LSP/native definition path. This mapping is absent from `nvimpager`
+and VSCode Neovim and remains fail-closed in historical review buffers.
+
 Every local product exposes a strict setup contract plus copied `status()` and
 `effective_config()` snapshots. `:checkhealth nvimconfig` aggregates those 17
 surfaces without refreshing state, starting processes, installing tools, or
@@ -173,9 +186,10 @@ user buffers, creates a pristine home tab, and opens the Snacks dashboard;
 
 ## Native review
 
-The full terminal editor has a native, repository-scoped review mode that stays
-in the current ordinary tab. `:ReviewOpen` (or `<leader>ro`) freezes a working,
-commit, range, or default-branch scope; `<leader>rr` opens and closes its
+The full terminal editor has a native, repository-scoped review mode in one
+dedicated transient tab. `:ReviewOpen` (or `<leader>ro`) first freezes a working,
+commit, range, or default-branch scope, then opens or focuses that tab without
+replacing the ordinary invocation buffer; `<leader>rr` opens and closes its
 three-pane Files / Commits / Comments float. Selecting a file closes the float
 and focuses the reviewed code. Its colored, fully expanded tree
 groups only non-empty change layers, supports collapsible directories, and
@@ -186,17 +200,18 @@ selected span without changing manually marked endpoints, while normal `Enter`
 keeps using the current row or marked endpoints. `c` clears only those endpoints
 and `b` returns to the exact frozen parent scope. Merge commits are reviewed
 individually. The Comments pane supports jumping, editing, confirmed deletion,
-replying, and resolving/reopening without a separate review tab; `a` adds a
+replying, and resolving/reopening inside the same review tab; `a` adds a
 review-level comment. `<leader>rR` provides the same review-level action from
-ordinary review buffers. Reanchoring remains available through
+review code buffers. Reanchoring remains available through
 `:ReviewReanchor` and the command palette.
 
-Review mode makes affected source buffers read-only and preserves their normal
-tab identity. `<leader>rv` switches between one inline unified projection and a
-native synchronized side-by-side diff; `<leader>rw` switches hunk-only and
+Review mode makes affected source buffers read-only only while its owned UI is
+active and restores their prior state on release. `<leader>rv` switches between
+one inline unified projection and a native synchronized side-by-side diff;
+`<leader>rw` switches hunk-only and
 full-file context; and `<leader>rg` focuses the reviewed code. Inline unchanged
 context appears once, while each replacement places real OLD rows before real
-NEW/CURRENT rows. Every code row is cursor-addressable in the ordinary review
+NEW/CURRENT rows. Every code row is cursor-addressable in the owned review
 window, and its `OLD │ NEW` gutter shows both source line numbers when available
 without replacing fold or comment signs. Side-by-side remains Neovim's native
 two-pane diff with both versions real and focusable. Jumping to an OLD or NEW
@@ -215,7 +230,12 @@ path. The unified projection is LSP-blocked. Read-only navigation, hover, and
 diagnostics are conservatively bridged from mapped NEW/CURRENT rows to the real
 current source; OLD or otherwise unmappable rows remain unavailable, and
 mutation operations are never proxied. An exact CURRENT pane in side-by-side
-view retains its ordinary LSP behavior.
+view retains its ordinary LSP behavior. In either layout, `gd` routes a selected
+definition back into the owned review tab when its CURRENT path and line map to
+one unambiguous frozen NEW entry, revealing hidden context in place. Definitions
+outside the diff keep the normal CURRENT-file navigation path. Resolving `gd`
+does not open an intermediate CURRENT tab, and delayed responses are discarded
+if the source document, review generation, or a newer definition request wins.
 
 `<leader>ra` comments the current line or visual range, `<leader>rA` comments the
 file, and `<leader>rR` comments the review. A selection resolves to canonical
@@ -228,12 +248,17 @@ Multiline rails place one colored type badge at each anchor start;
 continuation rows show only the guide and terminator. Same-type starts and
 overlaps use compact counts (`2` through `9`, then `9+`) without losing the
 per-type colors. Pausing on a commented range shows one concise inline row per
-comment; `<leader>ri` toggles those previews without removing the rail. A
-line/range composer reserves a one-to-six-row borderless body plus a dedicated
-instruction row directly below the source anchor and scrolls longer text. File
+comment; `<leader>ri` toggles those previews without removing the rail. Only the
+type badge is colored in previews and the Comments panel. By default a
+line/range composer is one rounded card with a colored left rail and chunked
+title/footer; it reserves its one-to-six-row body plus two chrome rows and
+scrolls longer text. Host config may select `composer.style = "minimal"` to keep
+the borderless body and separate footer while retaining the colored badge. File
 and review-level comments, including edits and replies, use a centered rounded
-modal capped at 88 by 18 rows without reserving source lines. In Normal mode,
-`<CR><CR>` saves through the same path as `<C-s>`.
+modal capped at 88 by 18 rows without reserving source lines. Tab and Shift-Tab
+cycle types for new comments and edits in Normal or Insert mode, returning to
+Insert; replies do not cycle. In Normal mode, `<CR><CR>` saves through the same
+path as `<C-s>`.
 
 `:ReviewExport[!]` always renders the complete saved review and may be repeated;
 it copies Markdown or opens a closable float when no clipboard is available. Its
@@ -249,6 +274,24 @@ Legacy bridge and delivery fields in existing review stores remain validated
 and round-trip unchanged, but are inert: Neovim no longer links or publishes
 review sessions. Ordinary `:DiffviewOpen` and `:DiffviewFileHistory` remain
 independent raw Diffview workflows.
+
+The review tab is leased through `tab-first.nvim` and titled
+`Review: <repository> · <scope>`. Reopening a review, drilling into a commit, and
+returning to its parent reuse and retitle the same live tab. `<leader>rm` off
+prepares an open composer, releases all review UI, and returns to the latest
+ordinary invocation while keeping the frozen review resumable; turning it on
+acquires a fresh generation and rebuilds the view. Supported X, middle-click,
+`<leader>q`, and `:CloseTab` paths can veto closure when a nonempty composer can
+be neither saved nor verified through recovery. Raw `:tabclose` is reconciled
+after best-effort composer recovery and never recreates the tab by itself.
+`:ReviewClose` alone removes the logical review and retains its verified
+unsaved-recovery/force rules.
+
+Auto-session physically releases the review tab before serialization. A
+successful explicit manual save may restore it afterward without stealing the
+ordinary focus; automatic saves, failed saves, and exit never reacquire review
+UI. Consequently no review-owned tab or transient review buffer is written into
+a session file.
 
 The review mappings use the lower-case `<leader>r` namespace: `rr` panel, `ro`
 open, `rm` mode, `rs` scope, `rb` parent scope, `rf/rh/rl` panel panes, `rv`

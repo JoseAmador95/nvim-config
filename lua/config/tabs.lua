@@ -98,6 +98,11 @@ for _, name in ipairs({
 	"name_formatter",
 	"close",
 	"request_close",
+	"acquire_transient",
+	"focus_transient",
+	"rename_transient",
+	"release_transient",
+	"valid_transient",
 }) do
 	M[name] = function(...)
 		return runtime[name](...)

@@ -6,6 +6,7 @@ local review_store = require("native_review.store")
 
 local PREVIEW_NAME = "review-export://markdown"
 local SIDE_LABELS = { left = "OLD", right = "NEW" }
+local PREVIEW_RECEIPT = {}
 local preview_state
 
 local function scope_fields(scope)
@@ -134,6 +135,10 @@ local function valid_win(win)
 	return type(win) == "number" and vim.api.nvim_win_is_valid(win)
 end
 
+local function valid_buf(buf)
+	return type(buf) == "number" and vim.api.nvim_buf_is_valid(buf)
+end
+
 local function window_view(win)
 	local view
 	vim.api.nvim_win_call(win, function()
@@ -197,11 +202,16 @@ local function close_preview(restore_focus, preserve_buffer)
 	if not state then
 		return
 	end
-	if preserve_buffer and vim.api.nvim_buf_is_valid(state.buf) then
+	if preserve_buffer and valid_buf(state.buf) then
 		vim.bo[state.buf].bufhidden = "hide"
 	end
 	if valid_win(state.win) then
 		vim.api.nvim_win_close(state.win, true)
+	end
+	state.win = nil
+	if not preserve_buffer and valid_buf(state.buf) then
+		vim.bo[state.buf].modified = false
+		vim.api.nvim_buf_delete(state.buf, { force = true })
 	end
 	preview_state = nil
 	if restore_focus then
@@ -209,20 +219,35 @@ local function close_preview(restore_focus, preserve_buffer)
 	end
 end
 
-local function create_preview_buffer(markdown)
-	local buf = vim.api.nvim_create_buf(false, true)
-	review_lsp.mark(buf, "panel", { preview = true })
-	vim.api.nvim_buf_set_name(buf, PREVIEW_NAME)
-	vim.bo[buf].buftype = "nofile"
-	vim.bo[buf].bufhidden = "wipe"
-	vim.bo[buf].swapfile = false
-	vim.bo[buf].filetype = "markdown"
-	vim.bo[buf].readonly = false
-	vim.bo[buf].modifiable = true
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(markdown, "\n", { plain = true }))
-	vim.bo[buf].modifiable = false
-	vim.bo[buf].modified = false
-	vim.bo[buf].readonly = true
+local function create_preview_buffer(markdown, owner)
+	local buf = owner._preview_receipt == PREVIEW_RECEIPT and valid_buf(owner.buf) and owner.buf
+	if not buf then
+		buf = vim.api.nvim_create_buf(false, true)
+		-- Transfer the handle before any fallible setup. A suspended receipt
+		-- then owns even a partially configured allocation if cleanup fails.
+		owner.buf = buf
+		owner._preview_receipt = PREVIEW_RECEIPT
+	end
+	local configured, configure_err = pcall(function()
+		review_lsp.mark(buf, "panel", { preview = true })
+		vim.api.nvim_buf_set_name(buf, PREVIEW_NAME)
+		vim.bo[buf].buftype = "nofile"
+		vim.bo[buf].bufhidden = "wipe"
+		vim.bo[buf].swapfile = false
+		vim.bo[buf].filetype = "markdown"
+		vim.bo[buf].readonly = false
+		vim.bo[buf].modifiable = true
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(markdown, "\n", { plain = true }))
+		vim.bo[buf].modifiable = false
+		vim.bo[buf].modified = false
+		vim.bo[buf].readonly = true
+	end)
+	if not configured then
+		if valid_buf(buf) then
+			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		end
+		return nil, tostring(configure_err)
+	end
 	return buf
 end
 
@@ -241,7 +266,7 @@ local function open_preview(buf, source, enter, view)
 		title_pos = "center",
 	})
 	vim.bo[buf].bufhidden = "wipe"
-	preview_state = { buf = buf, win = win, source = source }
+	preview_state = { buf = buf, win = win, source = source, _preview_receipt = PREVIEW_RECEIPT }
 	vim.wo[win].wrap = true
 	vim.wo[win].linebreak = true
 	if view then
@@ -260,8 +285,24 @@ end
 local function preview(markdown)
 	close_preview(false)
 	local source = source_snapshot(vim.api.nvim_get_current_win())
-	local buf = create_preview_buffer(markdown)
-	open_preview(buf, source, true)
+	local owner = { source = source, _preview_receipt = PREVIEW_RECEIPT }
+	preview_state = owner
+	local called, buf, create_err = pcall(create_preview_buffer, markdown, owner)
+	if not called then
+		preview_state = nil
+		error(buf, 0)
+	end
+	if not buf then
+		if not valid_buf(owner.buf) then
+			preview_state = nil
+		end
+		error(create_err, 0)
+	end
+	local opened, open_err = pcall(open_preview, buf, source, true)
+	if not opened then
+		pcall(close_preview, false)
+		error(open_err, 0)
+	end
 end
 
 ---Remove the Markdown float while retaining its unlisted buffer and exact visible state.
@@ -270,7 +311,7 @@ end
 ---@return string? error_message
 function M.suspend_preview()
 	local current = preview_state
-	if not current or not valid_win(current.win) or not vim.api.nvim_buf_is_valid(current.buf) then
+	if not current or not valid_win(current.win) or not valid_buf(current.buf) then
 		preview_state = nil
 		return nil
 	end
@@ -280,10 +321,11 @@ function M.suspend_preview()
 		buf = current.buf,
 		source = vim.deepcopy(current.source),
 		view = window_view(current.win),
+		_preview_receipt = PREVIEW_RECEIPT,
 	}
 	local ok, err = pcall(close_preview, false, true)
 	if not ok then
-		if vim.api.nvim_buf_is_valid(current.buf) then
+		if valid_buf(current.buf) then
 			vim.bo[current.buf].bufhidden = "wipe"
 		end
 		preview_state = current
@@ -311,17 +353,52 @@ function M.restore_preview(state, fallback_source_win)
 		source.win = source_win
 	end
 	local buf = state.buf
-	if not vim.api.nvim_buf_is_valid(buf) or vim.api.nvim_buf_get_name(buf) ~= PREVIEW_NAME then
-		buf = create_preview_buffer(state.markdown)
+	if not valid_buf(buf) or vim.api.nvim_buf_get_name(buf) ~= PREVIEW_NAME then
+		local called, created_buf = pcall(create_preview_buffer, state.markdown, state)
+		if not called or not created_buf then
+			return false
+		end
+		buf = created_buf
 	end
 	local ok = pcall(open_preview, buf, source, state.focused, state.view)
 	if not ok then
+		if preview_state and preview_state.buf == buf then
+			pcall(close_preview, false, true)
+		end
 		return false
 	end
 	if not state.focused and valid_win(current_win) then
 		vim.api.nvim_set_current_win(current_win)
 	end
 	return true
+end
+
+---Permanently discard a preview receipt retained by suspend_preview().
+---This never restores the float or its previous source focus.
+---@param state table?
+---@return boolean
+function M.discard_preview(state)
+	if not state then
+		return true
+	end
+	if type(state) ~= "table" or type(state.buf) ~= "number" then
+		return false
+	end
+	if preview_state and preview_state.buf == state.buf then
+		local closed = pcall(close_preview, false)
+		if not closed then
+			return false
+		end
+	end
+	if not valid_buf(state.buf) then
+		return true
+	end
+	if state._preview_receipt ~= PREVIEW_RECEIPT and vim.api.nvim_buf_get_name(state.buf) ~= PREVIEW_NAME then
+		return false
+	end
+	vim.bo[state.buf].modified = false
+	local deleted = pcall(vim.api.nvim_buf_delete, state.buf, { force = true })
+	return deleted
 end
 
 ---Copy the complete Markdown snapshot, or preview it when unavailable.

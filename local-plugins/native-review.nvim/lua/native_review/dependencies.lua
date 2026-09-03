@@ -15,6 +15,13 @@ local REQUIRED = {
 	},
 	fs = { "read_binary", "write_binary_atomic" },
 	editor = { "open_file_in_tab" },
+	tabs = {
+		"acquire_transient",
+		"focus_transient",
+		"rename_transient",
+		"release_transient",
+		"valid_transient",
+	},
 }
 
 function M.setup(opts)

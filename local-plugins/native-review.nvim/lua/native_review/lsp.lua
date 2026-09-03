@@ -45,6 +45,8 @@ local READ_ONLY_ACTIONS = {
 local metadata_by_buffer = {}
 local mirrors_by_buffer = {}
 local mirror_serial = 0
+local definition_serial = 0
+local definition_serial_by_buffer = {}
 local setup_done = false
 local start_diagnostic_mirror
 local stop_diagnostic_mirror
@@ -58,6 +60,55 @@ local function role(buf)
 		return nil
 	end
 	return vim.b[buf].nvim_review_role
+end
+
+local function invalidate_definition_requests(buf)
+	definition_serial = definition_serial + 1
+	definition_serial_by_buffer[buf] = definition_serial
+	return definition_serial
+end
+
+local function definition_request_options(buf, review_win, source_valid, allow_without_route, request)
+	local metadata = metadata_by_buffer[buf]
+	local provider = metadata and metadata.definition_options
+	-- Every definition attempt from this review-owned buffer supersedes the
+	-- previous one, even when the new window is not itself a review surface.
+	request = request or {}
+	local serial = request.serial or invalidate_definition_requests(buf)
+	local routed = type(provider) == "function" and provider(review_win) or nil
+	if type(routed) ~= "table" and not allow_without_route then
+		return nil
+	end
+	routed = routed or {}
+	local function request_current()
+		return valid_buffer(buf) and metadata_by_buffer[buf] == metadata and definition_serial_by_buffer[buf] == serial
+	end
+	local function callback_valid(callback)
+		return type(callback) ~= "function" or callback() == true
+	end
+	local function valid()
+		return request_current() and callback_valid(source_valid) and callback_valid(routed.valid)
+	end
+	local function pending()
+		return request_current() and callback_valid(request.pending or source_valid) and callback_valid(routed.pending)
+	end
+	local route
+	if type(routed.route) == "function" then
+		route = function(location)
+			-- A stale review response is consumed as a no-op. It must never fall
+			-- through to the ordinary tab-aware opener.
+			if not valid() then
+				return true
+			end
+			return routed.route(location)
+		end
+	end
+	return {
+		pending = pending,
+		route = route,
+		route_revalidates = route ~= nil,
+		valid = valid,
+	}
 end
 
 local function clear_navigation_mappings(buf)
@@ -256,6 +307,7 @@ function M.mark(buf, buffer_role, metadata)
 	then
 		return false
 	end
+	invalidate_definition_requests(buf)
 	stop_diagnostic_mirror(buf)
 	vim.b[buf].nvim_review_role = buffer_role
 	metadata_by_buffer[buf] = metadata or {}
@@ -314,6 +366,41 @@ function M.map_line(snapshot, current, line)
 		return nil, map_err
 	end
 	return forward[line], forward[line] and nil or "the historical line is inside a changed hunk"
+end
+
+---Map a one-based live CURRENT line back into an unchanged frozen NEW region.
+---@param snapshot integer|string|string[]
+---@param current integer|string|string[]
+---@param line integer
+---@return integer? mapped_line
+---@return string? err
+function M.map_current_line(snapshot, current, line)
+	if type(line) ~= "number" or line % 1 ~= 0 or line < 1 then
+		return nil, "line must be a positive integer"
+	end
+	local current_lines, current_err = source_lines(current)
+	if not current_lines then
+		return nil, current_err
+	elseif line > #current_lines then
+		return nil, "line is outside the current source"
+	end
+	local _, reverse, map_err = build_line_maps(snapshot, current)
+	if not reverse then
+		return nil, map_err
+	end
+	return reverse[line], reverse[line] and nil or "the current line is inside a changed hunk"
+end
+
+---Capture review-aware routing for one definition request from a real CURRENT pane.
+---Returns nil outside an active review-owned source window, preserving normal LSP navigation.
+---@param buf integer
+---@param review_win? integer
+---@return table? options
+function M.definition_options(buf, review_win)
+	if not valid_buffer(buf) or role(buf) ~= "current" then
+		return nil
+	end
+	return definition_request_options(buf, review_win or vim.api.nvim_get_current_win(), nil, false)
 end
 
 local function find_buffer(path)
@@ -818,7 +905,7 @@ function M.refresh_diagnostics(buf)
 	return refresh_mirror(record)
 end
 
-local function wait_for_lsp(buf, metadata, method, callback)
+local function wait_for_lsp(buf, metadata, method, callback, valid)
 	local ready = metadata.lsp_ready
 		or function(target)
 			return #vim.lsp.get_clients({ bufnr = target, method = method }) > 0
@@ -828,9 +915,16 @@ local function wait_for_lsp(buf, metadata, method, callback)
 		or function()
 			vim.notify("LSP did not attach to the current source in time", vim.log.levels.WARN, { title = "Review" })
 		end
+	local function still_valid()
+		if type(valid) ~= "function" then
+			return true
+		end
+		local ok, result = pcall(valid)
+		return ok and result == true
+	end
 	local attempts = 0
 	local function poll()
-		if not valid_buffer(buf) then
+		if not valid_buffer(buf) or not still_valid() then
 			return
 		end
 		attempts = attempts + 1
@@ -838,7 +932,11 @@ local function wait_for_lsp(buf, metadata, method, callback)
 			vim.schedule(callback)
 			return
 		elseif attempts >= 40 then
-			vim.schedule(timeout)
+			vim.schedule(function()
+				if still_valid() then
+					timeout()
+				end
+			end)
 			return
 		end
 		defer(poll, 50)
@@ -869,13 +967,47 @@ function M.navigate(buf, action_name, display_line, column, metadata, review_win
 	if not action then
 		return nil, "unsupported review LSP action"
 	end
+	local definition_request = action_name == "definition" and { serial = invalidate_definition_requests(buf) } or nil
 	metadata = metadata or metadata_by_buffer[buf]
 	local position, position_err = M.resolve_current_position(buf, display_line, column, metadata)
 	if not position then
 		return nil, position_err
 	end
 	review_win = review_win or vim.api.nvim_get_current_win()
-	if action_name ~= "hover" then
+	local source_error
+	local function source_valid()
+		if not valid_buffer(buf) or role(buf) ~= "unified" or metadata_by_buffer[buf] ~= metadata then
+			return false
+		end
+		local current, current_err = M.resolve_current_position(buf, display_line, column, metadata)
+		source_error = current_err
+		return position_unchanged(position, current)
+	end
+	local display_changedtick = vim.api.nvim_buf_get_changedtick(buf)
+	local source_name = vim.api.nvim_buf_get_name(position.buf)
+	local function source_pending()
+		return valid_buffer(buf)
+			and role(buf) == "unified"
+			and metadata_by_buffer[buf] == metadata
+			and projection_generation_current(buf, metadata)
+			and vim.api.nvim_buf_get_changedtick(buf) == display_changedtick
+			and valid_buffer(position.buf)
+			and vim.api.nvim_buf_get_changedtick(position.buf) == position.changedtick
+			and vim.api.nvim_buf_get_name(position.buf) == source_name
+			and not vim.bo[position.buf].modified
+	end
+	local location_options = action_name == "definition"
+			and definition_request_options(
+				buf,
+				review_win,
+				source_valid,
+				true,
+				{ serial = definition_request.serial, pending = source_pending }
+			)
+		or nil
+	-- Definitions may resolve back into this review. Keep the hidden CURRENT
+	-- source hidden until the result decides whether host fallback is needed.
+	if action_name ~= "hover" and action_name ~= "definition" then
 		local open = metadata.open or editor.open_file_in_tab
 		open(position.path, { lnum = position.line, col = position.column })
 	end
@@ -883,14 +1015,33 @@ function M.navigate(buf, action_name, display_line, column, metadata, review_win
 		if not valid_buffer(buf) or role(buf) ~= "unified" or metadata_by_buffer[buf] ~= metadata then
 			return
 		end
-		local current, current_err = M.resolve_current_position(buf, display_line, column, metadata)
-		if not position_unchanged(position, current) then
-			review_notify(current_err or "Current source mapping changed while waiting for LSP", vim.log.levels.WARN)
-			return
+		local current
+		if location_options then
+			local valid_ok, valid = pcall(location_options.valid)
+			if not valid_ok or valid ~= true then
+				if source_error then
+					review_notify(source_error, vim.log.levels.WARN)
+				end
+				return
+			end
+			current = position
+		else
+			local current_err
+			current, current_err = M.resolve_current_position(buf, display_line, column, metadata)
+			if not position_unchanged(position, current) then
+				review_notify(
+					current_err or "Current source mapping changed while waiting for LSP",
+					vim.log.levels.WARN
+				)
+				return
+			end
 		end
 		local navigate = metadata.navigate
 		if type(navigate) == "function" then
-			navigate(action_name, current.buf, current.line, current.column, { winid = review_win })
+			navigate(action_name, current.buf, current.line, current.column, {
+				location_options = location_options,
+				winid = review_win,
+			})
 			return
 		end
 		local navigation = metadata.navigation
@@ -911,9 +1062,9 @@ function M.navigate(buf, action_name, display_line, column, metadata, review_win
 				winid = review_win,
 			})
 		else
-			navigation.location_at(action_name, current.buf, current.line, current.column)
+			navigation.location_at(action_name, current.buf, current.line, current.column, location_options)
 		end
-	end)
+	end, location_options and location_options.pending or source_valid)
 	return true
 end
 
@@ -936,56 +1087,77 @@ function M.goto_definition(buf, line, column, metadata)
 	if buffer_role ~= "snapshot" then
 		return nil, "definition bridging requires a historical-new snapshot"
 	end
+	local definition_request = { serial = invalidate_definition_requests(buf) }
 	metadata = metadata or metadata_by_buffer[buf] or {}
 	local root = metadata.root
 	local relative = metadata.current_path or metadata.path
 	if type(root) ~= "string" or type(relative) ~= "string" then
 		return nil, "the review snapshot has no current source target"
 	end
-	local path, resolved_or_err = repo.resolve_relative(root, relative)
-	if not path then
-		return nil, "current source is unavailable: " .. tostring(resolved_or_err)
+	local current, current_err = resolve_current_source(metadata)
+	if not current then
+		return nil, current_err
 	end
-	local current_buf = find_buffer(path)
-	if vim.bo[current_buf].modified then
-		return nil, "current source has unsaved changes"
-	end
-	local mapped, map_err = M.map_line(buf, current_buf, line)
+	local mapped, map_err = M.map_line(buf, current.lines, line)
 	if not mapped then
 		return nil, map_err
 	end
+	local snapshot_changedtick = vim.api.nvim_buf_get_changedtick(buf)
+	local snapshot_text = buffer_text(buf)
+	local snapshot_name = vim.api.nvim_buf_get_name(buf)
+	local current_name = vim.api.nvim_buf_get_name(current.buf)
 	local target_column = column or metadata.column or 1
 	local definition = metadata.definition or (metadata.navigation and metadata.navigation.definition_at)
 	if type(definition) ~= "function" then
 		return nil, "current-source definition navigation is unavailable"
 	end
-	local open = metadata.open or editor.open_file_in_tab
-	open(path, { lnum = mapped, col = target_column })
-	wait_for_lsp(current_buf, metadata, "textDocument/definition", function()
-		if not valid_buffer(buf) or role(buf) ~= "snapshot" or not valid_buffer(current_buf) then
+	local function source_valid()
+		if
+			not valid_buffer(buf)
+			or role(buf) ~= "snapshot"
+			or metadata_by_buffer[buf] ~= metadata
+			or vim.api.nvim_buf_get_changedtick(buf) ~= snapshot_changedtick
+			or buffer_text(buf) ~= snapshot_text
+		then
+			return false
+		end
+		local latest = resolve_current_source(metadata, current.buf)
+		return latest ~= nil
+			and latest.buf == current.buf
+			and latest.changedtick == current.changedtick
+			and latest.path == current.path
+			and latest.text == current.text
+	end
+	local function source_pending()
+		return valid_buffer(buf)
+			and role(buf) == "snapshot"
+			and metadata_by_buffer[buf] == metadata
+			and vim.api.nvim_buf_get_changedtick(buf) == snapshot_changedtick
+			and vim.api.nvim_buf_get_name(buf) == snapshot_name
+			and valid_buffer(current.buf)
+			and vim.api.nvim_buf_get_changedtick(current.buf) == current.changedtick
+			and vim.api.nvim_buf_get_name(current.buf) == current_name
+			and not vim.bo[current.buf].modified
+	end
+	local location_options = definition_request_options(buf, vim.api.nvim_get_current_win(), source_valid, true, {
+		serial = definition_request.serial,
+		pending = source_pending,
+	})
+	wait_for_lsp(current.buf, metadata, "textDocument/definition", function()
+		local valid_ok, valid = pcall(location_options.valid)
+		if not valid_ok or valid ~= true then
 			return
 		end
-		if vim.bo[current_buf].modified then
-			vim.notify("Current source changed while waiting for LSP", vim.log.levels.WARN, { title = "Review" })
-			return
-		end
-		local current_line = M.map_line(buf, current_buf, line)
-		if current_line ~= mapped then
-			vim.notify(
-				"Current source mapping changed while waiting for LSP",
-				vim.log.levels.WARN,
-				{ title = "Review" }
-			)
-			return
-		end
-		definition(current_buf, current_line, target_column)
-	end)
+		definition(current.buf, mapped, target_column, location_options)
+	end, location_options.pending)
 	return true
 end
 
 ---Release projection-owned mappings, diagnostic state, and metadata.
 ---@param buf integer
 function M.clear(buf)
+	invalidate_definition_requests(buf)
+	definition_serial_by_buffer[buf] = nil
 	if not stop_diagnostic_mirror(buf) then
 		reset_mirrored_diagnostics(buf)
 	end

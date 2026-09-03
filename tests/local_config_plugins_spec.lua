@@ -42,6 +42,7 @@ package.loaded["config.local_config"] = nil
 local local_config = require("config.local_config")
 
 local plugin_names = {
+	"render_markdown",
 	"native_review",
 	"exact_editor",
 	"devcontainer_editor",
@@ -69,14 +70,62 @@ test("canonical plugin schema exposes all products and host-only top-level value
 	table.sort(expected)
 	equal(expected, actual, "canonical plugin inventory drifted")
 	equal("inline", config.plugins.native_review.layout, "native review default changed")
+	equal("card", config.plugins.native_review.composer.style, "native review composer default changed")
 	equal("workspace", config.plugins.tab_first.history.scope, "tab history is not workspace-scoped")
 	equal(30000, config.plugins.diagram_view.stage_timeout_ms, "diagram timeout default changed")
 	equal(5000, config.plugins.terminal_lifecycle.stop_timeout_ms, "terminal stop timeout default changed")
 	equal(21600, config.plugins.exact_editor.registry_heartbeat_seconds, "exact editor heartbeat default changed")
 	equal("auto", config.plugins.theme_router.background, "theme background default changed")
+	equal("subtle", config.plugins.render_markdown.preset, "Markdown rendering default changed")
 	equal("dap-ui", config.dap.ui, "DAP host configuration moved under plugins")
 	equal("full", config.ui.redraw_profile, "redraw profile default changed")
 	equal({}, config.env, "env host configuration default changed")
+end)
+
+test("native review composer style is host-configurable and schema-validated", function()
+	for _, style in ipairs({ "card", "minimal" }) do
+		assert(vim.fn.writefile({
+			("return { plugins = { native_review = { composer = { style = %q } } } }"):format(style),
+		}, config_path) == 0)
+		equal(style, local_config.reload().plugins.native_review.composer.style, "valid composer style was rejected")
+		equal({}, local_config.errors(), "valid composer style produced a diagnostic")
+	end
+
+	assert(vim.fn.writefile({
+		"return { plugins = { native_review = { composer = { style = 'animated' } } } }",
+	}, config_path) == 0)
+	equal(
+		"card",
+		local_config.reload().plugins.native_review.composer.style,
+		"invalid composer style escaped validation"
+	)
+	assert(
+		table.concat(local_config.errors(), "\n"):find("plugins.native_review.composer.style", 1, true),
+		"invalid composer style omitted its schema warning"
+	)
+end)
+
+test("Markdown rendering preset is host-configurable and invalid values fall back through the schema", function()
+	for _, preset in ipairs({ "subtle", "minimal", "semantic" }) do
+		assert(vim.fn.writefile({
+			("return { plugins = { render_markdown = { preset = %q } } }"):format(preset),
+		}, config_path) == 0)
+		equal(preset, local_config.reload().plugins.render_markdown.preset, "valid Markdown preset was rejected")
+		equal({}, local_config.errors(), "valid Markdown preset produced a diagnostic")
+	end
+
+	assert(vim.fn.writefile({
+		"return { plugins = { render_markdown = { preset = 'glossy' } } }",
+	}, config_path) == 0)
+	equal(
+		"subtle",
+		local_config.reload().plugins.render_markdown.preset,
+		"invalid Markdown preset did not fall back to subtle"
+	)
+	assert(
+		table.concat(local_config.errors(), "\n"):find("plugins.render_markdown.preset", 1, true),
+		"invalid Markdown preset omitted its schema warning"
+	)
 end)
 
 test("redraw profile accepts only the documented host values", function()
@@ -214,6 +263,10 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 	assert(
 		generated:find("registry_heartbeat_seconds = 21600", 1, true),
 		"generated template omitted the exact editor heartbeat policy"
+	)
+	assert(
+		generated:find('render_markdown = { preset = "subtle" }', 1, true),
+		"generated template omitted the host-only Markdown preset"
 	)
 	assert(not generated:find("mason =", 1, true), "generated template retained retired Mason automation")
 end)

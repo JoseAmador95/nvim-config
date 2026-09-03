@@ -373,11 +373,28 @@ end
 local function call_handler(state, name)
 	local callback = state.handlers and state.handlers[name]
 	if type(callback) == "function" then
-		callback(state)
+		return callback(state)
 	end
 end
 
+local function definition_options(state, buf, win)
+	local callback = state.handlers and state.handlers.definition_options
+	if type(callback) ~= "function" then
+		return nil
+	end
+	local presentation = state.presentation
+	return callback(state, {
+		buf = buf,
+		generation = presentation and presentation.generation or nil,
+		role = "current",
+		win = win,
+	})
+end
+
 local function restore_enrolled(state, buf, record)
+	-- Release per-request routing closures before restoring the ordinary role.
+	-- This also invalidates any delayed definition response or open picker.
+	review_lsp.clear(buf)
 	if not valid_buf(buf) then
 		active_buffers[buf] = nil
 		state.enrolled[buf] = nil
@@ -511,7 +528,12 @@ function M.enroll(state, buf)
 		state.enrolled[buf] = nil
 		return nil, protect_err
 	end
-	review_lsp.mark(buf, "current", { workspace = state.workspace })
+	review_lsp.mark(buf, "current", {
+		definition_options = function(win)
+			return definition_options(state, buf, win)
+		end,
+		workspace = state.workspace,
+	})
 	vim.keymap.set("n", "[h", record.callbacks["[h"], {
 		buffer = buf,
 		silent = true,

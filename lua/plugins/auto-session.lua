@@ -30,6 +30,7 @@ local exiting = false
 local exit_flag_registered = false
 local manual_save_active = false
 local direct_save
+local save_wrappers = setmetatable({}, { __mode = "k" })
 local sessionoptions = "blank,buffers,curdir,folds,help,tabpages,winsize,winpos,localoptions"
 
 local function notify_review_hook_failure(action, error_message)
@@ -52,10 +53,19 @@ local function suspend_code_review_for_session()
 		return false
 	end
 
-	if exiting or type(code_review.restore_after_session) ~= "function" then
-		return true
-	end
+	return true
+end
 
+local function restore_code_review_after_manual_save()
+	local loaded, code_review = pcall(require, "config.code_review")
+	if
+		exiting
+		or not loaded
+		or type(code_review) ~= "table"
+		or type(code_review.restore_after_session) ~= "function"
+	then
+		return
+	end
 	vim.schedule(function()
 		if exiting then
 			return
@@ -65,7 +75,6 @@ local function suspend_code_review_for_session()
 			notify_review_hook_failure("restore", restore_called and restore_error or restored)
 		end
 	end)
-	return true
 end
 
 local function notify_log_hook_failure(action, error_message)
@@ -118,7 +127,26 @@ local function save_session_manually(session_name, save, save_opts)
 		notify_review_hook_failure("save", called and "auto-session declined to save" or saved)
 		return false
 	end
+	restore_code_review_after_manual_save()
 	return true
+end
+
+local function install_manual_save_wrapper(auto_session)
+	local installed = save_wrappers[auto_session]
+	if installed and auto_session.save_session == installed.wrapper then
+		direct_save = installed.upstream
+		return
+	end
+	local upstream_save = auto_session.save_session
+	local wrapper = function(session_name, save_opts)
+		if save_opts and save_opts.is_autosave then
+			return upstream_save(session_name, save_opts)
+		end
+		return save_session_manually(session_name, upstream_save, save_opts)
+	end
+	direct_save = upstream_save
+	save_wrappers[auto_session] = { upstream = upstream_save, wrapper = wrapper }
+	auto_session.save_session = wrapper
 end
 
 return {
@@ -183,13 +211,7 @@ return {
 			exit_flag_registered = true
 		end
 		local auto_session = require("auto-session")
-		direct_save = auto_session.save_session
-		auto_session.save_session = function(session_name, save_opts)
-			if save_opts and save_opts.is_autosave then
-				return direct_save(session_name, save_opts)
-			end
-			return save_session_manually(session_name, direct_save, save_opts)
-		end
+		install_manual_save_wrapper(auto_session)
 		auto_session.setup(opts)
 		if vim.env.NVIM_TMUX_REFRESH_RESTORE == "1" then
 			vim.env.NVIM_TMUX_REFRESH_RESTORE = nil

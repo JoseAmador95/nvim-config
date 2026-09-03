@@ -15,8 +15,9 @@
 --
 --   return {
 --     plugins = {
---       native_review = { hunk_context = 3 },
+--       native_review = { hunk_context = 3, composer = { style = "card" } },
 --       clangd_compile_db = { path = "clangd", profile = "full" },
+--       render_markdown = { preset = "subtle" },
 --       theme_router = { background = "auto", transparent = false },
 --     },
 --     dap = { ui = "dap-ui" }, -- dap-ui | dap-view
@@ -52,6 +53,16 @@ local SCHEMA = {
 	plugins = {
 		type = "table",
 		fields = {
+			render_markdown = {
+				type = "table",
+				fields = {
+					preset = {
+						type = "enum",
+						values = { "subtle", "minimal", "semantic" },
+						default = "subtle",
+					},
+				},
+			},
 			native_review = {
 				type = "table",
 				fields = {
@@ -59,6 +70,12 @@ local SCHEMA = {
 					layout = { type = "enum", values = { "inline", "split" }, default = "inline" },
 					context = { type = "enum", values = { "hunks", "full" }, default = "hunks" },
 					inline_comments = { type = "boolean", default = true },
+					composer = {
+						type = "table",
+						fields = {
+							style = { type = "enum", values = { "card", "minimal" }, default = "card" },
+						},
+					},
 					panel = {
 						type = "table",
 						fields = {
@@ -747,11 +764,13 @@ local TEMPLATE = [[-- ~/.nvim-local.lua -- per-host Neovim settings (not under v
 
 return {
   plugins = {
+    render_markdown = { preset = "subtle" }, -- subtle | minimal | semantic; host-only
     native_review = {
       hunk_context = 3,
       layout = "inline", -- inline | split
       context = "hunks", -- hunks | full
       inline_comments = true,
+      composer = { style = "card" }, -- card | minimal; host-only
       panel = { max_width = 200, max_height = 48 },
     },
 

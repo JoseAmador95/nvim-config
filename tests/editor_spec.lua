@@ -162,6 +162,39 @@ local function border_text(value)
 	return table.concat(chunks)
 end
 
+local function chunk_highlight(value, needle)
+	for _, chunk in ipairs(type(value) == "table" and value or {}) do
+		if type(chunk) == "table" and tostring(chunk[1]):find(needle, 1, true) then
+			return chunk[2]
+		end
+	end
+	return nil
+end
+
+local function invoke_cycle_and_assert_insert(mapping, message)
+	assert(mapping.buffer == 1 and type(mapping.callback) == "function", message .. " mapping is missing")
+	local queued
+	local original_schedule = vim.schedule
+	vim.schedule = function(callback)
+		queued = callback
+	end
+	mapping.callback()
+	vim.schedule = original_schedule
+	assert(type(queued) == "function", message .. " did not schedule its Insert transition")
+	local entered_insert = false
+	local original_cmd = vim.cmd
+	vim.cmd = function(command)
+		if command == "startinsert" then
+			entered_insert = true
+			return
+		end
+		return original_cmd(command)
+	end
+	queued()
+	vim.cmd = original_cmd
+	assert(entered_insert, message .. " did not request Insert mode")
+end
+
 local function namespace_marks(buf)
 	return vim.api.nvim_buf_get_extmarks(buf, review_editor._namespace, 0, -1, { details = true })
 end
@@ -181,6 +214,7 @@ test("range composer uses a focused body and separate reserved footer", function
 	assert(review_editor.compose({
 		title = "Fixture",
 		body = "Draft",
+		style = "minimal",
 		source_win = source_win,
 		anchor_line = 2,
 		anchor = { kind = "range", start_line = 2, end_line = 2 },
@@ -221,6 +255,40 @@ test("range composer uses a focused body and separate reserved footer", function
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "teardown mutated source text")
 end)
 
+test("card composer owns one inline float with type-colored chrome and two reserved rows", function()
+	reset_editor()
+	local source_win, source_buf = review_source_fixture()
+	assert(review_editor.compose({
+		title = "New",
+		body = "Card draft",
+		style = "card",
+		type_cycle = true,
+		selected_type = "issue",
+		source_win = source_win,
+		anchor = { kind = "range", start_line = 3, end_line = 3 },
+	}, function()
+		return true
+	end))
+	local composer = vim.api.nvim_get_current_win()
+	local config = vim.api.nvim_win_get_config(composer)
+	assert(not inline_footer(source_win, composer), "card composer created a second visual footer")
+	assert(type(config.border) == "table" and #config.border == 8)
+	assert(config.width == vim.api.nvim_win_get_width(source_win) - (vim.fn.getwininfo(source_win)[1].textoff or 0) - 2)
+	assert(#reservation(source_buf)[4].virt_lines == config.height + 2)
+	assert(chunk_highlight(config.title, "issue") == "NvimReviewCommentIssue")
+	assert(chunk_highlight(config.footer, "issue") == "NvimReviewCommentIssue")
+	assert(config.border[1][2] == "NvimReviewCommentIssue" and config.border[8][2] == "NvimReviewCommentIssue")
+	vim.cmd("stopinsert")
+	invoke_cycle_and_assert_insert(vim.fn.maparg("<Tab>", "n", false, true), "Normal-mode card Tab")
+	config = vim.api.nvim_win_get_config(composer)
+	assert(chunk_highlight(config.title, "suggestion") == "NvimReviewCommentSuggestion")
+	assert(chunk_highlight(config.footer, "suggestion") == "NvimReviewCommentSuggestion")
+	assert(config.border[1][2] == "NvimReviewCommentSuggestion")
+	vim.cmd("stopinsert")
+	vim.fn.maparg("q", "n", false, true).callback()
+	assert(not review_editor.has_active() and not reservation(source_buf))
+end)
+
 test("range reservation renders only in its source window", function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
@@ -230,6 +298,7 @@ test("range reservation renders only in its source window", function()
 	assert(review_editor.compose({
 		title = "Scoped",
 		body = "Only the source window reserves this",
+		style = "minimal",
 		source_win = source_win,
 		anchor = { kind = "range", start_line = 2, end_line = 2 },
 	}, function()
@@ -418,7 +487,56 @@ test("review composer persists synchronously and recovers one rejected teardown"
 	assert(not review_editor.has_active() and not reservation(source_buf))
 end)
 
-test("new comment composer cycles type only in Normal mode and preserves it during recovery", function()
+test("prepare close cancels an empty composer without submitting it", function()
+	reset_editor()
+	local source_win, source_buf = review_source_fixture()
+	local calls = 0
+	local cancelled
+	assert(review_editor.prepare_close())
+	assert(review_editor.compose({
+		title = "Empty close",
+		source_win = source_win,
+		anchor = { kind = "general" },
+	}, function(body)
+		calls = calls + 1
+		cancelled = body
+		return true
+	end))
+	assert(review_editor.prepare_close())
+	assert(calls == 1 and cancelled == nil)
+	assert(not review_editor.has_active() and not reservation(source_buf))
+end)
+
+test("prepare close vetoes teardown until a nonempty draft is saved or recovered", function()
+	reset_editor()
+	local source_win, source_buf = review_source_fixture()
+	local recover = false
+	local submitted = 0
+	local recovered = 0
+	assert(review_editor.compose({
+		title = "Close recovery",
+		body = "Keep me",
+		source_win = source_win,
+		anchor = { kind = "general" },
+		recover = function(body)
+			assert(body == "Keep me")
+			recovered = recovered + 1
+			return recover
+		end,
+	}, function(body, interrupted)
+		assert(body == "Keep me" and interrupted == true)
+		submitted = submitted + 1
+		return false
+	end))
+	assert(not review_editor.prepare_close())
+	assert(submitted == 1 and recovered == 1 and review_editor.has_active())
+	assert(reservation(source_buf) == nil, "modal composer unexpectedly reserved source rows")
+	recover = true
+	assert(review_editor.prepare_close())
+	assert(submitted == 2 and recovered == 2 and not review_editor.has_active())
+end)
+
+test("minimal composer cycles type in Normal and Insert modes and preserves the colored badge", function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local submitted_type
@@ -426,10 +544,11 @@ test("new comment composer cycles type only in Normal mode and preserves it duri
 	assert(review_editor.compose({
 		title = "New",
 		body = "Typed draft",
+		style = "minimal",
 		source_win = source_win,
 		anchor_line = 5,
 		anchor = { kind = "range", start_line = 5, end_line = 5 },
-		type_cycle = { "issue", "suggestion", "rationale" },
+		type_cycle = true,
 		selected_type = "issue",
 		recover = function(body, selected_type)
 			assert(body == "Typed draft")
@@ -445,10 +564,28 @@ test("new comment composer cycles type only in Normal mode and preserves it duri
 	local footer = assert(inline_footer(source_win, win))
 	vim.cmd("stopinsert")
 	local tab = vim.fn.maparg("<Tab>", "n", false, true)
+	local insert_tab = vim.fn.maparg("<Tab>", "i", false, true)
+	local insert_backtab = vim.fn.maparg("<S-Tab>", "i", false, true)
 	assert(tab.buffer == 1 and type(tab.callback) == "function")
-	assert(vim.fn.maparg("<Tab>", "i", false, true).buffer ~= 1, "Insert-mode Tab was changed")
-	tab.callback()
-	assert(window_text(footer):find("New suggestion", 1, true) and window_text(footer):find("<Tab> type", 1, true))
+	assert(insert_tab.buffer == 1 and type(insert_tab.callback) == "function")
+	assert(insert_backtab.buffer == 1 and type(insert_backtab.callback) == "function")
+	invoke_cycle_and_assert_insert(tab, "Normal-mode Tab")
+	assert(
+		window_text(footer):find("New ◆ suggestion", 1, true)
+			and window_text(footer):find("<Tab>/<S-Tab> type", 1, true)
+	)
+	local marks = vim.api.nvim_buf_get_extmarks(
+		vim.api.nvim_win_get_buf(footer),
+		review_editor._footer_namespace,
+		0,
+		-1,
+		{ details = true }
+	)
+	assert(#marks == 1 and marks[1][4].hl_group == "NvimReviewCommentSuggestion")
+	invoke_cycle_and_assert_insert(insert_backtab, "Insert-mode Shift-Tab")
+	assert(window_text(footer):find("New ● issue", 1, true))
+	invoke_cycle_and_assert_insert(insert_tab, "Insert-mode Tab")
+	assert(window_text(footer):find("New ◆ suggestion", 1, true))
 	assert(review_editor.persist_active())
 	assert(submitted_type == "suggestion" and recovered_type == "suggestion")
 	assert(not review_editor.has_active() and not reservation(source_buf))
@@ -460,6 +597,7 @@ test("review composer grows from one to six screen rows and scrolls overflow", f
 	assert(review_editor.compose({
 		title = "Anchored",
 		body = "one",
+		style = "minimal",
 		source_win = source_win,
 		anchor_range = { first = 4, last = 6 },
 		anchor = { kind = "range", start_line = 4, end_line = 6 },
@@ -514,7 +652,8 @@ test("inline resize keeps a compact footer below the body and footer closure tea
 	assert(review_editor.compose({
 		title = "A deliberately long review title",
 		body = string.rep("wrapped text ", 12),
-		type_cycle = { "issue", "suggestion" },
+		style = "minimal",
+		type_cycle = true,
 		selected_type = "issue",
 		source_win = source_win,
 		anchor = { kind = "range", start_line = 8, end_line = 8 },
@@ -534,7 +673,7 @@ test("inline resize keeps a compact footer below the body and footer closure tea
 	assert(footer_config.width == body_config.width and footer_config.row == body_config.height + 1)
 	assert(#reservation(source_buf)[4].virt_lines == body_config.height + 1)
 	assert(vim.fn.strdisplaywidth(window_text(footer)) <= body_config.width)
-	assert(window_text(footer):find("<Tab>", 1, true) and window_text(footer):find("<C-s>", 1, true))
+	assert(window_text(footer):find("issue", 1, true) and window_text(footer):find("<C-s>", 1, true))
 	assert(window_text(footer):find("save", 1, true), "compact footer lost its save semantics")
 	vim.api.nvim_win_close(footer, true)
 	assert(callbacks == 1 and not review_editor.has_active() and not reservation(source_buf))
@@ -555,6 +694,7 @@ test("three-row EOF composer keeps its realized body and footer adjacent through
 	assert(review_editor.compose({
 		title = "EOF",
 		body = table.concat(draft, "\n"),
+		style = "minimal",
 		source_win = source_win,
 		anchor = { kind = "range", start_line = #source_lines, end_line = #source_lines },
 	}, function()
@@ -613,7 +753,8 @@ test("file and general anchors use one centered rounded modal without source res
 	assert(review_editor.compose({
 		title = "Edit",
 		body = "short",
-		type_cycle = { "issue", "suggestion" },
+		style = "minimal",
+		type_cycle = true,
 		selected_type = "issue",
 		source_win = source_win,
 		anchor_line = 4,
@@ -632,9 +773,9 @@ test("file and general anchors use one centered rounded modal without source res
 	assert(initial.height == 1 and initial.width <= math.min(88, vim.o.columns - 2))
 	assert(initial.row == math.floor((vim.o.lines - initial.height - 2) / 2))
 	assert(initial.col == math.floor((vim.o.columns - initial.width - 2) / 2))
-	assert(border_text(initial.title):find("Edit issue", 1, true))
-	assert(border_text(initial.footer):find("<Tab> type", 1, true))
-	assert(border_text(initial.footer):find("<C-s> / <CR><CR> save", 1, true))
+	assert(border_text(initial.title):find("Edit", 1, true) and border_text(initial.title):find("issue", 1, true))
+	assert(border_text(initial.footer):find("<Tab>/<S-Tab> type", 1, true))
+	assert(border_text(initial.footer):find("<C-s>/↵↵ save", 1, true))
 	assert(vim.bo[buf].filetype == "markdown" and not inline_footer(source_win, modal))
 	assert(not reservation(source_buf) and #namespace_marks(source_buf) == 1)
 	assert(namespace_marks(source_buf)[1][1] == sentinel, "modal creation replaced the source namespace")
@@ -646,9 +787,10 @@ test("file and general anchors use one centered rounded modal without source res
 	vim.cmd("stopinsert")
 	local tab = vim.fn.maparg("<Tab>", "n", false, true)
 	assert(tab.buffer == 1 and type(tab.callback) == "function")
-	assert(vim.fn.maparg("<Tab>", "i", false, true).buffer ~= 1)
+	assert(vim.fn.maparg("<Tab>", "i", false, true).buffer == 1)
 	tab.callback()
-	assert(border_text(vim.api.nvim_win_get_config(modal).title):find("Edit suggestion", 1, true))
+	local cycled_title = border_text(vim.api.nvim_win_get_config(modal).title)
+	assert(cycled_title:find("Edit", 1, true) and cycled_title:find("suggestion", 1, true))
 	vim.fn.maparg("<C-s>", "n", false, true).callback()
 	assert(calls == 1 and selected == "suggestion" and review_editor.has_active())
 	assert(not reservation(source_buf) and namespace_marks(source_buf)[1][1] == sentinel)
@@ -675,6 +817,7 @@ test("file and general anchors use one centered rounded modal without source res
 	assert(review_editor.compose({
 		title = "Reply",
 		body = "general draft",
+		selected_type = "suggestion",
 		source_win = source_win,
 		anchor = { kind = "general" },
 	}, function(body)
@@ -682,7 +825,12 @@ test("file and general anchors use one centered rounded modal without source res
 		return true
 	end))
 	local general_modal = vim.api.nvim_get_current_win()
-	assert(vim.api.nvim_win_get_config(general_modal).relative == "editor")
+	local reply_config = vim.api.nvim_win_get_config(general_modal)
+	assert(reply_config.relative == "editor")
+	assert(chunk_highlight(reply_config.title, "suggestion") == "NvimReviewCommentSuggestion")
+	assert(chunk_highlight(reply_config.footer, "suggestion") == "NvimReviewCommentSuggestion")
+	assert(vim.fn.maparg("<Tab>", "n", false, true).buffer ~= 1)
+	assert(vim.fn.maparg("<Tab>", "i", false, true).buffer ~= 1)
 	assert(not inline_footer(source_win, general_modal) and not reservation(source_buf))
 	vim.cmd("stopinsert")
 	vim.fn.maparg("q", "n", false, true).callback()

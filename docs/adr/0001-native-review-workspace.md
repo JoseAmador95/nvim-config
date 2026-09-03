@@ -1,6 +1,6 @@
 # ADR 0001: Native code-review mode in ordinary tabs
 
-- Status: Accepted
+- Status: Superseded by [ADR 0002](0002-native-review-owned-tab.md)
 - Date: 2026-08-26
 
 ## Context
@@ -52,7 +52,12 @@ Neovim owns a repository/session review controller in `config.code_review`:
   CURRENT is a real current buffer only when its exact bytes, including
   line-ending format and final newline, match the frozen model; otherwise it is
   an isolated read-only snapshot. Historical OLD, snapshot, unified, and panel
-  buffers remain LSP-blocked.
+  buffers remain LSP-blocked. A definition result may be projected back into the
+  owned review tab only when its canonical CURRENT path and line reverse-map to
+  one unambiguous frozen NEW entry. Picker confirmation and direct results both
+  revalidate their request generation and exact source document. The CURRENT
+  request buffer remains hidden until the destination is known; only a verified
+  outside-diff result uses the ordinary CURRENT-file opener.
 - `review_panel` is one dismissible three-pane float composed only of core
   Neovim windows. Files is a colored, collapsible tree with change groups,
   status, line totals, rename origins, and comment counts. Commits selects one
@@ -79,12 +84,15 @@ Neovim owns a repository/session review controller in `config.code_review`:
   `2` through `9`, then `9+`, while remaining separate panel items.
   File comments render as explicitly labeled virtual `0 │ [OLD]` or
   `0 │ [NEW]` rows for the anchor's path, side, and layer. CursorHold previews use
-  a separate transient namespace. A range composer reserves a one-to-six-row
-  borderless body and a separate instruction row without changing source text or
-  the persisted schema.
+  a separate transient namespace; previews and panel rows color only their type
+  badge. The default range composer is one rounded, theme-aware card and reserves
+  its one-to-six-row body plus two border rows without changing source text or
+  the persisted schema. The host-only `minimal` style retains the borderless body
+  and separate instruction row while still coloring the selected type.
   File and review-level create/edit/reply flows use a centered rounded modal
-  capped at 88 by 18 rows and reserve no source rows. Normal-mode double Enter
-  and `<C-s>` share one save path.
+  capped at 88 by 18 rows and reserve no source rows. Tab/Shift-Tab cycle new or
+  edited comment types in Normal and Insert mode and return to Insert; replies do
+  not cycle. Normal-mode double Enter and `<C-s>` share one save path.
 - `ReviewExport` renders all comments every time and copies complete Markdown or
   uses a temporary float. The header retains the frozen scope and exact
   revisions. Comment headings contain only file, line/range, and `[OLD]` or

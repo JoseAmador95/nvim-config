@@ -3,6 +3,7 @@ local M = {}
 local HOME_VARIABLE = "nvim_config_home"
 local HOME_PRESENTED_VARIABLE = "tab_first_home_presented"
 local TRANSIENT_TITLE_VARIABLE = "nvim_config_transient_title"
+local TRANSIENT_LIFECYCLE_GROUP = "TabFirstTransientLifecycle"
 
 local function default_options()
 	return {
@@ -45,6 +46,12 @@ local lifecycle_generation = 0
 local pending_closes = {}
 local focused_windows = {}
 local home_recovery_pending = false
+local transient_token = 0
+local transient_records = {}
+local transient_by_identity = {}
+local transient_lifecycle_ready = false
+local tearing_down = false
+local close_tab
 local history = {
 	entries = {},
 	index = 0,
@@ -172,6 +179,7 @@ local function delete_owned_buffer(buf, owned)
 		or not vim.api.nvim_buf_is_valid(buf)
 		or vim.api.nvim_buf_get_name(buf) ~= ""
 		or vim.bo[buf].modified
+		or not buffer_is_blank(buf)
 	then
 		return
 	end
@@ -179,6 +187,132 @@ local function delete_owned_buffer(buf, owned)
 		return
 	end
 	pcall(vim.api.nvim_buf_delete, buf, { force = true })
+end
+
+local function transient_identity(owner, key)
+	return owner .. "\0" .. key
+end
+
+local function transient_handle(record)
+	return {
+		tabpage = record.tabpage,
+		token = record.token,
+	}
+end
+
+local function transient_record(handle)
+	if type(handle) ~= "table" or type(handle.tabpage) ~= "number" or type(handle.token) ~= "number" then
+		return nil
+	end
+	local record = transient_records[handle.tabpage]
+	if not record or record.token ~= handle.token or not valid_tab(record.tabpage) then
+		return nil
+	end
+	return record
+end
+
+local function forget_transient(record)
+	if transient_records[record.tabpage] == record then
+		transient_records[record.tabpage] = nil
+	end
+	if transient_by_identity[record.identity] == record then
+		transient_by_identity[record.identity] = nil
+	end
+	pending_closes[record.tabpage] = nil
+	focused_windows[record.tabpage] = nil
+end
+
+local function notify_transient_callback(kind, err)
+	notify(("Transient tab %s callback failed: %s"):format(kind, tostring(err)), vim.log.levels.ERROR, "Tabs")
+end
+
+local function finish_transient(record, reason)
+	if record.closed_notified then
+		return
+	end
+	record.closed_notified = true
+	forget_transient(record)
+	local callback = record.on_closed
+	record.on_request_close = nil
+	record.on_closed = nil
+	delete_owned_buffer(record.bufnr, record.owned_buf)
+	if type(callback) == "function" then
+		local ok, err = pcall(callback, transient_handle(record), reason)
+		if not ok then
+			notify_transient_callback("on_closed", err)
+		end
+	end
+end
+
+local function reconcile_transients()
+	local stale = {}
+	for _, record in pairs(transient_records) do
+		if not valid_tab(record.tabpage) then
+			stale[#stale + 1] = record
+		end
+	end
+	for _, record in ipairs(stale) do
+		finish_transient(record, record.close_reason or "external")
+	end
+end
+
+local function run_transient_preflight(record, reason)
+	if record.preflight_running or type(record.on_request_close) ~= "function" then
+		return true
+	end
+	record.preflight_running = true
+	local ok, accepted = pcall(record.on_request_close, transient_handle(record), reason)
+	record.preflight_running = false
+	if not ok then
+		notify_transient_callback("on_request_close", accepted)
+		return false
+	end
+	return accepted ~= false
+end
+
+local function closing_transient_from_event(event)
+	local current = vim.api.nvim_get_current_tabpage()
+	local record = transient_records[current]
+	if record then
+		return record
+	end
+	local number = tonumber(event and event.match)
+	if not number then
+		return nil
+	end
+	for _, candidate in pairs(transient_records) do
+		if tab_number(candidate.tabpage) == number then
+			return candidate
+		end
+	end
+	return nil
+end
+
+local function ensure_transient_lifecycle()
+	local group = vim.api.nvim_create_augroup(TRANSIENT_LIFECYCLE_GROUP, { clear = true })
+	vim.api.nvim_create_autocmd("TabClosedPre", {
+		group = group,
+		desc = "Preflight externally closed transient tabs",
+		callback = function(event)
+			local record = closing_transient_from_event(event)
+			if not record or record.close_reason then
+				return
+			end
+			local pending = pending_closes[record.tabpage]
+			if type(pending) == "table" and pending.token == record.token then
+				record.close_reason = "supported"
+				return
+			end
+			record.close_reason = "external"
+			run_transient_preflight(record, "external")
+		end,
+	})
+	vim.api.nvim_create_autocmd("TabClosed", {
+		group = group,
+		desc = "Reconcile closed transient tabs",
+		callback = reconcile_transients,
+	})
+	transient_lifecycle_ready = true
 end
 
 local function rollback_landing(landing, landing_buf, landing_buf_owned, restore)
@@ -427,6 +561,7 @@ function M.setup(opts)
 	home_recovery_pending = false
 	configured = true
 	lifecycle_generation = lifecycle_generation + 1
+	ensure_transient_lifecycle()
 	return true
 end
 
@@ -461,6 +596,22 @@ end
 
 function M.teardown()
 	lifecycle_generation = lifecycle_generation + 1
+	tearing_down = true
+	pcall(vim.api.nvim_del_augroup_by_name, TRANSIENT_LIFECYCLE_GROUP)
+	transient_lifecycle_ready = false
+	local records = {}
+	for _, record in pairs(transient_records) do
+		records[#records + 1] = record
+	end
+	for _, record in ipairs(records) do
+		if valid_tab(record.tabpage) then
+			pcall(vim.api.nvim_tabpage_del_var, record.tabpage, TRANSIENT_TITLE_VARIABLE)
+		end
+		finish_transient(record, "teardown")
+	end
+	transient_records = {}
+	transient_by_identity = {}
+	tearing_down = false
 	pending_closes = {}
 	focused_windows = {}
 	home_recovery_pending = false
@@ -537,6 +688,163 @@ end
 ---@return boolean
 function M.is_transient(tabpage)
 	return M.transient_title(tabpage) ~= nil
+end
+
+local function validate_transient_spec(spec)
+	assert(
+		type(spec) == "table" and (next(spec) == nil or not vim.islist(spec)),
+		"tab-first transient spec must be an object"
+	)
+	for name in pairs(spec) do
+		assert(
+			name == "owner" or name == "key" or name == "title" or name == "on_request_close" or name == "on_closed",
+			"tab-first transient spec contains an unknown option: " .. tostring(name)
+		)
+	end
+	for _, name in ipairs({ "owner", "key", "title" }) do
+		local value = spec[name]
+		assert(type(value) == "string" and value ~= "", "tab-first transient " .. name .. " must be non-empty")
+	end
+	assert(
+		not spec.owner:find("\0", 1, true) and not spec.key:find("\0", 1, true),
+		"tab-first transient owner and key cannot contain NUL"
+	)
+	for _, name in ipairs({ "on_request_close", "on_closed" }) do
+		assert(
+			spec[name] == nil or type(spec[name]) == "function",
+			"tab-first transient " .. name .. " must be a function"
+		)
+	end
+end
+
+---Whether an opaque transient lease still owns its exact live tab.
+---@param handle table
+---@return boolean
+function M.valid_transient(handle)
+	return transient_record(handle) ~= nil
+end
+
+---Focus the exact tab owned by an opaque transient lease.
+---@param handle table
+---@return boolean?
+---@return string? err
+function M.focus_transient(handle)
+	local record = transient_record(handle)
+	if not record then
+		return nil, "transient tab handle is stale"
+	end
+	local ok, err = pcall(vim.api.nvim_set_current_tabpage, record.tabpage)
+	if not ok or not transient_record(handle) then
+		reconcile_transients()
+		return nil, ok and "transient tab closed while it was focused" or tostring(err)
+	end
+	return true
+end
+
+---Replace the stable title for an exact transient lease.
+---@param handle table
+---@param title string
+---@return boolean?
+---@return string? err
+function M.rename_transient(handle, title)
+	if type(title) ~= "string" or title == "" then
+		return nil, "transient tab title must be non-empty"
+	end
+	local record = transient_record(handle)
+	if not record then
+		return nil, "transient tab handle is stale"
+	end
+	local ok, err = pcall(vim.api.nvim_tabpage_set_var, record.tabpage, TRANSIENT_TITLE_VARIABLE, title)
+	if not ok then
+		return nil, tostring(err)
+	end
+	record.title = title
+	return true
+end
+
+---Create or focus one dedicated transient tab for an owner/key identity.
+---@param spec { owner: string, key: string, title: string, on_request_close?: fun(handle: table, reason: string): boolean?, on_closed?: fun(handle: table, reason: string) }
+---@return table? handle
+---@return string? err
+function M.acquire_transient(spec)
+	validate_transient_spec(spec)
+	if tearing_down then
+		return nil, "tab-first is tearing down"
+	end
+	if not transient_lifecycle_ready then
+		ensure_transient_lifecycle()
+	end
+	local identity = transient_identity(spec.owner, spec.key)
+	local existing = transient_by_identity[identity]
+	if existing and not valid_tab(existing.tabpage) then
+		finish_transient(existing, existing.close_reason or "external")
+		existing = nil
+	end
+	if existing then
+		local handle = transient_handle(existing)
+		local focused, focus_err = M.focus_transient(handle)
+		if not focused then
+			return nil, focus_err
+		end
+		local renamed, rename_err = M.rename_transient(handle, spec.title)
+		if not renamed then
+			return nil, rename_err
+		end
+		existing.on_request_close = spec.on_request_close
+		existing.on_closed = spec.on_closed
+		return transient_handle(existing)
+	end
+
+	local existing_buffers = {}
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		existing_buffers[buf] = true
+	end
+	local opened, open_err = pcall(vim.api.nvim_cmd, { cmd = "tabnew" }, {})
+	if not opened then
+		return nil, tostring(open_err)
+	end
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	local bufnr = vim.api.nvim_get_current_buf()
+	local owned_buf = not existing_buffers[bufnr]
+	M.unmark_home(tabpage)
+	if not M.mark_transient(tabpage, spec.title) then
+		close_handle(tabpage)
+		delete_owned_buffer(bufnr, owned_buf)
+		return nil, "could not mark the new tab as transient"
+	end
+	transient_token = transient_token + 1
+	local record = {
+		bufnr = bufnr,
+		closed_notified = false,
+		identity = identity,
+		key = spec.key,
+		on_closed = spec.on_closed,
+		on_request_close = spec.on_request_close,
+		owned_buf = owned_buf,
+		owner = spec.owner,
+		tabpage = tabpage,
+		title = spec.title,
+		token = transient_token,
+	}
+	transient_records[tabpage] = record
+	transient_by_identity[identity] = record
+	return transient_handle(record)
+end
+
+---Release one exact owner lease after its owner has completed cleanup.
+---@param handle table
+---@return boolean?
+---@return string? err
+function M.release_transient(handle)
+	local record = transient_record(handle)
+	if not record then
+		return nil, "transient tab handle is stale"
+	end
+	if record.close_reason == "external" then
+		return nil, "transient tab is already closing externally"
+	end
+	record.releasing = true
+	return close_tab(record.tabpage, "released", true)
 end
 
 ---@return integer?
@@ -658,15 +966,38 @@ function M.name_formatter(item)
 	return path ~= "" and vim.fn.fnamemodify(path, ":t") or "[No Name]"
 end
 
+local function reset_transient_close(record)
+	if record and transient_records[record.tabpage] == record then
+		record.close_reason = nil
+		record.releasing = nil
+	end
+end
+
 ---Close one stable tab handle without deleting user buffers.
 ---@param tabpage? integer
+---@param reason? string
+---@param skip_preflight? boolean
 ---@return boolean
-function M.close(tabpage)
+close_tab = function(tabpage, reason, skip_preflight)
 	tabpage = tabpage or vim.api.nvim_get_current_tabpage()
 	if not valid_tab(tabpage) then
 		return false
 	end
+	local transient = transient_records[tabpage]
+	if transient and not skip_preflight then
+		if not run_transient_preflight(transient, "supported") then
+			return false
+		end
+		if not valid_tab(tabpage) then
+			reconcile_transients()
+			return true
+		end
+	end
+	if transient then
+		transient.close_reason = reason or "supported"
+	end
 	if M.is_home(tabpage) and #vim.api.nvim_list_tabpages() == 1 then
+		reset_transient_close(transient)
 		M.ensure_home()
 		return true
 	end
@@ -686,6 +1017,7 @@ function M.close(tabpage)
 		end
 		local ok, error_message = pcall(vim.api.nvim_cmd, { cmd = "tabnew" }, {})
 		if not ok then
+			reset_transient_close(transient)
 			notify("Could not close tab: " .. tostring(error_message), vim.log.levels.ERROR, "Tabs")
 			return false
 		end
@@ -695,6 +1027,7 @@ function M.close(tabpage)
 		landing_buf_owned = not existing_buffers[landing_buf]
 		if not M.mark_home(landing) then
 			rollback_landing(landing, landing_buf, landing_buf_owned, original)
+			reset_transient_close(transient)
 			notify("Could not close tab: could not create a clean home tab", vim.log.levels.ERROR, "Tabs")
 			return false
 		end
@@ -707,14 +1040,20 @@ function M.close(tabpage)
 		elseif valid_tab(original) then
 			pcall(vim.api.nvim_set_current_tabpage, original)
 		end
+		reset_transient_close(transient)
 		notify("Could not close tab: " .. tostring(error_message), vim.log.levels.ERROR, "Tabs")
 		return false
 	end
+	reconcile_transients()
 
 	if landing or M.find_home() then
 		M.ensure_home()
 	end
 	return true
+end
+
+function M.close(tabpage)
+	return close_tab(tabpage, "supported", false)
 end
 
 ---Queue one close per stable tab handle.
@@ -726,7 +1065,17 @@ function M.request_close(tabpage)
 		return false
 	end
 
-	pending_closes[tabpage] = true
+	local transient = transient_records[tabpage]
+	if transient then
+		if not run_transient_preflight(transient, "supported") then
+			return false
+		end
+		if not valid_tab(tabpage) then
+			reconcile_transients()
+			return true
+		end
+	end
+	pending_closes[tabpage] = { token = transient and transient.token or nil }
 	local generation = lifecycle_generation
 	options.schedule(function()
 		if generation ~= lifecycle_generation then
@@ -734,7 +1083,9 @@ function M.request_close(tabpage)
 		end
 		pending_closes[tabpage] = nil
 		if valid_tab(tabpage) then
-			M.close(tabpage)
+			local current = transient_records[tabpage]
+			local skip_preflight = transient and current == transient and current.token == transient.token
+			close_tab(tabpage, "supported", skip_preflight)
 		end
 	end)
 	return true

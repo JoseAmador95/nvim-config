@@ -22,6 +22,7 @@ local function test(name, callback)
 end
 
 local mode = require("config.native_review").mode
+local review_lsp = require("config.native_review").lsp
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p") == 1)
 local path = fixture .. "/current.lua"
@@ -205,6 +206,34 @@ test("suspend restores and reenrolls while disable closes only owned auxiliary w
 	assert(vim.api.nvim_win_is_valid(unrelated_win), "unrelated window was closed")
 	assert(#vim.api.nvim_list_tabpages() == tabs_before, "ordinary review created or closed a tab")
 	vim.api.nvim_win_close(unrelated_win, true)
+end)
+
+test("suspend and disable invalidate CURRENT definition routing metadata", function()
+	reset()
+	local buf = vim.api.nvim_get_current_buf()
+	local state = mode.new(workspace())
+	state.handlers.definition_options = function()
+		return {
+			valid = function()
+				return true
+			end,
+			route = function()
+				return true
+			end,
+		}
+	end
+	assert(mode.enable(state))
+	local pending = assert(review_lsp.definition_options(buf, vim.api.nvim_get_current_win()))
+	assert(pending.valid() and review_lsp._metadata[buf] ~= nil)
+	local suspended = mode.suspend(state)
+	assert(not pending.valid(), "suspending review left a CURRENT definition response live")
+	assert(review_lsp._metadata[buf] == nil and review_lsp.definition_options(buf) == nil)
+	assert(mode.restore(state, suspended))
+	local restored = assert(review_lsp.definition_options(buf, vim.api.nvim_get_current_win()))
+	assert(restored.valid())
+	mode.disable(state)
+	assert(not restored.valid(), "disabling review left a CURRENT definition response live")
+	assert(review_lsp._metadata[buf] == nil and review_lsp.definition_options(buf) == nil)
 end)
 
 test("restore enrolls affected buffers opened while review mode is suspended", function()

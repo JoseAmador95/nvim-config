@@ -78,6 +78,18 @@ end
 
 local owned_paths = {}
 
+test("host adapter exposes the complete transient lease contract", function()
+	for _, name in ipairs({
+		"acquire_transient",
+		"focus_transient",
+		"rename_transient",
+		"release_transient",
+		"valid_transient",
+	}) do
+		assert(type(tabs[name]) == "function", "missing tabs adapter method " .. name)
+	end
+end)
+
 local function drain()
 	for _ = 1, 3 do
 		local done = false
