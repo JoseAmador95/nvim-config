@@ -70,10 +70,17 @@ test("comment rows expose old and current sides without inventing one for genera
 			},
 		},
 	}
-	local rendered = panel._comment_lines({ workspace = comment_workspace })
+	local rendered, _, decorations = panel._comment_lines({ workspace = comment_workspace })
 	assert(not rendered[3]:find("[OLD]", 1, true) and not rendered[3]:find("[CURRENT]", 1, true))
 	assert(rendered[3]:find("review", 1, true), "review-level comment retained internal terminology")
+	assert(rendered[3]:find("[● issue]", 1, true), "comment row omitted its type badge")
+	assert(#decorations[3] == 1 and decorations[3][1].group == "NvimReviewCommentIssue")
+	assert(
+		rendered[3]:sub(decorations[3][1].first + 1, decorations[3][1].last) == "[● issue]",
+		"comment row colored more than its type badge"
+	)
 	assert(rendered[4]:find("[OLD] range lua/example.lua:3-5", 1, true))
+	assert(#decorations[4] == 1 and decorations[4][1].group == "NvimReviewCommentPraise")
 	assert(rendered[5]:find("[CURRENT] range lua/example.lua:3-5", 1, true))
 	assert(rendered[6]:find("[OLD] file lua/example.lua", 1, true))
 	assert(rendered[7]:find("[CURRENT] file lua/example.lua", 1, true))

@@ -298,25 +298,77 @@ test("line mapping accepts only unchanged regions", function()
 	local mapped, err = review_lsp.map_line(snapshot, current, 2)
 	assert(mapped == nil and err:find("changed hunk", 1, true))
 	assert(review_lsp.map_line(snapshot, current, 3) == 4)
+	assert(review_lsp.map_current_line(snapshot, current, 2) == 1)
+	local reverse, reverse_err = review_lsp.map_current_line(snapshot, current, 3)
+	assert(reverse == nil and reverse_err:find("changed hunk", 1, true))
+	assert(review_lsp.map_current_line(snapshot, current, 4) == 3)
 end)
 
-test("historical-new gd maps before opening current source and old never invokes LSP", function()
+test("review definition options supersede older and unrouted requests and clear with their buffer", function()
+	local current = vim.api.nvim_create_buf(false, true)
+	local available = true
+	local routed
+	assert(review_lsp.mark(current, "current", {
+		definition_options = function(win)
+			assert(win == 17)
+			return {
+				valid = function()
+					return available
+				end,
+				route = function(location)
+					routed = location
+					return true
+				end,
+			}
+		end,
+	}))
+	local first = assert(review_lsp.definition_options(current, 17))
+	assert(first.valid())
+	local second = assert(review_lsp.definition_options(current, 17))
+	assert(not first.valid() and second.valid(), "a newer gd did not supersede the previous request")
+	assert(second.route({ path = "/tmp/target.lua", lnum = 2, col = 3 }))
+	assert(routed.path == "/tmp/target.lua")
+	available = false
+	assert(not second.valid())
+	available = true
+	local metadata = assert(review_lsp._metadata[current])
+	local provider = metadata.definition_options
+	metadata.definition_options = function()
+		return nil
+	end
+	assert(review_lsp.definition_options(current, 18) == nil)
+	assert(not second.valid(), "an ordinary-window gd left the prior review request live")
+	metadata.definition_options = provider
+	local third = assert(review_lsp.definition_options(current, 17))
+	assert(third.valid())
+	review_lsp.clear(current)
+	assert(not third.valid(), "clearing the review buffer left a definition request live")
+	vim.api.nvim_buf_delete(current, { force = true })
+end)
+
+test("historical-new gd requests from hidden CURRENT and old never invokes LSP", function()
 	local fixture = vim.fn.tempname()
 	assert(vim.fn.mkdir(fixture, "p") == 1)
 	local path = fixture .. "/sample.lua"
 	assert(vim.fn.writefile({ "one", "changed", "three" }, path) == 0)
 	local snapshot = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_lines(snapshot, 0, -1, false, { "one", "two", "three" })
-	local opened
 	local definitions = {}
+	local routed
 	review_lsp.mark(snapshot, "snapshot", {
 		root = fixture,
 		path = "sample.lua",
-		open = function(opened_path, position)
-			opened = { opened_path, position }
+		definition_options = function()
+			return {
+				route = function(location)
+					routed = location
+					return true
+				end,
+			}
 		end,
-		definition = function(target, line, column)
-			definitions[#definitions + 1] = { target, line, column }
+		definition = function(target, line, column, options)
+			definitions[#definitions + 1] = { target, line, column, options }
+			assert(options.valid() and options.route({ path = path, lnum = line, col = column }))
 		end,
 		lsp_ready = function()
 			return true
@@ -327,14 +379,9 @@ test("historical-new gd maps before opening current source and old never invokes
 	vim.wait(100, function()
 		return #definitions == 1
 	end)
-	assert(
-		opened
-			and vim.uv.fs_realpath(opened[1]) == vim.uv.fs_realpath(path)
-			and opened[2].lnum == 3
-			and opened[2].col == 7
-			and vim.deep_equal(definitions, { { vim.fn.bufnr(path), 3, 7 } }),
-		vim.inspect({ opened = opened, definitions = definitions })
-	)
+	assert(#definitions == 1 and definitions[1][1] == vim.fn.bufnr(path))
+	assert(definitions[1][2] == 3 and definitions[1][3] == 7 and type(definitions[1][4]) == "table")
+	assert(routed and routed.path == path and routed.lnum == 3 and routed.col == 7)
 	local failed, changed_err = review_lsp.goto_definition(snapshot, 2)
 	assert(failed == nil and changed_err:find("changed hunk", 1, true))
 
@@ -387,6 +434,27 @@ test("historical-new gd times out without issuing a request", function()
 		return timed_out
 	end))
 	assert(definitions == 0 and #deferred == 0)
+	timed_out = false
+	review_lsp.mark(snapshot, "snapshot", {
+		root = fixture,
+		path = "sample.lua",
+		definition = function()
+			definitions = definitions + 1
+		end,
+		lsp_ready = function()
+			return false
+		end,
+		lsp_timeout = function()
+			timed_out = true
+		end,
+		defer = function(callback)
+			deferred[#deferred + 1] = callback
+		end,
+	})
+	assert(review_lsp.goto_definition(snapshot, 1, 1) and #deferred == 1)
+	review_lsp.clear(snapshot)
+	table.remove(deferred, 1)()
+	assert(not timed_out and definitions == 0 and #deferred == 0, "cleared review request reached timeout or LSP")
 	vim.api.nvim_buf_delete(snapshot, { force = true })
 	vim.fn.delete(fixture, "rf")
 end)
@@ -425,7 +493,7 @@ test("unified read-only LSP actions map NEW rows and reject OLD rows", function(
 	assert(vim.wait(200, function()
 		return #requests == 6
 	end))
-	assert(#opened == 5, vim.inspect(opened))
+	assert(#opened == 4, vim.inspect(opened))
 	for index, action in ipairs({
 		"definition",
 		"declaration",
@@ -438,7 +506,7 @@ test("unified read-only LSP actions map NEW rows and reject OLD rows", function(
 	end
 	local failed, old_err = review_lsp.navigate(fixture.display, "definition", old_display, 1, fixture.metadata)
 	assert(failed == nil and old_err:find("OLD review rows", 1, true), old_err)
-	assert(#opened == 5 and #requests == 6, "OLD row invoked current-source navigation")
+	assert(#opened == 4 and #requests == 6, "OLD row invoked current-source navigation")
 
 	local expected = {
 		K = "Review hover in current source",
@@ -534,6 +602,142 @@ test("unified empty rows fail before opening or requesting CURRENT navigation", 
 	clear_unified_fixture(fixture)
 end)
 
+test("an invalid later gd supersedes pending unified and snapshot definitions without full polling", function()
+	local deferred = {}
+	local requests = 0
+	local pending_checks = 0
+	local full_checks = 0
+	local fixture = unified_fixture({
+		current_text = "one\nnew\nthree\n",
+		metadata = {
+			defer = function(callback)
+				deferred[#deferred + 1] = callback
+			end,
+			definition_options = function()
+				return {
+					pending = function()
+						pending_checks = pending_checks + 1
+						return true
+					end,
+					route = function()
+						return true
+					end,
+					valid = function()
+						full_checks = full_checks + 1
+						return true
+					end,
+				}
+			end,
+			lsp_ready = function()
+				return false
+			end,
+			navigate = function()
+				requests = requests + 1
+			end,
+		},
+		new_text = "one\nnew\nthree\n",
+		old_text = "one\nold\nthree\n",
+	})
+	local new_display = assert(fixture.projection.by_source.new[2])
+	local old_display = assert(fixture.projection.by_source.old[2])
+	assert(review_lsp.navigate(fixture.display, "definition", new_display, 1, fixture.metadata))
+	assert(#deferred == 1 and pending_checks == 1 and full_checks == 0)
+	local rejected, rejected_err = review_lsp.navigate(fixture.display, "definition", old_display, 1, fixture.metadata)
+	assert(rejected == nil and rejected_err:find("OLD review rows", 1, true))
+	table.remove(deferred, 1)()
+	assert(#deferred == 0 and requests == 0 and full_checks == 0)
+
+	local snapshot = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(snapshot, 0, -1, false, { "one", "new", "three" })
+	local snapshot_deferred = {}
+	local snapshot_requests = 0
+	assert(review_lsp.mark(snapshot, "snapshot", {
+		root = fixture.directory,
+		path = "sample.lua",
+		definition = function()
+			snapshot_requests = snapshot_requests + 1
+		end,
+		lsp_ready = function()
+			return false
+		end,
+		defer = function(callback)
+			snapshot_deferred[#snapshot_deferred + 1] = callback
+		end,
+	}))
+	assert(review_lsp.goto_definition(snapshot, 1, 1) and #snapshot_deferred == 1)
+	local invalid, invalid_err = review_lsp.goto_definition(snapshot, 0, 1)
+	assert(invalid == nil and invalid_err:find("positive integer", 1, true))
+	table.remove(snapshot_deferred, 1)()
+	assert(#snapshot_deferred == 0 and snapshot_requests == 0)
+	vim.api.nvim_buf_delete(snapshot, { force = true })
+	clear_unified_fixture(fixture)
+end)
+
+test("an invalid later gd supersedes definitions already queued through vim.schedule", function()
+	local fixture = unified_fixture({
+		current_text = "one\nnew\nthree\n",
+		metadata = {
+			lsp_ready = function()
+				return true
+			end,
+		},
+		new_text = "one\nnew\nthree\n",
+		old_text = "one\nold\nthree\n",
+	})
+	local original_schedule = vim.schedule
+	local scheduled = {}
+	local unified_requests = 0
+	local snapshot_requests = 0
+	local snapshot
+	local ok, err = xpcall(function()
+		fixture.metadata.navigate = function()
+			unified_requests = unified_requests + 1
+		end
+		vim.schedule = function(callback)
+			scheduled[#scheduled + 1] = callback
+		end
+
+		local new_display = assert(fixture.projection.by_source.new[2])
+		local old_display = assert(fixture.projection.by_source.old[2])
+		assert(review_lsp.navigate(fixture.display, "definition", new_display, 1, fixture.metadata))
+		assert(#scheduled == 1 and unified_requests == 0)
+		local rejected, rejected_err =
+			review_lsp.navigate(fixture.display, "definition", old_display, 1, fixture.metadata)
+		assert(rejected == nil and rejected_err:find("OLD review rows", 1, true))
+		table.remove(scheduled, 1)()
+
+		snapshot = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_buf_set_lines(snapshot, 0, -1, false, { "one", "new", "three" })
+		assert(review_lsp.mark(snapshot, "snapshot", {
+			root = fixture.directory,
+			path = "sample.lua",
+			definition = function()
+				snapshot_requests = snapshot_requests + 1
+			end,
+			lsp_ready = function()
+				return true
+			end,
+		}))
+		assert(review_lsp.goto_definition(snapshot, 1, 1))
+		assert(#scheduled == 1 and snapshot_requests == 0)
+		local invalid, invalid_err = review_lsp.goto_definition(snapshot, 0, 1)
+		assert(invalid == nil and invalid_err:find("positive integer", 1, true))
+		table.remove(scheduled, 1)()
+
+		assert(
+			unified_requests == 0 and snapshot_requests == 0,
+			vim.inspect({ unified_requests = unified_requests, snapshot_requests = snapshot_requests })
+		)
+	end, debug.traceback)
+	vim.schedule = original_schedule
+	if snapshot and vim.api.nvim_buf_is_valid(snapshot) then
+		review_lsp.clear(snapshot)
+		vim.api.nvim_buf_delete(snapshot, { force = true })
+	end
+	clear_unified_fixture(fixture)
+	assert(ok, err)
+end)
+
 test("unified LSP bridge revalidates source and mapping after waiting for a client", function()
 	local requests = 0
 	local opened = 0
@@ -559,7 +763,7 @@ test("unified LSP bridge revalidates source and mapping after waiting for a clie
 		notifications[#notifications + 1] = message
 	end
 	assert(review_lsp.navigate(fixture.display, "definition", 1, 2, fixture.metadata))
-	assert(opened == 1 and requests == 0)
+	assert(opened == 0 and requests == 0)
 	write_file(fixture.path, "changed\ntwo\n")
 	vim.api.nvim_buf_set_lines(fixture.source, 0, 1, false, { "changed" })
 	vim.bo[fixture.source].modified = false
@@ -919,6 +1123,124 @@ test("explicit location requests keep their target buffer and per-client encodin
 	package.loaded.snacks = originals.snacks
 	vim.api.nvim_buf_delete(target, { force = true })
 	vim.api.nvim_buf_delete(other, { force = true })
+	assert(ok, err)
+end)
+
+test("definition results route from CURRENT review panes with picker-time revalidation", function()
+	local target = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(target, 0, -1, false, { "definition source" })
+	vim.api.nvim_set_current_buf(target)
+	local editor = require("config.editor")
+	local client = { id = 61, offset_encoding = "utf-16" }
+	local originals = {
+		definition = vim.lsp.buf.definition,
+		get_clients = vim.lsp.get_clients,
+		open_file_in_tab = editor.open_file_in_tab,
+		snacks = package.loaded.snacks,
+	}
+	local opened = {}
+	local routed = {}
+	local picker
+	local request_items = {}
+	local route_enabled = true
+	local route_error
+	local route_throws = false
+	local route_valid = true
+	local validation_calls = 0
+	local ok, err = xpcall(function()
+		assert(review_lsp.mark(target, "current", {
+			definition_options = function(win)
+				assert(win == vim.api.nvim_get_current_win())
+				return {
+					valid = function()
+						validation_calls = validation_calls + 1
+						return route_valid
+					end,
+					route = function(location)
+						routed[#routed + 1] = location
+						if route_throws then
+							error("simulated route failure")
+						elseif route_error then
+							return false, route_error
+						end
+						return route_enabled
+					end,
+				}
+			end,
+		}))
+		vim.lsp.get_clients = function(options)
+			assert(options.bufnr == target and options.method == "textDocument/definition")
+			return { client }
+		end
+		vim.lsp.buf.definition = function(options)
+			options.on_list({ items = request_items })
+		end
+		editor.open_file_in_tab = function(path, position)
+			opened[#opened + 1] = { path = path, position = position }
+		end
+		package.loaded.snacks = {
+			picker = {
+				pick = function(options)
+					picker = options
+				end,
+			},
+		}
+
+		request_items = { { filename = "/tmp/in-review.lua", lnum = 4, col = 7 } }
+		assert(lsp_navigation.definition())
+		assert(#routed == 1 and routed[1].path == "/tmp/in-review.lua" and #opened == 0)
+		assert(validation_calls == 2, "a direct definition performed redundant full revalidation")
+
+		route_enabled = false
+		request_items = { { filename = "/tmp/outside.lua", lnum = 8, col = 2 } }
+		assert(lsp_navigation.definition())
+		assert(#routed == 2 and #opened == 1)
+		assert(opened[1].path == "/tmp/outside.lua" and opened[1].position.lnum == 8)
+
+		route_enabled = true
+		route_error = "simulated closed routing failure"
+		request_items = { { filename = "/tmp/must-not-fallback.lua", lnum = 3, col = 1 } }
+		assert(lsp_navigation.definition())
+		assert(#opened == 1, "a reported review routing failure escaped to ordinary navigation")
+		route_error = nil
+		route_throws = true
+		request_items = { { filename = "/tmp/must-not-escape.lua", lnum = 4, col = 1 } }
+		assert(lsp_navigation.definition())
+		assert(#opened == 1, "a throwing review router escaped to ordinary navigation")
+		route_throws = false
+
+		request_items = {
+			{ filename = "/tmp/first.lua", lnum = 1, col = 1 },
+			{ filename = "/tmp/second.lua", lnum = 9, col = 5 },
+		}
+		assert(lsp_navigation.definition())
+		assert(type(picker.confirm) == "function" and #picker.items == 2)
+		local closed = false
+		picker.confirm({
+			close = function()
+				closed = true
+			end,
+		}, picker.items[2])
+		assert(closed and #routed == 5 and routed[5].path == "/tmp/second.lua")
+
+		request_items = {
+			{ filename = "/tmp/stale-one.lua", lnum = 1, col = 1 },
+			{ filename = "/tmp/stale-two.lua", lnum = 2, col = 1 },
+		}
+		assert(lsp_navigation.definition())
+		local stale_picker = picker
+		request_items = { { filename = "/tmp/newer.lua", lnum = 6, col = 2 } }
+		assert(lsp_navigation.definition())
+		assert(#routed == 6 and routed[6].path == "/tmp/newer.lua")
+		stale_picker.confirm({ close = function() end }, stale_picker.items[1])
+		assert(#routed == 6 and #opened == 1, "an older picker survived a newer gd")
+	end, debug.traceback)
+	vim.lsp.buf.definition = originals.definition
+	vim.lsp.get_clients = originals.get_clients
+	editor.open_file_in_tab = originals.open_file_in_tab
+	package.loaded.snacks = originals.snacks
+	review_lsp.clear(target)
+	vim.api.nvim_buf_delete(target, { force = true })
 	assert(ok, err)
 end)
 

@@ -1,7 +1,5 @@
-local log_patterns = require("config.log_patterns")
 local pager = require("config.pager")
-
-log_patterns.setup()
+local deferred = require("config.deferred")
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "Viewer" })
@@ -109,7 +107,7 @@ end
 -- editor profile. The pager never loads the plugin.
 if not pager.active then
 	vim.api.nvim_create_user_command("MenuOpen", function()
-		local ok, menu = pcall(require, "config.menu")
+		local ok, menu = deferred.try("config.menu")
 		if not ok then
 			notify("Menu config not available", vim.log.levels.WARN)
 			return
@@ -121,16 +119,34 @@ if not pager.active then
 end
 
 vim.api.nvim_create_user_command("LogHlAdd", function(opts)
-	log_patterns.add("exact", opts)
-end, { nargs = "+", complete = log_patterns.complete_colors, desc = "Add log highlight (exact)" })
+	deferred.load("config.log_patterns").add("exact", opts)
+end, {
+	nargs = "+",
+	complete = function(arglead, cmdline)
+		return deferred.load("config.log_patterns").complete_colors(arglead, cmdline)
+	end,
+	desc = "Add log highlight (exact)",
+})
 
 vim.api.nvim_create_user_command("LogHlRegex", function(opts)
-	log_patterns.add("regex", opts)
-end, { nargs = "+", complete = log_patterns.complete_colors, desc = "Add log highlight (regex)" })
+	deferred.load("config.log_patterns").add("regex", opts)
+end, {
+	nargs = "+",
+	complete = function(arglead, cmdline)
+		return deferred.load("config.log_patterns").complete_colors(arglead, cmdline)
+	end,
+	desc = "Add log highlight (regex)",
+})
 
 vim.api.nvim_create_user_command("LogHlClear", function(opts)
-	log_patterns.clear(opts)
-end, { nargs = "?", complete = log_patterns.complete_colors, desc = "Clear log highlights" })
+	deferred.load("config.log_patterns").clear(opts)
+end, {
+	nargs = "?",
+	complete = function(arglead, cmdline)
+		return deferred.load("config.log_patterns").complete_colors(arglead, cmdline)
+	end,
+	desc = "Clear log highlights",
+})
 
 vim.api.nvim_create_user_command("LogWatchCurrentFile", function(opts)
 	require("config.log_watch").command(opts)

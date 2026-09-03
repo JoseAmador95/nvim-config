@@ -1623,6 +1623,7 @@ test("menu plugin is limited to the full terminal editor", function()
 
 		package.loaded["config.pager"] = { active = false }
 		assert(specs[1].cond() and specs[2].cond(), "menu disabled in full terminal Neovim")
+		assert(specs[2].init == nil, "menu Lazy spec eagerly initializes the host palette")
 
 		vim.keymap.set = function(modes, lhs, rhs, options)
 			mapping = { modes = modes, lhs = lhs, rhs = rhs, options = options }

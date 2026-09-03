@@ -119,6 +119,12 @@ local function drain()
 	end, 10)
 end
 
+test("host setup options do not leak request-only dependencies", function()
+	local setup = rpc._options()
+	assert(type(setup.open) == "function", "setup open callback is missing")
+	assert(setup.open_file == nil, "request-only open_file leaked into strict setup options")
+end)
+
 test("state root follows override, XDG, then home modes", function()
 	local old_override = vim.env.NVIM_EXACT_EDITOR_STATE_HOME
 	local old_xdg = vim.env.XDG_STATE_HOME
@@ -375,6 +381,10 @@ test("symlinked state directories are rejected before chmod", function()
 	assert(not ok and err:find("not a real directory", 1, true))
 	vim.fn.delete(symlink_root)
 	vim.fn.delete(target, "rf")
+end)
+
+test("host applies the bounded default registry heartbeat", function()
+	assert(rpc._options().registry_heartbeat_seconds == 21600, "host heartbeat policy default changed")
 end)
 
 test("interactive registration is deferred once beyond the startup path", function()

@@ -1,3 +1,5 @@
+local deferred = require("config.deferred")
+
 return {
 	{
 		"iamcco/markdown-preview.nvim",
@@ -5,7 +7,7 @@ return {
 			return not vim.g.vscode
 		end,
 		cmd = { "MarkdownPreview", "MarkdownPreviewStop", "MarkdownPreviewToggle" },
-		init = function(plugin)
+		init = function()
 			vim.g.mkdp_filetypes = { "markdown" }
 			vim.g.mkdp_preview_options = {
 				uml = {},
@@ -13,9 +15,10 @@ return {
 				disable_sync_scroll = 0,
 				sync_scroll_type = "middle",
 			}
-
-			local ok_bootstrap, bootstrap = pcall(require, "config.tool_bootstrap")
-			local ok_repair, repair = pcall(require, "verified_tools.markdown_preview")
+		end,
+		config = function(plugin)
+			local ok_bootstrap, bootstrap = deferred.try("config.tool_bootstrap")
+			local ok_repair, repair = deferred.try("verified_tools.markdown_preview")
 			if not ok_bootstrap or not ok_repair then
 				return
 			end

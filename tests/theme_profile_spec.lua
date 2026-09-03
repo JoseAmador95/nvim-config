@@ -63,7 +63,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 
 				local other = background == "light" and "dark" or "light"
 				vim.o.background = other
-				assert(vim.g.colors_name == expected(other), "background change did not switch Catppuccin flavour")
+				assert(
+					vim.wait(1000, function()
+						return vim.g.colors_name == expected(other)
+					end, 10),
+					"background change did not switch Catppuccin flavour"
+				)
 
 				vim.cmd("Theme vscode")
 				assert(theme.selection().colorscheme == "vscode", ":Theme vscode did not update selection")

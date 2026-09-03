@@ -3,6 +3,7 @@
 local M = {}
 
 local fs = require("native_review.dependencies").get("fs")
+local comment_types = require("native_review.comment_types")
 local review_scope = require("native_review.scope")
 local uv = vim.uv
 
@@ -26,14 +27,6 @@ local MAX_LOCK_BYTES = 1024
 local LOCK_STALE_SECONDS = 30
 local LOCK_OWNER_NAME = "owner.json"
 
-local TYPES = {
-	issue = true,
-	suggestion = true,
-	rationale = true,
-	question = true,
-	pedantic = true,
-	praise = true,
-}
 local LEGACY_STATUSES = { draft = true, reply = true, resolved = true, exported = true }
 local RESOLUTIONS = { open = true, resolved = true, legacy_unknown = true }
 local ANCHOR_KINDS = { general = true, file = true, range = true }
@@ -649,7 +642,7 @@ local function validate_item(item, seen, sequences, deps, index)
 	if sequences[item.sequence] then
 		return nil, label .. ".sequence must be unique"
 	end
-	if not TYPES[item.type] then
+	if not comment_types.contains(item.type) then
 		return nil, label .. ".type must be one of the six supported review types"
 	end
 	local body_ok, body_err = bounded_string(item.body, MAX_BODY, label .. ".body")
@@ -729,7 +722,7 @@ local function validate_legacy_item(item, seen, sequences, deps, index)
 	if sequences[item.sequence] then
 		return nil, label .. ".sequence must be unique"
 	end
-	if not TYPES[item.type] then
+	if not comment_types.contains(item.type) then
 		return nil, label .. ".type must be one of the six supported review types"
 	end
 	local body_ok, body_err = bounded_string(item.body, MAX_BODY, label .. ".body")
@@ -1539,7 +1532,7 @@ function M.add(session, values, options)
 		if not keys_ok then
 			return nil, keys_err
 		end
-		if not TYPES[values.type] then
+		if not comment_types.contains(values.type) then
 			return nil, "review item type must be one of the six supported types"
 		end
 		local body_ok, body_err = bounded_string(values.body, MAX_BODY, "review item body")
@@ -1586,7 +1579,7 @@ function M.edit(session, id, changes, options)
 			return nil, keys_err
 		end
 		if changes.type ~= nil then
-			if not TYPES[changes.type] then
+			if not comment_types.contains(changes.type) then
 				return nil, "review item type must be one of the six supported types"
 			end
 			item.type = changes.type
@@ -1616,7 +1609,7 @@ function M.set_type(session, id, item_type, options)
 		if not item then
 			return nil, "review item does not exist"
 		end
-		if not TYPES[item_type] then
+		if not comment_types.contains(item_type) then
 			return nil, "review item type must be one of the six supported types"
 		end
 		item.type = item_type
@@ -1658,7 +1651,7 @@ function M.reply(session, parent_id, values, options)
 			return nil, keys_err
 		end
 		local item_type = values.type or parent.type
-		if not TYPES[item_type] then
+		if not comment_types.contains(item_type) then
 			return nil, "reply type must be one of the six supported types"
 		end
 		local body_ok, body_err = bounded_string(values.body, MAX_BODY, "reply body")
@@ -1839,7 +1832,10 @@ M.max_anchor_context = MAX_ANCHOR_CONTEXT
 M.truncate_utf8 = truncate_utf8
 M.store_version = STORE_VERSION
 M.scope_version = SCOPE_VERSION
-M.types = vim.deepcopy(TYPES)
+M.types = {}
+for _, item_type in ipairs(comment_types.ids()) do
+	M.types[item_type] = true
+end
 M.resolutions = vim.deepcopy(RESOLUTIONS)
 M.anchor_kinds = vim.deepcopy(ANCHOR_KINDS)
 

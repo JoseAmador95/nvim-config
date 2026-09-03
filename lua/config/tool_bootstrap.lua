@@ -14,8 +14,6 @@ local markdown_ok, markdown_bridge = pcall(require, "verified_tools.markdown_pre
 local lazy_config_ok, lazy_config = pcall(require, "lazy.core.config")
 local setup_done = false
 local command_done = false
-local planning_done = false
-local plans = {}
 
 M._notify = function(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "Tools" })
@@ -614,40 +612,64 @@ function M.spec(name, options)
 	return mason_spec(name, options)
 end
 
+function M.plan(name, options)
+	if not setup_done then
+		M.setup()
+	end
+	local spec, spec_err = M.spec(name, options)
+	if not spec then
+		return nil, spec_err
+	end
+	return engine.plan(spec)
+end
+
 local function catalog_names()
 	local names = vim.deepcopy(manifest.managed_order)
 	vim.list_extend(names, manifest.mason_order)
 	return names
 end
 
-function M.plan_all()
-	plans = {}
+function M.plan_all(options)
+	local plans = {}
 	for _, name in ipairs(catalog_names()) do
-		local spec = M.spec(name)
-		if spec then
-			local plan = engine.plan(spec)
-			if plan then
-				plans[name] = plan
-			end
+		local plan = M.plan(name, options)
+		if plan then
+			plans[name] = plan
 		end
 	end
 	return vim.deepcopy(plans)
 end
 
-function M.import_legacy()
-	for _, name in ipairs(catalog_names()) do
-		local spec = M.spec(name)
+function M.import_legacy(name)
+	if not setup_done then
+		M.setup()
+	end
+	local names
+	if name == nil then
+		names = catalog_names()
+	elseif type(name) == "string" and (manifest.managed_tools[name] or manifest.mason_entry(name)) then
+		names = { name }
+	else
+		return nil, "unknown tool"
+	end
+	for _, candidate in ipairs(names) do
+		local spec = M.spec(candidate)
 		if spec and engine.status(spec.identity) == nil then
-			local record, reason = legacy_state.inspect(name, spec.identity.version)
+			local record, reason = legacy_state.inspect(candidate, spec.identity.version)
+			local imported, import_err
 			if record then
 				-- Schema-1 never carried archive/install evidence or a normalized
 				-- Mason receipt. Core therefore projects even old success as repair.
-				engine.import_legacy(spec, { status = record.status, detail = record.detail })
+				imported, import_err = engine.import_legacy(spec, { status = record.status, detail = record.detail })
 			elseif reason ~= "absent" and reason ~= "locked" then
-				engine.import_legacy(spec, { status = reason })
+				imported, import_err = engine.import_legacy(spec, { status = reason })
+			end
+			if import_err and import_err ~= "consumed" then
+				return nil, import_err
 			end
 		end
 	end
+	return true
 end
 
 local function report(prefix, name, ok, reason)
@@ -689,12 +711,7 @@ local function claim_mode(record)
 end
 
 local function start(name, force_managed)
-	local spec, spec_err = M.spec(name, { force_managed = force_managed })
-	if not spec then
-		M._notify(name .. " cannot be planned (" .. tostring(spec_err) .. ")", vim.log.levels.WARN)
-		return false
-	end
-	local plan, plan_err = engine.plan(spec)
+	local plan, plan_err = M.plan(name, { force_managed = force_managed })
 	if not plan then
 		M._notify(name .. " cannot be planned (" .. tostring(plan_err) .. ")", vim.log.levels.WARN)
 		return false
@@ -702,6 +719,11 @@ local function start(name, force_managed)
 	if plan.strategy == "external" then
 		M._notify(name .. " is supplied by compatible external executables")
 		return true
+	end
+	local imported, import_err = M.import_legacy(name)
+	if not imported then
+		M._notify(name .. " legacy state could not be imported (" .. tostring(import_err) .. ")", vim.log.levels.WARN)
+		return false
 	end
 	local current = engine.status(plan.identity)
 	if current and current.status == "succeeded" then
@@ -736,6 +758,10 @@ local function start(name, force_managed)
 end
 
 function M.install(target, force)
+	if type(target) ~= "string" or target == "" then
+		M._notify("An explicit tool name or 'all' is required", vim.log.levels.ERROR)
+		return false
+	end
 	local names = target == "all" and catalog_names() or { target }
 	if target ~= "all" and not manifest.managed_tools[target] and not manifest.mason_entry(target) then
 		M._notify("Unknown tool '" .. target .. "'", vim.log.levels.ERROR)
@@ -748,22 +774,12 @@ function M.install(target, force)
 	return ok
 end
 
-local function attest_existing()
-	for _, record in ipairs(engine.records() or {}) do
-		if record.status == "succeeded" then
-			engine.attest(record.identity, function(ok, reason)
-				if ok then
-					repair_markdown_preview(record.identity.name, record.identity)
-				else
-					M._notify(record.identity.name .. " attestation failed: " .. tostring(reason), vim.log.levels.WARN)
-				end
-			end)
-		end
-	end
-end
-
 local function register_command()
 	if not command_done then
+		if vim.fn.exists(":NvimConfigToolsInstall") == 2 then
+			command_done = true
+			return
+		end
 		vim.api.nvim_create_user_command("NvimConfigToolsInstall", function(options)
 			M.install(options.args == "" and "all" or options.args, options.bang)
 		end, {
@@ -788,26 +804,13 @@ function M.setup()
 		setup_done = true
 	end
 	register_command()
-	if planning_done then
-		return vim.deepcopy(plans)
-	end
-	local ok, result = pcall(M.plan_all)
-	if not ok then
-		M._notify("Initial tool planning failed: " .. bounded(result), vim.log.levels.ERROR)
-		return nil, result
-	end
-	planning_done = true
-	return result
+	return M
 end
 
 function M.mason_ready()
-	-- Local planning/import/attestation only. No registry refresh or install.
-	-- Keep this entrypoint safe even when Lazy (or a manual reload) reaches the
-	-- Mason config without having run the plugin init hook first.
-	M.setup()
-	M.plan_all()
-	M.import_legacy()
-	attest_existing()
+	-- Keep this entrypoint safe when Lazy reaches Mason config without having
+	-- run the plugin init hook first. Planning and attestation remain explicit.
+	return M.setup()
 end
 
 function M.mason_busy()
@@ -832,10 +835,8 @@ function M._reset_for_tests()
 	if command_done or vim.fn.exists(":NvimConfigToolsInstall") == 2 then
 		pcall(vim.api.nvim_del_user_command, "NvimConfigToolsInstall")
 	end
-	plans = {}
 	setup_done = false
 	command_done = false
-	planning_done = false
 	engine._reset_for_tests()
 end
 

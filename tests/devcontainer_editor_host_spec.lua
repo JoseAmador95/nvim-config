@@ -48,6 +48,7 @@ package.loaded["config.local_config"] = {
 }
 
 local devcontainer = require("config.devcontainer")
+assert(package.loaded.devcontainer_editor == nil, "devcontainer core loaded while registering host commands")
 
 test("host adapter injects plugin callbacks and no config dependency crosses the boundary", function()
 	local options = devcontainer._options()
@@ -82,15 +83,41 @@ test("editor replacement validates the exact pane before lifecycle start", funct
 	vim.system = old_system
 end)
 
+test("first command reports a core load failure and the next activation retries", function()
+	local original_preload = package.preload.devcontainer_editor
+	local original_notify = vim.notify
+	local notices = {}
+	package.preload.devcontainer_editor = function()
+		error("injected devcontainer core load failure")
+	end
+	package.loaded.devcontainer_editor = nil
+	vim.notify = function(message, level)
+		notices[#notices + 1] = { message = message, level = level }
+	end
+
+	local called, command_err = pcall(devcontainer._show_doctor)
+	package.preload.devcontainer_editor = original_preload
+	package.loaded.devcontainer_editor = nil
+	vim.notify = original_notify
+
+	assert(called, "doctor command raised on a deferred core load failure: " .. tostring(command_err))
+	assert(
+		#notices == 1 and notices[1].message:find("injected devcontainer core load failure", 1, true),
+		"doctor command did not report the deferred load failure"
+	)
+	assert(devcontainer._core(), "devcontainer core did not retry after the load failure")
+end)
+
 test("recreate and network authorization are explicit launcher argv", function()
 	local old_system = vim.system
-	local old_claim = devcontainer._core.new_claim_id
-	local old_status = devcontainer._core.status
+	local core = devcontainer._core()
+	local old_claim = core.new_claim_id
+	local old_status = core.status
 	local calls = {}
-	devcontainer._core.new_claim_id = function()
+	core.new_claim_id = function()
 		return "00000000-0000-4000-8000-000000000031"
 	end
-	devcontainer._core.status = function()
+	core.status = function()
 		return { claim_id = "00000000-0000-4000-8000-000000000031", status = "starting" }
 	end
 	vim.system = function(argv)
@@ -115,8 +142,8 @@ test("recreate and network authorization are explicit launcher argv", function()
 	assert(command:find("--ssh%-agent") and command:find("auto", 1, true))
 	assert(not command:find("NVIM_DEVCONTAINER_TOKEN", 1, true))
 	vim.system = old_system
-	devcontainer._core.new_claim_id = old_claim
-	devcontainer._core.status = old_status
+	core.new_claim_id = old_claim
+	core.status = old_status
 end)
 
 test("detached coordinator launch failure is reported without pane replacement", function()
@@ -142,9 +169,10 @@ test("detached coordinator launch failure is reported without pane replacement",
 end)
 
 test("detached launch is not successful before its exact starting claim", function()
-	local old_status = devcontainer._core.status
+	local core = devcontainer._core()
+	local old_status = core.status
 	local attempts = 0
-	devcontainer._core.status = function()
+	core.status = function()
 		attempts = attempts + 1
 		if attempts == 1 then
 			return nil, "workspace record is unavailable"
@@ -153,19 +181,19 @@ test("detached launch is not successful before its exact starting claim", functi
 	end
 	assert(devcontainer._wait_for_claim(root, "00000000-0000-4000-8000-000000000041"))
 	assert(attempts == 2)
-	devcontainer._core.status = function()
+	core.status = function()
 		return { claim_id = "00000000-0000-4000-8000-000000000041", status = "error" }
 	end
 	local ok, err = devcontainer._wait_for_claim(root, "00000000-0000-4000-8000-000000000041")
 	assert(ok == nil and err:find("entered error", 1, true))
 	local existing = { claim_id = "00000000-0000-4000-8000-000000000042", status = "error" }
-	devcontainer._core.status = function()
+	core.status = function()
 		return existing
 	end
 	ok, err = devcontainer._wait_for_claim(root, "00000000-0000-4000-8000-000000000041", 1)
 	assert(ok == nil and err:find("did not publish", 1, true))
 	assert(existing.claim_id == "00000000-0000-4000-8000-000000000042" and existing.status == "error")
-	devcontainer._core.status = old_status
+	core.status = old_status
 end)
 
 test("only final DevContainer commands are registered", function()
@@ -190,6 +218,32 @@ test("network denial is exactly the verified-tools offline signal", function()
 	vim.env.NVIM_CONFIG_OFFLINE = "0"
 	assert(devcontainer.network_authorized())
 	vim.env.NVIM_CONFIG_OFFLINE = previous
+end)
+
+test("container startup configures the core once and retries a failed first setup", function()
+	local saved_adapter = package.loaded["config.devcontainer"]
+	local saved_core = package.loaded.devcontainer_editor
+	local previous_container = vim.env.NVIM_DEVCONTAINER
+	local calls = 0
+	local fake = {}
+	function fake.setup()
+		calls = calls + 1
+		if calls == 1 then
+			error("fixture setup failure")
+		end
+		return fake
+	end
+	package.loaded.devcontainer_editor = fake
+	package.loaded["config.devcontainer"] = nil
+	vim.env.NVIM_DEVCONTAINER = "1"
+	local isolated = require("config.devcontainer")
+	local ok = pcall(isolated.setup)
+	assert(not ok and calls == 1, "failed container setup was not surfaced")
+	assert(isolated.setup() and calls == 2, "container setup did not retry exactly once")
+	assert(isolated.setup() and calls == 2, "configured container core was initialized twice")
+	package.loaded["config.devcontainer"] = saved_adapter
+	package.loaded.devcontainer_editor = saved_core
+	vim.env.NVIM_DEVCONTAINER = previous_container
 end)
 
 package.loaded["config.repo"] = old_repo

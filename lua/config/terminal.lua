@@ -3,7 +3,10 @@
 local M = {}
 
 local uv = vim.uv
-local lifecycle = require("terminal_lifecycle")
+local deferred = require("config.deferred")
+local lifecycle
+local lifecycle_configured = false
+local ensure_lifecycle
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve config.terminal source")
 local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
 local devcontainer_bashrc = vim.fs.joinpath(config_root, "scripts", "devcontainer-bashrc")
@@ -25,7 +28,11 @@ local function canonical_directory(path, label)
 end
 
 local function normalize_spec(spec)
-	local normalized, err = lifecycle._normalize(spec)
+	local instance, load_err = ensure_lifecycle()
+	if not instance then
+		return nil, load_err
+	end
+	local normalized, err = instance._normalize(spec)
 	if not normalized then
 		return nil, err
 	end
@@ -260,7 +267,17 @@ local lifecycle_policy = require("config.local_config").plugin("terminal_lifecyc
 })
 
 local function configure_lifecycle()
-	lifecycle.setup({
+	local candidate = lifecycle
+	if not candidate then
+		local loaded, result = deferred.try("terminal_lifecycle")
+		if not loaded then
+			lifecycle = nil
+			lifecycle_configured = false
+			return nil, tostring(result)
+		end
+		candidate = result
+	end
+	local ok, result = pcall(candidate.setup, {
 		backend = snacks_backend,
 		notify = notify,
 		schedule = vim.schedule,
@@ -268,9 +285,22 @@ local function configure_lifecycle()
 		stop_timeout_ms = lifecycle_policy.stop_timeout_ms,
 		buffer_mappings = lifecycle_policy.buffer_mappings,
 	})
+	if not ok then
+		lifecycle = nil
+		lifecycle_configured = false
+		return nil, tostring(result)
+	end
+	lifecycle = candidate
+	lifecycle_configured = true
+	return lifecycle
 end
 
-configure_lifecycle()
+ensure_lifecycle = function()
+	if lifecycle_configured and lifecycle then
+		return lifecycle
+	end
+	return configure_lifecycle()
+end
 
 local function call_with_spec(method, spec)
 	local normalized, err = normalize_spec(spec)
@@ -294,7 +324,8 @@ function M.focus(spec)
 		if not key then
 			return nil, err
 		end
-		return lifecycle.focus(key)
+		local instance, load_err = ensure_lifecycle()
+		return instance and instance.focus(key) or nil, load_err
 	end
 	return call_with_spec("focus", spec)
 end
@@ -308,7 +339,8 @@ function M.stop(identity)
 	if not key then
 		return nil, err
 	end
-	return lifecycle.stop(key)
+	local instance, load_err = ensure_lifecycle()
+	return instance and instance.stop(key) or nil, load_err
 end
 
 function M.dispose(identity)
@@ -316,19 +348,25 @@ function M.dispose(identity)
 	if not key then
 		return nil, err
 	end
-	return lifecycle.dispose(key)
+	local instance, load_err = ensure_lifecycle()
+	return instance and instance.dispose(key) or nil, load_err
 end
 
 function M.list()
-	return lifecycle.list()
+	local instance, err = ensure_lifecycle()
+	return instance and instance.list() or nil, err
 end
 
 function M.dispose_all(filter)
-	return lifecycle.dispose_all(filter)
+	local instance, err = ensure_lifecycle()
+	return instance and instance.dispose_all(filter) or nil, err
 end
 
 function M.send(identity, text, options)
-	local status = M.status(identity)
+	local status, status_err = M.status(identity)
+	if not status then
+		return nil, status_err
+	end
 	if not status.accepting_input then
 		return nil, "terminal process is not accepting input"
 	end
@@ -345,14 +383,21 @@ function M.send(identity, text, options)
 end
 
 function M.status(identity)
+	local instance, load_err = ensure_lifecycle()
+	if not instance then
+		return nil, load_err
+	end
 	if identity == nil then
-		return lifecycle.status()
+		return instance.status()
 	end
 	local key, err = key_for(identity)
 	if not key then
 		return nil, err
 	end
-	local status = lifecycle.status(key)
+	local status, status_err = instance.status(key)
+	if not status then
+		return nil, status_err
+	end
 	status.exists = status.state ~= "disposed"
 	status.running = status.state == "starting" or status.state == "running"
 	local job = buffer_job(status.buf)
@@ -364,7 +409,8 @@ function M.status(identity)
 end
 
 function M.effective_config()
-	return lifecycle.effective_config()
+	local instance, err = ensure_lifecycle()
+	return instance and instance.effective_config() or nil, err
 end
 
 function M.lines(identity)
@@ -372,7 +418,8 @@ function M.lines(identity)
 	if not key then
 		return nil, err
 	end
-	return lifecycle.lines(key)
+	local instance, load_err = ensure_lifecycle()
+	return instance and instance.lines(key) or nil, load_err
 end
 
 function M.shell_spec(root)
@@ -416,8 +463,10 @@ end
 M._normalize = normalize_spec
 M._key = workspace_key
 M._reset = function()
-	lifecycle._reset()
-	configure_lifecycle()
+	local instance = assert(ensure_lifecycle())
+	instance._reset()
+	lifecycle_configured = false
+	assert(configure_lifecycle())
 end
 
 return M

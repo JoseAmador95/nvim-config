@@ -32,6 +32,7 @@ local function configure_hunk_context(value)
 		repo = require("config.repo"),
 		fs = require("config.fs"),
 		editor = require("config.editor"),
+		tabs = require("config.tabs"),
 		lsp_navigation = lsp_navigation,
 		hunk_context = value,
 	})
@@ -999,6 +1000,34 @@ test("split winbars identify both sides and restore the ordinary origin winbar",
 	mode.disable(state)
 end)
 
+test("split code panes enforce absolute line numbers and restore invocation options", function()
+	local original_statuscolumn = "%s"
+	local state = setup_state(function(win)
+		vim.wo[win].number = false
+		vim.wo[win].relativenumber = true
+		vim.wo[win].statuscolumn = original_statuscolumn
+	end)
+	local ok, err = xpcall(function()
+		assert(presenter.show(state, entry(), { layout = "split", context = "full" }))
+		local presentation = state.presentation
+		for _, side in ipairs({ presentation.left, presentation.right }) do
+			assert(vim.wo[side.win].number, side.side .. " split pane did not show line numbers")
+			assert(not vim.wo[side.win].relativenumber, side.side .. " split pane retained relative line numbers")
+			assert(vim.wo[side.win].statuscolumn == "", side.side .. " split pane retained a custom status column")
+		end
+		presenter.clear(state)
+		assert(not vim.wo[state.origin.win].number, "split cleanup did not restore nonumber")
+		assert(vim.wo[state.origin.win].relativenumber, "split cleanup did not restore relativenumber")
+		assert(
+			vim.wo[state.origin.win].statuscolumn == original_statuscolumn,
+			"split cleanup did not restore statuscolumn"
+		)
+	end, debug.traceback)
+	pcall(presenter.clear, state)
+	pcall(mode.disable, state)
+	assert(ok, err)
+end)
+
 test("split highlight namespaces are side-local and restore only their own ownership", function()
 	local state, buf = setup_state()
 	local origin_win = state.origin.win
@@ -1700,6 +1729,57 @@ test("split boundary hunks omit only bands without matching source anchors", fun
 	pcall(presenter.clear, state)
 	pcall(mode.disable, state)
 	assert(ok, err)
+end)
+
+test("NEW definition locations reveal concealed rows in inline and split review layouts", function()
+	local function concealed(item, row)
+		for _, hidden in ipairs(item.omitted or {}) do
+			if hidden.first <= row and row <= hidden.last then
+				return true
+			end
+		end
+		return false
+	end
+
+	for _, layout in ipairs({ "inline", "split" }) do
+		local state, _, selected = setup_cursor_state()
+		assert(presenter.show(state, selected, { layout = layout, context = "hunks" }))
+		local presentation = state.presentation
+		local target = layout == "inline" and presentation.inline or presentation.right
+		local decoration
+		for _, item in ipairs(presentation.decorations) do
+			if item.buf == target.buf and item.win == target.win and #(item.omitted or {}) > 0 then
+				decoration = item
+				break
+			end
+		end
+		assert(decoration, layout .. " review has no concealed NEW context fixture")
+
+		local source_line
+		local target_line
+		if layout == "inline" then
+			for line, display in pairs(presentation.projection.by_source.new) do
+				if concealed(decoration, display) then
+					source_line = line
+					target_line = display
+					break
+				end
+			end
+		else
+			source_line = decoration.omitted[1].first
+			target_line = source_line
+		end
+		assert(source_line and target_line, layout .. " review has no concealed NEW line")
+		local generation = presentation.generation
+		local location = assert(presenter.reveal_new_location(state, selected.new_path, source_line, generation))
+		assert(location.win == target.win and location.buf == target.buf and location.line == target_line)
+		assert(not concealed(decoration, target_line), layout .. " definition row remained concealed")
+		assert(move_and_fire(target.win, target.buf, target_line) == target_line)
+		assert(state.presentation.layout == layout and state.presentation.context == "hunks")
+		local stale, stale_err = presenter.reveal_new_location(state, selected.new_path, source_line, generation + 1)
+		assert(stale == nil and stale_err:find("generation changed", 1, true), stale_err)
+		mode.disable(state)
+	end
 end)
 
 test("deleted and binary entries remain metadata-safe without a right pane", function()

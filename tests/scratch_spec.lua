@@ -31,6 +31,7 @@ package.loaded["config.repo"] = {
 }
 
 local host = require("config.scratch")
+assert(package.loaded.repo_scratch == nil, "loading the host scratch adapter initialized repo-scratch")
 local branch_identity = assert(host._identity("/repo"))
 assert(branch_identity.key.ref == branch)
 assert(branch_identity.label == "feature/complete-name")
@@ -43,8 +44,6 @@ assert(detached_identity.label == "detached-" .. oid:sub(1, 12), "legacy detache
 
 local original_command = vim.api.nvim_create_user_command
 local original_keymap = vim.keymap.set
-local scratch = require("repo_scratch")
-local original_setup = scratch.setup
 local commands = {}
 local mappings = {}
 vim.api.nvim_create_user_command = function(name)
@@ -53,15 +52,14 @@ end
 vim.keymap.set = function(mode, lhs)
 	mappings[mode .. lhs] = true
 end
-scratch.setup = function()
-	return true
-end
 host.setup()
-scratch.setup = original_setup
 vim.api.nvim_create_user_command = original_command
 vim.keymap.set = original_keymap
 assert(commands.Scratch, "host adapter did not retain :Scratch")
 assert(mappings["n<leader>."], "host adapter did not retain the scratch mapping")
+assert(package.loaded.repo_scratch == nil, "scratch command registration initialized repo-scratch")
+
+local scratch = require("repo_scratch")
 
 local original_open = scratch.open
 local original_prune = scratch.prune
@@ -76,6 +74,7 @@ local renewals = 0
 local releases = 0
 local saves = 0
 local timers = {}
+local setup_calls = {}
 local handle = {
 	path = vim.fn.tempname() .. ".md",
 	lease_path = vim.fn.tempname() .. ".lease",
@@ -84,7 +83,8 @@ local handle = {
 	key = { repo_identity = "/repo", ref = branch },
 }
 
-scratch.setup = function()
+scratch.setup = function(options)
+	setup_calls[#setup_calls + 1] = vim.deepcopy(options)
 	return true
 end
 scratch.prune = function()
@@ -147,14 +147,16 @@ local function new_timer()
 	return timer
 end
 
+local state_a = vim.fn.tempname()
 assert(host.setup({
-	state_root = vim.fn.tempname(),
+	state_root = state_a,
 	new_timer = new_timer,
 	schedule = function(callback)
 		callback()
 	end,
 }))
 local win = assert(host.open())
+assert(#setup_calls == 1 and setup_calls[1].state_root == state_a, "first use did not apply setup A")
 local buf = assert(win.buf)
 assert(#timers == 1, "host did not start one lease heartbeat")
 assert(timers[1].timeout == 100000 and timers[1].repeat_interval == 100000, "heartbeat is not lease/3")
@@ -169,9 +171,32 @@ vim.bo[buf].modified = true
 vim.api.nvim_exec_autocmds("BufWriteCmd", { buffer = buf, modeline = false })
 assert(saves == 0, "lease-lost buffer reached repo_scratch.save")
 assert(notifications[#notifications]:find("lease-lost", 1, true), "blocked save did not report lease loss")
+local state_b = vim.fn.tempname()
+local reconfigured, reconfigure_err = host.setup({
+	state_root = state_b,
+	new_timer = new_timer,
+	schedule = function(callback)
+		callback()
+	end,
+})
+assert(reconfigured == nil and reconfigure_err:find("active leases", 1, true), tostring(reconfigure_err))
+assert(#setup_calls == 1, "active lease reached the core reconfiguration path")
 vim.api.nvim_buf_delete(buf, { force = true })
 assert(releases == 1, "buffer deletion did not release the scratch handle")
 assert(#host.status().buffers == 0, "deleted scratch retained a heartbeat status")
+
+assert(host.setup({
+	state_root = state_b,
+	new_timer = new_timer,
+	schedule = function(callback)
+		callback()
+	end,
+}))
+assert(#setup_calls == 2 and setup_calls[2].state_root == state_b, "setup B was not applied to the active core")
+local second = assert(host.open())
+assert(#setup_calls == 2, "second use discarded setup B or redundantly configured the core")
+vim.api.nvim_buf_delete(second.buf, { force = true })
+assert(releases == 2, "second-use scratch handle was not released")
 assert(host.teardown())
 
 scratch.open = original_open

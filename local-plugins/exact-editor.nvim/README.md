@@ -27,6 +27,7 @@ require("exact_editor").setup({
     return host_install_buffer_mapping(bufnr, finish)
   end,
   workspace_retention = "visited",
+  registry_heartbeat_seconds = 21600,
 })
 ```
 
@@ -39,7 +40,9 @@ All blocking requests for one buffer share that single finish action. Completion
 is persisted once per request in sorted request-ID order, so concurrent callers
 observe deterministic fan-out. Visited workspaces remain in the instance
 registry for its lifetime; `workspace_retention` currently accepts only
-`"visited"`.
+`"visited"`. Known workspaces are discovery cache hits and do not republish the
+registry. A new workspace is published once and is added to in-memory state only
+when that publication succeeds.
 
 The public RPC consumers are `consume_request`, `consume_normal`, and
 `consume_blocking`. Blocking requests keep an owner-only wait file until the
@@ -48,6 +51,11 @@ external caller observes `completed` or `aborted`. `setup` accepts optional
 `notify` hooks for embedding and deterministic tests. An injected `server_stop`
 must return the boolean `true` only after the endpoint has stopped; the native
 `vim.fn.serverstop` path is successful only when it returns `1`.
+`registry_heartbeat_seconds` defaults to six hours and accepts inclusive values
+from 60 through 604800 seconds. The single periodic timer is unreferenced so it
+cannot keep Neovim alive. Successful cleanup stops and closes it; a failed
+server stop preserves both the live instance and its heartbeat for teardown
+retry.
 
 ## CLI
 

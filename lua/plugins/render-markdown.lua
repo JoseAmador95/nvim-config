@@ -1,3 +1,22 @@
+local redraw_profile = require("config.redraw_profile")
+local deferred = require("config.deferred")
+local local_config = require("config.local_config")
+local palette = require("config.palette")
+
+local configured = local_config.plugin("render_markdown", { preset = "subtle" })
+
+local function apply_palette()
+	palette.apply_markdown(configured.preset)
+end
+
+local render_opts = { render_modes = true }
+if redraw_profile.low_bandwidth() then
+	render_opts = {
+		render_modes = { "n" },
+		anti_conceal = { enabled = false },
+	}
+end
+
 return {
 	"MeanderingProgrammer/render-markdown.nvim",
 	-- Must register its FileType observer before the first event. Loading this
@@ -6,46 +25,31 @@ return {
 	cond = function()
 		return not vim.g.vscode
 	end,
-	dependencies = { "nvim-treesitter/nvim-treesitter" },
-	opts = {},
-	config = function()
-		require("render-markdown").setup({ render_modes = true })
-
-		-- render-markdown defaults lean dark; override the groups that read
-		-- worst on a light background and hand control back to its generated
-		-- colors when dark. Applied on every ColorScheme so the overrides
-		-- survive theme reapplies (including the background-follow reapply in
-		-- colorscheme.lua).
-		local function apply_overrides()
-			local set = vim.api.nvim_set_hl
-			if vim.o.background == "light" then
-				set(0, "RenderMarkdownCode", { bg = "#e8e8e8" })
-				set(0, "RenderMarkdownCodeInline", { bg = "#e0e0e0", fg = "#383838" })
-				set(0, "RenderMarkdownH1Bg", { bg = "#d6e4f0" })
-				set(0, "RenderMarkdownH2Bg", { bg = "#dceadb" })
-				set(0, "RenderMarkdownH3Bg", { bg = "#f0e6cc" })
-				set(0, "RenderMarkdownH4Bg", { bg = "#ead9e6" })
-				set(0, "RenderMarkdownH5Bg", { bg = "#dce6ea" })
-				set(0, "RenderMarkdownH6Bg", { bg = "#e2e2e2" })
-			else
-				set(0, "RenderMarkdownCode", { link = "ColorColumn" })
-				set(0, "RenderMarkdownCodeInline", { link = "RenderMarkdownCode" })
-				for i = 1, 6 do
-					set(0, "RenderMarkdownH" .. i .. "Bg", { link = "RenderMarkdownH" .. i })
-				end
-			end
+	-- Lazy runs every init callback before sourcing any plugin. Registering the
+	-- host palette here means it runs before render-markdown's own ColorScheme
+	-- callback, so the plugin derives its cached border colors from our public
+	-- highlight groups rather than from the previous colorscheme.
+	init = function()
+		if vim.g.vscode then
+			return
 		end
-
 		vim.api.nvim_create_autocmd("ColorScheme", {
-			group = vim.api.nvim_create_augroup("RenderMarkdownBgFollow", { clear = true }),
-			callback = apply_overrides,
+			group = vim.api.nvim_create_augroup("NvimConfigRenderMarkdownPalette", { clear = true }),
+			callback = apply_palette,
+			desc = "Repaint render-markdown from the active colorscheme",
 		})
-		apply_overrides()
+		apply_palette()
+	end,
+	dependencies = { "nvim-treesitter/nvim-treesitter" },
+	opts = render_opts,
+	config = function(_, opts)
+		local renderer = deferred.load("render-markdown")
+		renderer.setup(opts)
 
 		vim.api.nvim_create_user_command("MarkdownRender", function(opts)
 			local args = vim.trim(opts.args or "")
 			if args == "" then
-				require("render-markdown").toggle()
+				renderer.toggle()
 				return
 			end
 			vim.cmd("RenderMarkdown " .. args)

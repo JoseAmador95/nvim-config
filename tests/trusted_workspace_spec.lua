@@ -134,6 +134,71 @@ test("local_config delegates merge and snapshots while preserving host APIs", fu
 	vim.fn.delete(root, "rf")
 end)
 
+test("project local config cannot override the host Markdown rendering preset", function()
+	local root = temp_dir()
+	local project = vim.fs.joinpath(root, "project")
+	assert(vim.fn.mkdir(project, "p", 448) == 1)
+	local host_path = vim.fs.joinpath(root, "host.lua")
+	assert(vim.fn.writefile({
+		"return { plugins = { render_markdown = { preset = 'minimal' } } }",
+	}, host_path) == 0)
+	assert(vim.fn.writefile({
+		"return { plugins = { render_markdown = { preset = 'semantic' } } }",
+	}, vim.fs.joinpath(project, ".nvim-local.lua")) == 0)
+
+	vim.cmd.cd(vim.fn.fnameescape(project))
+	vim.env.NVIM_CONFIG_FILE = host_path
+	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = vim.fs.joinpath(root, "trust-state")
+	vim.env.NVIM_APPNAME = nil
+	vim.secure.read = function(path)
+		return table.concat(vim.fn.readfile(path), "\n")
+	end
+	package.loaded["config.local_config"] = nil
+	local local_config = require("config.local_config")
+	local effective = local_config.read()
+
+	equal("minimal", effective.plugins.render_markdown.preset, "project replaced the host Markdown preset")
+	local errors = table.concat(local_config.errors(), "\n")
+	assert(errors:find("project source", 1, true), "project Markdown rejection was not reported")
+	assert(errors:find("render_markdown", 1, true), "project Markdown rejection omitted the forbidden field")
+	equal(0, #require("trusted_workspace").status().pending, "rejected Markdown preset remained pending")
+
+	vim.fn.delete(root, "rf")
+end)
+
+test("project local config permits review context only and rejects host-only composer style", function()
+	local root = temp_dir()
+	local project = vim.fs.joinpath(root, "project")
+	assert(vim.fn.mkdir(project, "p", 448) == 1)
+	local host_path = vim.fs.joinpath(root, "host.lua")
+	assert(vim.fn.writefile({
+		"return { plugins = { native_review = { hunk_context = 4, composer = { style = 'minimal' } } } }",
+	}, host_path) == 0)
+	assert(vim.fn.writefile({
+		"return { plugins = { native_review = { hunk_context = 99, composer = { style = 'card' } } } }",
+	}, vim.fs.joinpath(project, ".nvim-local.lua")) == 0)
+
+	vim.cmd.cd(vim.fn.fnameescape(project))
+	vim.env.NVIM_CONFIG_FILE = host_path
+	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = vim.fs.joinpath(root, "trust-state")
+	vim.env.NVIM_APPNAME = nil
+	vim.secure.read = function(path)
+		return table.concat(vim.fn.readfile(path), "\n")
+	end
+	package.loaded["config.local_config"] = nil
+	local local_config = require("config.local_config")
+	local effective = local_config.read()
+
+	equal(4, effective.plugins.native_review.hunk_context, "rejected project source partially changed review context")
+	equal("minimal", effective.plugins.native_review.composer.style, "project replaced the host composer style")
+	local errors = table.concat(local_config.errors(), "\n")
+	assert(errors:find("project source", 1, true), "project composer rejection was not reported")
+	assert(errors:find("composer", 1, true), "project composer rejection omitted the forbidden field")
+	equal(0, #require("trusted_workspace").status().pending, "rejected composer remained pending")
+
+	vim.fn.delete(root, "rf")
+end)
+
 test("pager mode does not read or execute project Lua", function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
@@ -161,6 +226,46 @@ test("pager mode does not read or execute project Lua", function()
 	local status = require("trusted_workspace").status()
 	equal("host-only", status.profile, "pager did not select host-only authority mode")
 	equal(0, #status.pending, "pager exposed a project approval")
+
+	vim.fn.delete(root, "rf")
+end)
+
+test("project redraw settings reject the complete source without approval", function()
+	local root = temp_dir()
+	local project = vim.fs.joinpath(root, "project")
+	assert(vim.fn.mkdir(project, "p", 448) == 1)
+	local host_path = vim.fs.joinpath(root, "host.lua")
+	assert(vim.fn.writefile({
+		"return {",
+		"  ui = { redraw_profile = 'low-bandwidth' },",
+		"  plugins = { native_review = { hunk_context = 4 } },",
+		"}",
+	}, host_path) == 0)
+	assert(vim.fn.writefile({
+		"return {",
+		"  ui = { redraw_profile = 'full' },",
+		"  plugins = { native_review = { hunk_context = 99 } },",
+		"}",
+	}, vim.fs.joinpath(project, ".nvim-local.lua")) == 0)
+
+	vim.cmd.cd(vim.fn.fnameescape(project))
+	vim.env.NVIM_CONFIG_FILE = host_path
+	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = vim.fs.joinpath(root, "trust-state")
+	vim.env.NVIM_APPNAME = nil
+	vim.secure.read = function(path)
+		return table.concat(vim.fn.readfile(path), "\n")
+	end
+	package.loaded["config.local_config"] = nil
+	local local_config = require("config.local_config")
+	local effective = local_config.read()
+
+	equal("low-bandwidth", effective.ui.redraw_profile, "project UI replaced the host redraw profile")
+	equal(4, effective.plugins.native_review.hunk_context, "rejected project source was partially applied")
+	local errors = table.concat(local_config.errors(), "\n")
+	assert(errors:find("project source:", 1, true), "project UI rejection was not reported")
+	assert(errors:find("ui", 1, true), "project UI rejection omitted the forbidden namespace")
+	assert(not errors:find("project approval:", 1, true), "rejected project source was sent for approval")
+	equal(0, #require("trusted_workspace").status().pending, "rejected project source left a pending approval")
 
 	vim.fn.delete(root, "rf")
 end)

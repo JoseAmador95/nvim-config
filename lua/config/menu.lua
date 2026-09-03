@@ -1,6 +1,6 @@
-local action_palette = require("config.action_palette")
 local backend = require("config.menu.backend").default()
 local context = require("config.menu.context")
+local deferred = require("config.deferred")
 
 local M = {}
 
@@ -9,7 +9,7 @@ local function current_context()
 end
 
 local function descriptors(menu_context, surface)
-	return action_palette.sections(menu_context, surface)
+	return deferred.load("config.action_palette").sections(menu_context, surface)
 end
 
 local function palette_items(sections)

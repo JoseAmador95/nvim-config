@@ -1,8 +1,11 @@
--- Repository/session-scoped standalone native reviews in ordinary Neovim tabs.
+-- Repository/session-scoped standalone native reviews in one owner-managed tab.
 local M = {}
 
 local repo = require("native_review.dependencies").get("repo")
+local fs = require("native_review.dependencies").get("fs")
 local config = require("native_review.dependencies").get("config")
+local tabs = require("native_review.dependencies").get("tabs")
+local comment_types = require("native_review.comment_types")
 local review_changes = require("native_review.changes")
 local review_editor = require("native_review.editor")
 local review_export = require("native_review.export")
@@ -15,32 +18,12 @@ local review_store = require("native_review.store")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comments")
 local PREVIEW_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comment_preview")
-local REVIEW_TYPES = { "issue", "suggestion", "rationale", "question", "pedantic", "praise" }
-local COMMENT_SIGN_TYPES = { "issue", "suggestion", "question", "rationale", "pedantic", "praise" }
-local TYPE_SIGNS = {
-	issue = { text = "●", highlight = "NvimReviewCommentIssue" },
-	suggestion = { text = "◆", highlight = "NvimReviewCommentSuggestion" },
-	question = { text = "?", highlight = "NvimReviewCommentQuestion" },
-	rationale = { text = "R", highlight = "NvimReviewCommentRationale" },
-	pedantic = { text = "·", highlight = "NvimReviewCommentPedantic" },
-	praise = { text = "♥", highlight = "NvimReviewCommentPraise" },
-}
-local TYPE_HIGHLIGHT_LINKS = {
-	issue = "DiagnosticSignError",
-	suggestion = "DiagnosticSignWarn",
-	question = "DiagnosticSignInfo",
-	rationale = "Special",
-	pedantic = "DiagnosticSignHint",
-	praise = "DiagnosticSignOk",
-}
+local REVIEW_TYPES = comment_types.ids()
+local COMMENT_SIGN_TYPES = comment_types.rail_ids()
 
 local function apply_comment_highlights()
-	for _, item_type in ipairs(REVIEW_TYPES) do
-		vim.api.nvim_set_hl(
-			0,
-			TYPE_SIGNS[item_type].highlight,
-			{ default = true, link = TYPE_HIGHLIGHT_LINKS[item_type] }
-		)
+	for _, definition in ipairs(comment_types.all()) do
+		vim.api.nvim_set_hl(0, definition.highlight, { default = true, link = definition.default_link })
 	end
 end
 
@@ -85,6 +68,14 @@ local suspended
 local scope_history = {}
 local setup_done = false
 local inline_preview
+local review_surface
+local pending_surface_close
+local invocation
+local surface_transition = false
+local handle_surface_request_close
+local handle_surface_closed
+local workspace_generation = 0
+local definition_navigation_options
 
 local function notify(message, level)
 	vim.notify(tostring(message), level or vim.log.levels.INFO, { title = "Review" })
@@ -171,13 +162,28 @@ local function workspace_for_key(expected)
 	return registered(workspace) and workspace or nil
 end
 
-local function active_for_key(expected, action)
+local function bump_workspace_generation(workspace)
+	workspace_generation = workspace_generation + 1
+	workspace.generation = workspace_generation
+	return workspace.generation
+end
+
+local function interaction_token()
 	local workspace = current_workspace()
-	if not workspace or workspace_key(workspace) ~= expected then
+	return {
+		generation = workspace_generation,
+		workspace_key = workspace and workspace_key(workspace) or nil,
+	}
+end
+
+local function resolve_interaction_token(token, action)
+	local workspace = current_workspace()
+	local current_key = workspace and workspace_key(workspace) or nil
+	if type(token) ~= "table" or token.generation ~= workspace_generation or token.workspace_key ~= current_key then
 		notify("Active review changed while " .. action .. "; no changes were made", vim.log.levels.WARN)
-		return nil
+		return false
 	end
-	return workspace
+	return true
 end
 
 local function find_item(session, id)
@@ -187,6 +193,51 @@ local function find_item(session, id)
 		end
 	end
 	return nil
+end
+
+local function workspace_token(workspace)
+	return {
+		workspace_key = workspace_key(workspace),
+		generation = workspace.generation,
+	}
+end
+
+local function resolve_workspace_token(token, action)
+	if type(token) ~= "table" then
+		notify("Review selection was invalid; no changes were made", vim.log.levels.WARN)
+		return nil
+	end
+	local workspace = current_workspace()
+	if not workspace or workspace_key(workspace) ~= token.workspace_key then
+		notify("Active review changed while " .. action .. "; no changes were made", vim.log.levels.WARN)
+		return nil
+	end
+	if workspace.generation ~= token.generation then
+		notify("Review changed while " .. action .. "; no changes were made", vim.log.levels.WARN)
+		return nil
+	end
+	return workspace
+end
+
+local function item_token(workspace, item)
+	return {
+		workspace_key = workspace_key(workspace),
+		generation = workspace.generation,
+		item_id = item.id,
+	}
+end
+
+local function resolve_item_token(token, action)
+	local workspace = resolve_workspace_token(token, action)
+	if not workspace then
+		return nil
+	end
+	local item = find_item(workspace.session, token.item_id)
+	if not item then
+		notify("Review comment changed while " .. action .. "; no changes were made", vim.log.levels.WARN)
+		return nil
+	end
+	return workspace, item
 end
 
 local function find_entry(workspace, identity)
@@ -353,6 +404,7 @@ local function save_mutation(workspace, changed)
 	if not saved then
 		workspace.session = changed
 		workspace.scope = changed.scope
+		bump_workspace_generation(workspace)
 		workspace.unsaved_error = err
 		local receipt, recovery_err = recovery(workspace)
 		local suffix = type(receipt) == "table" and "; recovery saved to " .. receipt.path
@@ -365,12 +417,21 @@ local function save_mutation(workspace, changed)
 	end
 	workspace.session = saved
 	workspace.scope = saved.scope
+	bump_workspace_generation(workspace)
 	workspace.unsaved_error = nil
 	workspace.recovery = nil
 	update_panel(workspace)
 	M.refresh_marks(workspace)
 	refresh_trouble()
 	return true
+end
+
+local function mutation_failed(workspace, err)
+	if registered(workspace) then
+		bump_workspace_generation(workspace)
+	end
+	notify(err, vim.log.levels.ERROR)
+	return false
 end
 
 local function stale_now(workspace)
@@ -496,28 +557,66 @@ local function panel_callbacks(expected)
 	}
 end
 
-local function disable_ui(workspace)
+local function same_surface(first, second)
+	return type(first) == "table"
+		and type(second) == "table"
+		and first.tabpage == second.tabpage
+		and first.token == second.token
+end
+
+local function surface_valid()
+	return review_surface ~= nil and tabs.valid_transient(review_surface) == true
+end
+
+local function on_surface()
+	return surface_valid() and vim.api.nvim_get_current_tabpage() == review_surface.tabpage
+end
+
+local function surface_title(workspace)
+	local name = vim.fs.basename(vim.fs.normalize(workspace.root))
+	local label = workspace.scope and workspace.scope.label or workspace.session.id
+	return ("Review: %s · %s"):format(name, label)
+end
+
+local function panel_open(workspace)
+	return workspace and workspace.panel and review_panel.is_open(workspace.panel) or false
+end
+
+local function disable_ui(workspace, close_panel)
 	clear_inline_preview()
 	if workspace.panel then
-		review_panel.hide(workspace.panel)
+		if close_panel then
+			review_panel.close(workspace.panel)
+			workspace.panel.source_win = nil
+		else
+			review_panel.hide(workspace.panel)
+		end
 	end
 	if workspace.mode_state then
 		review_mode.disable(workspace.mode_state)
 	end
 	workspace.mode_on = false
+	if close_panel then
+		workspace.mode_state = nil
+	end
 end
 
-local function focus_snapshot(workspace)
-	local win = vim.api.nvim_get_current_win()
+local function window_focus_snapshot(win)
 	local value = {
 		kind = "window",
-		tab = vim.api.nvim_get_current_tabpage(),
+		tab = vim.api.nvim_win_get_tabpage(win),
 		win = win,
-		buf = vim.api.nvim_get_current_buf(),
+		buf = vim.api.nvim_win_get_buf(win),
 	}
 	vim.api.nvim_win_call(win, function()
 		value.view = vim.fn.winsaveview()
 	end)
+	return value
+end
+
+local function focus_snapshot(workspace)
+	local win = vim.api.nvim_get_current_win()
+	local value = window_focus_snapshot(win)
 	for name, pane in pairs(workspace and workspace.panel and workspace.panel.panes or {}) do
 		if pane.win == win then
 			value.kind = "panel"
@@ -537,6 +636,30 @@ local function focus_snapshot(workspace)
 	return value
 end
 
+-- A supported close can target the review tab while another tab is current.
+-- In that case the process-global current window is not review UI, so derive
+-- the resumable focus from the review's own live surface instead.
+local function surface_focus_snapshot(workspace)
+	local focused = workspace and workspace.panel and workspace.panel.focused
+	local pane = focused and workspace.panel.panes and workspace.panel.panes[focused] or nil
+	if pane and valid_win(pane.win) then
+		local value = window_focus_snapshot(pane.win)
+		value.kind = "panel"
+		value.pane = focused
+		return value
+	end
+	local target = workspace and workspace.mode_state and review_presenter.current_target(workspace.mode_state) or nil
+	if target and valid_win(target.win) then
+		local value = window_focus_snapshot(target.win)
+		value.kind = "presentation"
+		value.side = target.side
+		return value
+	end
+	-- The fallback deliberately carries no ordinary-window identity. Once the
+	-- surface is rebuilt, restore_focus() will select its current target.
+	return { kind = "surface" }
+end
+
 local function set_focus(win, snapshot, require_same_buffer)
 	if not valid_win(win) then
 		return false
@@ -554,13 +677,32 @@ local function set_focus(win, snapshot, require_same_buffer)
 	return true
 end
 
+local function normal_window(tab, preferred)
+	if valid_win(preferred) and vim.api.nvim_win_get_tabpage(preferred) == tab then
+		local window_config = vim.api.nvim_win_get_config(preferred)
+		if not window_config.relative or window_config.relative == "" then
+			return preferred
+		end
+	end
+	if not valid_tab(tab) then
+		return nil
+	end
+	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
+		local window_config = vim.api.nvim_win_get_config(win)
+		if not window_config.relative or window_config.relative == "" then
+			return win
+		end
+	end
+	return nil
+end
+
 local function restore_focus(workspace, snapshot)
 	if not snapshot then
 		return false
 	end
-	if snapshot.kind == "panel" and workspace and review_panel.is_open(workspace.panel) then
+	if snapshot.kind == "panel" and panel_open(workspace) then
 		return review_panel.focus(workspace.panel, snapshot.pane)
-	elseif snapshot.kind == "presentation" and workspace then
+	elseif snapshot.kind == "presentation" and workspace and workspace.mode_state then
 		local presentation = workspace.mode_state.presentation
 		for _, name in ipairs({ "inline", "left", "right" }) do
 			local side = presentation and presentation[name]
@@ -571,38 +713,162 @@ local function restore_focus(workspace, snapshot)
 	elseif snapshot.kind == "window" and set_focus(snapshot.win, snapshot, true) then
 		return true
 	end
-	local target = workspace and review_presenter.current_target(workspace.mode_state) or nil
+	local target = workspace and workspace.mode_state and review_presenter.current_target(workspace.mode_state) or nil
 	return target and set_focus(target.win, snapshot, false) or false
 end
 
-local function restore_activation_origin(workspace, snapshot)
-	if snapshot.kind == "window" and set_focus(snapshot.win, snapshot, true) then
-		return
-	end
-	if
-		snapshot.kind == "panel"
-		and workspace
-		and workspace.panel
-		and set_focus(workspace.panel.source_win, snapshot, true)
-	then
-		return
-	end
-	if workspace and workspace.mode_state then
-		set_focus(workspace.mode_state.origin.win, snapshot, true)
-	end
-end
-
-local function ui_snapshot(workspace)
+local function ui_snapshot(workspace, focus)
 	return {
 		entry_identity = workspace.entry_identity,
 		layout = workspace.layout,
 		context = workspace.context,
 		inline_comments = workspace.inline_comments ~= false,
 		mode_on = workspace.mode_on == true,
-		panel_visible = workspace.panel and review_panel.is_open(workspace.panel) or false,
+		panel_visible = panel_open(workspace),
 		panel_focus = workspace.panel and workspace.panel.focused or "files",
-		focus = focus_snapshot(workspace),
+		focus = focus or focus_snapshot(workspace),
 	}
+end
+
+local function capture_invocation()
+	if surface_transition or on_surface() then
+		return nil
+	end
+	local tab = vim.api.nvim_get_current_tabpage()
+	local win = normal_window(tab, vim.api.nvim_get_current_win())
+	if not win then
+		return nil
+	end
+	local value = {
+		tab = tab,
+		win = win,
+		buf = vim.api.nvim_win_get_buf(win),
+	}
+	vim.api.nvim_win_call(win, function()
+		value.view = vim.fn.winsaveview()
+	end)
+	invocation = value
+	local focus = vim.deepcopy(value)
+	focus.kind = "window"
+	return focus
+end
+
+local function call_during_surface_transition(callback, ...)
+	surface_transition = true
+	local ok, first, second = pcall(callback, ...)
+	surface_transition = false
+	if not ok then
+		return nil, tostring(first)
+	end
+	return first, second
+end
+
+local function restore_invocation()
+	if not invocation then
+		return false
+	end
+	if set_focus(invocation.win, invocation, true) then
+		return true
+	end
+	if not valid_tab(invocation.tab) then
+		return false
+	end
+	vim.api.nvim_set_current_tabpage(invocation.tab)
+	local win = normal_window(invocation.tab, vim.api.nvim_tabpage_get_win(invocation.tab))
+	return set_focus(win, invocation, false)
+end
+
+local function bind_workspace(workspace)
+	if not workspace.mode_state then
+		workspace.mode_state = review_mode.new(workspace)
+	end
+	workspace.mode_state.handlers = workspace.mode_state.handlers or {}
+	workspace.mode_state.handlers.definition_options = definition_navigation_options
+	if not workspace.panel then
+		workspace.panel = review_panel.new(workspace, panel_callbacks(workspace_key(workspace)))
+	end
+	return true
+end
+
+local function acquire_surface(workspace)
+	local invoked_from_surface = on_surface()
+	capture_invocation()
+	local had_surface = surface_valid()
+	if had_surface then
+		local focused, focus_err = call_during_surface_transition(tabs.focus_transient, review_surface)
+		if not focused then
+			review_surface = nil
+			if not invoked_from_surface then
+				restore_invocation()
+			end
+			return nil, focus_err
+		end
+		local renamed, rename_err =
+			call_during_surface_transition(tabs.rename_transient, review_surface, surface_title(workspace))
+		if not renamed then
+			if not invoked_from_surface then
+				restore_invocation()
+			end
+			return nil, rename_err
+		end
+		return true, false
+	elseif review_surface then
+		review_surface = nil
+	end
+	local handle, err = call_during_surface_transition(tabs.acquire_transient, {
+		owner = "native-review",
+		key = "workspace",
+		title = surface_title(workspace),
+		on_request_close = function(handle_value, reason)
+			return handle_surface_request_close(handle_value, reason)
+		end,
+		on_closed = function(handle_value, reason)
+			handle_surface_closed(handle_value, reason)
+		end,
+	})
+	if not handle then
+		if not invoked_from_surface then
+			restore_invocation()
+		end
+		return nil, err
+	end
+	review_surface = handle
+	return true, true
+end
+
+local function release_surface()
+	pending_surface_close = nil
+	if not surface_valid() then
+		review_surface = nil
+		return true
+	end
+	local handle = review_surface
+	review_surface = nil
+	local released, err = call_during_surface_transition(tabs.release_transient, handle)
+	if not released then
+		if tabs.valid_transient(handle) then
+			review_surface = handle
+		end
+		return nil, err
+	end
+	return true
+end
+
+local function release_bound_ui(workspace, snapshot)
+	workspace.resume_ui = snapshot or ui_snapshot(workspace)
+	-- The logical workspace survives a physical release. Advance its epoch so
+	-- no picker or confirmation captured from the released UI can revive when
+	-- the tab is rebuilt.
+	bump_workspace_generation(workspace)
+	for _, candidate in pairs(workspaces) do
+		disable_ui(candidate, true)
+	end
+	local released, err = release_surface()
+	if not released then
+		return nil, err
+	end
+	restore_invocation()
+	return true
 end
 
 local function restore_ui(workspace, snapshot)
@@ -611,6 +877,13 @@ local function restore_ui(workspace, snapshot)
 	workspace.layout = snapshot.layout
 	workspace.context = snapshot.context
 	workspace.inline_comments = snapshot.inline_comments
+	if snapshot.mode_on or snapshot.panel_visible then
+		local acquired, acquire_err = acquire_surface(workspace)
+		if not acquired then
+			return nil, acquire_err
+		end
+		bind_workspace(workspace)
+	end
 	if snapshot.mode_on then
 		local enabled, enable_err = review_mode.enable(workspace.mode_state)
 		if not enabled then
@@ -628,12 +901,74 @@ local function restore_ui(workspace, snapshot)
 	else
 		workspace.mode_on = false
 	end
-	if snapshot.panel_visible and not review_panel.open(workspace.panel, snapshot.panel_focus) then
+	if
+		snapshot.panel_visible and (not workspace.panel or not review_panel.open(workspace.panel, snapshot.panel_focus))
+	then
 		return nil, "could not restore the review panel"
 	end
 	restore_focus(workspace, snapshot.focus)
+	workspace.resume_ui = nil
 	M.refresh_marks(workspace)
 	return true
+end
+
+handle_surface_request_close = function(handle, reason)
+	if not same_surface(handle, review_surface) then
+		return true
+	end
+	pending_surface_close = nil
+	local workspace = current_workspace()
+	local surface_was_current = on_surface()
+	local ordinary_focus
+	if reason == "supported" then
+		if not surface_was_current then
+			ordinary_focus = capture_invocation() or focus_snapshot(nil)
+		end
+		if review_editor.prepare_close() ~= true then
+			notify(
+				"Could not close the review tab because its open comment was not saved or recovered",
+				vim.log.levels.ERROR
+			)
+			return false
+		end
+	end
+	if workspace and workspace.mode_on then
+		workspace.resume_ui = ui_snapshot(workspace, surface_focus_snapshot(workspace))
+	end
+	pending_surface_close = {
+		tabpage = handle.tabpage,
+		token = handle.token,
+		restore_invocation = surface_was_current,
+		ordinary_focus = ordinary_focus,
+	}
+	return true
+end
+
+handle_surface_closed = function(handle, reason)
+	if not same_surface(handle, review_surface) then
+		return
+	end
+	local close_state = same_surface(handle, pending_surface_close) and pending_surface_close or nil
+	pending_surface_close = nil
+	review_surface = nil
+	local workspace = current_workspace()
+	if workspace then
+		bump_workspace_generation(workspace)
+	end
+	for _, candidate in pairs(workspaces) do
+		disable_ui(candidate, true)
+	end
+	if close_state and close_state.restore_invocation == false then
+		restore_focus(nil, close_state.ordinary_focus)
+	else
+		restore_invocation()
+	end
+	M.refresh_marks(workspace)
+	refresh_trouble()
+	if reason == "external" then
+		notify("Review tab was closed; the logical review remains available with :ReviewMode on", vim.log.levels.WARN)
+	end
+	emit_changed()
 end
 
 local function workspace_preferences(existing, preferences)
@@ -660,12 +995,6 @@ local function activate(root, session, model, options)
 	local expected = key(root, session.id)
 	local existing = workspaces[expected]
 	local previous = current_workspace()
-	local opening_focus = focus_snapshot(previous)
-	local previous_ui = previous and ui_snapshot(previous) or nil
-	if previous then
-		disable_ui(previous)
-	end
-	restore_activation_origin(previous, opening_focus)
 	local preferences = options and options.preferences or nil
 	local resolved_preferences = workspace_preferences(existing, preferences)
 	local workspace = {
@@ -678,25 +1007,45 @@ local function activate(root, session, model, options)
 		model = model,
 		entry_identity = first_identity(model, existing and existing.entry_identity),
 	}
-	workspace.mode_state = review_mode.new(workspace)
-	workspace.mode_on = true
-	workspace.panel = review_panel.new(workspace, panel_callbacks(expected))
+	bump_workspace_generation(workspace)
+	local invoked_from_surface = on_surface()
+	local acquired, acquire_err = acquire_surface(workspace)
+	if not acquired then
+		return nil, acquire_err
+	end
+	local previous_ui = previous and ui_snapshot(previous) or nil
+	if previous then
+		-- A failed activation can restore this exact object. Invalidate its
+		-- outstanding actions before it can participate in that rollback.
+		bump_workspace_generation(previous)
+		disable_ui(previous)
+	end
+	bind_workspace(workspace)
+	workspace.mode_on = false
 	workspaces[expected] = workspace
 	active = workspace
 
 	local function rollback(err)
-		review_panel.close(workspace.panel)
-		review_mode.disable(workspace.mode_state)
+		disable_ui(workspace, true)
 		workspaces[expected] = existing
 		active = previous
 		if previous then
 			local restored, restore_err = restore_ui(previous, previous_ui)
 			if not restored then
-				disable_ui(previous)
+				disable_ui(previous, true)
+				release_surface()
+				restore_invocation()
 				return nil, tostring(err) .. "; previous review could not be restored: " .. tostring(restore_err)
 			end
+			if not previous_ui.mode_on and not previous_ui.panel_visible then
+				release_surface()
+			end
 		else
+			release_surface()
 			M.refresh_marks(nil)
+		end
+		if not invoked_from_surface then
+			restore_invocation()
 		end
 		return nil, err
 	end
@@ -714,6 +1063,7 @@ local function activate(root, session, model, options)
 	if not review_panel.open(workspace.panel, "files") then
 		return rollback("could not open the review panel")
 	end
+	workspace.resume_ui = nil
 	M.refresh_marks(workspace)
 	return workspace
 end
@@ -752,6 +1102,12 @@ local function open_resolved(root, scope, supplied, options)
 			return nil, save_err
 		end
 		session = saved
+	end
+	if suspended then
+		local restored, restore_err = M.restore_after_session()
+		if not restored then
+			return nil, "could not restore the suspended review before opening another one: " .. tostring(restore_err)
+		end
 	end
 	return activate(root, session, model, options)
 end
@@ -837,12 +1193,33 @@ function M.scope_back(expected)
 		return nil, "review session is no longer active"
 	end
 
+	if suspended then
+		local restored, restore_err = M.restore_after_session()
+		if not restored then
+			return nil,
+				"could not restore the suspended review before returning to its parent scope: " .. tostring(restore_err)
+		end
+		child = current_workspace()
+		if not child then
+			return nil, "review session disappeared while restoring its suspended UI"
+		end
+	end
+	local acquired, acquire_err = acquire_surface(child)
+	if not acquired then
+		return nil, "could not focus the review tab: " .. tostring(acquire_err)
+	end
+	-- Invalidate callbacks from the child before either restoring the parent
+	-- or rolling back to this same child after a failed restore.
+	bump_workspace_generation(child)
 	local child_ui = ui_snapshot(child)
 	disable_ui(child)
-	restore_activation_origin(child, child_ui.focus)
 	local parent = frame.workspace
 	local restored, restore_err
 	if registered(parent) then
+		-- Restoring a saved workspace is a new activation epoch. This second
+		-- bump also protects histories created before generation invalidation
+		-- became part of the drilldown contract.
+		bump_workspace_generation(parent)
 		restored, restore_err = restore_ui(parent, frame.ui_snapshot)
 	else
 		restore_err = "parent review session is no longer registered"
@@ -870,6 +1247,12 @@ end
 
 function M.present(identity, expected, options)
 	clear_inline_preview()
+	if suspended then
+		local restored, restore_err = M.restore_after_session()
+		if not restored then
+			return nil, restore_err
+		end
+	end
 	local workspace = expected and workspace_for_key(expected) or current_workspace()
 	if not workspace or workspace ~= current_workspace() then
 		return nil, "review session is no longer active"
@@ -878,10 +1261,23 @@ function M.present(identity, expected, options)
 	if not entry then
 		return nil, "review entry is no longer part of the exact model"
 	end
+	local resume_ui = workspace.resume_ui
+	local acquired, surface_result = acquire_surface(workspace)
+	if not acquired then
+		return nil, surface_result
+	end
+	local new_surface = surface_result == true
+	bind_workspace(workspace)
 	local enabled_for_present = false
 	if not workspace.mode_on then
 		local enabled, err = review_mode.enable(workspace.mode_state)
 		if not enabled then
+			if new_surface then
+				disable_ui(workspace, true)
+				release_surface()
+				restore_invocation()
+				workspace.resume_ui = resume_ui
+			end
 			return nil, err
 		end
 		workspace.mode_on = true
@@ -895,6 +1291,12 @@ function M.present(identity, expected, options)
 		if enabled_for_present then
 			review_mode.disable(workspace.mode_state)
 			workspace.mode_on = false
+		end
+		if new_surface then
+			disable_ui(workspace, true)
+			release_surface()
+			restore_invocation()
+			workspace.resume_ui = resume_ui
 		end
 		return nil, err
 	end
@@ -920,10 +1322,35 @@ function M.mode(value)
 		value = workspace.mode_on and "off" or "on"
 	end
 	if value == "off" then
-		clear_inline_preview()
-		if workspace.mode_on then
-			review_mode.disable(workspace.mode_state)
-			workspace.mode_on = false
+		if suspended then
+			return true
+		end
+		if not workspace.mode_on and not surface_valid() then
+			return true
+		end
+		local acquired, acquire_err = acquire_surface(workspace)
+		if not acquired then
+			notify(acquire_err, vim.log.levels.ERROR)
+			return nil
+		end
+		if review_editor.prepare_close() ~= true then
+			notify(
+				"Could not disable review mode because its open comment was not saved or recovered",
+				vim.log.levels.ERROR
+			)
+			return nil
+		end
+		local snapshot = ui_snapshot(workspace)
+		local released, release_err = release_bound_ui(workspace, snapshot)
+		if not released then
+			local restored, restore_err = restore_ui(workspace, snapshot)
+			notify(
+				"Could not release review tab: "
+					.. tostring(release_err)
+					.. (restored and "" or "; UI restore failed: " .. tostring(restore_err)),
+				vim.log.levels.ERROR
+			)
+			return nil
 		end
 		emit_changed()
 		return true
@@ -931,26 +1358,47 @@ function M.mode(value)
 		notify("Usage: ReviewMode [on|off|toggle]", vim.log.levels.ERROR)
 		return nil
 	end
-	local enabled_for_mode = false
-	if not workspace.mode_on then
-		local enabled, err = review_mode.enable(workspace.mode_state)
-		if not enabled then
-			notify(err, vim.log.levels.ERROR)
+	if suspended then
+		local restored, restore_err = M.restore_after_session()
+		if not restored then
+			notify(restore_err, vim.log.levels.ERROR)
 			return nil
 		end
-		workspace.mode_on = true
-		enabled_for_mode = true
+		workspace = current_workspace()
+		if workspace and workspace.mode_on and surface_valid() then
+			return true
+		end
 	end
-	if workspace.entry_identity then
-		local shown, err = M.present(workspace.entry_identity, nil, { emit = false })
-		if not shown then
-			if enabled_for_mode then
-				review_mode.disable(workspace.mode_state)
-				workspace.mode_on = false
-			end
-			notify(err, vim.log.levels.ERROR)
+	if workspace.mode_on and surface_valid() then
+		local focused, focus_err = acquire_surface(workspace)
+		if not focused then
+			notify(focus_err, vim.log.levels.ERROR)
 			return nil
 		end
+		return true
+	end
+	local snapshot = workspace.resume_ui
+		or {
+			entry_identity = workspace.entry_identity,
+			layout = workspace.layout,
+			context = workspace.context,
+			inline_comments = workspace.inline_comments ~= false,
+			mode_on = true,
+			panel_visible = true,
+			panel_focus = "files",
+		}
+	snapshot = vim.deepcopy(snapshot)
+	snapshot.mode_on = true
+	local restored, restore_err = restore_ui(workspace, snapshot)
+	if not restored then
+		for _, candidate in pairs(workspaces) do
+			disable_ui(candidate, true)
+		end
+		release_surface()
+		restore_invocation()
+		workspace.resume_ui = snapshot
+		notify(restore_err, vim.log.levels.ERROR)
+		return nil
 	end
 	emit_changed()
 	return true
@@ -960,6 +1408,9 @@ function M.panel(action)
 	local workspace = current_workspace()
 	if not workspace then
 		notify("No active review", vim.log.levels.ERROR)
+		return false
+	end
+	if not workspace.mode_on and not M.mode("on") then
 		return false
 	end
 	action = action or "toggle"
@@ -1047,7 +1498,9 @@ function M.inline_comments(value)
 	end
 	workspace.inline_comments = value == "on"
 	clear_inline_preview()
-	review_presenter.refresh_winbars(workspace.mode_state)
+	if workspace.mode_state then
+		review_presenter.refresh_winbars(workspace.mode_state)
+	end
 	emit_changed()
 	return true
 end
@@ -1056,6 +1509,9 @@ function M.code()
 	local workspace = current_workspace()
 	if not workspace then
 		notify("No active review", vim.log.levels.ERROR)
+		return
+	end
+	if not workspace.mode_on and not M.mode("on") then
 		return
 	end
 	local target = review_presenter.current_target(workspace.mode_state)
@@ -1154,6 +1610,327 @@ local function normal_targets(workspace, buf, win)
 	return targets
 end
 
+local function capture_definition_origin(workspace, presentation, source)
+	if
+		type(source) ~= "table"
+		or not valid_win(source.win)
+		or not valid_buf(source.buf)
+		or vim.api.nvim_win_get_buf(source.win) ~= source.buf
+		or source.generation ~= presentation.generation
+		or (source.role ~= "current" and source.role ~= "snapshot" and source.role ~= "unified")
+		or vim.b[source.buf].nvim_review_role ~= source.role
+	then
+		return nil
+	end
+	local captured = {
+		buf = source.buf,
+		bufhidden = vim.bo[source.buf].bufhidden,
+		buftype = vim.bo[source.buf].buftype,
+		changedtick = vim.api.nvim_buf_get_changedtick(source.buf),
+		entry_identity = presentation.entry.identity,
+		entry_text = presentation.entry.new_text,
+		generation = source.generation,
+		modified = vim.bo[source.buf].modified,
+		name = vim.api.nvim_buf_get_name(source.buf),
+		presentation = presentation,
+		role = source.role,
+		text = buffer_text(source.buf),
+		win = source.win,
+	}
+	if source.role ~= "current" then
+		return captured
+	elseif
+		captured.buftype ~= ""
+		or captured.modified
+		or type(captured.entry_text) ~= "string"
+		or captured.text ~= captured.entry_text
+	then
+		return nil
+	end
+	local relative, resolved = repo.relative_existing(workspace.root, captured.name)
+	if not relative or not resolved or relative ~= presentation.entry.new_path then
+		return nil
+	end
+	local disk = fs.read_binary(resolved)
+	if disk == nil or disk ~= captured.text then
+		return nil
+	end
+	captured.relative = relative
+	captured.resolved = vim.fs.normalize(resolved)
+	return captured
+end
+
+local function definition_origin_owned(workspace, state, captured)
+	if
+		current_workspace() ~= workspace
+		or not registered(workspace)
+		or workspace.mode_state ~= state
+		or workspace.mode_on ~= true
+		or state.enabled ~= true
+	then
+		return false
+	end
+	local presentation = state.presentation
+	if
+		not presentation
+		or presentation ~= captured.presentation
+		or presentation.generation ~= captured.generation
+		or presentation.entry.identity ~= captured.entry_identity
+		or not valid_win(captured.win)
+		or not valid_buf(captured.buf)
+		or vim.api.nvim_win_get_buf(captured.win) ~= captured.buf
+		or vim.api.nvim_buf_get_changedtick(captured.buf) ~= captured.changedtick
+		or vim.api.nvim_buf_get_name(captured.buf) ~= captured.name
+		or vim.bo[captured.buf].bufhidden ~= captured.bufhidden
+		or vim.bo[captured.buf].buftype ~= captured.buftype
+		or vim.bo[captured.buf].modified ~= captured.modified
+		or vim.b[captured.buf].nvim_review_role ~= captured.role
+		or presentation.entry.new_text ~= captured.entry_text
+	then
+		return false
+	end
+	for _, name in ipairs({ "inline", "right" }) do
+		local side = presentation[name]
+		if
+			side
+			and side.win == captured.win
+			and side.buf == captured.buf
+			and (side.side == "new" or side.side == "unified")
+		then
+			return true
+		end
+	end
+	return false
+end
+
+local function definition_origin_valid(workspace, state, captured)
+	if not definition_origin_owned(workspace, state, captured) or buffer_text(captured.buf) ~= captured.text then
+		return false
+	end
+	if captured.role == "current" then
+		local relative, resolved = repo.relative_existing(workspace.root, captured.name)
+		if
+			not relative
+			or not resolved
+			or relative ~= captured.relative
+			or vim.fs.normalize(resolved) ~= captured.resolved
+			or fs.read_binary(resolved) ~= captured.text
+		then
+			return false
+		end
+	end
+	return true
+end
+
+local function workspace_token_valid(workspace, token)
+	return current_workspace() == workspace
+		and registered(workspace)
+		and token.workspace_key == workspace_key(workspace)
+		and token.generation == workspace.generation
+end
+
+local function destination_text(workspace, resolved)
+	local disk, disk_err = fs.read_binary(resolved)
+	if disk == nil then
+		return nil, "CURRENT definition target is unavailable: " .. tostring(disk_err or resolved)
+	end
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if valid_buf(buf) and vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) ~= "" then
+			local _, candidate = repo.relative_existing(workspace.root, vim.api.nvim_buf_get_name(buf))
+			if candidate and vim.fs.normalize(candidate) == vim.fs.normalize(resolved) then
+				if vim.bo[buf].buftype ~= "" or vim.bo[buf].modified or buffer_text(buf) ~= disk then
+					return nil, "loaded CURRENT definition target differs from its file on disk"
+				end
+			end
+		end
+	end
+	return disk
+end
+
+local function eligible_definition_entries(workspace, relative)
+	local entries = {}
+	for _, entry in ipairs(workspace.model.entries or {}) do
+		if
+			entry.new_path == relative
+			and not entry.deleted
+			and not entry.metadata_only
+			and not entry.binary
+			and type(entry.new_text) == "string"
+		then
+			entries[#entries + 1] = entry
+		end
+	end
+	return entries
+end
+
+local function definition_candidate(workspace, entries, current_text, current_line)
+	local candidates = {}
+	for _, entry in ipairs(entries) do
+		local mapped = review_lsp.map_current_line(entry.new_text, current_text, current_line)
+		if mapped then
+			candidates[#candidates + 1] = { entry = entry, line = mapped }
+		end
+	end
+	if #candidates == 0 then
+		return nil, "CURRENT definition line does not map to frozen NEW content"
+	end
+	local presentation = workspace.mode_state and workspace.mode_state.presentation
+	local current_layer = presentation and (presentation.entry.layer or "history") or nil
+	local same_layer = {}
+	for _, candidate in ipairs(candidates) do
+		if (candidate.entry.layer or "history") == current_layer then
+			same_layer[#same_layer + 1] = candidate
+		end
+	end
+	if #same_layer == 1 then
+		return same_layer[1]
+	elseif #same_layer > 1 or #candidates > 1 then
+		return nil, "CURRENT definition maps to more than one review entry"
+	end
+	return candidates[1]
+end
+
+local function real_target_matches_frozen(workspace, presentation, entry, target)
+	local right = presentation and presentation.right
+	if not right or not right.real or right.buf ~= target.buf or right.win ~= target.win then
+		return true
+	elseif
+		not valid_buf(right.buf)
+		or vim.bo[right.buf].buftype ~= ""
+		or vim.bo[right.buf].modified
+		or buffer_text(right.buf) ~= entry.new_text
+	then
+		return nil, "LSP returned an invalid definition location"
+	end
+	local relative, resolved = repo.relative_existing(workspace.root, vim.api.nvim_buf_get_name(right.buf))
+	return relative == entry.new_path and resolved ~= nil and fs.read_binary(resolved) == entry.new_text
+end
+
+local function route_definition_location(workspace, state, token, location)
+	if not workspace_token_valid(workspace, token) then
+		return true
+	elseif
+		type(location) ~= "table"
+		or type(location.path) ~= "string"
+		or location.path == ""
+		or location.path:find("\0", 1, true) ~= nil
+		or type(location.lnum) ~= "number"
+		or location.lnum < 1
+		or location.lnum % 1 ~= 0
+		or (location.col ~= nil and (type(location.col) ~= "number" or location.col < 1 or location.col % 1 ~= 0))
+	then
+		return nil, "LSP returned an invalid definition location"
+	end
+	local stat = vim.uv.fs_stat(location.path)
+	if not stat or stat.type ~= "file" then
+		return nil, "CURRENT definition target is unavailable: " .. location.path
+	end
+	local relative, resolved = repo.relative_existing(workspace.root, location.path)
+	if not relative or not resolved then
+		if repo.contains(workspace.root, location.path) then
+			return nil, "CURRENT definition target could not be classified inside the repository"
+		end
+		return false
+	end
+	local entries = eligible_definition_entries(workspace, relative)
+	if #entries == 0 then
+		return false
+	end
+	local current_text, current_err = destination_text(workspace, resolved)
+	if current_text == nil then
+		return nil, current_err
+	end
+	local selected, candidate_err = definition_candidate(workspace, entries, current_text, location.lnum)
+	if not selected then
+		return nil, candidate_err
+	elseif not workspace_token_valid(workspace, token) then
+		return true
+	end
+
+	local presentation = state.presentation
+	if
+		not presentation
+		or presentation.entry.identity ~= selected.entry.identity
+		or (presentation.right and presentation.right.real and current_text ~= selected.entry.new_text)
+	then
+		local shown, show_err = M.present(selected.entry.identity, token.workspace_key)
+		if not shown then
+			return false, show_err
+		end
+	end
+	if not workspace_token_valid(workspace, token) then
+		return true
+	end
+	presentation = state.presentation
+	local target, target_err = review_presenter.reveal_new_location(
+		state,
+		selected.entry.new_path,
+		selected.line,
+		presentation and presentation.generation or nil
+	)
+	if not target then
+		return false, target_err
+	elseif
+		not valid_win(target.win)
+		or not valid_buf(target.buf)
+		or vim.api.nvim_win_get_buf(target.win) ~= target.buf
+	then
+		return false, "review definition target changed before it could be focused"
+	elseif not real_target_matches_frozen(workspace, presentation, selected.entry, target) then
+		return false, "live CURRENT target changed before its frozen review location could be focused"
+	elseif not workspace_token_valid(workspace, token) then
+		return true
+	end
+	local text = vim.api.nvim_buf_get_lines(target.buf, target.line - 1, target.line, false)[1] or ""
+	local column = type(location.col) == "number" and location.col or 1
+	column = math.max(0, math.min(column - 1, #text))
+	vim.api.nvim_win_set_cursor(target.win, { target.line, column })
+	vim.api.nvim_set_current_win(target.win)
+	return true
+end
+
+definition_navigation_options = function(state, source)
+	local workspace = state and state.workspace
+	local presentation = state and state.presentation
+	if not workspace or not presentation or type(source) ~= "table" then
+		return nil
+	end
+	local captured = capture_definition_origin(workspace, presentation, source)
+	if not captured then
+		-- This callback is only exposed by review-owned buffers. Once invoked,
+		-- failure to capture an exact frozen origin is a safety decision, not an
+		-- invitation to fall back to ordinary host navigation.
+		return {
+			pending = function()
+				return false
+			end,
+			route = function()
+				return true
+			end,
+			valid = function()
+				return false
+			end,
+		}
+	end
+	local token = workspace_token(workspace)
+	return {
+		pending = function()
+			return workspace_token_valid(workspace, token) and definition_origin_owned(workspace, state, captured)
+		end,
+		valid = function()
+			return workspace_token_valid(workspace, token) and definition_origin_valid(workspace, state, captured)
+		end,
+		route = function(location)
+			if
+				not workspace_token_valid(workspace, token) or not definition_origin_owned(workspace, state, captured)
+			then
+				return true
+			end
+			return route_definition_location(workspace, state, token, location)
+		end,
+	}
+end
+
 local function choose_target(workspace, captured, callback)
 	if not valid_buf(captured.buf) then
 		callback(nil, "review target changed before it could be captured")
@@ -1177,7 +1954,8 @@ local function choose_target(workspace, captured, callback)
 				return string.format("[%s] %s", value.layer, value.path)
 			end,
 		}, function(selected)
-			callback(selected, selected and nil or "review layer selection was cancelled")
+			-- vim.ui.select cancellation is an intentional no-op, not an error.
+			callback(selected)
 		end)
 	end
 end
@@ -1371,21 +2149,38 @@ end
 local editor_source
 
 local function valid_type(value)
-	return value == nil or vim.tbl_contains(REVIEW_TYPES, value)
+	return value == nil or comment_types.contains(value)
+end
+
+local function focus_review_ui(token, action)
+	local workspace = resolve_workspace_token(token, action)
+	if not workspace then
+		return nil
+	end
+	if not M.mode("on") then
+		return nil
+	end
+	return resolve_workspace_token(token, action)
 end
 
 local function add_from_capture(workspace, captured, requested_type, kind)
 	if not allow_mutation(workspace) then
 		return
 	end
-	local expected = workspace_key(workspace)
+	local token = workspace_token(workspace)
+	workspace = focus_review_ui(token, "opening a review comment composer")
+	if not workspace then
+		return
+	end
 	choose_target(workspace, captured, function(target, target_err)
-		workspace = active_for_key(expected, "selecting a review target")
+		workspace = resolve_workspace_token(token, "selecting a review target")
 		if not workspace then
 			return
 		end
 		if not target then
-			notify(target_err, vim.log.levels.ERROR)
+			if target_err then
+				notify(target_err, vim.log.levels.ERROR)
+			end
 			return
 		end
 		local anchor, anchor_err, display = make_anchor(workspace, target, kind, captured.first, captured.last)
@@ -1393,9 +2188,12 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 			notify(anchor_err, vim.log.levels.ERROR)
 			return
 		end
-		local target_visible = valid_win(target.win) and vim.api.nvim_win_get_buf(target.win) == target.buf
+		local target_visible = valid_win(target.win)
+			and vim.api.nvim_win_get_buf(target.win) == target.buf
+			and surface_valid()
+			and vim.api.nvim_win_get_tabpage(target.win) == review_surface.tabpage
 		if not target_visible or review_panel.is_open(workspace.panel) then
-			local shown, show_err = M.present(target.entry.identity, expected)
+			local shown, show_err = M.present(target.entry.identity, token.workspace_key)
 			if not shown then
 				notify(show_err, vim.log.levels.ERROR)
 				return
@@ -1421,7 +2219,7 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 		vim.api.nvim_win_set_cursor(target.win, { display.last, 0 })
 		compose(workspace, {
 			title = anchor.kind == "file" and "New file comment" or "New",
-			type_cycle = REVIEW_TYPES,
+			type_cycle = true,
 			selected_type = requested_type or REVIEW_TYPES[1],
 			source_win = target.win,
 			anchor_line = anchor.kind == "range" and display.last or nil,
@@ -1431,7 +2229,7 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 			if not body then
 				return true
 			end
-			local current = active_for_key(expected, "composing a review comment")
+			local current = resolve_workspace_token(token, "composing a review comment")
 			if not current or (not interrupted and not allow_mutation(current)) then
 				return false
 			end
@@ -1441,15 +2239,15 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 				anchor = anchor,
 			})
 			if not changed then
-				notify(err, vim.log.levels.ERROR)
-				return false
+				return mutation_failed(current, err)
 			end
 			return save_mutation(current, changed) == true
 		end)
 	end)
 end
 
-local function choose_saved(root, callback)
+local function choose_saved(root, callback, token)
+	token = token or interaction_token()
 	local sessions, err = review_store.list(root)
 	if not sessions then
 		notify("Could not list review sessions: " .. tostring(err), vim.log.levels.ERROR)
@@ -1462,6 +2260,9 @@ local function choose_saved(root, callback)
 		end,
 	}, function(session)
 		if not session then
+			return
+		end
+		if not resolve_interaction_token(token, "selecting a saved review session") then
 			return
 		end
 		local workspace, open_err = open_resolved(root, session.scope, session)
@@ -1477,8 +2278,11 @@ local function choose_saved(root, callback)
 	end)
 end
 
-local function user_input(prompt, callback)
+local function user_input(prompt, token, callback)
 	vim.ui.input({ prompt = prompt }, function(value)
+		if not resolve_interaction_token(token, "selecting a review scope") then
+			return
+		end
 		if value and vim.trim(value) ~= "" then
 			callback(vim.trim(value))
 		end
@@ -1486,6 +2290,7 @@ local function user_input(prompt, callback)
 end
 
 local function scope_picker(root, callback)
+	local token = interaction_token()
 	local choices = {
 		{ label = "Branch · default branch…HEAD", action = "branch" },
 		{ label = "Working tree · staged / unstaged / untracked", action = "working" },
@@ -1494,6 +2299,9 @@ local function scope_picker(root, callback)
 		{ label = "Saved review session…", action = "saved" },
 	}
 	local function opened(request)
+		if not resolve_interaction_token(token, "selecting a review scope") then
+			return
+		end
 		local workspace = M.open(request, root)
 		if workspace and callback then
 			callback(workspace)
@@ -1507,20 +2315,22 @@ local function scope_picker(root, callback)
 	}, function(choice)
 		if not choice then
 			return
+		elseif not resolve_interaction_token(token, "selecting a review scope") then
+			return
 		elseif choice.action == "branch" or choice.action == "working" then
 			opened({ kind = choice.action })
 		elseif choice.action == "commit" then
-			user_input("Commit: ", function(revision)
+			user_input("Commit: ", token, function(revision)
 				opened({ kind = "commit", rev = revision })
 			end)
 		elseif choice.action == "range" then
-			user_input("Range from: ", function(from)
-				user_input("Range to: ", function(to)
+			user_input("Range from: ", token, function(from)
+				user_input("Range to: ", token, function(to)
 					opened({ kind = "range", from = from, to = to })
 				end)
 			end)
 		else
-			choose_saved(root, callback)
+			choose_saved(root, callback, token)
 		end
 	end)
 end
@@ -1571,11 +2381,19 @@ function M.file_comment(requested_type)
 end
 
 function M.general_comment(requested_type)
+	if not valid_type(requested_type) then
+		notify("Usage: ReviewGeneralComment [" .. table.concat(REVIEW_TYPES, "|") .. "]", vim.log.levels.ERROR)
+		return
+	end
 	local workspace = current_workspace()
 	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	local expected = workspace_key(workspace)
+	local token = workspace_token(workspace)
+	workspace = focus_review_ui(token, "opening a review-level comment composer")
+	if not workspace then
+		return
+	end
 	local anchor = { kind = "general", stale = workspace.session.stale }
 	local source = editor_source(workspace)
 	if not source then
@@ -1588,7 +2406,7 @@ function M.general_comment(requested_type)
 	vim.api.nvim_set_current_win(source.win)
 	compose(workspace, {
 		title = "New review-level comment",
-		type_cycle = REVIEW_TYPES,
+		type_cycle = true,
 		selected_type = requested_type or REVIEW_TYPES[1],
 		source_win = source.win,
 		anchor = anchor,
@@ -1596,7 +2414,7 @@ function M.general_comment(requested_type)
 		if not body then
 			return true
 		end
-		local current = active_for_key(expected, "composing a review-level comment")
+		local current = resolve_workspace_token(token, "composing a review-level comment")
 		if not current or (not interrupted and not allow_mutation(current)) then
 			return false
 		end
@@ -1606,8 +2424,7 @@ function M.general_comment(requested_type)
 			anchor = anchor,
 		})
 		if not changed then
-			notify(err, vim.log.levels.ERROR)
-			return false
+			return mutation_failed(current, err)
 		end
 		return save_mutation(current, changed) == true
 	end)
@@ -1779,9 +2596,30 @@ local function inline_preview_text(item, maximum)
 	local last = anchor.end_line or anchor.start_line
 	local range = anchor.start_line == last and ("L%d"):format(anchor.start_line)
 		or ("L%d-%d"):format(anchor.start_line, last)
-	local prefix = ("  [%s][%s] %s · "):format(item.type, review_store.item_status(item), range)
+	local definition = comment_types.get(item.type) or comment_types.get("question")
+	local prefix = ("  [%s %s][%s] %s · "):format(
+		definition.icon,
+		definition.id,
+		review_store.item_status(item),
+		range
+	)
 	local body, multiline = first_body_line(item.body)
 	return prefix .. display_excerpt(body, maximum - vim.fn.strdisplaywidth(prefix), multiline)
+end
+
+local function inline_preview_chunks(item, maximum)
+	local text = inline_preview_text(item, maximum)
+	local definition = comment_types.get(item.type) or comment_types.get("question")
+	local badge = ("[%s %s]"):format(definition.icon, definition.id)
+	local first = text:find(badge, 1, true)
+	if not first then
+		return { { text, "Comment" } }
+	end
+	return {
+		{ text:sub(1, first - 1), "Comment" },
+		{ badge, definition.highlight },
+		{ text:sub(first + #badge), "Comment" },
+	}
 end
 
 local function inline_preview_width(win)
@@ -1851,7 +2689,7 @@ local function show_inline_preview()
 	for _, row in ipairs(rows) do
 		local virtual = {}
 		for _, item in ipairs(grouped[row]) do
-			virtual[#virtual + 1] = { { inline_preview_text(item, maximum), "Comment" } }
+			virtual[#virtual + 1] = inline_preview_chunks(item, maximum)
 		end
 		vim.api.nvim_buf_set_extmark(buf, PREVIEW_NAMESPACE, row - 1, 0, {
 			virt_lines = virtual,
@@ -1875,9 +2713,11 @@ local function item_label(item)
 		location = "[" .. side .. "] " .. location
 	end
 	local preview = (item.body:match("[^\n]+") or item.body):gsub("%s+", " ")
+	local definition = comment_types.get(item.type) or comment_types.get("question")
 	return string.format(
-		"%02d %-10s %-14s %s %s",
+		"%02d %s %-10s %-14s %s %s",
 		item.sequence,
+		definition.icon,
 		item.type,
 		review_store.item_status(item),
 		location,
@@ -1904,10 +2744,11 @@ local function delete_prompt(item)
 end
 
 local function choose_item(workspace, id, prompt, callback)
+	local selection_token = workspace_token(workspace)
 	if id and id ~= "" then
 		local item = find_item(workspace.session, id)
 		if item then
-			callback(item)
+			callback(item_token(workspace, item))
 		else
 			notify("Review comment does not exist", vim.log.levels.ERROR)
 		end
@@ -1928,9 +2769,29 @@ local function choose_item(workspace, id, prompt, callback)
 	if #candidates == 0 then
 		notify("No matching review comments", vim.log.levels.INFO)
 	elseif #candidates == 1 then
-		callback(candidates[1])
+		callback(item_token(workspace, candidates[1]))
 	else
-		vim.ui.select(candidates, { prompt = prompt, format_item = item_label }, callback)
+		local candidate_tokens = {}
+		local choices = {}
+		for _, item in ipairs(candidates) do
+			candidate_tokens[item.id] = item_token(workspace, item)
+			choices[#choices + 1] = vim.deepcopy(item)
+		end
+		workspace = focus_review_ui(selection_token, "opening a review comment chooser")
+		if not workspace then
+			return
+		end
+		vim.ui.select(choices, { prompt = prompt, format_item = item_label }, function(selected)
+			if not selected then
+				return
+			end
+			local token = candidate_tokens[selected.id]
+			if not token then
+				notify("Review selection was invalid; no changes were made", vim.log.levels.WARN)
+				return
+			end
+			callback(vim.deepcopy(token))
+		end)
 	end
 end
 
@@ -1974,8 +2835,19 @@ local function item_editor_source(workspace, item)
 	return location
 end
 
-local function compose_item(workspace, item, action)
-	local expected = workspace_key(workspace)
+local function compose_item(token, action)
+	local workspace, item = resolve_item_token(token, "opening a review comment composer")
+	if not workspace or not allow_mutation(workspace) then
+		return false
+	end
+	workspace = focus_review_ui(token, "opening a review comment composer")
+	if not workspace then
+		return false
+	end
+	workspace, item = resolve_item_token(token, "opening a review comment composer")
+	if not workspace or not item then
+		return false
+	end
 	local edit = action == "edit"
 	local title = edit and "Edit" or "Reply"
 	if item.anchor.kind == "file" or item.anchor.kind == "general" then
@@ -1998,8 +2870,8 @@ local function compose_item(workspace, item, action)
 	compose(workspace, {
 		title = title,
 		body = edit and item.body or "",
-		type_cycle = edit and REVIEW_TYPES or nil,
-		selected_type = (edit or item.anchor.kind == "file" or item.anchor.kind == "general") and item.type or nil,
+		type_cycle = edit,
+		selected_type = item.type,
 		source_win = location.win,
 		anchor_line = display and display.last or nil,
 		anchor_range = display and { first = display.first, last = display.last } or nil,
@@ -2008,21 +2880,15 @@ local function compose_item(workspace, item, action)
 		if not body then
 			return true
 		end
-		local current = active_for_key(expected, "composing a review comment")
-		if not current or (not interrupted and not allow_mutation(current)) then
-			return false
-		end
-		local stable = find_item(current.session, item.id)
-		if not stable then
-			notify("Review comment changed while the composer was open", vim.log.levels.ERROR)
+		local current, stable = resolve_item_token(token, "composing a review comment")
+		if not current or not stable or (not interrupted and not allow_mutation(current)) then
 			return false
 		end
 		local values = { type = selected_type or stable.type, body = body, anchor = stable.anchor }
 		local changed, err = edit and review_store.edit(current.session, stable.id, values)
 			or review_store.reply(current.session, stable.id, values)
 		if not changed then
-			notify(err, vim.log.levels.ERROR)
-			return false
+			return mutation_failed(current, err)
 		end
 		return save_mutation(current, changed) == true
 	end)
@@ -2033,13 +2899,8 @@ function M.edit(id)
 	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	local expected = workspace_key(workspace)
-	choose_item(workspace, id, "Edit review comment", function(selected)
-		local current = active_for_key(expected, "selecting a review comment")
-		local stable = current and find_item(current.session, selected.id)
-		if stable then
-			compose_item(current, stable, "edit")
-		end
+	choose_item(workspace, id, "Edit review comment", function(token)
+		compose_item(token, "edit")
 	end)
 end
 
@@ -2048,14 +2909,21 @@ function M.reply(id)
 	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	local expected = workspace_key(workspace)
-	choose_item(workspace, id, "Reply to review comment", function(selected)
-		local current = active_for_key(expected, "selecting a reply target")
-		local stable = current and find_item(current.session, selected.id)
-		if stable then
-			compose_item(current, stable, "reply")
-		end
+	choose_item(workspace, id, "Reply to review comment", function(token)
+		compose_item(token, "reply")
 	end)
+end
+
+local function apply_direct_mutation(token, action, mutator)
+	local workspace, item = resolve_item_token(token, action)
+	if not workspace or not item or not allow_mutation(workspace) then
+		return false
+	end
+	local changed, err = mutator(workspace, item)
+	if not changed then
+		return mutation_failed(workspace, err)
+	end
+	return save_mutation(workspace, changed) == true
 end
 
 local function direct_mutation(id, prompt, mutator)
@@ -2063,19 +2931,8 @@ local function direct_mutation(id, prompt, mutator)
 	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	local expected = workspace_key(workspace)
-	choose_item(workspace, id, prompt, function(selected)
-		local current = active_for_key(expected, "selecting a review comment")
-		local stable = current and find_item(current.session, selected.id)
-		if not stable or not allow_mutation(current) then
-			return
-		end
-		local changed, err = mutator(current, stable)
-		if changed then
-			save_mutation(current, changed)
-		else
-			notify(err, vim.log.levels.ERROR)
-		end
+	choose_item(workspace, id, prompt, function(token)
+		apply_direct_mutation(token, "changing a review comment", mutator)
 	end)
 end
 
@@ -2084,33 +2941,26 @@ function M.delete(id)
 	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	local expected = workspace_key(workspace)
-	choose_item(workspace, id, "Delete review comment", function(selected)
-		if not selected then
+	choose_item(workspace, id, "Delete review comment", function(token)
+		local current, selected = resolve_item_token(token, "confirming review comment deletion")
+		if not current or not selected then
 			return
 		end
-		local selected_id = selected.id
+		current = focus_review_ui(token, "confirming review comment deletion")
+		if not current then
+			return
+		end
+		current, selected = resolve_item_token(token, "confirming review comment deletion")
+		if not current or not selected then
+			return
+		end
 		vim.ui.select({ "Cancel", "Delete" }, { prompt = delete_prompt(selected) }, function(choice)
 			if choice ~= "Delete" then
 				return
 			end
-			local current = active_for_key(expected, "deleting a review comment")
-			local stable = current and find_item(current.session, selected_id)
-			if not stable then
-				if current then
-					notify("Review comment changed before it could be deleted", vim.log.levels.ERROR)
-				end
-				return
-			end
-			if not allow_mutation(current) then
-				return
-			end
-			local changed, err = review_store.delete(current.session, stable.id)
-			if changed then
-				save_mutation(current, changed)
-			else
-				notify(err, vim.log.levels.ERROR)
-			end
+			apply_direct_mutation(token, "deleting a review comment", function(stable_workspace, stable)
+				return review_store.delete(stable_workspace.session, stable.id)
+			end)
 		end)
 	end)
 end
@@ -2120,20 +2970,28 @@ function M.change_type(id)
 	if not workspace or not allow_mutation(workspace) then
 		return
 	end
-	local expected = workspace_key(workspace)
-	choose_item(workspace, id, "Change review comment type", function(selected)
-		vim.ui.select(REVIEW_TYPES, { prompt = "Review comment type" }, function(item_type)
-			local current = item_type and active_for_key(expected, "changing a review comment type") or nil
-			local stable = current and find_item(current.session, selected.id)
-			if not stable or not allow_mutation(current) then
+	choose_item(workspace, id, "Change review comment type", function(token)
+		local current = focus_review_ui(token, "opening the review comment type chooser")
+		if not current then
+			return
+		end
+		vim.ui.select(REVIEW_TYPES, {
+			prompt = "Review comment type",
+			format_item = function(item_type)
+				local definition = comment_types.get(item_type)
+				return definition and (definition.icon .. " " .. definition.id) or tostring(item_type)
+			end,
+		}, function(item_type)
+			if not item_type then
 				return
 			end
-			local changed, err = review_store.set_type(current.session, stable.id, item_type)
-			if changed then
-				save_mutation(current, changed)
-			else
-				notify(err, vim.log.levels.ERROR)
+			if not comment_types.contains(item_type) then
+				notify("Review comment type selection was invalid; no changes were made", vim.log.levels.WARN)
+				return
 			end
+			apply_direct_mutation(token, "changing a review comment type", function(stable_workspace, stable)
+				return review_store.set_type(stable_workspace.session, stable.id, item_type)
+			end)
 		end)
 	end)
 end
@@ -2162,14 +3020,24 @@ function M.toggle_resolution(id)
 		notify("No active review", vim.log.levels.ERROR)
 		return
 	end
-	choose_item(workspace, id, "Resolve or reopen review comment", function(item)
-		set_resolution(item.id, item.resolution == "resolved" and "open" or "resolved")
+	if not allow_mutation(workspace) then
+		return
+	end
+	choose_item(workspace, id, "Resolve or reopen review comment", function(token)
+		apply_direct_mutation(token, "toggling review comment resolution", function(stable_workspace, item)
+			return review_store.set_resolution(
+				stable_workspace.session,
+				item.id,
+				item.resolution == "resolved" and "open" or "resolved"
+			)
+		end)
 	end)
 end
 
 function M.reanchor(id, source_win)
 	local workspace = current_workspace()
-	if not workspace or not allow_mutation(workspace) then
+	if not workspace then
+		notify("No active review", vim.log.levels.ERROR)
 		return
 	end
 	local captured
@@ -2183,34 +3051,47 @@ function M.reanchor(id, source_win)
 	else
 		captured = capture(vim.fn.line("."), vim.fn.line("."))
 	end
-	local expected = workspace_key(workspace)
-	choose_item(workspace, id, "Reanchor review comment", function(selected)
-		local current = active_for_key(expected, "selecting a review comment")
-		if not current or not allow_mutation(current) then
+	if not allow_mutation(workspace) then
+		return
+	end
+	choose_item(workspace, id, "Reanchor review comment", function(token)
+		local current, selected = resolve_item_token(token, "selecting a review comment")
+		if not current or not selected or not allow_mutation(current) then
 			return
 		end
 		if selected.anchor.kind == "general" then
 			notify("Review-level comments do not have a location to reanchor", vim.log.levels.INFO)
 			return
 		end
+		current = focus_review_ui(token, "opening a review target chooser")
+		if not current then
+			return
+		end
 		choose_target(current, captured, function(target, target_err)
-			current = active_for_key(expected, "reanchoring a review comment")
-			local item = current and find_item(current.session, selected.id)
-			if not current or not item or not allow_mutation(current) then
+			current, selected = resolve_item_token(token, "reanchoring a review comment")
+			if not current or not selected or not allow_mutation(current) then
 				return
 			end
 			if not target then
-				notify(target_err, vim.log.levels.ERROR)
+				if target_err then
+					notify(target_err, vim.log.levels.ERROR)
+				end
+				return
+			end
+			if
+				not valid_win(target.win)
+				or not valid_buf(target.buf)
+				or vim.api.nvim_win_get_buf(target.win) ~= target.buf
+			then
+				notify("Reviewed code window is no longer available", vim.log.levels.ERROR)
 				return
 			end
 			local anchor, anchor_err
-			if item.anchor.kind == "general" then
-				anchor = { kind = "general", stale = false }
-			elseif item.anchor.kind == "file" then
+			if selected.anchor.kind == "file" then
 				anchor, anchor_err =
-					make_anchor(current, target, "file", captured.first, captured.first, item.anchor.side)
+					make_anchor(current, target, "file", captured.first, captured.first, selected.anchor.side)
 			else
-				local length = (item.anchor.end_line or item.anchor.start_line) - item.anchor.start_line
+				local length = (selected.anchor.end_line or selected.anchor.start_line) - selected.anchor.start_line
 				local first = vim.api.nvim_win_get_cursor(target.win)[1]
 				if target.unified then
 					local resolved
@@ -2219,7 +3100,7 @@ function M.reanchor(id, source_win)
 						first,
 						first,
 						target.generation,
-						item.anchor.side
+						selected.anchor.side
 					)
 					if resolved then
 						local canonical = {
@@ -2242,15 +3123,15 @@ function M.reanchor(id, source_win)
 				return
 			end
 			anchor.stale = false
-			local changed, err = review_store.edit(current.session, item.id, {
-				type = item.type,
-				body = item.body,
+			local changed, err = review_store.edit(current.session, selected.id, {
+				type = selected.type,
+				body = selected.body,
 				anchor = anchor,
 			})
 			if changed then
 				save_mutation(current, changed)
 			else
-				notify(err, vim.log.levels.ERROR)
+				mutation_failed(current, err)
 			end
 		end)
 	end)
@@ -2279,6 +3160,9 @@ function M.jump(id)
 	end
 	local anchor = item.anchor
 	if anchor.kind == "general" then
+		if not workspace.mode_on and not M.mode("on") then
+			return false
+		end
 		return review_panel.focus(workspace.panel, "comments")
 	end
 	if workspace.session.stale or anchor.stale then
@@ -2389,6 +3273,7 @@ function M.refresh()
 	workspace.session = loaded
 	workspace.scope = loaded.scope
 	workspace.model = model
+	bump_workspace_generation(workspace)
 	workspace.entry_identity = identity
 	if workspace.mode_on and identity then
 		local shown, show_err = M.present(identity, nil, { emit = false })
@@ -2407,6 +3292,13 @@ function M.export(force)
 	local workspace = current_workspace()
 	if not workspace then
 		notify("No active review", vim.log.levels.ERROR)
+		return nil
+	end
+	if suspended then
+		notify(
+			"Review UI is suspended for session serialization; use :ReviewMode on before exporting",
+			vim.log.levels.ERROR
+		)
 		return nil
 	end
 	local snapshot
@@ -2493,7 +3385,8 @@ local function aggregate_connector(mark)
 end
 
 local function aggregate_sign_text(item_type, mark)
-	local icon = TYPE_SIGNS[item_type].text
+	local definition = comment_types.get(item_type) or comment_types.get("question")
+	local icon = definition.icon
 	local shows_badge = mark.single or mark.starts
 	if not shows_badge then
 		return aggregate_connector(mark)
@@ -2511,13 +3404,16 @@ end
 
 local function file_comment_virtual_line(item)
 	local side = item.anchor.side == "left" and "OLD" or "NEW"
-	local prefix = ("0 │ [%s][%s][%s] "):format(side, item.type, review_store.item_status(item))
+	local definition = comment_types.get(item.type) or comment_types.get("question")
+	local badge = ("[%s %s]"):format(definition.icon, definition.id)
+	local prefix = ("0 │ [%s]%s[%s] "):format(side, badge, review_store.item_status(item))
 	local body, multiline = first_body_line(item.body)
 	local excerpt = display_excerpt(body, math.max(1, 88 - vim.fn.strdisplaywidth(prefix)), multiline)
-	local sign = TYPE_SIGNS[item.type] or TYPE_SIGNS.question
 	return {
 		{ "0 │ ", "LineNr" },
-		{ ("[%s][%s][%s] "):format(side, item.type, review_store.item_status(item)), sign.highlight },
+		{ ("[%s]"):format(side), "Comment" },
+		{ badge, definition.highlight },
+		{ ("[%s] "):format(review_store.item_status(item)), "Comment" },
 		{ excerpt, "Comment" },
 	}
 end
@@ -2540,7 +3436,7 @@ function M.decorate_buffer(workspace, buf)
 			local rendered_rows = vim.tbl_filter(function(line)
 				return line >= 1 and line <= count
 			end, anchor_rows)
-			local item_type = TYPE_SIGNS[item.type] and item.type or "question"
+			local item_type = comment_types.contains(item.type) and item.type or "question"
 			for index, line in ipairs(rendered_rows) do
 				marks[line] = marks[line] or {}
 				local mark = marks[line][item_type]
@@ -2583,9 +3479,10 @@ function M.decorate_buffer(workspace, buf)
 		for type_index, item_type in ipairs(COMMENT_SIGN_TYPES) do
 			local mark = line_marks[item_type]
 			if mark then
+				local definition = comment_types.get(item_type)
 				vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line - 1, 0, {
 					priority = 90 - type_index,
-					sign_hl_group = TYPE_SIGNS[item_type].highlight,
+					sign_hl_group = definition.highlight,
 					sign_text = aggregate_sign_text(item_type, mark),
 				})
 			end
@@ -2650,16 +3547,55 @@ function M.items()
 	return value and value.items or {}
 end
 
+local function discard_suspended_preview(state)
+	if not state or not state.preview then
+		return true
+	end
+	local called, discarded = pcall(review_export.discard_preview, state.preview)
+	if not called or discarded ~= true then
+		return nil, called and "preview receipt was rejected" or tostring(discarded)
+	end
+	state.preview = nil
+	return true
+end
+
+local function rollback_suspended_preview(state)
+	if not state or not state.preview then
+		return true
+	end
+	local called, restored = pcall(review_export.restore_preview, state.preview)
+	if called and restored == true then
+		state.preview = nil
+		return true
+	end
+	local restore_err = called and "preview receipt was rejected" or tostring(restored)
+	local discarded, discard_err = discard_suspended_preview(state)
+	if discarded then
+		return true, "preview restore failed (" .. restore_err .. "); retained preview was discarded safely"
+	end
+	return nil,
+		"preview restore failed (" .. restore_err .. ") and retained-preview cleanup failed: " .. tostring(discard_err)
+end
+
 function M.suspend_for_session()
 	clear_inline_preview()
-	if suspended then
-		return nil, "review UI is already suspended"
-	elseif review_editor.has_active() then
+	if review_editor.has_active() then
 		return nil, "review composer has unsent text; save or cancel it first"
 	end
+	if suspended then
+		if suspended.rollback_failed then
+			return nil, "previous review UI suspension rollback is incomplete; use :ReviewMode on to retry"
+		end
+		local latest_focus = capture_invocation()
+		if latest_focus then
+			suspended.focus = latest_focus
+		end
+		return true
+	end
 	local workspace = current_workspace()
+	local ordinary_focus = capture_invocation()
 	local state = {
-		focus = focus_snapshot(workspace),
+		focus = ordinary_focus or focus_snapshot(workspace),
 		key = workspace and workspace_key(workspace) or nil,
 	}
 	local preview, preview_err = review_export.suspend_preview()
@@ -2668,17 +3604,51 @@ function M.suspend_for_session()
 	end
 	state.preview = preview
 	if workspace then
-		state.mode_on = workspace.mode_on
-		state.entry = workspace.entry_identity
-		state.layout = workspace.layout
-		state.context = workspace.context
-		state.inline_comments = workspace.inline_comments ~= false
-		state.panel = review_panel.suspend(workspace.panel)
-		if workspace.mode_state.presentation then
-			review_presenter.clear(workspace.mode_state)
+		if workspace.mode_on or surface_valid() then
+			local acquired, acquire_err = acquire_surface(workspace)
+			if not acquired then
+				local preview_settled, preview_rollback_err = rollback_suspended_preview(state)
+				if not preview_settled then
+					state.rollback_failed = true
+					suspended = state
+				end
+				restore_focus(workspace, state.focus)
+				local suffix = preview_rollback_err and "; " .. preview_rollback_err or ""
+				return nil, "could not focus review tab for session save: " .. tostring(acquire_err) .. suffix
+			end
+			state.ui = ui_snapshot(workspace)
+			local released, release_err = release_bound_ui(workspace, state.ui)
+			if not released then
+				local restored, restore_err = restore_ui(workspace, state.ui)
+				if restored then
+					state.ui = nil
+				end
+				local preview_settled, preview_rollback_err = rollback_suspended_preview(state)
+				if not restored or not preview_settled then
+					state.rollback_failed = true
+					suspended = state
+				end
+				restore_focus(workspace, state.focus)
+				return nil,
+					"could not release review tab for session save: "
+						.. tostring(release_err)
+						.. (restored and "" or "; UI restore failed: " .. tostring(restore_err))
+						.. (preview_rollback_err and "; " .. preview_rollback_err or "")
+			end
+		else
+			bump_workspace_generation(workspace)
+			state.resume_ui = workspace.resume_ui and vim.deepcopy(workspace.resume_ui) or nil
+			state.ui = {
+				entry_identity = workspace.entry_identity,
+				layout = workspace.layout,
+				context = workspace.context,
+				inline_comments = workspace.inline_comments ~= false,
+				mode_on = false,
+				panel_visible = false,
+				panel_focus = "files",
+				focus = state.focus,
+			}
 		end
-		state.mode = review_mode.suspend(workspace.mode_state)
-		workspace.mode_on = false
 	end
 	suspended = state
 	emit_changed()
@@ -2699,43 +3669,40 @@ function M.restore_after_session()
 		return ok, err
 	end
 	if state.key and not workspace then
-		return finish(nil, "review session disappeared while UI was suspended", false)
+		local _, discard_err = discard_suspended_preview(state)
+		local suffix = discard_err and "; preview cleanup failed: " .. tostring(discard_err) or ""
+		return finish(nil, "review session disappeared while UI was suspended" .. suffix, false)
 	end
-	if workspace then
-		workspace.layout = state.layout
-		workspace.context = state.context
-		workspace.inline_comments = state.inline_comments
-		workspace.entry_identity = first_identity(workspace.model, state.entry)
-		local restored, restore_err = review_mode.restore(workspace.mode_state, state.mode)
+	if workspace and state.ui then
+		local restored, restore_err = restore_ui(workspace, state.ui)
 		if not restored then
-			review_mode.disable(workspace.mode_state)
-			review_panel.hide(workspace.panel)
-			return finish(nil, "could not restore review mode: " .. tostring(restore_err), false)
-		end
-		workspace.mode_on = state.mode_on == true
-		if workspace.mode_on and workspace.entry_identity then
-			local shown, show_err = M.present(workspace.entry_identity, state.key, { emit = false })
-			if not shown then
-				review_mode.disable(workspace.mode_state)
-				workspace.mode_on = false
-				review_panel.hide(workspace.panel)
-				return finish(nil, "could not restore review presentation: " .. tostring(show_err), false)
+			for _, candidate in pairs(workspaces) do
+				disable_ui(candidate, true)
 			end
+			release_surface()
+			workspace.resume_ui = vim.deepcopy(state.ui)
+			suspended = state
+			return finish(nil, "could not restore review UI: " .. tostring(restore_err), false)
 		end
-		if not review_panel.restore(workspace.panel, state.panel) then
-			review_mode.disable(workspace.mode_state)
-			workspace.mode_on = false
-			return finish(nil, "could not restore review panel", false)
+		if not state.ui.mode_on then
+			workspace.resume_ui = state.resume_ui
 		end
 	end
-	local preview_target = workspace and review_presenter.current_target(workspace.mode_state) or nil
-	if not review_export.restore_preview(state.preview, preview_target and preview_target.win) then
+	local preview_target = workspace and workspace.mode_state and review_presenter.current_target(workspace.mode_state)
+		or nil
+	local preview_called, preview_restored =
+		pcall(review_export.restore_preview, state.preview, preview_target and preview_target.win)
+	if not preview_called or preview_restored ~= true then
 		if workspace then
-			review_mode.disable(workspace.mode_state)
-			workspace.mode_on = false
-			review_panel.hide(workspace.panel)
+			workspace.resume_ui = state.ui and vim.deepcopy(state.ui) or workspace.resume_ui
+			for _, candidate in pairs(workspaces) do
+				disable_ui(candidate, true)
+			end
+			release_surface()
 		end
-		return finish(nil, "could not restore review export preview", false)
+		suspended = state
+		local detail = preview_called and "preview receipt was rejected" or tostring(preview_restored)
+		return finish(nil, "could not restore review export preview: " .. detail, false)
 	end
 	local ok, err = finish(true, nil, true)
 	emit_changed()
@@ -2750,8 +3717,8 @@ function M.close(force)
 		return false
 	end
 	local expected = workspace_key(workspace)
-	if review_editor.has_active() then
-		notify("Save or cancel the review composer before closing", vim.log.levels.WARN)
+	if review_editor.prepare_close() ~= true then
+		notify("Could not close review because its open comment was not saved or recovered", vim.log.levels.ERROR)
 		return false
 	end
 	if workspace.unsaved_error then
@@ -2769,8 +3736,38 @@ function M.close(force)
 			return false
 		end
 	end
-	review_panel.close(workspace.panel)
-	review_mode.disable(workspace.mode_state)
+	local suspended_state = suspended
+	local snapshot
+	if surface_valid() then
+		local acquired, acquire_err = acquire_surface(workspace)
+		if not acquired then
+			notify("Could not focus review tab before close: " .. tostring(acquire_err), vim.log.levels.ERROR)
+			return false
+		end
+		snapshot = ui_snapshot(workspace)
+		local released, release_err = release_bound_ui(workspace, snapshot)
+		if not released then
+			local restored, restore_err = restore_ui(workspace, snapshot)
+			notify(
+				"Could not close review tab: "
+					.. tostring(release_err)
+					.. (restored and "" or "; UI restore failed: " .. tostring(restore_err)),
+				vim.log.levels.ERROR
+			)
+			return false
+		end
+	else
+		disable_ui(workspace, true)
+		if not suspended_state then
+			restore_invocation()
+		end
+	end
+	local discarded, discard_err = discard_suspended_preview(suspended_state)
+	if not discarded then
+		notify("Could not discard suspended review preview: " .. tostring(discard_err), vim.log.levels.ERROR)
+		return false
+	end
+	suspended = nil
 	workspaces[expected] = nil
 	active = nil
 	clear_scope_history()
@@ -2820,9 +3817,17 @@ local function setup_autocmds()
 			show_inline_preview()
 		end,
 	})
-	vim.api.nvim_create_autocmd({ "CursorMoved", "InsertEnter", "BufLeave", "WinLeave", "TabLeave", "WinScrolled" }, {
+	vim.api.nvim_create_autocmd({ "CursorMoved", "InsertEnter", "BufLeave", "WinScrolled" }, {
 		group = group,
 		callback = clear_inline_preview,
+	})
+	vim.api.nvim_create_autocmd({ "WinLeave", "TabLeave" }, {
+		group = group,
+		callback = function()
+			clear_inline_preview()
+			capture_invocation()
+		end,
+		desc = "Remember the latest ordinary review invocation",
 	})
 	vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter" }, {
 		group = group,
@@ -2877,17 +3882,22 @@ end
 
 function M.teardown()
 	clear_inline_preview()
+	local _, discard_err = discard_suspended_preview(suspended)
+	if discard_err then
+		notify(
+			"Could not discard suspended review preview during teardown: " .. tostring(discard_err),
+			vim.log.levels.ERROR
+		)
+	end
 	for key, workspace in pairs(workspaces) do
-		if workspace.panel then
-			review_panel.close(workspace.panel)
-		end
-		if workspace.mode_state then
-			review_mode.disable(workspace.mode_state)
-		end
+		disable_ui(workspace, true)
 		workspaces[key] = nil
 	end
+	release_surface()
 	active = nil
 	suspended = nil
+	pending_surface_close = nil
+	invocation = nil
 	clear_scope_history()
 	pcall(vim.api.nvim_del_augroup_by_name, "NvimConfigCodeReview")
 	if review_lsp.teardown then
@@ -2908,6 +3918,7 @@ M._root_for_command = root_for_command
 M._contains_line = contains_line
 M._workspace_preferences = workspace_preferences
 M._inline_preview_text = inline_preview_text
+M._inline_preview_chunks = inline_preview_chunks
 M._show_inline_preview = show_inline_preview
 M._clear_inline_preview = clear_inline_preview
 M._preview_namespace = PREVIEW_NAMESPACE

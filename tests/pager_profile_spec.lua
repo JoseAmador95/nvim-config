@@ -16,6 +16,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			local ok, err = xpcall(function()
 				local pager = require("config.pager")
 				assert(pager.active, "pager profile was not selected")
+				assert(require("config.redraw_profile").current() == "full", "pager accepted host redraw throttling")
 				assert(require("config.theme").selection().colorscheme == "vscode", "pager default theme changed")
 				assert(vim.g.colors_name == "vscode", "pager did not apply the VSCode default")
 				assert(vim.bo.filetype == "markdown", "forced pager filetype was not applied")
@@ -58,6 +59,27 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(package.loaded["config.exact_editor"] == nil, "exact editor adapter loaded in the pager")
 				assert(package.loaded["config.project_settings"] == nil, "project settings adapter loaded in the pager")
 				assert(package.loaded.tab_first == nil, "tab-first runtime loaded in the pager")
+				for _, name in ipairs({ "trusted_workspace", "treesitter_runtime", "theme_router" }) do
+					assert(package.loaded[name] ~= nil, name .. " is missing from the pager's early allowlist")
+				end
+				for _, name in ipairs({
+					"exact_editor",
+					"devcontainer_editor",
+					"terminal_lifecycle",
+					"project_python",
+					"action_palette",
+					"diagram_view",
+					"log_workbench.matches",
+					"log_workbench.follow",
+					"repo_scratch",
+					"coverage_workbench",
+					"just_workbench",
+					"clangd_compile_db",
+					"verified_tools",
+					"native_review",
+				}) do
+					assert(package.loaded[name] == nil, name .. " crossed the pager load boundary")
+				end
 				assert(_G.ExactEditorRequest == nil, "exact editor RPC function leaked into the pager")
 				assert(
 					vim.fn.exists(":NvimConfigParsersInstall") == 2,

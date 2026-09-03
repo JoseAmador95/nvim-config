@@ -229,6 +229,221 @@ test("safe final close retains modified output and uses injected host callbacks"
 	assert(tab_first.is_home(vim.api.nvim_get_current_tabpage()), "final close did not leave a home tab")
 end)
 
+test("transient leases create one dedicated tab per owner key and reuse it exactly", function()
+	reset_editor()
+	local origin = vim.api.nvim_get_current_tabpage()
+	local tabs_before = #vim.api.nvim_list_tabpages()
+	local closed = {}
+	local first = assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "workspace",
+		title = "Review: first",
+		on_closed = function(handle, reason)
+			closed[#closed + 1] = { handle = handle, reason = reason }
+		end,
+	}))
+	local owned_buf = vim.api.nvim_get_current_buf()
+	assert(first.tabpage ~= origin and vim.api.nvim_get_current_tabpage() == first.tabpage)
+	equal(tabs_before + 1, #vim.api.nvim_list_tabpages(), "transient acquisition did not create one dedicated tab")
+	assert(tab_first.valid_transient(first), "new transient handle was not valid")
+	equal("Review: first", tab_first.transient_title(first.tabpage), "transient title was not installed")
+
+	vim.api.nvim_set_current_tabpage(origin)
+	local second = assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "workspace",
+		title = "Review: reused",
+		on_closed = function(handle, reason)
+			closed[#closed + 1] = { handle = handle, reason = reason }
+		end,
+	}))
+	equal(first, second, "same owner/key did not reuse its opaque handle")
+	equal(tabs_before + 1, #vim.api.nvim_list_tabpages(), "same owner/key created a second transient tab")
+	assert(vim.api.nvim_get_current_tabpage() == first.tabpage, "reused transient tab was not focused")
+	equal("Review: reused", tab_first.transient_title(first.tabpage), "reused transient tab was not renamed")
+	assert(tab_first.rename_transient(first, "Review: renamed"), "explicit transient rename failed")
+	equal("Review: renamed", tab_first.transient_title(first.tabpage), "explicit transient rename was not visible")
+
+	vim.api.nvim_set_current_tabpage(origin)
+	assert(tab_first.focus_transient(first), "explicit transient focus failed")
+	assert(vim.api.nvim_get_current_tabpage() == first.tabpage, "explicit transient focus selected the wrong tab")
+	assert(tab_first.release_transient(first), "owner release failed")
+	assert(not tab_first.valid_transient(first), "released transient handle stayed valid")
+	equal(1, #closed, "owner release did not notify closure exactly once")
+	equal({ handle = first, reason = "released" }, closed[1], "owner release callback changed")
+	assert(not vim.api.nvim_buf_is_valid(owned_buf), "hidden owned blank scratch buffer survived release")
+end)
+
+test("supported transient closes honor vetoes and callback errors", function()
+	reset_editor()
+	local queue = {}
+	local preflights = {}
+	local closed = {}
+	tab_first.setup({
+		schedule = function(callback)
+			queue[#queue + 1] = callback
+		end,
+		notify = function() end,
+	})
+	local handle = assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "veto",
+		title = "Review: veto",
+		on_request_close = function(received, reason)
+			preflights[#preflights + 1] = { handle = received, reason = reason }
+			return false
+		end,
+		on_closed = function(received, reason)
+			closed[#closed + 1] = { handle = received, reason = reason }
+		end,
+	}))
+	assert(not tab_first.request_close(handle.tabpage), "supported close ignored its synchronous veto")
+	equal(0, #queue, "vetoed supported close was queued")
+	equal({ { handle = handle, reason = "supported" } }, preflights, "close request skipped synchronous preflight")
+	assert(tab_first.valid_transient(handle), "preflight veto closed the transient tab")
+	equal(0, #closed, "preflight veto emitted a closed callback")
+
+	assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "veto",
+		title = "Review: callback error",
+		on_request_close = function()
+			error("simulated preflight failure")
+		end,
+		on_closed = function(received, reason)
+			closed[#closed + 1] = { handle = received, reason = reason }
+		end,
+	}))
+	assert(not tab_first.close(handle.tabpage), "preflight callback error closed the transient tab")
+	assert(tab_first.valid_transient(handle), "callback error invalidated the transient lease")
+
+	assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "veto",
+		title = "Review: approved",
+		on_request_close = function(received, reason)
+			preflights[#preflights + 1] = { handle = received, reason = reason }
+			return true
+		end,
+		on_closed = function(received, reason)
+			closed[#closed + 1] = { handle = received, reason = reason }
+		end,
+	}))
+	assert(tab_first.request_close(handle.tabpage), "approved supported close was not queued")
+	assert(not tab_first.request_close(handle.tabpage), "duplicate supported close was queued")
+	equal(1, #queue, "approved supported close did not retain click coalescing")
+	equal(2, #preflights, "duplicate supported close reran preflight")
+	queue[1]()
+	assert(not tab_first.valid_transient(handle), "approved supported close retained the lease")
+	equal({ handle = handle, reason = "supported" }, closed[1], "supported close callback changed")
+end)
+
+test("owner release bypasses close preflight", function()
+	reset_editor()
+	local preflights = 0
+	local closed
+	local handle = assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "release",
+		title = "Review: release",
+		on_request_close = function()
+			preflights = preflights + 1
+			return false
+		end,
+		on_closed = function(received, reason)
+			closed = { handle = received, reason = reason }
+		end,
+	}))
+	local retained_buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_buf_set_lines(retained_buf, 0, -1, false, { "owner content" })
+	vim.bo[retained_buf].modified = false
+	assert(tab_first.release_transient(handle), "owner release was vetoed by its own preflight")
+	equal(0, preflights, "owner release invoked supported-close preflight")
+	equal({ handle = handle, reason = "released" }, closed, "owner release notification changed")
+	assert(vim.api.nvim_buf_is_valid(retained_buf), "release deleted a nonblank owner buffer")
+	equal({ "owner content" }, vim.api.nvim_buf_get_lines(retained_buf, 0, -1, false), "release changed owner content")
+	vim.api.nvim_buf_delete(retained_buf, { force = true })
+end)
+
+test("releasing the final transient tab preserves user buffers and creates a safe home", function()
+	reset_editor()
+	local origin = vim.api.nvim_get_current_tabpage()
+	local user_buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_buf_set_lines(user_buf, 0, -1, false, { "unsaved user content" })
+	vim.bo[user_buf].modified = true
+	local handle = assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "last-tab",
+		title = "Review: last tab",
+	}))
+	local origin_number = assert(vim.api.nvim_tabpage_get_number(origin))
+	vim.api.nvim_cmd({ cmd = "tabclose", args = { tostring(origin_number) } }, {})
+	assert(#vim.api.nvim_list_tabpages() == 1 and tab_first.valid_transient(handle), "fixture did not leave one lease")
+	assert(tab_first.release_transient(handle), "final transient release failed")
+	assert(tab_first.is_home(vim.api.nvim_get_current_tabpage()), "final transient release did not create a safe home")
+	assert(vim.api.nvim_buf_is_valid(user_buf) and vim.bo[user_buf].modified, "final release deleted user changes")
+end)
+
+test("raw tab close reconciles once and stale generations cannot affect reacquisition", function()
+	reset_editor()
+	local preflights = {}
+	local closed = {}
+	local first = assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "raw",
+		title = "Review: raw",
+		on_request_close = function(received, reason)
+			preflights[#preflights + 1] = { handle = received, reason = reason }
+			return false
+		end,
+		on_closed = function(received, reason)
+			closed[#closed + 1] = { handle = received, reason = reason }
+		end,
+	}))
+	vim.cmd("tabclose")
+	equal({ { handle = first, reason = "external" } }, preflights, "raw close did not run best-effort preflight")
+	equal({ { handle = first, reason = "external" } }, closed, "raw close did not reconcile exactly once")
+	assert(not tab_first.valid_transient(first), "raw close retained a valid lease")
+
+	local second = assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "raw",
+		title = "Review: replacement",
+	}))
+	assert(second.token > first.token, "reacquisition reused an opaque generation")
+	assert(not tab_first.focus_transient(first), "stale handle focused the replacement lease")
+	assert(not tab_first.rename_transient(first, "Review: stale"), "stale handle renamed the replacement lease")
+	assert(not tab_first.release_transient(first), "stale handle released the replacement lease")
+	assert(tab_first.valid_transient(second), "stale handle operation invalidated the replacement lease")
+	equal("Review: replacement", tab_first.transient_title(second.tabpage), "stale handle changed replacement title")
+	assert(tab_first.release_transient(second), "replacement lease cleanup failed")
+end)
+
+test("teardown clears lease callbacks without closing the visible tab", function()
+	reset_editor()
+	local closed = {}
+	local handle = assert(tab_first.acquire_transient({
+		owner = "review",
+		key = "teardown",
+		title = "Review: teardown",
+		on_request_close = function()
+			error("preflight survived teardown")
+		end,
+		on_closed = function(received, reason)
+			closed[#closed + 1] = { handle = received, reason = reason }
+		end,
+	}))
+	local leased_tab = handle.tabpage
+	assert(tab_first.teardown(), "tab-first teardown failed")
+	assert(vim.api.nvim_tabpage_is_valid(leased_tab), "teardown destructively closed the visible leased tab")
+	assert(not tab_first.valid_transient(handle), "teardown retained an active lease")
+	equal(nil, tab_first.transient_title(leased_tab), "teardown retained the transient title")
+	equal({ { handle = handle, reason = "teardown" } }, closed, "teardown callback changed")
+	vim.cmd("tabclose")
+	equal(1, #closed, "closed callback survived lifecycle teardown")
+	assert(tab_first.setup({}), "tab-first setup after teardown failed")
+end)
+
 test("semantic history traverses exact locations then falls back when exhausted", function()
 	reset_editor()
 	local first = make_file("history-first")

@@ -92,15 +92,25 @@ local function options()
 	local open = require("config.editor").open_file_in_tab
 	local policy = require("config.local_config").plugin("exact_editor", {
 		workspace_retention = "visited",
+		registry_heartbeat_seconds = 21600,
 	})
 	return {
 		state_root = state_root,
 		resolve_workspace = resolve_workspace,
 		resolve_relative = require("config.repo").resolve_relative,
 		open = open,
-		open_file = open,
 		install_finish_mapping = install_finish_mapping,
 		workspace_retention = policy.workspace_retention,
+		registry_heartbeat_seconds = policy.registry_heartbeat_seconds,
+	}
+end
+
+local function request_dependencies()
+	local setup_options = options()
+	return {
+		open_file = setup_options.open,
+		resolve_relative = setup_options.resolve_relative,
+		install_finish_mapping = setup_options.install_finish_mapping,
 	}
 end
 
@@ -138,7 +148,7 @@ function M.consume_request(request_id, instance, dependencies)
 	if not migrated then
 		return nil, migrate_err
 	end
-	local deps = vim.tbl_extend("force", options(), dependencies or {})
+	local deps = vim.tbl_extend("force", request_dependencies(), dependencies or {})
 	return exact.consume_request(request_id, migrated, deps)
 end
 

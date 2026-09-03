@@ -97,6 +97,7 @@ vim.notify = function(message, level)
 end
 
 local just = require("config.just")
+assert(package.loaded.just_workbench == nil, "loading the host Just adapter initialized just-workbench")
 local system_calls = {}
 just._configure({
 	system = function(argv, options, callback)

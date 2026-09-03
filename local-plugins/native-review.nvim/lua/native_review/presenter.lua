@@ -244,11 +244,25 @@ local function set_filetype(buf, path)
 	end
 end
 
+local function definition_options(state, buf, win, generation, buffer_role)
+	local callback = state.handlers and state.handlers.definition_options
+	if type(callback) ~= "function" then
+		return nil
+	end
+	return callback(state, {
+		buf = buf,
+		generation = generation,
+		role = buffer_role,
+		win = win,
+	})
+end
+
 local function scratch(entry, side, state)
 	local buf = vim.api.nvim_create_buf(false, true)
 	local is_old = side == "old"
 	local role = is_old and "old" or "snapshot"
 	local path = is_old and entry.old_path or entry.new_path
+	local generation = state.presentation and state.presentation.generation or nil
 	local metadata = {
 		root = state.workspace.root,
 		path = path,
@@ -257,6 +271,9 @@ local function scratch(entry, side, state)
 		entry = entry,
 		bridge = not entry.metadata_only,
 		navigation = lsp_navigation,
+		definition_options = function(win)
+			return definition_options(state, buf, win, generation, role)
+		end,
 	}
 	-- The role deliberately precedes filetype assignment and all FileType consumers.
 	review_lsp.mark(buf, role, metadata)
@@ -309,6 +326,9 @@ local function unified_scratch(entry, projection, generation, state)
 		projection = projection,
 		root = state.workspace.root,
 		visible_sections = state.presentation.context == "hunks" and state.presentation.visibility.unified or nil,
+		definition_options = function(win)
+			return definition_options(state, buf, win, generation, "unified")
+		end,
 	}
 	vim.bo[buf].buftype = "nofile"
 	vim.bo[buf].bufhidden = "wipe"
@@ -1016,7 +1036,10 @@ end
 
 local function prepare_review_window(win, layout)
 	vim.wo[win].foldenable = false
+	vim.wo[win].number = true
+	vim.wo[win].relativenumber = false
 	vim.wo[win].signcolumn = "auto:1-9"
+	vim.wo[win].statuscolumn = ""
 	if layout == "split" then
 		set_blank_diff_filler(win)
 	end
@@ -1511,30 +1534,26 @@ local function merged_sections(sections_value)
 	return merged
 end
 
----Reveal mapped display rows which are currently concealed by hunk-only context.
----@param state table
----@param rows integer[]
----@param expected_generation? integer
----@return boolean?
----@return string? err
-function M.reveal_rows(state, rows, expected_generation)
-	local presentation, inline_or_err = active_projection(state, expected_generation)
-	if not presentation then
-		return nil, inline_or_err
+local function reveal_target_rows(state, presentation, target, rows)
+	if state.presentation ~= presentation or not valid_win(target.win) or not valid_buf(target.buf) then
+		return nil, "review presentation is no longer current"
+	elseif vim.api.nvim_win_get_buf(target.win) ~= target.buf then
+		return nil, "review source window changed"
 	elseif type(rows) ~= "table" or #rows == 0 then
-		return nil, "at least one display row is required"
+		return nil, "at least one source row is required"
 	end
 	local wanted = {}
+	local line_count = vim.api.nvim_buf_line_count(target.buf)
 	for _, row in ipairs(rows) do
-		if not integer(row) or row < 1 or row > #presentation.projection.rows then
-			return nil, "display row is outside the unified projection"
+		if not integer(row) or row < 1 or row > line_count then
+			return nil, "source row is outside the review buffer"
 		end
 		wanted[row] = true
 	end
 
 	local changed = false
 	for _, item in ipairs(presentation.decorations or {}) do
-		if item.buf == inline_or_err.buf and item.win == inline_or_err.win and item.omitted then
+		if item.buf == target.buf and item.win == target.win and item.omitted then
 			local retained = {}
 			for _, hidden in ipairs(item.omitted) do
 				local visible = {}
@@ -1564,7 +1583,7 @@ function M.reveal_rows(state, rows, expected_generation)
 		end
 	end
 	if changed then
-		local guard = presentation.cursor_guards[inline_or_err.win]
+		local guard = presentation.cursor_guards[target.win]
 		if guard then
 			local visible = vim.deepcopy(guard.sections)
 			for row in pairs(wanted) do
@@ -1574,6 +1593,27 @@ function M.reveal_rows(state, rows, expected_generation)
 		end
 	end
 	return true
+end
+
+---Reveal mapped display rows which are currently concealed by hunk-only context.
+---@param state table
+---@param rows integer[]
+---@param expected_generation? integer
+---@return boolean?
+---@return string? err
+function M.reveal_rows(state, rows, expected_generation)
+	local presentation, inline_or_err = active_projection(state, expected_generation)
+	if not presentation then
+		return nil, inline_or_err
+	elseif type(rows) ~= "table" or #rows == 0 then
+		return nil, "at least one display row is required"
+	end
+	for _, row in ipairs(rows) do
+		if not integer(row) or row < 1 or row > #presentation.projection.rows then
+			return nil, "display row is outside the unified projection"
+		end
+	end
+	return reveal_target_rows(state, presentation, inline_or_err, rows)
 end
 
 local function first_source_line(projection, side)
@@ -1634,6 +1674,61 @@ function M.locate_anchor(state, anchor, expected_generation)
 	location.source_line = line or 0
 	location.terminator = record and record.terminator or ""
 	return location
+end
+
+---Locate and reveal a frozen NEW source line in either review layout.
+---@param state table
+---@param path string
+---@param line integer
+---@param expected_generation? integer
+---@return table? location
+---@return string? err
+function M.reveal_new_location(state, path, line, expected_generation)
+	local presentation = state and state.presentation
+	if not presentation then
+		return nil, "review presentation is unavailable"
+	elseif expected_generation and presentation.generation ~= expected_generation then
+		return nil, "review presentation generation changed"
+	elseif presentation.entry.deleted or presentation.entry.metadata_only or presentation.entry.new_path ~= path then
+		return nil, "NEW source is not represented by this review presentation"
+	elseif not integer(line) or line < 1 or line > presentation.source_line_counts.new then
+		return nil, "NEW source line is outside the review presentation"
+	end
+
+	if presentation.projection and presentation.inline then
+		local location, locate_err = M.locate_anchor(state, {
+			kind = "range",
+			path = path,
+			side = "right",
+			layer = presentation.entry.layer or "history",
+			start_line = line,
+			end_line = line,
+		}, presentation.generation)
+		if not location then
+			return nil, locate_err
+		end
+		local revealed, reveal_err = M.reveal_rows(state, { location.display_line }, presentation.generation)
+		if not revealed then
+			return nil, reveal_err
+		end
+		return {
+			buf = presentation.inline.buf,
+			line = location.display_line,
+			source_line = line,
+			win = presentation.inline.win,
+		}
+	end
+
+	local target = presentation.right
+		or (presentation.inline and presentation.inline.side == "new" and presentation.inline or nil)
+	if not target then
+		return nil, "NEW review pane is unavailable"
+	end
+	local revealed, reveal_err = reveal_target_rows(state, presentation, target, { line })
+	if not revealed then
+		return nil, reveal_err
+	end
+	return { buf = target.buf, line = line, source_line = line, win = target.win }
 end
 
 ---Return every active display row represented by a canonical persisted anchor.

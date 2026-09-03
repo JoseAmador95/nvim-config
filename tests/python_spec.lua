@@ -72,6 +72,9 @@ package.loaded["config.project_settings"] = {
 }
 package.loaded["config.local_config"] = {
 	plugin = function(name, defaults)
+		if name == "clangd_compile_db" then
+			return vim.deepcopy(defaults)
+		end
 		assert(name == "project_python")
 		assert(defaults.test_runner == "pytest")
 		assert(defaults.repl.readiness_timeout_ms == 5000 and defaults.repl.poll_interval_ms == 50)
@@ -156,6 +159,7 @@ local function drain_deferred(limit)
 end
 
 local python = require("config.python")
+assert(package.loaded.project_python == nil, "project-python loaded before the first Python operation")
 local buf_a = vim.fn.bufadd(fixture .. "/a/src/test_a.py")
 local buf_b = vim.fn.bufadd(fixture .. "/b/src/test_b.py")
 vim.fn.bufload(buf_a)
@@ -210,6 +214,7 @@ test("automatic environments follow deterministic filesystem-only priority", fun
 			local env_root = (leaf == "bin" or leaf == "Scripts") and vim.fs.dirname(directory) or directory
 			assert(python.venv_name(root) == vim.fs.basename(env_root))
 			assert(vim.fn.delete(candidate) == 0)
+			python.refresh(root)
 		end
 	end)
 end)
@@ -227,8 +232,10 @@ test("environment probes skip non-executable files and support all layouts", fun
 	vim.uv.fs_chmod(unix_python, tonumber("600", 8))
 	assert(python.for_root(root) == unix_python3)
 	assert(vim.fn.delete(unix_python3) == 0)
+	python.refresh(root)
 	assert(python.for_root(root) == windows_scripts)
 	assert(vim.fn.delete(windows_scripts) == 0)
+	python.refresh(root)
 	assert(python.for_root(root) == windows_root)
 end)
 
@@ -290,6 +297,7 @@ test("manual selections are root-scoped and stale interpreters are discarded", f
 	python.refresh_current(buf)
 	assert(python.for_root(root) == manual)
 	assert(vim.fn.delete(manual) == 0)
+	python.refresh(root)
 	assert(python.for_root(root) == automatic)
 	vim.api.nvim_buf_delete(buf, { force = true })
 end)
@@ -718,7 +726,22 @@ test("attached Pyright root scopes manual selection and shared consumers", funct
 		assert(started[1].client.settings.pyright.disableOrganizeImports)
 		assert(vim.deep_equal(python.neotest_python(service), { manual }))
 		vim.api.nvim_set_current_buf(buf)
-		assert(require("config.statusline").python() == "Py:.manual")
+		local original_cmake = package.loaded["config.cmake"]
+		local original_clangd = package.loaded["config.clangd"]
+		local original_review = package.loaded["config.code_review"]
+		package.loaded["config.cmake"] = { status = function() end }
+		package.loaded["config.clangd"] = {
+			profile = function()
+				return "full"
+			end,
+		}
+		package.loaded["config.code_review"] = { status = function() end }
+		local statusline = require("config.statusline")
+		statusline.refresh_buffer(buf)
+		assert(statusline.python() == "Py:.manual")
+		package.loaded["config.cmake"] = original_cmake
+		package.loaded["config.clangd"] = original_clangd
+		package.loaded["config.code_review"] = original_review
 	end, debug.traceback)
 	repo_config.root = previous_root
 	vim.lsp.get_clients = previous_clients

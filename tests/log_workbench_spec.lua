@@ -88,6 +88,8 @@ package.loaded["config.local_config"] = {
 }
 
 require("config.viewer_commands")
+assert(package.loaded["config.log_patterns"] == nil, "viewer command registration loaded the log match adapter")
+assert(package.loaded["log_workbench.matches"] == nil, "viewer command registration initialized log matches")
 local log_watch = require("config.log_watch")
 assert(log_watch.setup({
 	new_fs_poll = watcher,
@@ -172,6 +174,7 @@ test("host color UI drives plugin extmarks while log-highlight remains external"
 	vim.api.nvim_set_current_buf(buf)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "INFO", "ERROR marker", "ERROR second" })
 	local patterns = require("config.log_patterns")
+	assert(package.loaded["log_workbench.matches"] == nil, "loading the host log adapter initialized log matches")
 	assert(patterns.add("exact", { args = "red ERROR" }))
 	local state = vim.b[buf].log_pattern_state
 	equal(1, #state.patterns)

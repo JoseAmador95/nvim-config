@@ -1,6 +1,7 @@
 -- Plugin-free three-pane floating panel for standalone native review workspaces.
 local M = {}
 
+local comment_types = require("native_review.comment_types")
 local review_lsp = require("native_review.lsp")
 local review_store = require("native_review.store")
 local config = require("native_review.dependencies").get("config")
@@ -10,6 +11,7 @@ local PANEL_TITLES = { files = " Files ", commits = " Commits ", comments = " Co
 local PANEL_NAMES = { files = "files", commits = "commits", comments = "comments" }
 local COMMIT_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_commits")
 local FILE_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_files")
+local COMMENT_NAMESPACE = vim.api.nvim_create_namespace("nvim_review_panel_comments")
 local SIDE_LABELS = { left = "OLD", right = "CURRENT" }
 
 local STATUS_HIGHLIGHTS = {
@@ -50,6 +52,9 @@ local HIGHLIGHT_LINKS = {
 local function apply_highlights()
 	for name, link in pairs(HIGHLIGHT_LINKS) do
 		vim.api.nvim_set_hl(0, name, { default = true, link = link })
+	end
+	for _, definition in ipairs(comment_types.all()) do
+		vim.api.nvim_set_hl(0, definition.highlight, { default = true, link = definition.default_link })
 	end
 end
 
@@ -752,24 +757,23 @@ end
 local function comment_lines(state)
 	local lines = { "a review · Enter jump · e edit · d delete · c type · r reply · s resolve", "" }
 	local rows = {}
+	local decorations = {}
 	for _, item in ipairs(state.workspace.session.items or {}) do
 		local body = short_text(item.body:match("[^\n]+") or item.body, 54)
 		local side = anchor_side_label(item.anchor)
-		lines[#lines + 1] = string.format(
-			"%02d [%s][%s] %s%s · %s",
-			item.sequence,
-			item.type,
-			review_store.item_status(item),
-			side and "[" .. side .. "] " or "",
-			anchor_label(item.anchor),
-			body
-		)
-		rows[#lines] = item.id
+		local definition = comment_types.get(item.type) or comment_types.get("question")
+		local rendered = new_rendered_line()
+		add_segment(rendered, string.format("%02d ", item.sequence))
+		add_segment(rendered, ("[%s %s]"):format(definition.icon, definition.id), definition.highlight)
+		add_segment(rendered, ("[%s] "):format(review_store.item_status(item)))
+		add_segment(rendered, side and "[" .. side .. "] " or "")
+		add_segment(rendered, anchor_label(item.anchor) .. " · " .. body)
+		append_rendered(lines, rows, decorations, rendered, item.id)
 	end
 	if #(state.workspace.session.items or {}) == 0 then
 		lines[#lines + 1] = "No comments"
 	end
-	return lines, rows
+	return lines, rows, decorations
 end
 
 local function set_lines(pane, lines, rows)
@@ -782,20 +786,24 @@ local function set_lines(pane, lines, rows)
 	pane.rows = rows
 end
 
-local function decorate_files(pane, decorations)
+local function decorate(pane, decorations, namespace)
 	if not valid_buf(pane.buf) then
 		return
 	end
 	apply_highlights()
-	vim.api.nvim_buf_clear_namespace(pane.buf, FILE_NAMESPACE, 0, -1)
+	vim.api.nvim_buf_clear_namespace(pane.buf, namespace, 0, -1)
 	for line, highlights in pairs(decorations or {}) do
 		for _, highlight in ipairs(highlights) do
-			vim.api.nvim_buf_set_extmark(pane.buf, FILE_NAMESPACE, line - 1, highlight.first, {
+			vim.api.nvim_buf_set_extmark(pane.buf, namespace, line - 1, highlight.first, {
 				end_col = highlight.last,
 				hl_group = highlight.group,
 			})
 		end
 	end
+end
+
+local function decorate_files(pane, decorations)
+	decorate(pane, decorations, FILE_NAMESPACE)
 end
 
 local function restore_pane(pane)
@@ -905,11 +913,12 @@ function M.refresh(state, workspace)
 	ensure_windows(state)
 	local files, file_rows, file_decorations = file_lines(state)
 	local commits, commit_rows = commit_lines(state, vim.api.nvim_win_get_width(state.panes.commits.win))
-	local comments, comment_rows = comment_lines(state)
+	local comments, comment_rows, comment_decorations = comment_lines(state)
 	set_lines(state.panes.files, files, file_rows)
 	decorate_files(state.panes.files, file_decorations)
 	set_lines(state.panes.commits, commits, commit_rows)
 	set_lines(state.panes.comments, comments, comment_rows)
+	decorate(state.panes.comments, comment_decorations, COMMENT_NAMESPACE)
 	decorate_commits(state)
 	for _, pane in pairs(state.panes) do
 		restore_pane(pane)

@@ -1,6 +1,8 @@
 local M = {}
 
-local scratch = require("repo_scratch")
+local deferred = require("config.deferred")
+local local_config = require("config.local_config")
+local scratch
 local configured = false
 local effective_config
 local setup_options = {}
@@ -14,6 +16,47 @@ end
 
 local function state_root()
 	return vim.fs.joinpath(vim.fn.stdpath("state"), "nvim-config", "scratch")
+end
+
+local function load_scratch()
+	if scratch then
+		return scratch
+	end
+	local ok, result = deferred.try("repo_scratch")
+	if not ok then
+		return nil, result
+	end
+	scratch = result
+	return scratch
+end
+
+local function configure_scratch(core, options, config)
+	local ok, setup_ok, setup_err = pcall(core.setup, {
+		state_root = options.state_root or state_root(),
+		max_age_seconds = config.retention_days * 24 * 60 * 60,
+		lease_seconds = config.lease_seconds,
+		event = options.event,
+	})
+	if not ok then
+		return nil, setup_ok
+	end
+	if not setup_ok then
+		return nil, setup_err
+	end
+	configured = true
+	return core
+end
+
+local function ensure_scratch()
+	if configured then
+		return scratch
+	end
+	local core, load_err = load_scratch()
+	if not core then
+		return nil, load_err
+	end
+	effective_config = effective_config or local_config.plugin("repo_scratch", DEFAULT_CONFIG)
+	return configure_scratch(core, setup_options, effective_config)
 end
 
 local function git(root, arguments)
@@ -193,6 +236,11 @@ local function present(root, label, handle)
 end
 
 function M.open()
+	local core, setup_err = ensure_scratch()
+	if not core then
+		notify("Could not initialize scratch state: " .. tostring(setup_err), vim.log.levels.ERROR)
+		return nil
+	end
 	local root, root_err = require("config.repo").current_root(0)
 	if not root then
 		notify(root_err, vim.log.levels.ERROR)
@@ -204,13 +252,13 @@ function M.open()
 		return nil
 	end
 	if effective_config.prune_on_open then
-		local pruned, prune_err = scratch.prune(loaded_scratch_paths())
+		local pruned, prune_err = core.prune(loaded_scratch_paths())
 		if not pruned then
 			notify(prune_err, vim.log.levels.ERROR)
 			return nil
 		end
 	end
-	local handle, open_err = scratch.open({ key = target.key, legacy_ids = target.legacy_ids })
+	local handle, open_err = core.open({ key = target.key, legacy_ids = target.legacy_ids })
 	if not handle then
 		local detail = type(open_err) == "table" and open_err.kind or tostring(open_err)
 		notify("Could not open scratch: " .. detail, vim.log.levels.ERROR)
@@ -237,20 +285,20 @@ function M.setup(opts)
 	if next(active) ~= nil then
 		return nil, "cannot reconfigure scratch while buffers hold active leases"
 	end
-	setup_options = opts
-	effective_config = require("config.local_config").plugin("repo_scratch", DEFAULT_CONFIG)
-	local ok, err = scratch.setup({
-		state_root = opts.state_root or state_root(),
-		max_age_seconds = effective_config.retention_days * 24 * 60 * 60,
-		lease_seconds = effective_config.lease_seconds,
-		event = opts.event,
-	})
-	if not ok then
-		notify("Could not initialize scratch state: " .. tostring(err), vim.log.levels.ERROR)
-		return nil, err
+	local candidate_config = local_config.plugin("repo_scratch", DEFAULT_CONFIG)
+	if configured then
+		local core, setup_err = configure_scratch(scratch, opts, candidate_config)
+		if not core then
+			return nil, setup_err
+		end
 	end
-	configured = true
-	vim.api.nvim_create_user_command("Scratch", M.open, { nargs = 0, desc = "Open the private repo/ref scratch" })
+	setup_options = opts
+	effective_config = candidate_config
+	vim.api.nvim_create_user_command(
+		"Scratch",
+		M.open,
+		{ nargs = 0, desc = "Open the private repo/ref scratch", force = true }
+	)
 	vim.keymap.set("n", "<leader>.", M.open, { desc = "Project scratch" })
 	return true
 end
@@ -286,13 +334,23 @@ function M.teardown()
 		end
 	end
 	active = {}
-	scratch.teardown()
+	if scratch and configured then
+		scratch.teardown()
+	end
 	configured = false
 	effective_config = nil
 	return true
 end
 
-M._scratch = scratch
+M._scratch = setmetatable({}, {
+	__index = function(_, key)
+		local core, err = load_scratch()
+		if not core then
+			error("could not load repo scratch: " .. tostring(err), 2)
+		end
+		return core[key]
+	end,
+})
 M._identity = identity
 M._state_root = state_root
 

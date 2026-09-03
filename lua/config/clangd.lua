@@ -1,8 +1,11 @@
 -- Host policy adapter for clangd-compile-db.nvim. Profiles, executable paths,
 -- CMake integration, commands, and notifications remain in the configuration.
 local M = {}
-local router = require("clangd_compile_db")
+local router
+local router_configured = false
+local ensure_router
 local local_config = require("config.local_config")
+local deferred = require("config.deferred")
 
 local plugin_config = local_config.plugin("clangd_compile_db", {
 	path = "clangd",
@@ -38,7 +41,8 @@ end
 
 function M.command(root)
 	local command = { vim.fn.expand(plugin_config.path) }
-	local directory = root and router.command_directory(root) or nil
+	local instance = root and assert(ensure_router()) or nil
+	local directory = instance and instance.command_directory(root) or nil
 	if directory then
 		command[#command + 1] = "--compile-commands-dir=" .. directory
 	end
@@ -92,55 +96,83 @@ local lsp = {
 	end,
 }
 
-router.setup({
-	lsp = lsp,
-	event = function(event)
-		if event.kind ~= "status" then
-			return
+ensure_router = function()
+	if router_configured and router then
+		return router
+	end
+	local candidate = router
+	if not candidate then
+		local loaded, result = deferred.try("clangd_compile_db")
+		if not loaded then
+			return nil, tostring(result)
 		end
-		vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigCMakeChanged", modeline = false })
-	end,
-	max_validation_bytes = plugin_config.max_validation_bytes,
-	restart_timeout_ms = plugin_config.restart_timeout_ms,
-})
-router.register_provider("cmake", { priority = 10 })
+		candidate = result
+	end
+	local ok, result = pcall(candidate.setup, {
+		lsp = lsp,
+		event = function(event)
+			if event.kind ~= "status" then
+				return
+			end
+			vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigCMakeChanged", modeline = false })
+		end,
+		max_validation_bytes = plugin_config.max_validation_bytes,
+		restart_timeout_ms = plugin_config.restart_timeout_ms,
+	})
+	if not ok or not result then
+		router = nil
+		return nil, tostring(ok and "clangd router setup failed" or result)
+	end
+	local registered, register_err = candidate.register_provider("cmake", { priority = 10 })
+	if not registered then
+		router = nil
+		return nil, tostring(register_err)
+	end
+	router = candidate
+	router_configured = true
+	return router
+end
 
 function M.on_new_config(config, root)
 	config.cmd = M.command(root)
 end
 
 function M.validate_compile_commands(directory, options)
-	local validated, err = router.validate(directory, options)
+	local instance = assert(ensure_router())
+	local validated, err = instance.validate(directory, options)
 	return validated and validated.directory or nil, err, validated and validated.validity or nil
 end
 
 function M.set_cmake(root, directory)
-	local state, err = router.set_provider(root, "cmake", directory)
+	local instance = assert(ensure_router())
+	local state, err = instance.set_provider(root, "cmake", directory)
 	return state ~= nil, err
 end
 
 function M.set_manual(root, directory, options)
-	local state, err = router.set_override(root, directory, options)
+	local instance = assert(ensure_router())
+	local state, err = instance.set_override(root, directory, options)
 	return state ~= nil, err
 end
 
 function M.clear_manual(root)
-	local state, err = router.clear_override(root)
+	local instance = assert(ensure_router())
+	local state, err = instance.clear_override(root)
 	return state ~= nil, err
 end
 
 function M.restart_root(root)
-	return router.restart(root)
+	return assert(ensure_router()).restart(root)
 end
 
 function M.refresh(root)
-	local state, err = router.refresh(root)
+	local state, err = assert(ensure_router()).refresh(root)
 	return state ~= nil, err
 end
 
 function M.status(root)
 	root = canonical(root)
-	local state = router.status(root)
+	local state = assert(ensure_router()).status(root)
 	local active = state.active
 	return {
 		profile = M.profile(),
@@ -154,6 +186,6 @@ function M.status(root)
 	}
 end
 
-M._router = router
+M._router = ensure_router
 
 return M

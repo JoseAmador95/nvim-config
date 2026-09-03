@@ -1,6 +1,7 @@
 local M = {}
 
 local editor = require("config.editor")
+local markdown_navigation = require("config.markdown_navigation")
 local review_lsp = require("config.native_review").lsp
 
 local NATIVE_DEFAULT_KEYMAPS = {
@@ -19,7 +20,16 @@ local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "LSP" })
 end
 
+local function review_definition_options(bufnr, winid)
+	if type(review_lsp.definition_options) ~= "function" then
+		return nil
+	end
+	return review_lsp.definition_options(bufnr, winid)
+end
+
 local open_location_list
+local options_valid
+local options_pending
 
 local function position_params(bufnr, row, byte_column, client)
 	return {
@@ -31,21 +41,29 @@ local function position_params(bufnr, row, byte_column, client)
 	}
 end
 
-local function has_client(method, title, bufnr)
+local function has_client(method, title, bufnr, options)
+	options = options or {}
 	local target = bufnr or vim.api.nvim_get_current_buf()
 	if review_lsp.blocked(target) then
 		notify((title or "LSP") .. ": disabled for historical review content")
-		return nil
+		return nil, "blocked"
 	end
-	local clients = vim.lsp.get_clients({ bufnr = target, method = method })
+	local filter = { bufnr = target, method = method }
+	if options.name then
+		filter.name = options.name
+	end
+	local clients = vim.lsp.get_clients(filter)
 	if clients and #clients > 0 then
 		return clients
 	end
-	notify((title or "LSP") .. ": no active client for method")
-	return nil
+	if options.notify_missing ~= false then
+		local detail = options.name and ("no active " .. options.name .. " client") or "no active client for method"
+		notify((title or "LSP") .. ": " .. detail)
+	end
+	return nil, "missing"
 end
 
-local function request_location_at(action, bufnr, line, column)
+local function request_location_at(action, bufnr, line, column, options)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return false
 	end
@@ -63,6 +81,9 @@ local function request_location_at(action, bufnr, line, column)
 		end
 		return params
 	end, function(results)
+		if not options_pending(action, options or {}) then
+			return
+		end
 		local items = {}
 		for client_id, response in pairs(results) do
 			local client = vim.lsp.get_client_by_id(client_id)
@@ -75,8 +96,44 @@ local function request_location_at(action, bufnr, line, column)
 			notify(action.title .. ": no locations found")
 			return
 		end
-		open_location_list(action, { items = items })
+		open_location_list(action, vim.tbl_extend("force", {}, options or {}, { items = items }))
 	end)
+	return true
+end
+
+local function request_location_from_client(action, client, bufnr, line, column, options)
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return false
+	end
+	local row = math.max(0, math.min(line - 1, vim.api.nvim_buf_line_count(bufnr) - 1))
+	local text = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
+	local byte_column = math.max(0, math.min(column - 1, #text))
+	local params = position_params(bufnr, row, byte_column, client)
+	local sent = client:request(action.method, params, function(err, result)
+		if not options_pending(action, options or {}) then
+			return
+		end
+		if err then
+			local message = type(err) == "table" and err.message or tostring(err)
+			notify(action.title .. ": " .. tostring(message), vim.log.levels.WARN)
+			return
+		end
+		if not result then
+			notify(action.title .. ": no locations found")
+			return
+		end
+		local locations = vim.islist(result) and result or { result }
+		local items = vim.lsp.util.locations_to_items(locations, client.offset_encoding)
+		if #items == 0 then
+			notify(action.title .. ": no locations found")
+			return
+		end
+		open_location_list(action, vim.tbl_extend("force", {}, options or {}, { items = items }))
+	end, bufnr)
+	if not sent then
+		notify(action.title .. ": client rejected the request", vim.log.levels.WARN)
+		return false
+	end
 	return true
 end
 
@@ -94,22 +151,93 @@ local function snacks_lsp_picker(method, title, picker_fn)
 	end
 end
 
+options_valid = function(action, options)
+	if type(options.valid) ~= "function" then
+		return true
+	end
+	local ok, valid = pcall(options.valid)
+	if not ok then
+		notify(action.title .. ": location request could not be revalidated", vim.log.levels.WARN)
+		return false
+	end
+	return valid == true
+end
+
+options_pending = function(action, options)
+	local pending = options.pending
+	if type(pending) ~= "function" then
+		return true
+	end
+	local ok, valid = pcall(pending)
+	if not ok then
+		notify(action.title .. ": pending location request could not be revalidated", vim.log.levels.WARN)
+		return false
+	end
+	return valid == true
+end
+
+local function location_from_item(item)
+	local path = item.filename
+	if (not path or path == "") and item.bufnr then
+		path = vim.api.nvim_buf_get_name(item.bufnr)
+	end
+	if not path or path == "" then
+		return nil
+	end
+	return {
+		path = path,
+		lnum = item.lnum or 1,
+		col = item.col or 1,
+		item = item,
+	}
+end
+
+local function dispatch_location(action, item, options)
+	local routed = type(options.route) == "function"
+	if (not routed or options.route_revalidates ~= true) and not options_valid(action, options) then
+		return false
+	end
+	local location = location_from_item(item)
+	if not location then
+		notify(action.title .. ": invalid location from server", vim.log.levels.WARN)
+		return false
+	end
+	-- Review routers return true when consumed and false only for a verified
+	-- outside-diff destination. Errors and missing decisions fail closed.
+	if routed then
+		local ok, handled, route_err = pcall(options.route, location)
+		if not ok then
+			notify(action.title .. ": review location routing failed: " .. tostring(handled), vim.log.levels.WARN)
+			return false
+		elseif handled == true then
+			return true
+		elseif route_err then
+			notify(action.title .. ": " .. tostring(route_err), vim.log.levels.WARN)
+			return false
+		elseif handled ~= false then
+			notify(action.title .. ": review location routing returned no decision", vim.log.levels.WARN)
+			return false
+		end
+	end
+	editor.open_file_in_tab(location.path, {
+		lnum = location.lnum,
+		col = location.col,
+	})
+	return true
+end
+
 open_location_list = function(action, options)
 	local items = options.items or {}
+	if not options_pending(action, options) then
+		return
+	end
 	if #items == 1 then
-		local item = items[1]
-		local path = item.filename
-		if (not path or path == "") and item.bufnr then
-			path = vim.api.nvim_buf_get_name(item.bufnr)
-		end
-		if not path or path == "" then
-			notify(action.title .. ": invalid location from server", vim.log.levels.WARN)
-			return
-		end
-		editor.open_file_in_tab(path, {
-			lnum = item.lnum or 1,
-			col = item.col or 1,
-		})
+		dispatch_location(action, items[1], options)
+		return
+	end
+	-- A multi-result picker can stay open indefinitely. Fully validate before
+	-- exposing it, then validate again only when the user confirms a choice.
+	if not options_valid(action, options) then
 		return
 	end
 
@@ -126,6 +254,7 @@ open_location_list = function(action, options)
 		end
 		if path and path ~= "" then
 			picker_items[#picker_items + 1] = {
+				_lsp_location = item,
 				file = path,
 				pos = { item.lnum or 1, math.max((item.col or 1) - 1, 0) },
 				text = item.text or path,
@@ -136,10 +265,19 @@ open_location_list = function(action, options)
 		notify(action.title .. ": invalid locations from server", vim.log.levels.WARN)
 		return
 	end
+	local confirm = "open_in_tab"
+	if type(options.route) == "function" or type(options.valid) == "function" then
+		confirm = function(picker, item)
+			picker:close()
+			if item then
+				dispatch_location(action, item._lsp_location or item, options)
+			end
+		end
+	end
 	snacks.picker.pick({
 		items = picker_items,
 		format = "file",
-		confirm = "open_in_tab",
+		confirm = confirm,
 		title = action.title,
 	})
 end
@@ -176,12 +314,18 @@ local location_actions = {
 
 local function goto_location(name)
 	local action = assert(location_actions[name], "unknown LSP location action: " .. tostring(name))
+	local bufnr = vim.api.nvim_get_current_buf()
+	local winid = vim.api.nvim_get_current_win()
+	local navigation_options = name == "definition" and review_definition_options(bufnr, winid) or nil
 	if not has_client(action.method, action.title) then
+		return false
+	end
+	if navigation_options and not options_valid(action, navigation_options) then
 		return false
 	end
 	action.request({
 		on_list = function(options)
-			open_location_list(action, options)
+			open_location_list(action, vim.tbl_extend("force", {}, options, navigation_options or {}))
 		end,
 	})
 	return true
@@ -200,17 +344,77 @@ end
 ---@param bufnr integer
 ---@param line integer One-based line.
 ---@param column integer One-based byte column.
+---@param options? { valid?: fun(): boolean, route?: fun(location: table): boolean? }
 ---@return boolean
-function M.location_at(name, bufnr, line, column)
+function M.location_at(name, bufnr, line, column, options)
 	local action = location_actions[name]
 	if not action then
 		error("unknown LSP location action: " .. tostring(name))
 	end
-	return request_location_at(action, bufnr, line, column)
+	return request_location_at(action, bufnr, line, column, options)
 end
 
-function M.definition_at(bufnr, line, column)
-	return M.location_at("definition", bufnr, line, column)
+function M.definition_at(bufnr, line, column, options)
+	return M.location_at("definition", bufnr, line, column, options)
+end
+
+---Return whether navigation is allowed for this buffer. Historical native-review
+---buffers must never escape to CURRENT source through a host mapping.
+---@param bufnr? integer
+---@param title? string
+---@return boolean
+function M.navigation_allowed(bufnr, title)
+	local target = bufnr or vim.api.nvim_get_current_buf()
+	if review_lsp.blocked(target) then
+		notify((title or "LSP") .. ": disabled for historical review content")
+		return false
+	end
+	return true
+end
+
+---Request a definition from one named client only.
+---@param name string
+---@param bufnr integer
+---@param line integer One-based line.
+---@param column integer One-based byte column.
+---@param title? string
+---@return boolean
+function M.definition_at_for_client(name, bufnr, line, column, title)
+	local action = vim.tbl_extend("force", location_actions.definition, {
+		title = title or ("Go to definition via " .. name),
+	})
+	local navigation_options = review_definition_options(bufnr, vim.api.nvim_get_current_win())
+	local clients = has_client(action.method, action.title, bufnr, { name = name })
+	if not clients then
+		return false
+	end
+	if navigation_options and not options_valid(action, navigation_options) then
+		return false
+	end
+	return request_location_from_client(action, clients[1], bufnr, line, column, navigation_options)
+end
+
+---Use LSP definition when available, otherwise preserve native tag navigation.
+---Historical review content is blocked without falling through to native `gd`.
+---@param bufnr? integer
+---@return boolean
+function M.definition_or_native(bufnr)
+	local target = bufnr or vim.api.nvim_get_current_buf()
+	local action = location_actions.definition
+	local navigation_options = review_definition_options(target, vim.api.nvim_get_current_win())
+	local clients, reason = has_client(action.method, action.title, target, { notify_missing = false })
+	if clients then
+		if navigation_options and not options_valid(action, navigation_options) then
+			return false
+		end
+		local cursor = vim.api.nvim_win_get_cursor(0)
+		return request_location_at(action, target, cursor[1], cursor[2] + 1, navigation_options)
+	end
+	if reason == "missing" then
+		vim.cmd("normal! gd")
+		return true
+	end
+	return false
 end
 
 local function hover_contents(results)
@@ -300,6 +504,16 @@ end
 
 function M.setup()
 	delete_default_keymaps()
+	markdown_navigation.setup({
+		allowed = M.navigation_allowed,
+		eligible = function(bufnr)
+			return not review_lsp.blocked(bufnr)
+		end,
+		definition = M.definition_or_native,
+		marksman = function(bufnr, line, column)
+			return M.definition_at_for_client("marksman", bufnr, line, column, "Markdown link")
+		end,
+	})
 	local hover_opts = { border = "rounded" }
 	local group = vim.api.nvim_create_augroup("LspKeymaps", { clear = true })
 	vim.api.nvim_create_autocmd("FileType", {
@@ -319,7 +533,8 @@ function M.setup()
 				return
 			end
 			delete_default_keymaps(event.buf)
-			vim.keymap.set("n", "gd", M.definition, { buffer = event.buf, silent = true, desc = "Go to definition" })
+			local definition = markdown_navigation.handler(event.buf) or M.definition
+			vim.keymap.set("n", "gd", definition, { buffer = event.buf, silent = true, desc = "Go to definition" })
 			vim.keymap.set("n", "gD", M.declaration, { buffer = event.buf, silent = true, desc = "Go to declaration" })
 			vim.keymap.set(
 				"n",

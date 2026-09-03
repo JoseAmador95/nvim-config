@@ -50,6 +50,26 @@ local repo = {
 
 local native_review = require("native_review")
 
+local function tabs_fixture(value)
+	return {
+		acquire_transient = function()
+			return value
+		end,
+		focus_transient = function()
+			return value
+		end,
+		rename_transient = function()
+			return value
+		end,
+		release_transient = function()
+			return value
+		end,
+		valid_transient = function()
+			return value
+		end,
+	}
+end
+
 local function setup(overrides)
 	overrides = overrides or {}
 	return native_review.setup(vim.tbl_extend("force", {
@@ -65,6 +85,7 @@ local function setup(overrides)
 		editor = {
 			open_file_in_tab = function() end,
 		},
+		tabs = tabs_fixture(true),
 		lsp_navigation = {},
 	}, overrides))
 end
@@ -76,6 +97,7 @@ test("lifecycle defaults are copied and unknown setup options do not mutate stat
 		layout = "inline",
 		context = "hunks",
 		inline_comments = true,
+		composer = { style = "card" },
 		panel = { max_width = 200, max_height = 48 },
 	}, defaults, "pre-setup defaults")
 	assert(native_review.status().configured == false)
@@ -86,6 +108,52 @@ test("lifecycle defaults are copied and unknown setup options do not mutate stat
 	local ok, err = pcall(native_review.setup, { unknown = true })
 	assert(not ok and tostring(err):find("unknown option", 1, true), tostring(err))
 	equal(before, native_review.status(), "rejected setup mutated status")
+end)
+
+test("comment type catalogue owns cycle order, rail priority, icons, and highlights", function()
+	local catalogue = native_review.comment_types or require("native_review.comment_types")
+	equal(
+		{ "issue", "suggestion", "rationale", "question", "pedantic", "praise" },
+		catalogue.ids(),
+		"comment type cycle order"
+	)
+	equal(
+		{ "issue", "suggestion", "question", "rationale", "pedantic", "praise" },
+		catalogue.rail_ids(),
+		"comment sign rail priority"
+	)
+	for _, definition in ipairs(catalogue.all()) do
+		assert(definition.icon ~= "" and definition.highlight:match("^NvimReviewComment"))
+		assert(catalogue.contains(definition.id))
+	end
+	equal("suggestion", catalogue.cycle("issue", 1), "forward cycle")
+	equal("praise", catalogue.cycle("issue", -1), "reverse cycle")
+end)
+
+test("composer style accepts only card or minimal without mutating rejected config", function()
+	local before = native_review.status()
+	for _, composer in ipairs({ { style = "animated" }, { style = "card", extra = true } }) do
+		local ok, err = pcall(setup, { composer = composer })
+		assert(not ok and tostring(err):find("composer", 1, true), tostring(err))
+		equal(before, native_review.status(), "rejected composer config mutated status")
+	end
+end)
+
+test("setup requires every transient tab lease method atomically", function()
+	local before = native_review.status()
+	for _, method in ipairs({
+		"acquire_transient",
+		"focus_transient",
+		"rename_transient",
+		"release_transient",
+		"valid_transient",
+	}) do
+		local adapter = tabs_fixture(true)
+		adapter[method] = nil
+		local ok, err = pcall(setup, { tabs = adapter })
+		assert(not ok and tostring(err):find("tabs." .. method, 1, true), tostring(err))
+		equal(before, native_review.status(), "rejected tabs adapter mutated setup state")
+	end
 end)
 
 setup()
@@ -156,6 +224,20 @@ test("historical OLD buffers remain LSP-blocked with buffer-local guards", funct
 	vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
+test("discarding a suspended export preview wipes only its private receipt buffer", function()
+	local preview_buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(preview_buf, "review-export://markdown")
+	vim.bo[preview_buf].bufhidden = "hide"
+	assert(native_review.export.discard_preview({ buf = preview_buf }))
+	assert(not vim.api.nvim_buf_is_valid(preview_buf), "discard retained the suspended preview buffer")
+
+	local unrelated = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(unrelated, "review-export://not-the-preview")
+	assert(not native_review.export.discard_preview({ buf = unrelated }), "discard accepted an unrelated buffer")
+	assert(vim.api.nvim_buf_is_valid(unrelated), "discard deleted an unrelated buffer")
+	vim.api.nvim_buf_delete(unrelated, { force = true })
+end)
+
 test("legacy bridge and delivery metadata stay renderable but never drive the controller", function()
 	local session = {
 		version = 2,
@@ -214,13 +296,15 @@ end)
 
 test("repeated setup replaces adapters, copied status is pure, and teardown is repeatable", function()
 	local first = require("native_review.dependencies").get("repo")
+	local first_tabs = require("native_review.dependencies").get("tabs")
 	equal("first", first.root("first"), "initial adapter")
 	local replacement_repo = vim.tbl_extend("force", {}, repo)
 	replacement_repo.root = function()
 		return "replacement"
 	end
-	setup({ repo = replacement_repo, layout = "split" })
+	setup({ repo = replacement_repo, tabs = tabs_fixture("replacement-tab"), layout = "split" })
 	equal("replacement", first.root("ignored"), "stable adapter proxy did not observe replacement")
+	equal("replacement-tab", first_tabs.focus_transient({}), "stable tabs proxy did not observe replacement")
 
 	local status = native_review.status()
 	assert(status.configured and status.config.layout == "split")

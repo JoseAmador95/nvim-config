@@ -41,9 +41,6 @@ return {
 		end,
 		event = "VeryLazy",
 		cmd = { "Mason", "MasonLog" },
-		init = function()
-			require("config.tool_bootstrap").setup()
-		end,
 		config = function()
 			require("mason").setup({
 				install_root_dir = require("config.tool_paths").mason_root(),
@@ -62,7 +59,6 @@ return {
 				},
 			})
 			retire_mason_mutations()
-			require("config.tool_bootstrap").mason_ready()
 		end,
 	},
 

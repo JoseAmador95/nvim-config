@@ -23,6 +23,12 @@ export XDG_CACHE_HOME="$check_tmp/cache"
 export NVIM_LOG_FILE="$check_tmp/log/nvim.log"
 export NVIM_LSP_LOG_FILE="$check_tmp/log/lsp.log"
 export NVIM_CONFIG_FILE="$check_tmp/no-local-config.lua"
+low_bandwidth_config="$check_tmp/low-bandwidth.lua"
+printf '%s\n' 'return { ui = { redraw_profile = "low-bandwidth" } }' > "$low_bandwidth_config"
+pinned_theme_dark_config="$check_tmp/pinned-theme-dark.lua"
+pinned_theme_light_config="$check_tmp/pinned-theme-light.lua"
+printf '%s\n' 'return { plugins = { theme_router = { background = "dark" } } }' > "$pinned_theme_dark_config"
+printf '%s\n' 'return { plugins = { theme_router = { background = "light" } } }' > "$pinned_theme_light_config"
 export NVIM_CONFIG_ROOT="$repo_root"
 export NVIM_CONFIG_OFFLINE=1
 export PYTHONDONTWRITEBYTECODE=1
@@ -192,8 +198,22 @@ run_theme_profile_test() {
 		--cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
 }
 
+run_pinned_theme_test() {
+	background=$1
+	test_path=$2
+	if [ "$background" = "dark" ]; then
+		config_file=$pinned_theme_dark_config
+	else
+		config_file=$pinned_theme_light_config
+	fi
+	run_check "theme_pinned_profile_spec ($background)" env NVIM_CONFIG_FILE="$config_file" \
+		NVIM_CONFIG_THEME_BACKGROUND="$background" "NVIM_CONFIG_TEST=$test_path" "$NVIM_BIN" \
+		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
+}
+
 run_pager_test() {
 	run_check "pager_profile_spec" env NVIM_APPNAME=nvimpager NVIMPAGER_FILETYPE=markdown \
+		NVIM_CONFIG_FILE="$low_bandwidth_config" \
 		NVIM_CONFIG_TEST="$repo_root/tests/pager_profile_spec.lua" "$NVIM_BIN" \
 		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
 }
@@ -205,9 +225,21 @@ run_pager_lock_test() {
 }
 
 run_vscode_test() {
-	run_check "vscode_profile_spec" env NVIM_CONFIG_TEST="$repo_root/tests/vscode_profile_spec.lua" "$NVIM_BIN" \
+	run_check "vscode_profile_spec" env NVIM_CONFIG_FILE="$low_bandwidth_config" \
+		NVIM_CONFIG_TEST="$repo_root/tests/vscode_profile_spec.lua" "$NVIM_BIN" \
 		--headless -i NONE --cmd 'let g:vscode = 1' \
 		--cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
+}
+
+run_redraw_profile_test() {
+	label=$1
+	profile=$2
+	config_file=$3
+	shift 3
+	run_check "redraw_profile_spec ($label)" env "$@" NVIM_CONFIG_FILE="$config_file" \
+		NVIM_CONFIG_EXPECTED_REDRAW_PROFILE="$profile" \
+		NVIM_CONFIG_TEST="$repo_root/tests/redraw_profile_spec.lua" "$NVIM_BIN" \
+		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
 }
 
 run_pure_test lock_spec
@@ -268,11 +300,15 @@ run_check "devcontainer_editor_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NO
 	-l "$repo_root/local-plugins/devcontainer-editor.nvim/tests/devcontainer_editor_spec.lua"
 run_check "devcontainer_editor_cli_spec" python3 "$repo_root/tests/devcontainer_editor_cli_spec.py"
 
-for pure_spec in lazy_lock_spec local_plugins_spec local_config_plugins_spec trusted_workspace_spec project_settings_spec theme_router_spec diagram_view_spec verified_tools_host_spec log_watch_spec log_workbench_spec treesitter_spec pager_spec lint_spec menu_spec tabs_spec editor_spec navigation_history_spec auto_session_spec notification_spec ux_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec; do
+for pure_spec in lazy_lock_spec local_plugins_spec local_config_plugins_spec trusted_workspace_spec markdown_spec project_settings_spec theme_router_spec diagram_view_spec verified_tools_host_spec log_watch_spec log_workbench_spec treesitter_spec pager_spec lint_spec menu_spec action_palette_adapter_spec tabs_spec editor_spec navigation_history_spec auto_session_spec notification_spec ux_spec statusline_performance_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec; do
 	run_pure_test "$pure_spec"
 done
 
 run_config_test startup_spec "$repo_root/tests/startup_spec.lua"
+run_config_test load_contract_spec "$repo_root/tests/load_contract_spec.lua"
+run_redraw_profile_test full full "$check_tmp/no-local-config.lua"
+run_redraw_profile_test low-bandwidth low-bandwidth "$low_bandwidth_config"
+run_redraw_profile_test ssh full "$check_tmp/no-local-config.lua" SSH_CONNECTION=fixture
 run_config_test log_profile_spec "$repo_root/tests/log_profile_spec.lua"
 run_config_test menu_lifecycle_spec "$repo_root/tests/menu_lifecycle_spec.lua"
 run_config_test tooling_spec "$repo_root/tests/tooling_spec.lua"
@@ -284,6 +320,8 @@ run_theme_profile_test editor dark "$repo_root/tests/theme_profile_spec.lua"
 run_theme_profile_test editor light "$repo_root/tests/theme_profile_spec.lua"
 run_theme_profile_test pager dark "$repo_root/tests/theme_profile_spec.lua"
 run_theme_profile_test pager light "$repo_root/tests/theme_profile_spec.lua"
+run_pinned_theme_test dark "$repo_root/tests/theme_pinned_profile_spec.lua"
+run_pinned_theme_test light "$repo_root/tests/theme_pinned_profile_spec.lua"
 run_config_test dependency_spec "$repo_root/tests/dependency_spec.lua"
 run_config_test coverage_spec "$repo_root/tests/coverage_spec.lua"
 run_pager_lock_test

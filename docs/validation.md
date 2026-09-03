@@ -33,11 +33,17 @@ Both bootstrap and the offline gate isolate `XDG_CONFIG_HOME`, so a persisted
 
 ## Runtime tool installation
 
-Full-editor startup plans and attests eligible managed-release and Mason
-identities without installing. Explicit work is claimed once in persistent
-state; a failure, interruption, or corrupt claim is never retried
-automatically. A manual repair can reclaim an interrupted attempt only after
-its owner exits; live or unverifiable owners remain locked.
+Full-editor startup registers only a lightweight command facade; the
+verified-tool lifecycle and local plugin remain unloaded until the first
+explicit install or repair request. Neither startup nor Mason readiness plans,
+probes versions, attests, or accesses the registry/network. An explicit named
+install plans only that target, while `all` is the explicit aggregate path.
+The same explicit request imports only that tool's legacy record before it is
+claimed; startup never scans the legacy catalog.
+Explicit work is claimed once in persistent state; a failure, interruption, or
+corrupt claim is never retried automatically. A manual repair can reclaim an
+interrupted attempt only after its owner exits; live or unverifiable owners
+remain locked.
 
 - `:NvimConfigToolsInstall [all|name]` installs or retries the exact release or
   Mason identity. `!` explicitly selects the managed strategy when a compatible
@@ -52,8 +58,9 @@ commands and mappings are disabled.
 The editor and pager share the primary Neovim managed-tool root. Release proof
 binds the verified archive to every promoted content hash. Mason proof binds the
 exact raw source version and full link map to a normalized private `0600`
-receipt; health and startup attestation are local-only and never refresh the
-registry.
+receipt. Health receipt inspection and explicit attestation are local-only and
+never refresh the registry. Attestation of an existing successful identity
+occurs only on an explicit install/repair request.
 
 | Mason backend | Host dependency |
 | --- | --- |
@@ -70,7 +77,8 @@ been removed; PlantUML diagram rendering is unchanged.
 
 | Area | Automated evidence | Manual evidence still required |
 | --- | --- | --- |
-| Terminal editor | Startup, argv lifecycle, commands, LSP config and plugin API contracts | Interactive completion and long editing sessions |
+| Terminal editor | Startup, argv lifecycle, commands, LSP config, plugin API contracts, and cache-only statusline render sentinel | Interactive completion and long editing sessions |
+| Redraw profiles | Schema/default, host/project trust boundary, full/low functional matrix, explicit SSH non-selection, and pager/VSCode full-profile guards | Subjective latency and bandwidth on a real remote terminal |
 | nvimpager | Allowlist, source-lock SHA parity, parser set, argv/stdin filetype behavior, mappings and absence of editor-only services | Rendering in the real `nvimpager` executable |
 | VSCode Neovim | Stubbed profile and action mappings; terminal-only commands/plugins stay absent | A live VS Code extension host |
 | Themes | VSCode default, Catppuccin Latte/Mocha switching, local persistence, editor/pager availability and VSCode exclusion | Visual judgement in the real terminal and pager |

@@ -1,8 +1,9 @@
 -- Host adapter for just-workbench.nvim. Commands, prompts, picker presentation,
 -- terminal UI, repository resolution, and quickfix integration remain here.
 local M = {}
+local deferred = require("config.deferred")
 
-local workbench = require("just_workbench")
+local workbench
 local DEFAULT_POLICY = {
 	binary = "just",
 	root_mode = "repo",
@@ -128,12 +129,28 @@ local function supports_one(binary)
 	return help:find("--one", 1, true) ~= nil
 end
 
+local function load_workbench()
+	if workbench then
+		return workbench
+	end
+	local ok, result = deferred.try("just_workbench")
+	if not ok then
+		return nil, result
+	end
+	workbench = result
+	return workbench
+end
+
 local function configure(overrides)
 	if configured then
-		return
+		return workbench
+	end
+	local core, load_err = load_workbench()
+	if not core then
+		return nil, load_err
 	end
 	overrides = overrides or {}
-	workbench.setup({
+	local ok, setup_result, setup_err = pcall(core.setup, {
 		system = overrides.system or vim.system,
 		trust = overrides.trust or function(path, contents)
 			local approved = vim.secure.read(path)
@@ -146,7 +163,14 @@ local function configure(overrides)
 		supports_one = overrides.supports_one or supports_one,
 		terminal = overrides.terminal or terminal_adapter(),
 	})
+	if not ok then
+		return nil, setup_result
+	end
+	if not setup_result then
+		return nil, setup_err or "setup failed"
+	end
 	configured = true
+	return core
 end
 
 local function execute(catalog, action, values, decision)
@@ -256,8 +280,12 @@ function M.run(requested, overrides)
 		notify(ctx_err, vim.log.levels.ERROR)
 		return
 	end
-	configure(overrides)
-	local handle, catalog_err = workbench.catalog(ctx, function(catalog, err)
+	local core, setup_err = configure(overrides)
+	if not core then
+		notify("Could not initialize Just workbench: " .. tostring(setup_err), vim.log.levels.ERROR)
+		return
+	end
+	local handle, catalog_err = core.catalog(ctx, function(catalog, err)
 		vim.schedule(function()
 			if not catalog then
 				notify("Could not list recipes: " .. tostring(err), vim.log.levels.ERROR)
@@ -368,7 +396,6 @@ function M.stop()
 end
 
 function M.setup()
-	configure()
 	vim.api.nvim_create_user_command("JustRun", function(opts)
 		M.run(opts.args)
 	end, { nargs = "?", desc = "Choose and run a trusted Just recipe", force = true })
@@ -390,11 +417,27 @@ function M.setup()
 		desc = "Stop the active Just run for this repository",
 		force = true,
 	})
+	return true
 end
 
-M._decode_dump = workbench._decode_dump
+function M._decode_dump(...)
+	local core, err = load_workbench()
+	if not core then
+		error("could not load Just workbench: " .. tostring(err), 2)
+	end
+	return core._decode_dump(...)
+end
+
 M._find_justfile = find_justfile
-M._workbench = workbench
+M._workbench = setmetatable({}, {
+	__index = function(_, key)
+		local core, err = load_workbench()
+		if not core then
+			error("could not load Just workbench: " .. tostring(err), 2)
+		end
+		return core[key]
+	end,
+})
 M._configure = configure
 
 return M

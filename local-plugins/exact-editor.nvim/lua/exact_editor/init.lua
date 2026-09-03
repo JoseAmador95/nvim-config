@@ -12,6 +12,11 @@ local configured = {}
 local temp_counter = 0
 local wait_controllers = {}
 local test_hook
+local heartbeat_generation = 0
+local default_timer_factory = function()
+	return uv.new_timer()
+end
+local timer_factory = default_timer_factory
 
 local declared, declare_err = pcall(
 	ffi.cdef,
@@ -128,6 +133,7 @@ local SETUP_KEYS = {
 	notify = true,
 	install_finish_mapping = true,
 	workspace_retention = true,
+	registry_heartbeat_seconds = true,
 	on_state_change = true,
 }
 
@@ -1261,7 +1267,7 @@ local function discover(instance, path)
 	local absolute = vim.fn.fnamemodify(candidate, ":p")
 	for _, workspace in pairs(instance.workspaces) do
 		if contained(workspace.root, absolute) then
-			return M.write_registry(instance)
+			return true
 		end
 	end
 	local resolver = configured.resolve_workspace
@@ -1275,13 +1281,22 @@ local function discover(instance, path)
 			return nil, normalize_err
 		end
 		local identity = workspace_identity(normalized)
-		local added = instance.workspaces[identity] == nil
-		instance.workspaces[identity] = normalized
-		if added then
-			emit("workspace-visited", { instance_id = instance.instance_id, workspace = normalized })
+		if instance.workspaces[identity] ~= nil then
+			return true
 		end
+		instance.workspaces[identity] = normalized
+		local record, write_err = M.write_registry(instance)
+		if not record then
+			instance.workspaces[identity] = nil
+			return nil, write_err
+		end
+		emit("workspace-visited", { instance_id = instance.instance_id, workspace = normalized })
+		return record
 	elseif resolve_err then
 		return nil, resolve_err
+	end
+	if instance.registry_identity then
+		return true
 	end
 	return M.write_registry(instance)
 end
@@ -1291,6 +1306,83 @@ local function append_warning(current, warning)
 		return current
 	end
 	return current and (current .. "; " .. tostring(warning)) or tostring(warning)
+end
+
+local function heartbeat_is_current(instance, timer, generation)
+	return active == instance
+		and instance.registry_heartbeat == timer
+		and instance.registry_heartbeat_generation == generation
+		and heartbeat_generation == generation
+end
+
+local function stop_heartbeat(instance)
+	local timer = instance.registry_heartbeat
+	heartbeat_generation = heartbeat_generation + 1
+	instance.registry_heartbeat = nil
+	instance.registry_heartbeat_generation = nil
+	if not timer then
+		return true
+	end
+	local warning
+	local stopped, stop_err = pcall(timer.stop, timer)
+	if not stopped then
+		warning = append_warning(warning, "registry heartbeat stop failed: " .. tostring(stop_err))
+	end
+	local closing = false
+	if type(timer.is_closing) == "function" then
+		local inspected, result = pcall(timer.is_closing, timer)
+		closing = inspected and result == true
+	end
+	if not closing then
+		local closed, close_err = pcall(timer.close, timer)
+		if not closed then
+			warning = append_warning(warning, "registry heartbeat close failed: " .. tostring(close_err))
+		end
+	end
+	return true, warning
+end
+
+local function start_heartbeat(instance)
+	if instance.registry_heartbeat then
+		return true
+	end
+	local created, timer_or_err = pcall(timer_factory)
+	if not created or not timer_or_err then
+		return nil, "could not create registry heartbeat timer: " .. tostring(timer_or_err)
+	end
+	local timer = timer_or_err
+	heartbeat_generation = heartbeat_generation + 1
+	local generation = heartbeat_generation
+	instance.registry_heartbeat = timer
+	instance.registry_heartbeat_generation = generation
+	local interval = configured.registry_heartbeat_seconds * 1000
+	local started, start_err = pcall(timer.start, timer, interval, interval, function()
+		if not heartbeat_is_current(instance, timer, generation) then
+			return
+		end
+		vim.schedule(function()
+			if not heartbeat_is_current(instance, timer, generation) then
+				return
+			end
+			local record, write_err = M.write_registry(instance)
+			if not record then
+				notify(
+					"Could not refresh exact editor registry heartbeat: " .. tostring(write_err),
+					vim.log.levels.WARN
+				)
+			end
+		end)
+	end)
+	if not started then
+		stop_heartbeat(instance)
+		return nil, "could not start registry heartbeat timer: " .. tostring(start_err)
+	end
+	local unreferenced, unref_err = pcall(timer.unref, timer)
+	if not unreferenced then
+		stop_heartbeat(instance)
+		return nil, "could not unreference registry heartbeat timer: " .. tostring(unref_err)
+	end
+	return true
 end
 
 local function stop_server(path)
@@ -1388,6 +1480,10 @@ local function cleanup(instance)
 	if socket_warning_or_err then
 		notify("Exact editor socket cleanup: " .. tostring(socket_warning_or_err), vim.log.levels.WARN)
 	end
+	local _, heartbeat_warning = stop_heartbeat(instance)
+	if heartbeat_warning then
+		notify("Exact editor heartbeat cleanup: " .. tostring(heartbeat_warning), vim.log.levels.WARN)
+	end
 
 	local registry_removed, registry_err = unlink_regular(record_path(instance), instance.registry_identity)
 	if not registry_removed then
@@ -1403,7 +1499,7 @@ local function cleanup(instance)
 		_G.ExactEditorRequest = nil
 	end
 	emit("instance-stopped", { instance_id = instance.instance_id })
-	return true, append_warning(socket_warning_or_err, registry_err)
+	return true, append_warning(append_warning(socket_warning_or_err, heartbeat_warning), registry_err)
 end
 
 local function start_server(root, instance_id)
@@ -1504,10 +1600,25 @@ function M.setup(opts)
 	if retention ~= "visited" then
 		error("setup.workspace_retention must be visited")
 	end
+	local heartbeat_seconds = opts.registry_heartbeat_seconds
+	if heartbeat_seconds == nil then
+		heartbeat_seconds = 21600
+	end
+	if
+		type(heartbeat_seconds) ~= "number"
+		or heartbeat_seconds % 1 ~= 0
+		or heartbeat_seconds < 60
+		or heartbeat_seconds > 604800
+	then
+		error("setup.registry_heartbeat_seconds must be an integer between 60 and 604800")
+	end
 	if active then
 		return active
 	end
-	local next_configured = vim.tbl_extend("force", {}, opts, { workspace_retention = retention })
+	local next_configured = vim.tbl_extend("force", {}, opts, {
+		workspace_retention = retention,
+		registry_heartbeat_seconds = heartbeat_seconds,
+	})
 	local clock_value, clock_err = timestamp(next_configured)
 	if not clock_value then
 		local report = opts.notify or vim.notify
@@ -1614,11 +1725,29 @@ function M.setup(opts)
 		end
 		return nil
 	end
+	local heartbeat_started, heartbeat_err = start_heartbeat(instance)
+	if not heartbeat_started then
+		local cleaned, cleanup_err = cleanup(instance)
+		notify(
+			"Could not start editor registry heartbeat: "
+				.. tostring(heartbeat_err)
+				.. (cleaned and "" or "; cleanup failed: " .. tostring(cleanup_err)),
+			vim.log.levels.ERROR
+		)
+		if cleaned then
+			pcall(vim.api.nvim_del_augroup_by_name, "exact_editor_rpc")
+			configured = previous_configured
+		end
+		return nil
+	end
 	return instance
 end
 
 function M.effective_config()
-	return { workspace_retention = configured.workspace_retention or "visited" }
+	return {
+		workspace_retention = configured.workspace_retention or "visited",
+		registry_heartbeat_seconds = configured.registry_heartbeat_seconds or 21600,
+	}
 end
 
 function M.status()
@@ -1626,6 +1755,7 @@ function M.status()
 		configured = active ~= nil,
 		instance = nil,
 		workspace_retention = configured.workspace_retention or "visited",
+		registry_heartbeat_seconds = configured.registry_heartbeat_seconds or 21600,
 		workspaces = {},
 		waits = {},
 	}
@@ -1731,6 +1861,11 @@ M._wait_state_keys = WAIT_STATE_KEYS
 M._prepare_state = prepare_state
 M._normalize_workspace = normalize_workspace
 M._workspace_identity = workspace_identity
+M._discover = discover
+M._set_timer_factory_for_tests = function(factory)
+	assert(factory == nil or type(factory) == "function", "exact editor timer factory must be a function or nil")
+	timer_factory = factory or default_timer_factory
+end
 M._set_test_hook = function(callback)
 	assert(callback == nil or type(callback) == "function", "exact editor test hook must be a function or nil")
 	test_hook = callback

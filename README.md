@@ -8,9 +8,11 @@ This is a Neovim 0.12+ configuration with a full editor profile and a small
 ## Setup and optional features
 
 Clone the repository as `~/.config/nvim` and start Neovim. Lazy restores locked
-plugins; startup only plans and attests exact tool pins. Installation, retry and
-repair are explicit through `:NvimConfigToolsInstall[!]`, and offline startup
-never consumes an attempt.
+plugins; startup only registers a lightweight verified-tool command facade. The
+tool lifecycle and its local plugin are loaded on the first explicit
+`:NvimConfigToolsInstall[!]` request. Startup performs no tool planning, version
+probes, attestation, registry access, or network work, and offline startup never
+consumes an attempt.
 
 For a reproducible install or validation run, download the four pinned,
 precompiled validators and restore the committed plugin/parser pins into an
@@ -34,7 +36,7 @@ mutates plugins, parsers, or the committed lock.
 
 Host-specific settings belong in `~/.nvim-local.lua`; create a documented
 owner-only template with `:NvimConfigInit`. Plugin settings live exclusively
-under `plugins.<plugin_name>`; `dap`, `path`, `env`, and `plugins_dir` remain
+under `plugins.<plugin_name>`; `dap`, `ui`, `path`, `env`, and `plugins_dir` remain
 host-level settings. The retired root names `theme`, `clangd`, `review`,
 `log_watch`, `diagram_cache`, and `mason` are rejected rather than treated as
 aliases. `:NvimConfigDump` recursively redacts environment values. For example,
@@ -43,11 +45,51 @@ set `plugins = { native_review = { hunk_context = 0 } }` to change that
 review-local context. Split view keeps one structural context line when
 configured to zero so native old/new filler stays aligned.
 
+The terminal editor starts with `ui = { redraw_profile = "full" }`. Set
+`redraw_profile = "low-bandwidth"` explicitly in the per-host file to reduce
+redraw traffic; it is never inferred from SSH. Project-local `ui` is forbidden:
+the complete project source is rejected before approval rather than partially
+merged. VSCode Neovim and `nvimpager` always keep `full`.
+
+| Surface | `full` | `low-bandwidth` |
+| --- | --- | --- |
+| Core UI | `cursorline`, `showmatch`, `scrolloff=10` | no cursor line/match flash, `scrolloff=0` |
+| Diagnostics | virtual lines on the current line | virtual lines off |
+| Navic / Illuminate | immediate navic; Illuminate 100 ms with LSP, Tree-sitter, regex | lazy navic; Illuminate 300 ms with LSP only |
+| Indent / context | indent scope on at 200 ms; Tree-sitter Context on | scope off at 500 ms; Tree-sitter Context off |
+| Markdown | all configured render modes with normal anti-conceal | normal mode only; anti-conceal off |
+| Noice / Lualine | existing 33 ms LSP progress and 16 ms event refresh | both throttled to 100 ms |
+
+The choice is fixed at startup; restart Neovim after changing it. `full`
+preserves the existing interactive behavior and remains the default.
+
+Markdown rendering has three host-only palette presets under
+`plugins.render_markdown.preset`: `subtle` (the default), `minimal` (no code or
+heading backgrounds), and `semantic` (level-colored headings). For example,
+`plugins = { render_markdown = { preset = "semantic" } }` belongs in
+`~/.nvim-local.lua`; project-local configuration cannot override it. In the
+full terminal editor, buffer-local `gd` opens existing regular-file links
+through the tab-aware editor adapter, sends headings, fragments, and reference
+links to Marksman, and opens HTTP(S)/email targets through the host UI. Under
+SSH, external targets are copied through the configured clipboard provider
+instead of launching a remote browser. Plain Markdown text falls back to the
+ordinary LSP/native definition path. This mapping is absent from `nvimpager`
+and VSCode Neovim and remains fail-closed in historical review buffers.
+
 Every local product exposes a strict setup contract plus copied `status()` and
 `effective_config()` snapshots. `:checkhealth nvimconfig` aggregates those 17
 surfaces without refreshing state, starting processes, installing tools, or
 downloading parsers. Workflow commands remain in the host configuration rather
 than inside the plugins.
+
+All 17 local plugin directories stay on `runtimepath`; none is registered as a
+Lazy plugin. The startup-owned foundations are `trusted-workspace`,
+`exact-editor`, `tab-first`, `treesitter-runtime`, `theme-router`, and
+`native-review` (VSCode and pager use their smaller profile-specific subsets).
+The devcontainer, terminal, Python, action palette, diagram, log, scratch,
+coverage, Just, clangd compile-database, and verified-tools cores load only at
+their documented first-use boundary. Their host commands and mappings remain
+available from startup through lightweight adapters.
 
 The debug UI defaults to `dap-ui`. Select the pinned `nvim-dap-view`
 alternative with `dap = { ui = "dap-view" }` in local config, or for one
@@ -60,6 +102,8 @@ terminal background with Latte in light mode and Mocha in dark mode.
 `:Theme vscode` switches back, while `:ThemeReset` discards the local choice
 and restores the current versioned default without persisting it; a private
 migration marker prevents the retained legacy Lua choice from returning.
+Focus, terminal-background option, and OSC response bursts share one 100 ms
+refresh window; a durable reload wins over repaint when both are pending.
 
 The effective executable order is deliberate:
 
@@ -70,9 +114,10 @@ The effective executable order is deliberate:
 5. config-managed release binaries under the primary Neovim data root;
 6. Mason's `bin` directory.
 
-External candidates are still probed before a managed claim, but once an exact
-pin is installed its content-attested shim wins consistently in the editor and
-`nvimpager`. `:checkhealth nvimconfig` prints the effective origin and order.
+External candidates are probed only while planning an explicit install request,
+before a managed claim. Once an exact pin is installed its content-attested shim
+wins consistently in the editor and `nvimpager`. `:checkhealth nvimconfig`
+prints the effective origin and order.
 External tools are optional unless their feature is used:
 
 | Feature | Tools |
@@ -90,13 +135,18 @@ External tools are optional unless their feature is used:
 `mmdflux`, PlantUML, release tools and exact Mason packages share
 `:NvimConfigToolsInstall [all|name]`; append `!` for explicit repair or to
 force the managed pin when a compatible external tool would otherwise win.
+Naming one tool plans only that target; spelling `all` is the explicit aggregate
+planning/install path. That explicit request also imports only the matching
+legacy tool record; startup never scans the legacy catalog.
+
 Mason's UI is
 read-only: its install, update and uninstall commands and mappings are removed.
 Release installs bind the verified source-archive SHA to hashes of every
 promoted command/artifact. Mason validates its exact raw source version and
 complete executable-link map, then binds them to a private `0600` receipt;
-subsequent attestation detects receipt or executable drift without refreshing
-the registry.
+an explicit request for an already-succeeded identity attests it and detects
+receipt or executable drift without refreshing the registry.
+
 The managed backends and their host prerequisites are:
 
 | Backend | Packages | Host prerequisite |
@@ -136,9 +186,10 @@ user buffers, creates a pristine home tab, and opens the Snacks dashboard;
 
 ## Native review
 
-The full terminal editor has a native, repository-scoped review mode that stays
-in the current ordinary tab. `:ReviewOpen` (or `<leader>ro`) freezes a working,
-commit, range, or default-branch scope; `<leader>rr` opens and closes its
+The full terminal editor has a native, repository-scoped review mode in one
+dedicated transient tab. `:ReviewOpen` (or `<leader>ro`) first freezes a working,
+commit, range, or default-branch scope, then opens or focuses that tab without
+replacing the ordinary invocation buffer; `<leader>rr` opens and closes its
 three-pane Files / Commits / Comments float. Selecting a file closes the float
 and focuses the reviewed code. Its colored, fully expanded tree
 groups only non-empty change layers, supports collapsible directories, and
@@ -149,17 +200,18 @@ selected span without changing manually marked endpoints, while normal `Enter`
 keeps using the current row or marked endpoints. `c` clears only those endpoints
 and `b` returns to the exact frozen parent scope. Merge commits are reviewed
 individually. The Comments pane supports jumping, editing, confirmed deletion,
-replying, and resolving/reopening without a separate review tab; `a` adds a
+replying, and resolving/reopening inside the same review tab; `a` adds a
 review-level comment. `<leader>rR` provides the same review-level action from
-ordinary review buffers. Reanchoring remains available through
+review code buffers. Reanchoring remains available through
 `:ReviewReanchor` and the command palette.
 
-Review mode makes affected source buffers read-only and preserves their normal
-tab identity. `<leader>rv` switches between one inline unified projection and a
-native synchronized side-by-side diff; `<leader>rw` switches hunk-only and
+Review mode makes affected source buffers read-only only while its owned UI is
+active and restores their prior state on release. `<leader>rv` switches between
+one inline unified projection and a native synchronized side-by-side diff;
+`<leader>rw` switches hunk-only and
 full-file context; and `<leader>rg` focuses the reviewed code. Inline unchanged
 context appears once, while each replacement places real OLD rows before real
-NEW/CURRENT rows. Every code row is cursor-addressable in the ordinary review
+NEW/CURRENT rows. Every code row is cursor-addressable in the owned review
 window, and its `OLD │ NEW` gutter shows both source line numbers when available
 without replacing fold or comment signs. Side-by-side remains Neovim's native
 two-pane diff with both versions real and focusable. Jumping to an OLD or NEW
@@ -178,7 +230,12 @@ path. The unified projection is LSP-blocked. Read-only navigation, hover, and
 diagnostics are conservatively bridged from mapped NEW/CURRENT rows to the real
 current source; OLD or otherwise unmappable rows remain unavailable, and
 mutation operations are never proxied. An exact CURRENT pane in side-by-side
-view retains its ordinary LSP behavior.
+view retains its ordinary LSP behavior. In either layout, `gd` routes a selected
+definition back into the owned review tab when its CURRENT path and line map to
+one unambiguous frozen NEW entry, revealing hidden context in place. Definitions
+outside the diff keep the normal CURRENT-file navigation path. Resolving `gd`
+does not open an intermediate CURRENT tab, and delayed responses are discarded
+if the source document, review generation, or a newer definition request wins.
 
 `<leader>ra` comments the current line or visual range, `<leader>rA` comments the
 file, and `<leader>rR` comments the review. A selection resolves to canonical
@@ -191,12 +248,17 @@ Multiline rails place one colored type badge at each anchor start;
 continuation rows show only the guide and terminator. Same-type starts and
 overlaps use compact counts (`2` through `9`, then `9+`) without losing the
 per-type colors. Pausing on a commented range shows one concise inline row per
-comment; `<leader>ri` toggles those previews without removing the rail. A
-line/range composer reserves a one-to-six-row borderless body plus a dedicated
-instruction row directly below the source anchor and scrolls longer text. File
+comment; `<leader>ri` toggles those previews without removing the rail. Only the
+type badge is colored in previews and the Comments panel. By default a
+line/range composer is one rounded card with a colored left rail and chunked
+title/footer; it reserves its one-to-six-row body plus two chrome rows and
+scrolls longer text. Host config may select `composer.style = "minimal"` to keep
+the borderless body and separate footer while retaining the colored badge. File
 and review-level comments, including edits and replies, use a centered rounded
-modal capped at 88 by 18 rows without reserving source lines. In Normal mode,
-`<CR><CR>` saves through the same path as `<C-s>`.
+modal capped at 88 by 18 rows without reserving source lines. Tab and Shift-Tab
+cycle types for new comments and edits in Normal or Insert mode, returning to
+Insert; replies do not cycle. In Normal mode, `<CR><CR>` saves through the same
+path as `<C-s>`.
 
 `:ReviewExport[!]` always renders the complete saved review and may be repeated;
 it copies Markdown or opens a closable float when no clipboard is available. Its
@@ -212,6 +274,24 @@ Legacy bridge and delivery fields in existing review stores remain validated
 and round-trip unchanged, but are inert: Neovim no longer links or publishes
 review sessions. Ordinary `:DiffviewOpen` and `:DiffviewFileHistory` remain
 independent raw Diffview workflows.
+
+The review tab is leased through `tab-first.nvim` and titled
+`Review: <repository> · <scope>`. Reopening a review, drilling into a commit, and
+returning to its parent reuse and retitle the same live tab. `<leader>rm` off
+prepares an open composer, releases all review UI, and returns to the latest
+ordinary invocation while keeping the frozen review resumable; turning it on
+acquires a fresh generation and rebuilds the view. Supported X, middle-click,
+`<leader>q`, and `:CloseTab` paths can veto closure when a nonempty composer can
+be neither saved nor verified through recovery. Raw `:tabclose` is reconciled
+after best-effort composer recovery and never recreates the tab by itself.
+`:ReviewClose` alone removes the logical review and retains its verified
+unsaved-recovery/force rules.
+
+Auto-session physically releases the review tab before serialization. A
+successful explicit manual save may restore it afterward without stealing the
+ordinary focus; automatic saves, failed saves, and exit never reacquire review
+UI. Consequently no review-owned tab or transient review buffer is written into
+a session file.
 
 The review mappings use the lower-case `<leader>r` namespace: `rr` panel, `ro`
 open, `rm` mode, `rs` scope, `rb` parent scope, `rf/rh/rl` panel panes, `rv`
@@ -299,10 +379,16 @@ Python settings take precedence only after
 `.vscode/settings.json` and `.neoconf.json`; any edit revokes their effect until
 they are approved again. Selection never changes global `PATH`,
 `VIRTUAL_ENV` or terminal activation. The effective interpreter for each root
-is shared by Pyright, Neotest, DAP, the REPL and statusline. An attached Pyright
-root or the nearest Python project marker takes precedence over an enclosing Git
-root, so nested Python projects stay independent. Opening a PEP 723 script never
-runs venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
+is shared by Pyright, Neotest, DAP, the REPL and an event-refreshed statusline
+cache. Statusline renders read cached labels only; project discovery, Git and
+filesystem work run outside the render path. An attached Pyright root or the
+nearest Python project marker takes precedence over an enclosing Git root, so
+nested Python projects stay independent. Opening a PEP 723 script never runs
+venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
+Environment discovery is cached per project; use `:PythonEnvironmentRefresh`
+after changing an environment on disk, or `:PythonEnvironmentClear` to discard
+the manual selection and rediscover it.
+
 `<leader>Tn` runs the nearest test, `<leader>Td` debugs it, `<leader>pr` toggles
 the project REPL and `<leader>ps` opens or focuses that REPL before sending the
 current line or visual selection. Sends are queued FIFO per project until the
