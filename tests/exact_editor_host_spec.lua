@@ -119,6 +119,12 @@ local function drain()
 	end, 10)
 end
 
+test("host setup options do not leak request-only dependencies", function()
+	local setup = rpc._options()
+	assert(type(setup.open) == "function", "setup open callback is missing")
+	assert(setup.open_file == nil, "request-only open_file leaked into strict setup options")
+end)
+
 test("state root follows override, XDG, then home modes", function()
 	local old_override = vim.env.NVIM_EXACT_EDITOR_STATE_HOME
 	local old_xdg = vim.env.XDG_STATE_HOME
