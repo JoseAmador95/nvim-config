@@ -106,7 +106,12 @@ local function parse_color(input)
 	return nil, "Unknown color: " .. key
 end
 
-local function get_visual_selection(buf)
+local function get_visual_selection(buf, opts)
+	-- A matching two-address range is the explicit opt-in to Neovim's
+	-- persistent visual marks; a plain command must never reuse them.
+	if type(opts) ~= "table" or opts.range ~= 2 then
+		return nil
+	end
 	local start_pos = vim.fn.getpos("'<")
 	local end_pos = vim.fn.getpos("'>")
 	if start_pos[2] == 0 or end_pos[2] == 0 then
@@ -118,9 +123,15 @@ local function get_visual_selection(buf)
 		start_row, end_row = end_row, start_row
 		start_col, end_col = end_col, start_col
 	end
+	if start_row ~= opts.line1 or end_row ~= opts.line2 then
+		return nil
+	end
 	local lines = vim.api.nvim_buf_get_lines(buf, start_row - 1, end_row, false)
 	if #lines == 0 then
 		return nil
+	end
+	if #lines == 1 then
+		return lines[1]:sub(start_col, end_col)
 	end
 	lines[1] = lines[1]:sub(start_col)
 	lines[#lines] = lines[#lines]:sub(1, end_col)
@@ -176,9 +187,11 @@ function M.add(kind, opts)
 		notify(color_index_or_err, vim.log.levels.ERROR)
 		return
 	end
-	local pattern_text = get_visual_selection(buf)
-	if (not pattern_text or pattern_text == "") and vim.trim(pattern_arg or "") ~= "" then
+	local pattern_text
+	if vim.trim(pattern_arg or "") ~= "" then
 		pattern_text = pattern_arg
+	else
+		pattern_text = get_visual_selection(buf, opts)
 	end
 	if not pattern_text or vim.trim(pattern_text) == "" then
 		notify("Pattern is required", vim.log.levels.ERROR)

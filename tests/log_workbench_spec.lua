@@ -190,6 +190,59 @@ test("host color UI drives plugin extmarks while log-highlight remains external"
 	vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
+test("host commands distinguish explicit patterns from visual ranges", function()
+	local buf = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(buf)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+		"stale selection",
+		"prefix marker suffix",
+		"another stale line",
+	})
+	local match_core = require("log_workbench.matches")
+
+	-- Visual marks outlive Visual mode and must not override a new command argument.
+	assert(vim.fn.setpos("'<", { buf, 1, 1, 0 }) == 0)
+	assert(vim.fn.setpos("'>", { buf, 3, 18, 0 }) == 0)
+	vim.api.nvim_cmd({ cmd = "LogHlAdd", args = { "red", "marker" } }, {})
+	local entries = match_core.list(buf)
+	equal(1, #entries)
+	equal("marker", entries[1].text)
+
+	vim.cmd("LogHlClear")
+	local notification_count = #notifications
+	vim.api.nvim_cmd({ cmd = "LogHlAdd", args = { "red" } }, {})
+	equal({}, match_core.list(buf), "a command without a range reused stale visual marks")
+	equal(notification_count + 1, #notifications)
+	assert(notifications[#notifications].message:find("Pattern is required", 1, true))
+
+	-- A real visual range remains supported, including a partial single-line selection.
+	assert(vim.fn.setpos("'<", { buf, 2, 8, 0 }) == 0)
+	assert(vim.fn.setpos("'>", { buf, 2, 13, 0 }) == 0)
+	vim.cmd("'<,'>LogHlAdd blue")
+	entries = match_core.list(buf)
+	equal(1, #entries)
+	equal("marker", entries[1].text)
+
+	vim.cmd("LogHlClear")
+	vim.cmd("'<,'>LogHlRegex green")
+	entries = match_core.list(buf)
+	equal(1, #entries)
+	equal("regex", entries[1].kind)
+	equal("marker", entries[1].text)
+
+	-- The core still rejects intentionally selected multi-line patterns.
+	vim.cmd("LogHlClear")
+	assert(vim.fn.setpos("'<", { buf, 1, 1, 0 }) == 0)
+	assert(vim.fn.setpos("'>", { buf, 2, 6, 0 }) == 0)
+	notification_count = #notifications
+	vim.cmd("'<,'>LogHlAdd purple")
+	equal({}, match_core.list(buf))
+	equal(notification_count + 1, #notifications)
+	assert(notifications[#notifications].message:find("patterns must be single-line", 1, true))
+
+	vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
 test("local plugin has no host imports, commands, mappings, or syntax dependency", function()
 	for _, path in ipairs(vim.fn.glob(plugin .. "/lua/**/*.lua", false, true)) do
 		local contents = table.concat(vim.fn.readfile(path), "\n")

@@ -122,6 +122,7 @@ vim.api.nvim_create_user_command("LogHlAdd", function(opts)
 	deferred.load("config.log_patterns").add("exact", opts)
 end, {
 	nargs = "+",
+	range = true,
 	complete = function(arglead, cmdline)
 		return deferred.load("config.log_patterns").complete_colors(arglead, cmdline)
 	end,
@@ -132,6 +133,7 @@ vim.api.nvim_create_user_command("LogHlRegex", function(opts)
 	deferred.load("config.log_patterns").add("regex", opts)
 end, {
 	nargs = "+",
+	range = true,
 	complete = function(arglead, cmdline)
 		return deferred.load("config.log_patterns").complete_colors(arglead, cmdline)
 	end,
