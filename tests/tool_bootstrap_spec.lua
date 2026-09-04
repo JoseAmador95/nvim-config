@@ -451,6 +451,21 @@ test("offline denial consumes no attempt", function()
 	network_allowed = true
 end)
 
+test("provision inventory stays offline and preserves unclaimed tools", function()
+	local release_before = release_install_count
+	local refresh_before = registry_refresh_count
+	local mason_before = mason_install_count
+	local untouched = assert(bootstrap.spec("marksman", { force_managed = true })).identity
+	assert(bootstrap.engine().status(untouched) == nil)
+	local ok, inventory, changed = bootstrap.provision_exact({ allow_network = false, timeout = 1000 })
+	assert(not ok and changed == false)
+	assert(type(inventory.managed_tools["markdown-preview"]) == "table")
+	assert(#inventory.mason.required == #toolchain.mason_order)
+	assert(release_install_count == release_before)
+	assert(registry_refresh_count == refresh_before and mason_install_count == mason_before)
+	assert(bootstrap.engine().status(untouched) == nil, "offline inventory consumed a one-shot attempt")
+end)
+
 vim.fn.delete(fixture, "rf")
 
 if #failures > 0 then

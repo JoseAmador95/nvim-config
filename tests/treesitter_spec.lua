@@ -3,11 +3,19 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 local treesitter_plugin = repo .. "/local-plugins/treesitter-runtime.nvim"
+local trusted_plugin = repo .. "/local-plugins/trusted-workspace.nvim"
+local shared = repo .. "/local-plugins/_shared"
 vim.opt.runtimepath:prepend(treesitter_plugin)
+vim.opt.runtimepath:prepend(trusted_plugin)
+vim.opt.runtimepath:prepend(shared)
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({
 	treesitter_plugin .. "/lua/?.lua",
 	treesitter_plugin .. "/lua/?/init.lua",
+	trusted_plugin .. "/lua/?.lua",
+	trusted_plugin .. "/lua/?/init.lua",
+	shared .. "/lua/?.lua",
+	shared .. "/lua/?/init.lua",
 	repo .. "/lua/?.lua",
 	repo .. "/lua/?/init.lua",
 	package.path,
@@ -83,12 +91,18 @@ vim.treesitter.language.get_lang = function(ft)
 end
 
 local runtime = require("config.treesitter_runtime")
+local default_expected_revision = runtime._expected_revision
+local default_parser_file = runtime._parser_file
+local default_installed_revision = runtime._installed_revision
 
 local function reset_runtime()
 	runtime.setup({ parsers = {}, highlight = false, indent = false })
 	starts = {}
 	install_calls = {}
 	install_task = nil
+	runtime._expected_revision = default_expected_revision
+	runtime._parser_file = default_parser_file
+	runtime._installed_revision = default_installed_revision
 end
 
 local function starts_for(buf)
@@ -210,6 +224,50 @@ test("blocking install API honors timeout and returns the Task result", function
 	assert(ok and task == install_task, "blocking install did not return success and its Task")
 	equal(1234, received_timeout, "blocking install did not forward its timeout")
 	equal(false, install_calls[1].opts.summary, "blocking install did not forward its summary option")
+end)
+
+test("exact provisioning is offline-safe selective and idempotent", function()
+	reset_runtime()
+	runtime.setup({ parsers = { "lua" }, highlight = false, indent = false })
+	local parser_path = vim.fn.tempname() .. ".so"
+	paths[#paths + 1] = parser_path
+	assert(vim.fn.writefile({ "parser" }, parser_path, "b") == 0)
+	local actual_revision
+	runtime._expected_revision = function(name)
+		assert(name == "lua")
+		return "revision-1"
+	end
+	runtime._parser_file = function(name)
+		assert(name == "lua")
+		return parser_path
+	end
+	runtime._installed_revision = function(name)
+		assert(name == "lua")
+		return actual_revision
+	end
+	installed = {}
+
+	local ok, reason, changed, before = runtime.provision_exact({ allow_network = false })
+	assert(not ok and reason == "offline" and changed == false)
+	assert(before.exact == false and #install_calls == 0, "offline provisioning started an install")
+
+	install_task = {
+		await = function() end,
+		wait = function(_, timeout)
+			assert(timeout == 1234)
+			installed = { "lua" }
+			actual_revision = "revision-1"
+			return true
+		end,
+	}
+	ok, _, changed = runtime.provision_exact({ allow_network = true, timeout = 1234 })
+	assert(ok and changed == true)
+	equal({ "lua" }, install_calls[1].parsers, "provisioning installed more than the stale parser")
+	assert(install_calls[1].opts.force == true and install_calls[1].opts.summary == false)
+
+	local calls = #install_calls
+	ok, _, changed = runtime.provision_exact({ allow_network = true, timeout = 1234 })
+	assert(ok and changed == false and #install_calls == calls, "exact second run reinstalled a parser")
 end)
 
 test("editor parser manifest is exactly 19 languages and keeps Rust", function()
