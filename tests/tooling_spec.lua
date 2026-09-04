@@ -45,7 +45,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(vim.lsp.is_enabled("docker_language_server"), "Docker LSP is not explicitly enabled")
 				assert(not vim.lsp.is_enabled("stylua"), "Stylua was unexpectedly enabled as an LSP")
 				assert(vim.lsp.config["*"].before_init == nil, "wildcard before_init hook is still configured")
-				assert(type(vim.lsp.config.pyright.root_dir) == "function", "native LSP startup gate is missing")
+				assert(type(vim.lsp.config.ty.root_dir) == "function", "native LSP startup gate is missing")
+				assert(vim.lsp.is_enabled("ty"), "ty is not explicitly enabled")
+				assert(not vim.lsp.is_enabled("pyright"), "Pyright remains enabled")
 				assert(vim.fn.exists(":NvimConfigToolsInstall") == 2, "pinned tool installer command is missing")
 				assert(vim.fn.exists(":MasonToolsInstallSync") == 0, "retired Mason sync command remains")
 				for _, name in ipairs({ "MasonInstall", "MasonUninstall", "MasonUninstallAll", "MasonUpdate" }) do
@@ -71,7 +73,11 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, local_python) == 0)
 				assert(vim.uv.fs_chmod(local_python, tonumber("700", 8)))
 				assert(vim.fn.writefile({
-					'{ "python.analysis.typeCheckingMode": "strict", "python.analysis.autoSearchPaths": false }',
+					vim.json.encode({
+						["ty.configuration.environment.python"] = project .. "/.venv",
+						["ty.configuration.rules.unresolved-reference"] = "warn",
+						["ty.disableLanguageServices"] = false,
+					}),
 				}, project .. "/.vscode/settings.json") == 0)
 				assert(vim.fn.writefile({ '{ "lspconfig": { "ruff": false } }' }, project .. "/.neoconf.json") == 0)
 
@@ -125,17 +131,17 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"Neoconf still imported unapproved project settings directly"
 				)
 
-				local startup_config = vim.deepcopy(vim.lsp.config.pyright)
+				local startup_config = vim.deepcopy(vim.lsp.config.ty)
 				startup_config.root_dir = project
 				local startup_client = { settings = startup_config.settings }
-				vim.lsp.config.pyright.before_init({}, startup_config)
+				vim.lsp.config.ty.before_init({}, startup_config)
 				assert(rawequal(startup_config.settings, startup_client.settings))
-				assert(startup_client.settings.pyright.disableOrganizeImports)
 				assert(
-					startup_client.settings.python.analysis.typeCheckingMode ~= "strict",
-					"unapproved VSCode settings reached Pyright"
+					startup_client.settings.ty.configuration.rules == nil
+						or startup_client.settings.ty.configuration.rules["unresolved-reference"] ~= "warn",
+					"unapproved VSCode settings reached ty"
 				)
-				assert(startup_client.settings.python.pythonPath == local_python)
+				assert(startup_client.settings.ty.configuration.environment.python == local_python)
 
 				local disabled_buf = vim.api.nvim_create_buf(false, false)
 				vim.api.nvim_buf_set_name(disabled_buf, project .. "/disabled.py")
@@ -149,18 +155,27 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(approved_fingerprint, "trust command did not persist the exact fingerprint")
 				local approved_vscode, approved_err = project_settings.get("vscode", {}, project)
 				assert(
-					approved_vscode.python.analysis.typeCheckingMode == "strict",
+					approved_vscode.ty.configuration.rules["unresolved-reference"] == "warn",
 					"approved adapter value is missing: "
 						.. vim.inspect({ approved_vscode, approved_err, current_source })
 				)
 
-				startup_config = vim.deepcopy(vim.lsp.config.pyright)
+				startup_config = vim.deepcopy(vim.lsp.config.ty)
 				startup_config.root_dir = project
 				startup_client = { settings = startup_config.settings }
-				vim.lsp.config.pyright.before_init({}, startup_config)
+				vim.lsp.config.ty.before_init({}, startup_config)
 				assert(rawequal(startup_config.settings, startup_client.settings))
-				assert(startup_client.settings.python.analysis.typeCheckingMode == "strict")
-				assert(startup_client.settings.python.analysis.autoSearchPaths == false)
+				assert(startup_client.settings.ty.configuration.rules["unresolved-reference"] == "warn")
+				assert(startup_client.settings.ty.disableLanguageServices == false)
+				assert(startup_client.settings.ty.configuration.environment.python == project .. "/.venv")
+				assert(require("config.python").for_root(project) == local_python)
+				local updated_config = vim.deepcopy(vim.lsp.config.ty)
+				updated_config.root_dir = project
+				local updated_settings = updated_config.settings
+				vim.lsp.config.ty.on_new_config(updated_config, project)
+				assert(rawequal(updated_config.settings, updated_settings))
+				assert(updated_config.settings.ty.configuration.environment.python == project .. "/.venv")
+				assert(updated_config.settings.ty.configuration.rules["unresolved-reference"] == "warn")
 				local disabled_started = false
 				vim.lsp.config.ruff.root_dir(disabled_buf, function()
 					disabled_started = true
@@ -168,29 +183,28 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(not disabled_started, "approved lspconfig.ruff=false did not gate startup")
 
 				local real_config = {
-					name = "pyright",
+					name = "ty",
 					root_dir = project,
-					settings = { python = { analysis = { diagnosticMode = "openFilesOnly" } } },
+					settings = {
+						ty = { configuration = { rules = { ["possibly-unresolved-reference"] = "ignore" } } },
+					},
 				}
 				local upstream_saw_settings = false
-				local wrapped_before_init = require("config.lsp_neoconf").wrap_before_init(
-					"pyright",
-					function(_, config)
-						upstream_saw_settings = config.settings.python.analysis.typeCheckingMode == "strict"
-					end
-				)
+				local wrapped_before_init = require("config.lsp_neoconf").wrap_before_init("ty", function(_, config)
+					upstream_saw_settings = config.settings.ty.configuration.rules["unresolved-reference"] == "warn"
+				end)
 				wrapped_before_init({}, real_config)
 				assert(upstream_saw_settings, "approved settings were not merged before upstream before_init")
-				assert(real_config.settings.python.analysis.diagnosticMode == "openFilesOnly")
+				assert(real_config.settings.ty.configuration.rules["possibly-unresolved-reference"] == "ignore")
 
 				assert(vim.fn.writefile({
-					'{ "python.analysis.typeCheckingMode": "basic", "python.analysis.autoSearchPaths": true }',
+					'{ "ty.configuration.rules.unresolved-reference": "error" }',
 				}, project .. "/.vscode/settings.json") == 0)
 				local changed = { root_dir = project, settings = {} }
-				vim.lsp.config.pyright.before_init({}, changed)
-				local changed_analysis = changed.settings.python and changed.settings.python.analysis or {}
+				vim.lsp.config.ty.before_init({}, changed)
+				local changed_rules = changed.settings.ty and changed.settings.ty.configuration.rules or {}
 				assert(
-					changed_analysis.typeCheckingMode ~= "basic",
+					changed_rules["unresolved-reference"] ~= "error",
 					"changed unapproved project settings remained active"
 				)
 				upstream_saw_settings = true
@@ -201,9 +215,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"LSP settings table identity changed on revocation"
 				)
 				assert(not upstream_saw_settings, "revoked settings remained visible to the upstream hook")
-				assert(real_config.settings.python.analysis.typeCheckingMode == nil, "revoked settings remained sticky")
 				assert(
-					real_config.settings.python.analysis.diagnosticMode == "openFilesOnly",
+					real_config.settings.ty.configuration.rules["unresolved-reference"] == nil,
+					"revoked settings remained sticky"
+				)
+				assert(
+					real_config.settings.ty.configuration.rules["possibly-unresolved-reference"] == "ignore",
 					"base settings were lost"
 				)
 				disabled_started = false

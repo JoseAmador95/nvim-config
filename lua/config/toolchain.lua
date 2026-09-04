@@ -227,11 +227,11 @@ M.mason_order = {
 	"tree-sitter-cli",
 	"bash-language-server",
 	"json-lsp",
-	"pyright",
 	"vtsls",
 	"yaml-language-server",
 	"markdownlint-cli2",
 	"prettierd",
+	"ty",
 	"cmake-language-server",
 	"clang-format",
 	"debugpy",
@@ -256,7 +256,7 @@ M.mason_tools = {
 	lemminx = mason("0.29.3", { "lemminx" }, "prebuilt"),
 	["lua-language-server"] = mason("3.18.2", { "lua-language-server" }, "prebuilt"),
 	marksman = mason("2026-02-08", { "marksman" }, "prebuilt"),
-	ruff = mason("0.16.1", { "ruff" }, "prebuilt"),
+	ruff = mason("0.16.6", { "ruff" }, "prebuilt"),
 	tombi = mason("v1.2.7", { "tombi" }, "prebuilt"),
 	codelldb = mason("v1.12.2", { "codelldb" }, "prebuilt"),
 	hadolint = mason("v2.15.1", { "hadolint" }, "prebuilt"),
@@ -271,9 +271,6 @@ M.mason_tools = {
 	["json-lsp"] = mason("4.10.0", { "vscode-json-language-server" }, "npm", {
 		requires_all = { "node", "npm" },
 	}),
-	pyright = mason("1.1.411", { "pyright-langserver", "pyright" }, "npm", {
-		requires_all = { "node", "npm" },
-	}),
 	vtsls = mason("0.3.0", { "vtsls" }, "npm", { requires_all = { "node", "npm" } }),
 	["yaml-language-server"] = mason("1.24.0", { "yaml-language-server" }, "npm", {
 		requires_all = { "node", "npm" },
@@ -283,6 +280,10 @@ M.mason_tools = {
 	}),
 	prettierd = mason("0.29.0", { "prettierd" }, "npm", {
 		requires_all = { "node", "npm" },
+	}),
+	ty = mason("0.0.77", { "ty" }, "pypi", {
+		requires_any = { "python3", "python" },
+		requires_python_venv = true,
 	}),
 	["cmake-language-server"] = mason("0.1.11", { "cmake-language-server" }, "pypi", {
 		requires_any = { "python3", "python" },

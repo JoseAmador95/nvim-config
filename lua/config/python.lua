@@ -40,10 +40,10 @@ local function contained(root, path)
 	return root ~= nil and path ~= nil and (path == root or vim.fs.relpath(root, path) ~= nil)
 end
 
-local function attached_pyright_root(buf, start)
+local function attached_ty_root(buf, start)
 	local best
-	for _, client in ipairs(vim.lsp.get_clients({ bufnr = buf, name = "pyright" })) do
-		local candidate = client.name == "pyright" and client.config and client.config.root_dir or nil
+	for _, client in ipairs(vim.lsp.get_clients({ bufnr = buf, name = "ty" })) do
+		local candidate = client.name == "ty" and client.config and client.config.root_dir or nil
 		candidate = canonical(candidate)
 		if candidate and contained(candidate, start) and (not best or #candidate > #best) then
 			best = candidate
@@ -52,24 +52,54 @@ local function attached_pyright_root(buf, start)
 	return best
 end
 
-local function explicit_from_project_settings(root)
-	for _, key in ipairs({ "vscode", "lspconfig.pyright" }) do
-		local ok, settings = pcall(project_settings.get, key, {}, root)
-		if ok and type(settings) == "table" then
-			local direct = type(settings.python) == "table" and settings.python or nil
-			local nested = type(settings.settings) == "table" and settings.settings.python or nil
-			for _, python in pairs({ direct = direct, nested = nested }) do
-				if type(python) == "table" then
-					for _, field in ipairs({ "defaultInterpreterPath", "pythonPath", "venvPath", "venv" }) do
-						if type(python[field]) == "string" and python[field] ~= "" then
-							return vim.deepcopy(python)
-						end
-					end
+local function project_value(key, root)
+	local ok, value = pcall(project_settings.get, key, {}, root)
+	return ok and type(value) == "table" and value or nil
+end
+
+local function direct_ty_environment(settings)
+	if type(settings) ~= "table" then
+		return nil
+	end
+	local ty = type(settings.ty) == "table" and settings.ty or nil
+	local configuration = ty and type(ty.configuration) == "table" and ty.configuration or nil
+	local environment = configuration and type(configuration.environment) == "table" and configuration.environment
+		or nil
+	return environment and type(environment.python) == "string" and environment.python ~= "" and environment.python
+		or nil
+end
+
+local function ty_environment(settings)
+	local direct = direct_ty_environment(settings)
+	if direct then
+		return direct
+	end
+	return type(settings) == "table" and direct_ty_environment(settings.settings) or nil
+end
+
+local function legacy_python(settings)
+	if type(settings) ~= "table" then
+		return nil
+	end
+	local nested = type(settings.settings) == "table" and settings.settings or nil
+	for _, layer in ipairs({ settings, nested }) do
+		local python = type(layer.python) == "table" and layer.python or nil
+		if python then
+			for _, field in ipairs({ "defaultInterpreterPath", "pythonPath", "venvPath", "venv" }) do
+				if type(python[field]) == "string" and python[field] ~= "" then
+					return vim.deepcopy(python)
 				end
 			end
 		end
 	end
 	return nil
+end
+
+local function explicit_from_project_settings(root)
+	local ty_server = project_value("lspconfig.ty", root)
+	local vscode = project_value("vscode", root)
+	local legacy_server = project_value("lspconfig.pyright", root)
+	return ty_environment(ty_server) or ty_environment(vscode) or legacy_python(vscode) or legacy_python(legacy_server)
 end
 
 local function fallback_python()
@@ -148,7 +178,7 @@ local function root_for_start(start, buf)
 	end
 	return engine.resolve_root({
 		start = start,
-		attached_root = buf and attached_pyright_root(buf, start) or nil,
+		attached_root = buf and attached_ty_root(buf, start) or nil,
 		repo_root = repo.root(start),
 	})
 end
@@ -180,10 +210,10 @@ local function root_matches(client, root)
 	return canonical(client.config and client.config.root_dir) == canonical(root)
 end
 
-local function restart_pyright(root)
+local function restart_ty(root)
 	local buffers = {}
-	for _, client in ipairs(vim.lsp.get_clients({ name = "pyright" })) do
-		if client.name == "pyright" and root_matches(client, root) then
+	for _, client in ipairs(vim.lsp.get_clients({ name = "ty" })) do
+		if client.name == "ty" and root_matches(client, root) then
 			for buf in pairs(client.attached_buffers or {}) do
 				buffers[buf] = true
 			end
@@ -196,7 +226,7 @@ local function restart_pyright(root)
 	vim.defer_fn(function()
 		for buf in pairs(buffers) do
 			if vim.api.nvim_buf_is_valid(buf) then
-				local config = vim.deepcopy(vim.lsp.config.pyright or {})
+				local config = vim.deepcopy(vim.lsp.config.ty or {})
 				config.root_dir = root
 				vim.lsp.start(config, {
 					bufnr = buf,
@@ -331,7 +361,7 @@ function M.refresh_current(buf, python)
 	end
 	if before.value.interpreter ~= snapshot.value.interpreter or before.source ~= snapshot.source then
 		install_dap_resolver()
-		restart_pyright(root)
+		restart_ty(root)
 		confirm_repl_restart(root, snapshot.value.interpreter)
 		vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigPythonChanged", modeline = false })
 	end
@@ -343,7 +373,7 @@ local function refresh_consumers(root, before, snapshot)
 		return snapshot
 	end
 	install_dap_resolver()
-	restart_pyright(root)
+	restart_ty(root)
 	confirm_repl_restart(root, snapshot.value.interpreter)
 	vim.api.nvim_exec_autocmds("User", { pattern = "NvimConfigPythonChanged", modeline = false })
 	return snapshot
@@ -389,12 +419,40 @@ function M.environment(root)
 	}
 end
 
+local function apply_ty_settings(config, root)
+	if type(config) ~= "table" then
+		return nil, "ty config is invalid"
+	end
+	root = canonical(root or config.root_dir)
+	local settings = type(config.settings) == "table" and config.settings or {}
+	config.settings = settings
+	local configured_explicit = direct_ty_environment(settings)
+	local explicit = configured_explicit or explicit_from_project_settings(root)
+	local snapshot, err = engine.sync(root, explicit)
+	if not snapshot then
+		return nil, err
+	end
+	if configured_explicit or snapshot.validity ~= "valid" then
+		return snapshot
+	end
+	settings.ty = type(settings.ty) == "table" and settings.ty or {}
+	settings.ty.configuration = type(settings.ty.configuration) == "table" and settings.ty.configuration or {}
+	local configuration = settings.ty.configuration
+	configuration.environment = type(configuration.environment) == "table" and configuration.environment or {}
+	configuration.environment.python = snapshot.value.interpreter
+	return snapshot
+end
+
+function M.lsp_root_dir(buf, on_dir)
+	on_dir(M.root(buf))
+end
+
 function M.before_init(_, config)
-	return engine.apply_pyright(config, config and config.root_dir or M.root(0))
+	return apply_ty_settings(config, config and config.root_dir or M.root(0))
 end
 
 function M.on_new_config(config, root)
-	return engine.apply_pyright(config, root or (config and config.root_dir) or M.root(0))
+	return apply_ty_settings(config, root or (config and config.root_dir) or M.root(0))
 end
 
 function M.neotest_python(root)

@@ -12,10 +12,10 @@ M.servers = {
 	{ name = "lemminx", package = "lemminx" },
 	{ name = "lua_ls", package = "lua-language-server" },
 	{ name = "marksman", package = "marksman" },
-	{ name = "pyright", package = "pyright" },
 	{ name = "ruff", package = "ruff" },
 	{ name = "rust_analyzer", external = "rust-analyzer" },
 	{ name = "tombi", package = "tombi" },
+	{ name = "ty", package = "ty" },
 	{ name = "vtsls", package = "vtsls" },
 	{ name = "yamlls", package = "yaml-language-server" },
 }

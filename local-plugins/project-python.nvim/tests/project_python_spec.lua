@@ -88,13 +88,25 @@ test("pre-setup public defaults and aggregate status are copied", function()
 	first.repl.poll_interval_ms = 1
 	first.root_markers[1] = "mutated"
 	local second = project_python.effective_config()
-	assert(second.repl.poll_interval_ms == 50 and second.root_markers[1] == "pyrightconfig.json")
+	assert(second.repl.poll_interval_ms == 50 and second.root_markers[1] == "ty.toml")
+	assert(second.root_markers[2] == "pyrightconfig.json" and vim.tbl_contains(second.root_markers, "Pipfile"))
 	assert(pcall(vim.json.encode, second))
 
 	local status = project_python.status()
 	assert(status.configured == false and vim.tbl_isempty(status.snapshots))
 	status.configured = true
 	assert(project_python.status().configured == false)
+end)
+
+test("ty and legacy markers resolve the same nested project root", function()
+	configure()
+	assert(vim.fn.delete(service .. "/pyproject.toml") == 0)
+	for _, marker in ipairs({ "ty.toml", "pyrightconfig.json", "Pipfile" }) do
+		assert(vim.fn.writefile({}, service .. "/" .. marker) == 0)
+		assert(project_python.resolve_root({ start = source, repo_root = repo }) == service, marker)
+		assert(vim.fn.delete(service .. "/" .. marker) == 0)
+	end
+	assert(vim.fn.writefile({ "[project]" }, service .. "/pyproject.toml") == 0)
 end)
 
 test("root precedence is attached, nearest marker, repository, then directory", function()
@@ -213,26 +225,30 @@ test("caller explicit snapshots are ephemeral", function()
 	assert(vim.deep_equal(project_python.snapshot(service), baseline))
 end)
 
-test("Pyright, Neotest, and DAP consume the same immutable snapshot", function()
+test("published synchronization is provider-neutral and shared by Neotest and DAP", function()
 	configure()
-	local python = executable(service .. "/.venv/bin/python")
-	local settings = { pyright = { disableOrganizeImports = true } }
-	local config = { root_dir = service, settings = settings }
-	local snapshot = project_python.apply_pyright(config, service)
-	assert(rawequal(config.settings, settings))
-	assert(config.settings.python.pythonPath == python)
-	assert(snapshot.value.interpreter == python)
+	executable(service .. "/.venv/bin/python")
+	local python = executable(service .. "/.synchronized/bin/python")
+	local snapshot = assert(project_python.sync(service, service .. "/.synchronized"))
+	assert(snapshot.source == "explicit" and snapshot.value.interpreter == python)
+	assert(vim.deep_equal(project_python.snapshot(service), snapshot))
+	local generation = snapshot.generation
+	snapshot = assert(project_python.sync(service, service .. "/.synchronized"))
+	assert(snapshot.generation == generation, "unchanged synchronization advanced the generation")
 	assert(vim.deep_equal(project_python.neotest_python(service), { python }))
 	assert(project_python.neotest_runner() == "pytest")
 	local dap, dap_snapshot = project_python.apply_dap({ type = "python", request = "launch" }, service)
 	assert(dap.pythonPath == python and dap_snapshot.value.interpreter == python)
 
-	local invalid = { root_dir = service, settings = { python = { pythonPath = "/missing/python" } } }
-	snapshot = project_python.apply_pyright(invalid, service)
-	assert(snapshot.validity == "invalid" and invalid.settings.python.pythonPath == "/missing/python")
+	snapshot = assert(project_python.sync(service, service .. "/missing/python"))
+	assert(snapshot.source == "explicit" and snapshot.validity == "invalid")
+	assert(project_python.neotest_python(service) == nil)
+	local unresolved, unresolved_snapshot = project_python.apply_dap({ type = "python", request = "launch" }, service)
+	assert(unresolved.pythonPath == nil and unresolved_snapshot.validity == "invalid")
 	local explicit_dap, explicit_snapshot =
 		project_python.apply_dap({ type = "python", pythonPath = "/missing/python" }, service)
 	assert(explicit_snapshot.validity == "invalid" and explicit_dap.pythonPath == "/missing/python")
+	assert(project_python.apply_pyright == nil, "provider-specific Pyright API remains exported")
 end)
 
 test("discovery never executes Python and REPL uses only the injected lifecycle", function()
