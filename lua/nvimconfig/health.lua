@@ -498,12 +498,21 @@ local function check_validation_contract(configured)
 		health.error("plugin lockfile is missing: " .. lockfile)
 	end
 
-	for _, name in ipairs({ "bootstrap-config", "check-config", "install-ci-tools" }) do
+	for _, name in ipairs({ "bootstrap-config", "check-config", "install-ci-tools", "provision-runtime" }) do
 		local path = vim.fs.joinpath(root, "scripts", name)
 		if vim.fn.executable(path) == 1 then
 			health.ok("validation entrypoint is executable: scripts/" .. name)
 		else
 			health.error("validation entrypoint is missing or not executable: " .. path)
+		end
+	end
+	local provision = vim.fs.joinpath(root, "scripts", "provision-runtime")
+	if vim.fn.executable(provision) == 1 then
+		local result = vim.system({ provision, "--contract-version" }, { text = true }):wait(5000)
+		if result.code == 0 and vim.trim(result.stdout or "") == "1" then
+			health.ok("provision-runtime contract version: 1 (offline unless --allow-network is explicit)")
+		else
+			health.error("provision-runtime does not expose contract version 1")
 		end
 	end
 	check_validation_tool("stylua", { "--version" }, "stylua " .. toolchain.versions.stylua, configured)

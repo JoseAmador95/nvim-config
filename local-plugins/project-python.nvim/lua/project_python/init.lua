@@ -34,6 +34,7 @@ local TERMINAL_KEYS = {
 }
 
 local DEFAULT_MARKERS = {
+	"ty.toml",
 	"pyrightconfig.json",
 	"pyproject.toml",
 	"setup.py",
@@ -152,7 +153,12 @@ local function explicit_candidate(root, raw)
 	local value = explicit_value(raw)
 	if type(value) == "string" and value ~= "" then
 		local path = absolute_from(root, value)
-		return true, executable(path), path
+		local info = path and uv.fs_stat(path) or nil
+		local python = executable(path)
+		if not python and info and info.type == "directory" then
+			python = environment_python(path)
+		end
+		return true, python, path
 	end
 	if type(value) ~= "table" then
 		return false
@@ -413,6 +419,32 @@ function M.resolve_root(input)
 	return repo or marker or canonical(start)
 end
 
+local function resolve_snapshot(root, raw_explicit, publish_result)
+	local present, explicit = explicit_candidate(root, raw_explicit)
+	if present then
+		local validity = explicit and "valid" or "invalid"
+		return publish_result and publish(root, "explicit", validity, explicit)
+			or ephemeral(root, "explicit", validity, explicit)
+	end
+	local manual = selected[root]
+	if manual then
+		local valid = executable(manual)
+		if valid then
+			if publish_result then
+				selected[root] = valid
+			end
+			return publish_result and publish(root, "manual", "valid", valid)
+				or ephemeral(root, "manual", "valid", valid)
+		end
+		if publish_result then
+			selected[root] = nil
+		end
+	end
+	local source, python = automatic(root)
+	local validity = python and "valid" or "invalid"
+	return publish_result and publish(root, source, validity, python) or ephemeral(root, source, validity, python)
+end
+
 function M.snapshot(root, options)
 	options = options or {}
 	local caller_explicit = options.explicit ~= nil
@@ -426,29 +458,18 @@ function M.snapshot(root, options)
 	if not caller_explicit and snapshots[root] then
 		return public_snapshot(snapshots[root])
 	end
-	local present, explicit = explicit_candidate(root, explicit_for(root, options.explicit))
-	if present then
-		local validity = explicit and "valid" or "invalid"
-		return caller_explicit and ephemeral(root, "explicit", validity, explicit)
-			or publish(root, "explicit", validity, explicit)
+	return resolve_snapshot(root, explicit_for(root, options.explicit), not caller_explicit)
+end
+
+-- Re-evaluate explicit input and publish the effective root snapshot. Unlike
+-- snapshot(root, { explicit = ... }), this is a synchronization boundary for
+-- host adapters whose trusted project settings may have changed.
+function M.sync(root, explicit)
+	root = canonical(root)
+	if not root then
+		return nil, "project root is invalid"
 	end
-	local manual = selected[root]
-	if manual then
-		local valid = executable(manual)
-		if valid then
-			if not caller_explicit then
-				selected[root] = valid
-			end
-			return caller_explicit and ephemeral(root, "manual", "valid", valid)
-				or publish(root, "manual", "valid", valid)
-		end
-		if not caller_explicit then
-			selected[root] = nil
-		end
-	end
-	local source, python = automatic(root)
-	local validity = python and "valid" or "invalid"
-	return caller_explicit and ephemeral(root, source, validity, python) or publish(root, source, validity, python)
+	return resolve_snapshot(root, explicit_for(root, explicit), true)
 end
 
 function M.resolve(input, options)
@@ -499,43 +520,6 @@ function M.refresh(root)
 	end
 	emit("changed", { root = root, status = result })
 	return result
-end
-
-local function settings_explicit(settings)
-	local python = type(settings) == "table" and settings.python or nil
-	if type(python) ~= "table" then
-		return nil
-	end
-	for _, key in ipairs({ "defaultInterpreterPath", "pythonPath", "venvPath", "venv" }) do
-		if type(python[key]) == "string" and python[key] ~= "" then
-			return python
-		end
-	end
-	return nil
-end
-
-function M.apply_pyright(config, root)
-	if type(config) ~= "table" then
-		return nil, "Pyright config is invalid"
-	end
-	root = canonical(root or config.root_dir)
-	local explicit = settings_explicit(config.settings)
-	local snapshot = M.snapshot(root, { explicit = explicit })
-	if explicit or snapshot.validity ~= "valid" then
-		return snapshot
-	end
-	local settings = config.settings or {}
-	local merged = vim.tbl_deep_extend("force", {}, settings, {
-		python = { pythonPath = snapshot.value.interpreter },
-	})
-	for key in pairs(settings) do
-		settings[key] = nil
-	end
-	for key, value in pairs(merged) do
-		settings[key] = value
-	end
-	config.settings = settings
-	return snapshot
 end
 
 function M.neotest_python(root)

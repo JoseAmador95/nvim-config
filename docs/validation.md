@@ -31,6 +31,43 @@ checks every active pager checkout against the corresponding source-lock SHA.
 Both bootstrap and the offline gate isolate `XDG_CONFIG_HOME`, so a persisted
 `:Theme` choice on the host cannot change their versioned-default assertions.
 
+## Runtime provisioning contract
+
+`scripts/provision-runtime` reconciles the caller's current private runtime;
+unlike `bootstrap-config`, it does not create a disposable validation tree, and
+unlike `check-config`, it may mutate runtime state only when explicitly allowed:
+
+```sh
+scripts/provision-runtime --non-interactive --report ABSOLUTE_PATH \
+  [--require-managed-tools] [--allow-network]
+```
+
+The default is offline. It inventories locked Lazy checkouts, verified release
+and Mason identities, and exact Tree-sitter revisions, and locally attests
+existing successful tool records. Missing, stale, drifted, or failed state is
+reported without a registry refresh, download, retry, repair, or consumed
+attempt. `--allow-network` is the sole authorization to restore or repair that
+state. `--require-managed-tools` additionally rejects effective managed tools
+that do not resolve through their verified managed result.
+
+The report contract is version 1 (`--contract-version` prints `1`). Its
+deterministic JSON contains `schema_version`, `status`, `changed`, bounded and
+sorted `error_codes`, `nvim`, `lock`, editor/nvimpager plugin and parser
+inventories, `mason`, and `managed_tools`. Publication is atomic with mode
+`0600`; plugin, parser, and Mason extras are retained, and the source
+`lazy-lock.json` must remain byte-identical.
+
+Provisioning rejects a non-canonical HOME, HOME under `/localdata`, XDG roots
+outside HOME, unsafe report parents/targets, and concurrent or stale lock state.
+Its HOME-contained XDG and state directories are secured as `0700`; the report
+must also live below HOME. Linux ARM64 currently has no pinned managed
+`markdown-preview` asset, so that identity reports `unsupported-platform` and a
+strict `--require-managed-tools` run cannot succeed on that target.
+
+`install-ci-tools` remains only the pinned-validator installer;
+`bootstrap-config` remains the network-capable isolated plugin/parser bootstrap;
+and `check-config` remains the complete offline, non-mutating acceptance gate.
+
 ## Runtime tool installation
 
 Full-editor startup registers only a lightweight command facade; the
@@ -75,6 +112,12 @@ installer. Rust language intelligence and formatting accept only host/user
 Rust edit-only and are explained by health. ASM and PlantUML LSP support has
 been removed; PlantUML diagram rendering is unchanged.
 
+Python language tooling uses the exact Ruff 0.16.6 prebuilt pin and ty 0.0.77
+through the PyPI backend. The Python fixtures prove that approved interpreter
+or environment input is published once for ty, Neotest, DAP, and the REPL;
+that ty settings are mutated without replacing the effective LSP settings
+table; and that environment changes restart only exact-root ty clients.
+
 | Area | Automated evidence | Manual evidence still required |
 | --- | --- | --- |
 | Terminal editor | Startup, argv lifecycle, commands, LSP config, plugin API contracts, and cache-only statusline render sentinel | Interactive completion and long editing sessions |
@@ -82,6 +125,7 @@ been removed; PlantUML diagram rendering is unchanged.
 | nvimpager | Allowlist, source-lock SHA parity, parser set, argv/stdin filetype behavior, mappings and absence of editor-only services | Rendering in the real `nvimpager` executable |
 | VSCode Neovim | Stubbed profile and action mappings; terminal-only commands/plugins stay absent | A live VS Code extension host |
 | Themes | VSCode default, Catppuccin Latte/Mocha switching, local persistence, editor/pager availability and VSCode exclusion | Visual judgement in the real terminal and pager |
+| Runtime provisioning | CLI/schema v1, offline authorization boundary, private HOME/XDG/report paths, atomic `0600` reports, exact inventories, lock immutability, extras preservation and idempotence | Network downloads on every supported OS/architecture and recovery from a deliberately stale operator lock |
 | Tree-sitter | Installed/missing parser lifecycle, completion retry, large-file guard and textobject surfaces | Language-specific highlighting judgement |
 | LSP | Server catalog, bounded JSONC/fingerprint approval for project settings, mutation revocation, merge order, profile isolation, single/multiple-result tab navigation and clangd command construction | Connecting to every external language server |
 | DAP | Adapter resolution, VSCode aliases, exclusive UI selection, lifecycle, views and tab-aware fixture navigation | Real adapter behavior and interactive UI judgement |

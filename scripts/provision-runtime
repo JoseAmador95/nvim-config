@@ -1,0 +1,352 @@
+#!/bin/sh
+set -eu
+umask 077
+
+usage() {
+	printf 'Usage: %s --non-interactive --report ABSOLUTE_PATH [--allow-network] [--require-managed-tools]\n' "$0" >&2
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = "--contract-version" ]; then
+	printf '%s\n' '1'
+	exit 0
+fi
+
+non_interactive=0
+allow_network=0
+require_managed=0
+report=
+seen_report=0
+seen_non_interactive=0
+seen_allow_network=0
+seen_require_managed=0
+while [ "$#" -gt 0 ]; do
+	case $1 in
+		--non-interactive)
+			[ "$seen_non_interactive" -eq 0 ] || {
+				usage
+				exit 2
+			}
+			seen_non_interactive=1
+			non_interactive=1
+			shift
+			;;
+		--report)
+			[ "$seen_report" -eq 0 ] && [ "$#" -ge 2 ] || {
+				usage
+				exit 2
+			}
+			seen_report=1
+			report=$2
+			shift 2
+			;;
+		--require-managed-tools)
+			[ "$seen_require_managed" -eq 0 ] || {
+				usage
+				exit 2
+			}
+			seen_require_managed=1
+			require_managed=1
+			shift
+			;;
+		--allow-network)
+			[ "$seen_allow_network" -eq 0 ] || {
+				usage
+				exit 2
+			}
+			seen_allow_network=1
+			allow_network=1
+			shift
+			;;
+		*)
+			usage
+			exit 2
+			;;
+	esac
+done
+
+[ "$non_interactive" -eq 1 ] && [ "$seen_report" -eq 1 ] || {
+	usage
+	exit 2
+}
+case $report in
+	/*) ;;
+	*)
+		printf '%s\n' '--report must be an absolute path' >&2
+		exit 2
+		;;
+esac
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+NVIM_BIN=${NVIM_BIN:-nvim}
+if ! command -v "$NVIM_BIN" >/dev/null 2>&1; then
+	printf 'Required command not found: %s\n' "$NVIM_BIN" >&2
+	exit 1
+fi
+
+case ${HOME:-} in
+	/*) ;;
+	*)
+		printf '%s\n' 'HOME must be an absolute path' >&2
+		exit 1
+		;;
+esac
+if [ "$HOME" = "/" ] || [ -L "$HOME" ] || [ ! -d "$HOME" ] || [ ! -w "$HOME" ] || [ ! -x "$HOME" ]; then
+	printf 'Refusing unsafe HOME: %s\n' "$HOME" >&2
+	exit 1
+fi
+home_physical=$(CDPATH='' cd -- "$HOME" && pwd -P)
+case $home_physical in
+	/ | /localdata | /localdata/*)
+		printf 'Refusing unsafe HOME: %s\n' "$home_physical" >&2
+		exit 1
+		;;
+esac
+[ "$home_physical" = "$HOME" ] || {
+	printf 'HOME must use its canonical physical path: %s\n' "$home_physical" >&2
+	exit 1
+}
+
+XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+XDG_STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}
+XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}
+
+validate_home_descendant() {
+	candidate_path=$1
+	candidate_label=$2
+	case $candidate_path in
+		"$HOME" | "$HOME"/*) ;;
+		*)
+			printf '%s must remain under HOME: %s\n' "$candidate_label" "$candidate_path" >&2
+			return 1
+			;;
+	esac
+	candidate_relative=${candidate_path#"$HOME"}
+	case $candidate_relative/ in
+		*/../* | */./* | *//*)
+			printf 'Refusing non-canonical %s: %s\n' "$candidate_label" "$candidate_path" >&2
+			return 1
+			;;
+	esac
+
+	# Resolve the closest existing ancestor before mkdir. This prevents an invalid
+	# outside-HOME value, or an existing symlink escape, from being mutated before
+	# it is rejected. The final physical-path check below still validates the
+	# directory after creation.
+	candidate_ancestor=$candidate_path
+	while [ ! -e "$candidate_ancestor" ] && [ ! -L "$candidate_ancestor" ]; do
+		candidate_parent=$(dirname -- "$candidate_ancestor")
+		[ "$candidate_parent" != "$candidate_ancestor" ] || {
+			printf 'Refusing unsafe %s: %s\n' "$candidate_label" "$candidate_path" >&2
+			return 1
+		}
+		candidate_ancestor=$candidate_parent
+	done
+	if [ -L "$candidate_ancestor" ] || [ ! -d "$candidate_ancestor" ]; then
+		printf 'Refusing unsafe %s ancestor: %s\n' "$candidate_label" "$candidate_ancestor" >&2
+		return 1
+	fi
+	candidate_physical=$(CDPATH='' cd -- "$candidate_ancestor" && pwd -P) || return 1
+	case $candidate_physical/ in
+		"$home_physical"/*) ;;
+		*)
+			printf '%s ancestor resolves outside HOME: %s\n' "$candidate_label" "$candidate_physical" >&2
+			return 1
+			;;
+	esac
+}
+
+ensure_root() {
+	root_path=$1
+	root_label=$2
+	case $root_path in
+		/*) ;;
+		*)
+			printf '%s must be absolute: %s\n' "$root_label" "$root_path" >&2
+			exit 1
+			;;
+	esac
+	if [ "$root_path" = "/" ] || [ -L "$root_path" ]; then
+		printf 'Refusing unsafe %s: %s\n' "$root_label" "$root_path" >&2
+		exit 1
+	fi
+	validate_home_descendant "$root_path" "$root_label" || exit 1
+	mkdir -p "$root_path"
+	root_physical=$(CDPATH='' cd -- "$root_path" && pwd -P)
+	case $root_physical/ in
+		"$home_physical"/*) ;;
+		*)
+			printf '%s must remain under HOME: %s\n' "$root_label" "$root_physical" >&2
+			exit 1
+			;;
+	esac
+	if [ ! -w "$root_physical" ] || [ ! -x "$root_physical" ]; then
+		printf 'Refusing unusable %s: %s\n' "$root_label" "$root_physical" >&2
+		exit 1
+	fi
+	chmod 700 "$root_physical"
+}
+
+report_parent=$(dirname -- "$report")
+report_name=$(basename -- "$report")
+case $report_name in
+	'' | . | ..)
+		printf 'Refusing unsafe report path: %s\n' "$report" >&2
+		exit 2
+		;;
+esac
+if [ "$report_parent" = "/" ] || [ -L "$report_parent" ]; then
+	printf 'Refusing unsafe report parent: %s\n' "$report_parent" >&2
+	exit 2
+fi
+validate_home_descendant "$report_parent" 'report parent' || exit 2
+
+ensure_root "$XDG_CONFIG_HOME" XDG_CONFIG_HOME
+ensure_root "$XDG_DATA_HOME" XDG_DATA_HOME
+ensure_root "$XDG_STATE_HOME" XDG_STATE_HOME
+ensure_root "$XDG_CACHE_HOME" XDG_CACHE_HOME
+ensure_root "$XDG_DATA_HOME/nvim" 'primary Neovim data root'
+
+mkdir -p "$report_parent"
+report_parent=$(CDPATH='' cd -- "$report_parent" && pwd -P)
+case $report_parent/ in
+	"$home_physical"/*) ;;
+	*)
+		printf 'Report must remain under HOME: %s\n' "$report_parent" >&2
+		exit 2
+		;;
+esac
+chmod 700 "$report_parent"
+report=$report_parent/$report_name
+if [ -L "$report" ] || [ -d "$report" ]; then
+	printf 'Refusing unsafe report target: %s\n' "$report" >&2
+	exit 2
+fi
+
+state_root=$XDG_STATE_HOME/nvim/nvim-config
+ensure_root "$XDG_STATE_HOME/nvim" 'primary Neovim state root'
+ensure_root "$state_root" 'provisioning state root'
+provision_lock=$state_root/provision-runtime.lock
+if ! mkdir "$provision_lock" 2>/dev/null; then
+	printf 'Another provision-runtime invocation is active, or its lock is stale: %s\n' "$provision_lock" >&2
+	exit 1
+fi
+
+work_root=
+cleanup() {
+	cleanup_status=$?
+	trap - 0 HUP INT TERM
+	[ -z "$work_root" ] || rm -rf -- "$work_root"
+	rmdir "$provision_lock" 2>/dev/null || cleanup_status=1
+	exit "$cleanup_status"
+}
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+work_root=$(mktemp -d "$state_root/provision-runtime.work.XXXXXX")
+chmod 700 "$work_root"
+safe_cwd=$work_root/cwd
+mkdir "$safe_cwd"
+local_config=$work_root/no-local-config.lua
+printf '%s\n' 'return {}' >"$local_config"
+chmod 600 "$local_config"
+cp "$repo_root/lazy-lock.json" "$work_root/lazy-lock.json"
+chmod 600 "$work_root/lazy-lock.json"
+
+export XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
+export NVIM_CONFIG_ROOT="$repo_root"
+export NVIM_CONFIG_PROVISION_REPORT="$report"
+export NVIM_CONFIG_LAZY_LOCKFILE="$work_root/lazy-lock.json"
+export NVIM_CONFIG_FILE="$local_config"
+export NVIM_CONFIG_ALLOW_NETWORK=$allow_network
+if [ "$allow_network" -eq 1 ]; then
+	export NVIM_CONFIG_OFFLINE=0
+else
+	export NVIM_CONFIG_OFFLINE=1
+fi
+export NVIM_CONFIG_PROVISIONING=1
+export NVIM_LOG_FILE="$work_root/nvim.log"
+export NVIM_LSP_LOG_FILE="$work_root/lsp.log"
+export TMPDIR="$work_root"
+unset NVIM_APPNAME NVIMPAGER_FILETYPE NVIM_CONFIG_BOOTSTRAP
+unset NVIM_CONFIG_PRIMARY_DATA_ROOT NVIM_CONFIG_PRIMARY_STATE_ROOT NVIM_CONFIG_TOOLS_ROOT NVIM_CONFIG_MASON_ROOT
+cd "$safe_cwd"
+
+run_none() {
+	"$NVIM_BIN" --headless -u NONE -i NONE \
+		--cmd 'lua vim.opt.runtimepath:prepend(vim.env.NVIM_CONFIG_ROOT)' \
+		"$@" \
+		-c 'quitall!'
+}
+
+if ! run_none -c 'lua if not require("config.provision_report").initialize() then vim.cmd("cquit 42") end'; then
+	exit 1
+fi
+
+run_profile_action() {
+	action_name=$1
+	profile_name=$2
+	action_error=$3
+	export NVIM_CONFIG_PROVISION_ACTION="$action_name"
+	export NVIM_CONFIG_PROVISION_PROFILE="$profile_name"
+	export NVIM_CONFIG_PROVISION_ERROR="$action_error"
+	if [ "$profile_name" = "nvimpager" ]; then
+		NVIM_APPNAME=nvimpager "$NVIM_BIN" --headless -u "$repo_root/init.lua" -i NONE \
+			-c 'lua local m = require("config.provision_runtime"); if vim.g.nvim_config_initialized ~= true then m.fail_if_running(vim.env.NVIM_CONFIG_PROVISION_ERROR); vim.cmd("cquit 41") end' \
+			-c 'lua local m = require("config.provision_runtime"); local online = vim.env.NVIM_CONFIG_ALLOW_NETWORK == "1"; local ok = vim.env.NVIM_CONFIG_PROVISION_ACTION == "plugins" and m.provision_plugins(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online) or m.provision_parsers(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online); if not ok then vim.cmd("cquit 42") end' \
+			-c 'quitall!'
+	else
+		"$NVIM_BIN" --headless -u "$repo_root/init.lua" -i NONE \
+			-c 'lua local m = require("config.provision_runtime"); if vim.g.nvim_config_initialized ~= true then m.fail_if_running(vim.env.NVIM_CONFIG_PROVISION_ERROR); vim.cmd("cquit 41") end' \
+			-c 'lua local m = require("config.provision_runtime"); local online = vim.env.NVIM_CONFIG_ALLOW_NETWORK == "1"; local ok = vim.env.NVIM_CONFIG_PROVISION_ACTION == "plugins" and m.provision_plugins(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online) or m.provision_parsers(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online); if not ok then vim.cmd("cquit 42") end' \
+			-c 'quitall!'
+	fi
+}
+
+lazy_root=$XDG_DATA_HOME/nvim/lazy/lazy.nvim
+if [ ! -d "$lazy_root" ] && [ "$allow_network" -eq 1 ]; then
+	export NVIM_CONFIG_BOOTSTRAP=1
+	export NVIM_CONFIG_PROVISION_BOOTSTRAPPED=1
+fi
+if ! run_profile_action plugins editor plugin-editor; then
+	run_none -c 'lua require("config.provision_report").fail_if_running("plugin-editor")' || true
+	exit 1
+fi
+unset NVIM_CONFIG_BOOTSTRAP NVIM_CONFIG_PROVISION_BOOTSTRAPPED
+if ! run_profile_action plugins nvimpager plugin-nvimpager; then
+	run_none -c 'lua require("config.provision_report").fail_if_running("plugin-nvimpager")' || true
+	exit 1
+fi
+
+if ! "$NVIM_BIN" --headless -u "$repo_root/init.lua" -i NONE \
+	-c 'lua local m = require("config.provision_runtime"); if vim.g.nvim_config_initialized ~= true then m.fail_if_running("managed-tools"); vim.cmd("cquit 41") end' \
+	-c 'lua if not require("config.provision_runtime").provision_tools(vim.env.NVIM_CONFIG_ALLOW_NETWORK == "1") then vim.cmd("cquit 42") end' \
+	-c 'quitall!'; then
+	run_none -c 'lua require("config.provision_report").fail_if_running("managed-tools")' || true
+	exit 1
+fi
+
+if ! run_profile_action parsers editor parser-editor; then
+	run_none -c 'lua require("config.provision_report").fail_if_running("parser-editor")' || true
+	exit 1
+fi
+if ! run_profile_action parsers nvimpager parser-nvimpager; then
+	run_none -c 'lua require("config.provision_report").fail_if_running("parser-nvimpager")' || true
+	exit 1
+fi
+
+if ! cmp -s "$repo_root/lazy-lock.json" "$work_root/lazy-lock.json"; then
+	run_none -c 'lua require("config.provision_report").fail_if_running("lock-changed")' || true
+	exit 1
+fi
+
+export NVIM_CONFIG_REQUIRE_MANAGED=$require_managed
+if ! "$NVIM_BIN" --headless -u "$repo_root/init.lua" -i NONE \
+	-c 'lua local m = require("config.provision_runtime"); if vim.g.nvim_config_initialized ~= true then m.fail_if_running("verification"); vim.cmd("cquit 41") end' \
+	-c 'lua if not require("config.provision_runtime").finalize(vim.env.NVIM_CONFIG_REQUIRE_MANAGED == "1") then vim.cmd("cquit 42") end' \
+	-c 'quitall!'; then
+	run_none -c 'lua require("config.provision_report").fail_if_running("verification")' || true
+	exit 1
+fi

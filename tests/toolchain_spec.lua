@@ -117,11 +117,11 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 		"tree-sitter-cli",
 		"bash-language-server",
 		"json-lsp",
-		"pyright",
 		"vtsls",
 		"yaml-language-server",
 		"markdownlint-cli2",
 		"prettierd",
+		"ty",
 		"cmake-language-server",
 		"clang-format",
 		"debugpy",
@@ -132,7 +132,7 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 		["lemminx"] = "0.29.3",
 		["lua-language-server"] = "3.18.2",
 		["marksman"] = "2026-02-08",
-		["ruff"] = "0.16.1",
+		["ruff"] = "0.16.6",
 		["tombi"] = "v1.2.7",
 		["codelldb"] = "v1.12.2",
 		["hadolint"] = "v2.15.1",
@@ -143,11 +143,11 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 		["tree-sitter-cli"] = "v0.26.11",
 		["bash-language-server"] = "5.6.0",
 		["json-lsp"] = "4.10.0",
-		["pyright"] = "1.1.411",
 		["vtsls"] = "0.3.0",
 		["yaml-language-server"] = "1.24.0",
 		["markdownlint-cli2"] = "0.23.2",
 		["prettierd"] = "0.29.0",
+		["ty"] = "0.0.77",
 		["cmake-language-server"] = "0.1.11",
 		["clang-format"] = "22.1.8",
 		["debugpy"] = "1.8.21",
@@ -172,10 +172,11 @@ test("Mason manifest is complete, exact, and stably ordered", function()
 		end
 		assert(toolchain.identity(name, entry) == name .. "@" .. expected[name])
 	end
-	for _, removed in ipairs({ "gofumpt", "gopls", "delve", "goimports", "rust-analyzer" }) do
+	for _, removed in ipairs({ "gofumpt", "gopls", "delve", "goimports", "pyright", "rust-analyzer" }) do
 		assert(toolchain.mason_entry(removed) == nil, "removed tool leaked into Mason: " .. removed)
 	end
-	assert(vim.deep_equal(toolchain.mason_entry("pyright").requires_all, { "node", "npm" }))
+	assert(vim.deep_equal(toolchain.mason_entry("ty").requires_any, { "python3", "python" }))
+	assert(toolchain.mason_entry("ty").requires_python_venv == true)
 	assert(toolchain.mason_entry("debugpy").requires_python_venv == true)
 end)
 
@@ -200,10 +201,10 @@ test("LSP catalog separates the exact server set from external Rust eligibility"
 		"lemminx",
 		"lua_ls",
 		"marksman",
-		"pyright",
 		"ruff",
 		"rust_analyzer",
 		"tombi",
+		"ty",
 		"vtsls",
 		"yamlls",
 	}

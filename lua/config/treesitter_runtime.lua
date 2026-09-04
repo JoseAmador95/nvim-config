@@ -55,6 +55,7 @@ end
 ---@field wait? boolean Wait for the installation task and return its result.
 ---@field timeout? integer Maximum wait in milliseconds (default 300000).
 ---@field summary? boolean Show nvim-treesitter's installation summary.
+---@field force? boolean Reinstall requested parsers even when present.
 
 ---Install configured parsers explicitly through the host plugin API.
 ---@param requested? string|string[] Defaults to the parsers passed to setup().
@@ -74,6 +75,7 @@ function M.install(requested, opts)
 	end
 	local ok, task = pcall(treesitter.install, selected, {
 		summary = opts.summary ~= false,
+		force = opts.force == true,
 	})
 	if not ok then
 		return false, tostring(task)
@@ -106,6 +108,137 @@ function M.install(requested, opts)
 		end)
 	end)
 	return true, task
+end
+
+---Return the configured parser allowlist as an immutable copy.
+function M.configured()
+	return vim.deepcopy(parsers)
+end
+
+local function as_set(values)
+	local result = {}
+	for _, value in ipairs(values or {}) do
+		result[value] = true
+	end
+	return result
+end
+
+local function expected_revision(name)
+	local ok, definitions = pcall(require, "nvim-treesitter.parsers")
+	local entry = ok and definitions[name] or nil
+	local revision = entry and entry.install_info and entry.install_info.revision
+	return type(revision) == "string" and revision ~= "" and revision or nil
+end
+
+local function stable_line(path)
+	local before = vim.uv.fs_lstat(path)
+	if not before or before.type ~= "file" or before.nlink ~= 1 or before.size > 256 then
+		return nil
+	end
+	local ok, lines = pcall(vim.fn.readfile, path, "b", 1)
+	local after = vim.uv.fs_lstat(path)
+	if
+		not ok
+		or not after
+		or before.dev ~= after.dev
+		or before.ino ~= after.ino
+		or before.size ~= after.size
+		or type(lines[1]) ~= "string"
+	then
+		return nil
+	end
+	return lines[1]
+end
+
+local function parser_file(name)
+	return vim.fs.joinpath(vim.fn.stdpath("data"), "site", "parser", name .. ".so")
+end
+
+local function installed_revision(name)
+	return stable_line(vim.fs.joinpath(vim.fn.stdpath("data"), "site", "parser-info", name .. ".revision"))
+end
+
+M._expected_revision = expected_revision
+M._parser_file = parser_file
+M._installed_revision = installed_revision
+
+---Inspect exact configured parser revisions without creating directories.
+function M.inventory(requested)
+	local selected = as_list(requested or parsers)
+	local installed = as_set(installed_parsers())
+	local selected_set = as_set(selected)
+	local required = {}
+	local problems = {}
+	for _, name in ipairs(selected) do
+		local expected = M._expected_revision(name)
+		local parser_stat = vim.uv.fs_lstat(M._parser_file(name))
+		local actual = installed[name]
+				and parser_stat
+				and parser_stat.type == "file"
+				and parser_stat.nlink == 1
+				and M._installed_revision(name)
+			or nil
+		local exact = expected ~= nil and actual == expected
+		required[#required + 1] = {
+			name = name,
+			expected = expected or vim.NIL,
+			actual = actual or vim.NIL,
+			exact = exact,
+		}
+		if not exact then
+			local reason = not expected and "unpinned" or not actual and "missing" or "wrong"
+			problems[#problems + 1] = name .. ":" .. reason
+		end
+	end
+	table.sort(required, function(left, right)
+		return left.name < right.name
+	end)
+	table.sort(problems)
+	local extras = {}
+	for name in pairs(installed) do
+		if not selected_set[name] then
+			extras[#extras + 1] = name
+		end
+	end
+	table.sort(extras)
+	return { required = required, exact = #problems == 0, problems = problems, extras = extras }
+end
+
+---Reconcile only missing/stale configured parsers after explicit network consent.
+function M.provision_exact(opts)
+	opts = opts or {}
+	local before = M.inventory()
+	if before.exact then
+		return true, before, false
+	end
+	if opts.allow_network ~= true then
+		return false, "offline", false, before
+	end
+	local stale = {}
+	for _, item in ipairs(before.required) do
+		if not item.exact then
+			stale[#stale + 1] = item.name
+		end
+	end
+	local installed, install_err = M.install(stale, {
+		wait = true,
+		timeout = opts.timeout or 300000,
+		summary = false,
+		force = true,
+	})
+	if not installed then
+		return false, tostring(install_err), true, before
+	end
+	local after = M.inventory()
+	if not after.exact then
+		return false, "Tree-sitter parser revisions remain inexact", true, after
+	end
+	if not vim.deep_equal(before.extras, after.extras) then
+		after.exact = false
+		after.problems[#after.problems + 1] = "extras-not-preserved"
+		return false, "Tree-sitter extras changed", true, after
+	end
+	return true, after, true
 end
 
 ---@class NvimConfigTreesitterRuntimeOpts

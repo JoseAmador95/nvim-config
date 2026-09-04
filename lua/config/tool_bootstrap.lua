@@ -757,6 +757,193 @@ local function start(name, force_managed)
 	end) ~= nil
 end
 
+local function contained(path, root)
+	path = path and vim.fs.normalize(path) or nil
+	root = root and vim.fs.normalize(root):gsub("/+$", "") or nil
+	return path and root and (path == root or path:sub(1, #root + 1) == root .. "/") or false
+end
+
+local function await_operation(starter, identity, timeout)
+	local completed = false
+	local succeeded = false
+	local reason
+	local started, start_err = starter(function(ok, value)
+		succeeded = ok == true
+		reason = ok and nil or tostring(value)
+		completed = true
+	end)
+	if not started then
+		return false, tostring(start_err)
+	end
+	if not completed then
+		local waited = vim.wait(timeout or 300000, function()
+			return completed
+		end, 10)
+		if not waited then
+			pcall(engine.cancel, identity)
+			return false, "timeout"
+		end
+	end
+	return succeeded, reason
+end
+
+local function reconcile_tool(name, opts)
+	local spec, spec_err = M.spec(name, { force_managed = true })
+	if not spec then
+		return false, false, tostring(spec_err), spec_err == "unsupported" and "unsupported-platform" or nil
+	end
+	local plan, plan_err = engine.plan(spec)
+	if not plan then
+		return false,
+			false,
+			tostring(plan_err),
+			tostring(plan_err):find("unsupported", 1, true) and "unsupported-platform" or nil
+	end
+	local imported, import_err = M.import_legacy(name)
+	if not imported then
+		return false, false, tostring(import_err)
+	end
+	local current = engine.status(plan.identity)
+	if current and current.status == "succeeded" then
+		local attested, attest_err = await_operation(function(done)
+			return engine.attest(plan.identity, done)
+		end, plan.identity, opts.timeout)
+		if attested then
+			repair_markdown_preview(name, plan.identity)
+			return true, false
+		end
+		current = engine.status(plan.identity)
+		if opts.allow_network ~= true then
+			return false, false, attest_err or "drift"
+		end
+	end
+	if opts.allow_network ~= true then
+		return false, false, current and current.status or "missing"
+	end
+	local mode = claim_mode(current)
+	if not mode then
+		return false, false, "active-state:" .. tostring(current and current.status)
+	end
+	local ready, ready_err = preflight(plan)
+	if not ready then
+		return false, false, tostring(ready_err)
+	end
+	local claim, claim_err = engine.claim(plan, { mode = mode })
+	if not claim then
+		return false, false, tostring(claim_err)
+	end
+	local installed, install_err = await_operation(function(done)
+		return engine.run(claim, done)
+	end, plan.identity, opts.timeout)
+	if not installed then
+		return false, true, install_err
+	end
+	repair_markdown_preview(name, plan.identity)
+	return true, true
+end
+
+local function package_extras(required)
+	local extras = {}
+	local root = vim.fs.joinpath(paths.mason_root(), "packages")
+	local stat = uv.fs_lstat(root)
+	if stat and stat.type == "directory" then
+		for name, kind in vim.fs.dir(root) do
+			if kind == "directory" and not required[name] then
+				extras[#extras + 1] = name
+			end
+		end
+	end
+	table.sort(extras)
+	return extras
+end
+
+local function report_item(name, ok, problem)
+	local spec = M.spec(name, { force_managed = true })
+	local identity = spec and spec.identity or nil
+	local record = identity and engine.status(identity) or nil
+	local command = spec and sorted_keys(spec.executables)[1] or name
+	local effective = vim.fn.exepath(command)
+	local effective_real = effective ~= "" and uv.fs_realpath(effective) or nil
+	local verified_shim = effective ~= "" and paths.is_verified_shim_path(effective) or false
+	local direct
+	if spec then
+		local relative = spec.manifest.integrity.commands[command]
+		direct = relative and vim.fs.joinpath(identity.install_root, relative) or nil
+	end
+	return {
+		name = name,
+		version = identity and identity.version or (manifest.mason_entry(name) or manifest.managed_tools[name]).version,
+		status = record and record.status or "missing",
+		direct = direct or vim.NIL,
+		effective = effective ~= "" and effective or vim.NIL,
+		shadowed = not (
+				identity
+				and (
+					effective_real and contained(effective_real, identity.install_root)
+					or verified_shim and record ~= nil
+				)
+			),
+		exact = ok == true and record and record.status == "succeeded" or false,
+		problem = ok and vim.NIL or tostring(problem or (record and record.status) or "missing"),
+	}
+end
+
+---Reconcile the exact release and Mason manifest through verified-tools only.
+---No claim, registry refresh, installer, or retry occurs without allow_network.
+function M.provision_exact(opts)
+	opts = opts or {}
+	if not setup_done then
+		M.setup()
+	end
+	local mason_required = {}
+	for _, name in ipairs(manifest.mason_order) do
+		mason_required[name] = true
+	end
+	local inventory = {
+		mason = { required = {}, exact = true, problems = {}, extras = package_extras(mason_required) },
+		managed_tools = {},
+	}
+	local changed = false
+	local overall = true
+	local first_reason
+	local first_code
+	for _, name in ipairs(catalog_names()) do
+		local ok, item_changed, reason, code = reconcile_tool(name, opts)
+		changed = changed or item_changed == true
+		overall = overall and ok
+		first_reason = first_reason or (not ok and reason or nil)
+		first_code = first_code
+			or (not ok and (code or (manifest.managed_tools[name] and "managed-tools" or "mason")) or nil)
+		local item = report_item(name, ok, reason)
+		if manifest.managed_tools[name] then
+			item.name = nil
+			item.status = nil
+			item.problem = nil
+			inventory.managed_tools[name] = item
+		else
+			inventory.mason.required[#inventory.mason.required + 1] = item
+			if not item.exact then
+				inventory.mason.exact = false
+				inventory.mason.problems[#inventory.mason.problems + 1] = name .. ":" .. tostring(item.problem)
+			end
+		end
+	end
+	table.sort(inventory.mason.required, function(left, right)
+		return left.name < right.name
+	end)
+	table.sort(inventory.mason.problems)
+	local final_extras = package_extras(mason_required)
+	if not vim.deep_equal(inventory.mason.extras, final_extras) then
+		inventory.mason.extras = final_extras
+		inventory.mason.exact = false
+		inventory.mason.problems[#inventory.mason.problems + 1] = "extras-not-preserved"
+		overall = false
+		first_reason = first_reason or "Mason extras changed during provisioning"
+		first_code = first_code or "mason"
+	end
+	return overall, inventory, changed, first_reason, first_code
+end
+
 function M.install(target, force)
 	if type(target) ~= "string" or target == "" then
 		M._notify("An explicit tool name or 'all' is required", vim.log.levels.ERROR)

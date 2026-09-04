@@ -109,20 +109,24 @@ test("approval gates JSONC and any lexical change revokes current use", function
 		vim.fs.joinpath(root, ".vscode/settings.json"),
 		[[{
   // comments and trailing commas are accepted
-  "python.analysis.typeCheckingMode": "strict",
-  "python.analysis.autoSearchPaths": false,
-  "python.analysis.stubPath": "https://example.invalid/a//b",
+  "ty.configuration.rules.unresolved-reference": "warn",
+  "ty.disableLanguageServices": false,
+  "ty.configurationFile": "https://example.invalid/a//b",
 }]]
 	)
-	write(vim.fs.joinpath(root, ".neoconf.json"), [[{ "lspconfig": { "pyright": false, }, /* retained UI format */ }]])
+	write(vim.fs.joinpath(root, ".neoconf.json"), [[{ "lspconfig": { "ty": false, }, /* retained UI format */ }]])
 	local state = harness(root, {
-		vscode = { python = { analysis = { diagnosticMode = "openFilesOnly" } } },
-		["lspconfig.pyright"] = { settings = { python = { analysis = { useLibraryCodeForTypes = true } } } },
+		vscode = { ty = { configuration = { rules = { ["possibly-unresolved-reference"] = "ignore" } } } },
+		["lspconfig.ty"] = { ty = { configuration = { rules = { ["unresolved-import"] = "error" } } } },
 	})
 
 	local before, before_err = project_settings.get("vscode", {}, root)
-	equal("openFilesOnly", before.python.analysis.diagnosticMode, "global Neoconf value was lost before approval")
-	assert(before.python.analysis.typeCheckingMode == nil, "unapproved VSCode setting escaped")
+	equal(
+		"ignore",
+		before.ty.configuration.rules["possibly-unresolved-reference"],
+		"global Neoconf value was lost before approval"
+	)
+	assert(before.ty.configuration.rules["unresolved-reference"] == nil, "unapproved VSCode setting escaped")
 	assert(before_err == "project settings are not approved")
 	local snapshot = assert(project_settings.snapshot(root))
 	assert(snapshot.present and not snapshot.approved)
@@ -131,16 +135,23 @@ test("approval gates JSONC and any lexical change revokes current use", function
 
 	assert(project_settings.approve(root))
 	local approved = assert(project_settings.get("vscode", {}, root))
-	equal("openFilesOnly", approved.python.analysis.diagnosticMode, "global setting did not merge")
-	equal("strict", approved.python.analysis.typeCheckingMode, "approved dotted VSCode key did not expand")
-	equal(false, approved.python.analysis.autoSearchPaths, "approved false value was lost")
-	equal("https://example.invalid/a//b", approved.python.analysis.stubPath, "comment lexer changed a string")
-	equal(false, project_settings.get("lspconfig.pyright", {}, root), "approved server disable did not override global")
+	equal("ignore", approved.ty.configuration.rules["possibly-unresolved-reference"], "global setting did not merge")
+	equal("warn", approved.ty.configuration.rules["unresolved-reference"], "approved dotted VSCode key did not expand")
+	equal(false, approved.ty.disableLanguageServices, "approved false value was lost")
+	equal("https://example.invalid/a//b", approved.ty.configurationFile, "comment lexer changed a string")
+	equal(false, project_settings.get("lspconfig.ty", {}, root), "approved server disable did not override global")
 
-	write(vim.fs.joinpath(root, ".vscode/settings.json"), '{ "python.analysis.typeCheckingMode": "basic" }\n')
+	write(
+		vim.fs.joinpath(root, ".vscode/settings.json"),
+		'{ "ty.configuration.rules.unresolved-reference": "error" }\n'
+	)
 	local changed, changed_err = project_settings.get("vscode", {}, root)
-	equal("openFilesOnly", changed.python.analysis.diagnosticMode, "global fallback was lost after mutation")
-	assert(changed.python.analysis.typeCheckingMode == nil, "changed unapproved content remained active")
+	equal(
+		"ignore",
+		changed.ty.configuration.rules["possibly-unresolved-reference"],
+		"global fallback was lost after mutation"
+	)
+	assert(changed.ty.configuration.rules["unresolved-reference"] == nil, "changed unapproved content remained active")
 	assert(changed_err == "project settings are not approved")
 	local changed_snapshot = assert(project_settings.snapshot(root))
 	assert(changed_snapshot.fingerprint ~= first_fingerprint and not changed_snapshot.approved)
@@ -154,18 +165,18 @@ test("approved Neoconf settings preserve dotted-key expansion", function()
 	write(
 		vim.fs.joinpath(root, ".neoconf.json"),
 		[[{
-  "lspconfig.pyright": {
-    "python.analysis.typeCheckingMode": "strict",
-    "python.analysis.autoSearchPaths": false
+  "lspconfig.ty": {
+    "ty.configuration.rules.unresolved-reference": "warn",
+    "ty.disableLanguageServices": false
   },
   "lspconfig.ruff.settings.lint.preview": true
 }]]
 	)
 	harness(root, {})
 	assert(project_settings.approve(root))
-	local pyright = assert(project_settings.get("lspconfig.pyright", {}, root))
-	equal("strict", pyright.python.analysis.typeCheckingMode, "server-local dotted key did not expand")
-	equal(false, pyright.python.analysis.autoSearchPaths, "server-local false value was lost")
+	local ty = assert(project_settings.get("lspconfig.ty", {}, root))
+	equal("warn", ty.ty.configuration.rules["unresolved-reference"], "server-local dotted key did not expand")
+	equal(false, ty.ty.disableLanguageServices, "server-local false value was lost")
 	local ruff = assert(project_settings.get("lspconfig.ruff", {}, root))
 	equal(true, ruff.settings.lint.preview, "top-level Neoconf dotted key did not expand")
 	vim.fn.delete(root, "rf")
@@ -174,14 +185,14 @@ end)
 test("global Neoconf lspconfig settings preserve dotted-key expansion", function()
 	local root = temp_dir()
 	harness(root, {
-		["lspconfig.pyright"] = {
-			["python.analysis.typeCheckingMode"] = "strict",
-			["python.analysis.autoSearchPaths"] = false,
+		["lspconfig.ty"] = {
+			["ty.configuration.rules.unresolved-reference"] = "warn",
+			["ty.disableLanguageServices"] = false,
 		},
 	})
-	local pyright = assert(project_settings.get("lspconfig.pyright", {}, root))
-	equal("strict", pyright.python.analysis.typeCheckingMode, "global server dotted key did not expand")
-	equal(false, pyright.python.analysis.autoSearchPaths, "global server false value was lost")
+	local ty = assert(project_settings.get("lspconfig.ty", {}, root))
+	equal("warn", ty.ty.configuration.rules["unresolved-reference"], "global server dotted key did not expand")
+	equal(false, ty.ty.disableLanguageServices, "global server false value was lost")
 	vim.fn.delete(root, "rf")
 end)
 

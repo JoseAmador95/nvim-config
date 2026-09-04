@@ -32,11 +32,12 @@ function M.setup(context)
 		cmd = deferred.clangd_command(),
 		on_new_config = deferred.clangd_on_new_config,
 	})
-	register("pyright", {
+	register("ty", {
 		capabilities = client_capabilities,
-		settings = { pyright = { disableOrganizeImports = true } },
-		before_init = deferred.pyright_before_init,
-		on_new_config = deferred.pyright_on_new_config,
+		settings = { ty = { configuration = {} } },
+		root_dir = deferred.ty_root_dir,
+		before_init = deferred.ty_before_init,
+		on_new_config = deferred.ty_on_new_config,
 	})
 	register("ruff", { capabilities = client_capabilities })
 	register("cmake", {

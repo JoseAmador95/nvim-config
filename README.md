@@ -34,6 +34,37 @@ Parser bootstrap requires the exact pinned `tree-sitter` CLI and a host `cc`;
 `--skip-parsers` skips that preflight. The final gate is offline and never
 mutates plugins, parsers, or the committed lock.
 
+To reconcile the plugins, verified tools, Mason packages, and Tree-sitter
+parsers in the current HOME runtime, request an owner-private schema-v1 report:
+
+```sh
+./scripts/provision-runtime --non-interactive \
+  --report "$HOME/.local/state/nvim/provision-runtime.json"
+```
+
+That command is offline by default: it inventories and locally attests existing
+state, but missing or stale components fail without consuming an installation
+attempt. Add `--allow-network` to authorize downloads and repairs. Add
+`--require-managed-tools` when every managed release must win through its
+verified shim. The full interface is
+`scripts/provision-runtime --non-interactive --report ABSOLUTE_PATH
+[--require-managed-tools] [--allow-network]`; `--contract-version` prints `1`.
+
+Provisioning uses only canonical paths below the caller's HOME, rejects HOME or
+XDG roots under `/localdata`, secures its XDG/state directories as `0700`, and
+writes the report atomically as `0600`. The report records deterministic
+`status`, `changed`, bounded `error_codes`, Neovim/lock state, both runtime
+profiles, Mason, and managed tools. It preserves the committed `lazy-lock.json`
+and unrelated plugin, parser, and Mason extras. On Linux ARM64 the manifest has
+no managed `markdown-preview` release asset, so provisioning reports
+`unsupported-platform`; in particular, strict `--require-managed-tools` cannot
+succeed there until a verified ARM64 asset is pinned.
+
+Use `bootstrap-config` for a disposable isolated XDG tree, `provision-runtime`
+for the caller's real private runtime, and `check-config` for the offline
+non-mutating acceptance gate. `install-ci-tools` only prepares the four pinned
+validators used by that gate.
+
 Host-specific settings belong in `~/.nvim-local.lua`; create a documented
 owner-only template with `:NvimConfigInit`. Plugin settings live exclusively
 under `plugins.<plugin_name>`; `dap`, `ui`, `path`, `env`, and `plugins_dir` remain
@@ -151,9 +182,12 @@ The managed backends and their host prerequisites are:
 
 | Backend | Packages | Host prerequisite |
 | --- | --- | --- |
-| Prebuilt | clangd, Docker LS, lemminx, Lua LS, marksman, ruff, Tombi, codelldb, hadolint, jq, ShellCheck, shfmt, StyLua, tree-sitter CLI | None |
-| npm | Bash/JSON/TypeScript/YAML language servers, pyright, markdownlint-cli2, prettierd | `node` and `npm` |
-| PyPI | cmake-language-server, clang-format, debugpy | Python with `venv` |
+| Prebuilt | clangd, Docker LS, lemminx, Lua LS, marksman, Ruff, Tombi, codelldb, hadolint, jq, ShellCheck, shfmt, StyLua, tree-sitter CLI | None |
+| npm | Bash/JSON/TypeScript/YAML language servers, markdownlint-cli2, prettierd | `node` and `npm` |
+| PyPI | ty, cmake-language-server, clang-format, debugpy | Python with `venv` |
+
+Python language tooling is pinned to Ruff 0.16.6 and ty 0.0.77. Removing
+Pyright from the manifest does not uninstall an existing Mason copy.
 
 Rust remains fully editable even without language tooling. Its LSP and formatter
 activate only for external host/user `rust-analyzer` and `rustfmt` executables;
@@ -374,17 +408,21 @@ Resolution is filesystem-only: `UV_PROJECT_ENVIRONMENT`, `.venv`, Pixi's
 default environment, `venv`, `env`, `.conda`, and contained active virtual or
 Conda environments are considered in that order. `:VenvSelect` remains the
 manual override for cached or external environments. Explicit VSCode/neoconf
-Python settings take precedence only after
+`ty.configuration.environment.python` settings take precedence, with the
+existing VSCode/neoconf Python interpreter fields retained as a lower-priority
+compatibility input, only after
 `:NvimConfigTrustProjectSettings` approves the exact combined fingerprint of
 `.vscode/settings.json` and `.neoconf.json`; any edit revokes their effect until
 they are approved again. Selection never changes global `PATH`,
 `VIRTUAL_ENV` or terminal activation. The effective interpreter for each root
-is shared by Pyright, Neotest, DAP, the REPL and an event-refreshed statusline
+is shared by ty, Neotest, DAP, the REPL and an event-refreshed statusline
 cache. Statusline renders read cached labels only; project discovery, Git and
-filesystem work run outside the render path. An attached Pyright root or the
+filesystem work run outside the render path. An attached ty root or the
 nearest Python project marker takes precedence over an enclosing Git root, so
-nested Python projects stay independent. Opening a PEP 723 script never runs
-venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
+nested Python projects stay independent. `ty.toml` is the native marker;
+`pyrightconfig.json` and `Pipfile` remain legacy root markers only and their
+Pyright analysis settings are not translated to ty. Opening a PEP 723 script
+never runs venv-selector's automatic `uv sync`; `:VenvSelect` remains manual.
 Environment discovery is cached per project; use `:PythonEnvironmentRefresh`
 after changing an environment on disk, or `:PythonEnvironmentClear` to discard
 the manual selection and rediscover it.
@@ -450,7 +488,8 @@ Run the complete local validation from the repository root:
 ```
 
 It first proves every installed plugin checkout matches `lazy-lock.json`, then
-runs the pure and full-profile specs, startup smoke, StyLua, ShellCheck,
+runs the pure and full-profile specs (including the provisioning contract),
+startup smoke, StyLua, ShellCheck for the validation/provisioning scripts,
 actionlint, the exact tree-sitter CLI, a host C compiler, and `git diff --check`.
 Writable state, cache, temporary files, and logs are isolated. The check is
 offline; only `bootstrap-config` restores plugins and parsers, while

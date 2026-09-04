@@ -302,11 +302,13 @@ test("manual selections are root-scoped and stale interpreters are discarded", f
 	vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
-test("Pyright, Neotest, and DAP consume the same root selection without interpreter probes", function()
-	local config = { root_dir = fixture .. "/a", settings = { pyright = { disableOrganizeImports = true } } }
+test("ty, Neotest, and DAP consume the same root selection without interpreter probes", function()
+	local settings = { ty = { configuration = { rules = { ["unresolved-reference"] = "warn" } } } }
+	local config = { root_dir = fixture .. "/a", settings = settings }
 	python.before_init({}, config)
-	assert(config.settings.python.pythonPath == python_a)
-	assert(config.settings.pyright.disableOrganizeImports)
+	assert(rawequal(config.settings, settings))
+	assert(config.settings.ty.configuration.environment.python == python_a)
+	assert(config.settings.ty.configuration.rules["unresolved-reference"] == "warn")
 	assert(vim.deep_equal(python.neotest_python(fixture .. "/a"), { python_a }))
 	assert(python.neotest_runner({ python_a }) == "pytest")
 	assert(python.neotest_runner({ python_b }) == "pytest")
@@ -346,26 +348,61 @@ test("DAP roots resolve cross-project config fields before the active buffer", f
 	assert(placeholder.pythonPath == python_a, "unresolved placeholder preempted the active buffer")
 end)
 
-test("Pyright automatic configuration preserves explicit interpreter and venv settings", function()
-	for _, explicit in ipairs({
-		{ defaultInterpreterPath = "/explicit/default-python" },
-		{ pythonPath = "/explicit/python" },
-		{ venvPath = "/explicit/venvs" },
-		{ venv = "chosen" },
-	}) do
-		local initial = { root_dir = fixture .. "/a", settings = { python = vim.deepcopy(explicit) } }
-		local initial_snapshot = python.before_init({}, initial)
-		assert(vim.deep_equal(initial.settings.python, explicit))
-		assert(initial_snapshot.source == "explicit" and initial_snapshot.validity == "invalid")
-		local updated = { root_dir = fixture .. "/a", settings = { python = vim.deepcopy(explicit) } }
-		local updated_snapshot = python.on_new_config(updated, fixture .. "/a")
-		assert(vim.deep_equal(updated.settings.python, explicit))
-		assert(updated_snapshot.source == "explicit" and updated_snapshot.validity == "invalid")
-	end
+test("ty settings stay in place and trusted explicit precedence publishes one interpreter", function()
+	local environment = fixture .. "/a/.other"
+	local settings = {
+		ty = {
+			configuration = {
+				environment = { python = environment },
+				rules = { ["unresolved-reference"] = "warn" },
+			},
+		},
+	}
+	local initial = { root_dir = fixture .. "/a", settings = settings }
+	local initial_snapshot = python.before_init({}, initial)
+	assert(rawequal(initial.settings, settings))
+	assert(initial.settings.ty.configuration.environment.python == environment)
+	assert(initial.settings.ty.configuration.rules["unresolved-reference"] == "warn")
+	assert(initial_snapshot.source == "explicit" and initial_snapshot.value.interpreter == python_a2)
+	assert(python.for_root(fixture .. "/a") == python_a2)
+
+	explicit_project_values["lspconfig.ty"] = {
+		ty = { configuration = { environment = { python = python_a2 } } },
+	}
+	explicit_project_values.vscode = {
+		ty = { configuration = { environment = { python = python_a } } },
+		python = { pythonPath = python_b },
+	}
+	explicit_project_values["lspconfig.pyright"] = { python = { pythonPath = python_b } }
+	local updated = { root_dir = fixture .. "/a", settings = { ty = { configuration = {} } } }
+	local updated_snapshot = python.on_new_config(updated, fixture .. "/a")
+	assert(updated_snapshot.value.interpreter == python_a2, "lspconfig.ty did not outrank VSCode settings")
+	assert(updated.settings.ty.configuration.environment.python == python_a2)
+
+	explicit_project_values["lspconfig.ty"] = nil
+	updated = { root_dir = fixture .. "/a", settings = {} }
+	updated_snapshot = python.on_new_config(updated, fixture .. "/a")
+	assert(updated_snapshot.value.interpreter == python_a, "VSCode ty did not outrank legacy Python settings")
+	explicit_project_values.vscode.ty = nil
+	updated = { root_dir = fixture .. "/a", settings = {} }
+	updated_snapshot = python.on_new_config(updated, fixture .. "/a")
+	assert(updated_snapshot.value.interpreter == python_b, "VSCode Python compatibility did not outrank Pyright")
+
+	explicit_project_values.vscode = nil
+	explicit_project_values["lspconfig.pyright"] = nil
+	local invalid_path = fixture .. "/a/missing/python"
+	local invalid = {
+		root_dir = fixture .. "/a",
+		settings = { ty = { configuration = { environment = { python = invalid_path } } } },
+	}
+	local invalid_snapshot = python.before_init({}, invalid)
+	assert(invalid_snapshot.source == "explicit" and invalid_snapshot.validity == "invalid")
+	assert(invalid.settings.ty.configuration.environment.python == invalid_path)
+	assert(python.for_root(fixture .. "/a") == nil, "invalid ty interpreter fell back automatically")
 
 	local automatic = { root_dir = fixture .. "/a", settings = {} }
-	python.on_new_config(automatic, fixture .. "/a")
-	assert(automatic.settings.python.pythonPath == python.for_root(fixture .. "/a"))
+	local automatic_snapshot = python.on_new_config(automatic, fixture .. "/a")
+	assert(automatic.settings.ty.configuration.environment.python == automatic_snapshot.value.interpreter)
 end)
 
 test("host snapshots are copied and explicit project failures never fall back", function()
@@ -394,24 +431,24 @@ test("host discovery and Neotest runner never execute Python", function()
 	assert(ok, err)
 end)
 
-test("manual activation restarts only Pyright clients for the selected root", function()
+test("manual activation restarts only ty clients for the selected root", function()
 	local stopped = {}
 	local started = {}
 	local clients = {
 		{
-			name = "pyright",
+			name = "ty",
 			config = { root_dir = fixture .. "/a" },
 			attached_buffers = { [buf_a] = true },
 			stop = function()
-				stopped.pyright_a = true
+				stopped.ty_a = true
 			end,
 		},
 		{
-			name = "pyright",
+			name = "ty",
 			config = { root_dir = fixture .. "/b" },
 			attached_buffers = { [buf_b] = true },
 			stop = function()
-				stopped.pyright_b = true
+				stopped.ty_b = true
 			end,
 		},
 		{
@@ -441,19 +478,18 @@ test("manual activation restarts only Pyright clients for the selected root", fu
 	end
 	vim.defer_fn = previous_defer
 	vim.lsp.start = previous_start
-	assert(stopped.pyright_a)
-	assert(not stopped.pyright_b)
+	assert(stopped.ty_a)
+	assert(not stopped.ty_b)
 	assert(not stopped.ruff)
 	assert(#started == 1 and started[1].options.bufnr == buf_a)
 	assert(started[1].config.root_dir == fixture .. "/a")
 end)
 
-test("nearest Python marker outranks an enclosing Git root", function()
+test("ty and legacy markers keep LSP and shared consumers on the same nested root", function()
 	local monorepo = fixture .. "/marker-monorepo"
 	local service = monorepo .. "/services/api"
 	local path = service .. "/src/main.py"
 	vim.fn.mkdir(service .. "/src", "p")
-	vim.fn.writefile({ "[project]" }, service .. "/pyproject.toml")
 	vim.fn.writefile({ "pass" }, path)
 	local buf = vim.fn.bufadd(path)
 	vim.fn.bufload(buf)
@@ -467,7 +503,16 @@ test("nearest Python marker outranks an enclosing Git root", function()
 		return {}
 	end
 	local ok, err = xpcall(function()
-		assert(python.root(buf) == service)
+		for _, marker in ipairs({ "ty.toml", "pyrightconfig.json", "Pipfile" }) do
+			assert(vim.fn.writefile({}, service .. "/" .. marker) == 0)
+			assert(python.root(buf) == service, marker .. " did not define the Python root")
+			local lsp_root
+			python.lsp_root_dir(buf, function(root)
+				lsp_root = root
+			end)
+			assert(lsp_root == service, marker .. " did not define the ty root")
+			assert(vim.fn.delete(service .. "/" .. marker) == 0)
+		end
 	end, debug.traceback)
 	repo_config.root = previous_root
 	vim.lsp.get_clients = previous_clients
@@ -667,7 +712,7 @@ test("venv-selector hook keeps the Python origin while its picker has focus", fu
 	vim.api.nvim_buf_delete(picker_buf, { force = true })
 end)
 
-test("attached Pyright root scopes manual selection and shared consumers", function()
+test("attached ty root scopes manual selection and shared consumers", function()
 	local monorepo = fixture .. "/lsp-monorepo"
 	local service = monorepo .. "/services/api"
 	local path = service .. "/src/main.py"
@@ -686,7 +731,7 @@ test("attached Pyright root scopes manual selection and shared consumers", funct
 	local stopped = false
 	local started = {}
 	local client = {
-		name = "pyright",
+		name = "ty",
 		config = { root_dir = service },
 		attached_buffers = { [buf] = true },
 		stop = function()
@@ -702,8 +747,8 @@ test("attached Pyright root scopes manual selection and shared consumers", funct
 	vim.defer_fn = function(callback)
 		callback()
 	end
-	vim.lsp.config("pyright", {
-		settings = { pyright = { disableOrganizeImports = true } },
+	vim.lsp.config("ty", {
+		settings = { ty = { configuration = { rules = { ["unresolved-reference"] = "warn" } } } },
 		before_init = python.before_init,
 	})
 	vim.lsp.start = function(config, options)
@@ -722,8 +767,8 @@ test("attached Pyright root scopes manual selection and shared consumers", funct
 		assert(#started == 1 and started[1].options.bufnr == buf)
 		assert(started[1].config.root_dir == service)
 		assert(rawequal(started[1].config.settings, started[1].client.settings))
-		assert(started[1].client.settings.python.pythonPath == manual)
-		assert(started[1].client.settings.pyright.disableOrganizeImports)
+		assert(started[1].client.settings.ty.configuration.environment.python == manual)
+		assert(started[1].client.settings.ty.configuration.rules["unresolved-reference"] == "warn")
 		assert(vim.deep_equal(python.neotest_python(service), { manual }))
 		vim.api.nvim_set_current_buf(buf)
 		local original_cmake = package.loaded["config.cmake"]

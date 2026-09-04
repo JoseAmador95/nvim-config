@@ -289,12 +289,11 @@ test("release and Mason specs expose exact executable and integrity maps", funct
 	assert(vim.deep_equal(release_spec.executables, { mmdflux = "mmdflux" }))
 	assert(release_spec.manifest.integrity.kind == "release-sha256")
 	assert(release_spec.manifest.integrity.commands.mmdflux == "bin/mmdflux")
-	local mason_spec = assert(bootstrap.spec("pyright"))
-	assert(
-		vim.deep_equal(mason_spec.executables, { pyright = "pyright", ["pyright-langserver"] = "pyright-langserver" })
-	)
-	assert(mason_spec.manifest.integrity.receipt_path == ".verified-tools/receipts/pyright.json")
-	assert(mason_spec.manifest.integrity.commands.pyright == "bin/pyright")
+	local mason_spec = assert(bootstrap.spec("ty"))
+	assert(vim.deep_equal(mason_spec.executables, { ty = "ty" }))
+	assert(mason_spec.identity.version == "0.0.77")
+	assert(mason_spec.manifest.integrity.receipt_path == ".verified-tools/receipts/ty.json")
+	assert(mason_spec.manifest.integrity.commands.ty == "bin/ty")
 end)
 
 test("manual release and Mason installs produce persisted proofs", function()
@@ -385,9 +384,9 @@ test("bang bypasses a compatible external probe while prerequisites block before
 	assert(release_install_count == before + 1)
 	external["markdown-preview"] = nil
 
-	local pyright = assert(bootstrap.spec("pyright", { force_managed = true }))
-	assert(not bootstrap.install("pyright", true))
-	assert(bootstrap.engine().status(pyright.identity) == nil, "missing prerequisites consumed an attempt")
+	local ty = assert(bootstrap.spec("ty", { force_managed = true }))
+	assert(not bootstrap.install("ty", true))
+	assert(bootstrap.engine().status(ty.identity) == nil, "missing prerequisites consumed an attempt")
 end)
 
 test("strict probes inspect every candidate and reject errors", function()
@@ -450,6 +449,21 @@ test("offline denial consumes no attempt", function()
 	assert(claim == nil and reason == "blocked/offline")
 	assert(bootstrap.engine().status(plan.identity) == nil)
 	network_allowed = true
+end)
+
+test("provision inventory stays offline and preserves unclaimed tools", function()
+	local release_before = release_install_count
+	local refresh_before = registry_refresh_count
+	local mason_before = mason_install_count
+	local untouched = assert(bootstrap.spec("marksman", { force_managed = true })).identity
+	assert(bootstrap.engine().status(untouched) == nil)
+	local ok, inventory, changed = bootstrap.provision_exact({ allow_network = false, timeout = 1000 })
+	assert(not ok and changed == false)
+	assert(type(inventory.managed_tools["markdown-preview"]) == "table")
+	assert(#inventory.mason.required == #toolchain.mason_order)
+	assert(release_install_count == release_before)
+	assert(registry_refresh_count == refresh_before and mason_install_count == mason_before)
+	assert(bootstrap.engine().status(untouched) == nil, "offline inventory consumed a one-shot attempt")
 end)
 
 vim.fn.delete(fixture, "rf")
