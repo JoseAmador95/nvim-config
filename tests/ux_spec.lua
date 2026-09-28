@@ -222,5 +222,59 @@ assert(
 	"indent scope and delimiters do not share the semantic rainbow"
 )
 
+local function luminance(color)
+	local function linear(channel)
+		local value = channel / 255
+		return value <= 0.04045 and value / 12.92 or ((value + 0.055) / 1.055) ^ 2.4
+	end
+	return 0.2126 * linear(math.floor(color / 65536) % 256)
+		+ 0.7152 * linear(math.floor(color / 256) % 256)
+		+ 0.0722 * linear(color % 256)
+end
+
+local function contrast(foreground, background)
+	local first, second = luminance(foreground), luminance(background)
+	return (math.max(first, second) + 0.05) / (math.min(first, second) + 0.05)
+end
+
+vim.o.background = "light"
+vim.api.nvim_set_hl(0, "Normal", { fg = 0x1f2328 })
+vim.api.nvim_set_hl(0, "NormalFloat", { fg = 0x1f2328 })
+vim.api.nvim_set_hl(0, "Comment", { fg = 0x008000 })
+vim.api.nvim_set_hl(0, "String", { fg = 0xa31515 })
+palette.apply()
+local light_code = vim.api.nvim_get_hl(0, { name = "MdRenderInlineCode", link = false })
+assert(light_code.fg == 0xa31515, "light inline code lost the theme's String color")
+assert(light_code.bg and contrast(light_code.fg, light_code.bg) >= 4.5, "light inline code has poor contrast")
+local light_block = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlock", link = false })
+assert(light_block.fg == 0xa31515 and not light_block.bg, "light code block lost the theme's String color")
+assert(contrast(light_block.fg, 0xffffff) >= 4.5, "light code block has poor contrast")
+
+vim.api.nvim_set_hl(0, "Normal", { fg = 0x4c4f69, bg = 0xeff1f5 })
+vim.api.nvim_set_hl(0, "NormalFloat", { fg = 0x4c4f69, bg = 0xeff1f5 })
+vim.api.nvim_set_hl(0, "Comment", { fg = 0x9ca0b0 })
+vim.api.nvim_set_hl(0, "String", { fg = 0x40a02b })
+palette.apply()
+local latte_code = vim.api.nvim_get_hl(0, { name = "MdRenderInlineCode", link = false })
+assert(latte_code.fg == 0x4c4f69, "low-contrast String color was not replaced with Normal text")
+assert(latte_code.bg and contrast(latte_code.fg, latte_code.bg) >= 4.5, "Latte inline code has poor contrast")
+local latte_block = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlock", link = false })
+assert(latte_block.fg == 0x4c4f69 and not latte_block.bg, "Latte code block did not replace low-contrast String")
+assert(contrast(latte_block.fg, 0xeff1f5) >= 4.5, "Latte code block has poor contrast")
+
+vim.o.background = "dark"
+vim.api.nvim_set_hl(0, "Normal", { fg = 0xd4d4d4 })
+vim.api.nvim_set_hl(0, "NormalFloat", { fg = 0xd4d4d4 })
+vim.api.nvim_set_hl(0, "Comment", { fg = 0x888888 })
+vim.api.nvim_set_hl(0, "String", { fg = 0xce9178 })
+palette.apply()
+local dark_code = vim.api.nvim_get_hl(0, { name = "MdRenderInlineCode", link = false })
+assert(dark_code.fg == 0xce9178, "dark inline code retained the light theme color")
+assert(dark_code.bg and contrast(dark_code.fg, dark_code.bg) >= 4.5, "dark inline code has poor contrast")
+assert(luminance(dark_code.bg) < luminance(light_code.bg), "inline code did not follow the background")
+local dark_block = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlock", link = false })
+assert(dark_block.fg == 0xce9178 and not dark_block.bg, "dark code block lost the theme's String color")
+assert(contrast(dark_block.fg, 0x1e1e1e) >= 4.5, "dark code block has poor contrast")
+
 print("ux_spec: sessions, dashboard, and semantic palette passed")
 vim.cmd("quitall!")
