@@ -98,6 +98,30 @@ test("managed releases are prebuilt and target-aware", function()
 	assert(toolchain.installers == nil, "package-manager installers remain in the manifest")
 end)
 
+test("dynamic npm release uses only latest metadata and pinned private Node assets", function()
+	local toolchain = require("config.toolchain")
+	assert(vim.deep_equal(toolchain.dynamic_order, { "devcontainers-cli" }))
+	local entry = assert(toolchain.dynamic_entry("devcontainers-cli"))
+	assert(entry.backend == "npm-release")
+	assert(entry.package == "@devcontainers/cli" and entry.command == "devcontainer")
+	assert(entry.dist_tag == "latest")
+	assert(entry.metadata_url == "https://registry.npmjs.org/%40devcontainers%2fcli/latest")
+	assert(entry.node.version == "24.20.0")
+	local expected = {
+		["darwin-arm64"] = "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8",
+		["darwin-x86_64"] = "9e5b2644cf107befb6aefca676b96d3296bc10138096f022ed378d6233ed81f4",
+		["linux-arm64"] = "3515603e2487879a39bc75716f1a2affd027500c64ba50e845cf72cb33219013",
+		["linux-x86_64"] = "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec",
+	}
+	for target, sha256 in pairs(expected) do
+		local asset = assert(entry.node.assets[target])
+		assert(asset.sha256 == sha256)
+		assert(toolchain.node_release_url(entry.node, asset) == "https://nodejs.org/dist/v24.20.0/" .. asset.archive)
+	end
+	assert(toolchain.dynamic_entry("unknown") == nil)
+	assert(toolchain.versions["devcontainers-cli"] == nil, "latest was converted into a startup-time static version")
+end)
+
 test("Mason manifest is complete, exact, and stably ordered", function()
 	local toolchain = require("config.toolchain")
 	local expected_order = {
@@ -190,7 +214,7 @@ test("Mason tool installer is removed and verified-tools retains manual authorit
 	package.loaded["plugins.lsp"] = nil
 end)
 
-test("LSP catalog separates the exact server set from external Rust eligibility", function()
+test("LSP catalog binds every managed server and keeps Rust as an explicit host exception", function()
 	local catalog = require("config.lsp_catalog")
 	local expected = {
 		"bashls",
@@ -209,21 +233,12 @@ test("LSP catalog separates the exact server set from external Rust eligibility"
 		"yamlls",
 	}
 	assert(vim.deep_equal(catalog.server_names(), expected), "native LSP server set drifted")
-	local without_rust = catalog.enabled_servers(function()
-		return nil
-	end)
-	assert(not vim.tbl_contains(without_rust, "rust_analyzer"), "missing external Rust server was enabled")
-	local with_rust = catalog.enabled_servers(function(name)
-		return name == "rust-analyzer" and "/host/bin/rust-analyzer" or nil
-	end)
-	assert(vim.deep_equal(with_rust, expected), "external rust-analyzer was not enabled")
+	assert(vim.deep_equal(catalog.enabled_servers(), expected), "native LSP enablement drifted")
 	local toolchain = require("config.toolchain")
 	for _, server in ipairs(catalog.servers) do
 		if server.package then
-			assert(
-				toolchain.mason_entry(server.package),
-				"LSP package is absent from Mason manifest: " .. server.package
-			)
+			local entry = assert(toolchain.mason_entry(server.package), server.package)
+			assert(toolchain.executable_map(entry)[server.command], "LSP command is absent from its exact manifest")
 		else
 			assert(server.name == "rust_analyzer" and server.external == "rust-analyzer")
 		end
@@ -245,7 +260,8 @@ test("Rust tools use external paths and the missing analyzer notice is one-shot"
 		notifications[#notifications + 1] = { message = message, level = level }
 	end
 
-	assert(rust_tools.rust_analyzer() == nil and rust_tools.rustfmt() == nil)
+	assert(rust_tools.rust_analyzer() == nil)
+	assert(rust_tools.rustfmt == nil, "unverified rustfmt resolution remains public")
 	rust_tools.setup_missing_analyzer_notice(nil)
 	vim.api.nvim_exec_autocmds("FileType", { pattern = "rust", modeline = false })
 	vim.api.nvim_exec_autocmds("FileType", { pattern = "rust", modeline = false })
@@ -254,9 +270,7 @@ test("Rust tools use external paths and the missing analyzer notice is one-shot"
 	assert(notifications[1].message:find(":checkhealth nvimconfig", 1, true), "Rust notice omitted health guidance")
 
 	external["rust-analyzer"] = "/host/bin/rust-analyzer"
-	external.rustfmt = "/user/bin/rustfmt"
 	assert(rust_tools.rust_analyzer() == "/host/bin/rust-analyzer")
-	assert(rust_tools.rustfmt() == "/user/bin/rustfmt")
 	rust_tools._reset_for_tests()
 	rust_tools.setup_missing_analyzer_notice(external["rust-analyzer"])
 	vim.api.nvim_exec_autocmds("FileType", { pattern = "rust", modeline = false })
@@ -279,6 +293,11 @@ test("clangd has one argv builder and rejects invalid databases before stop", fu
 	package.loaded["config.clangd"] = nil
 	local clangd = require("config.clangd")
 	assert(package.loaded.clangd_compile_db == nil, "clangd router loaded before a root-scoped operation")
+	local lsp_boundary = require("config.lsp_deferred")
+	assert(
+		lsp_boundary.clangd_command() == lsp_boundary.clangd_rpc_start,
+		"native clangd registration did not retain the deferred root-scoped RPC function"
+	)
 	local command = clangd.command()
 	assert(package.loaded.clangd_compile_db == nil, "base clangd argv activated the compile-db router")
 	assert(command[1] == "/host/bin/clangd-custom", "local clangd path was ignored")
@@ -292,6 +311,30 @@ test("clangd has one argv builder and rejects invalid databases before stop", fu
 	assert(clangd.set_manual(root, root), "valid manual database was not applied")
 	command = clangd.command(root)
 	assert(command[2] == "--compile-commands-dir=" .. root, "root-scoped compile database flag is misplaced")
+	local original_rpc_start = vim.lsp.rpc.start
+	local lsp_runtime = require("config.lsp_runtime")
+	local original_resolve = lsp_runtime._resolve
+	lsp_runtime._resolve = function(tool, executable)
+		assert(tool == "clangd" and executable == "clangd")
+		return "/host/bin/clangd-custom"
+	end
+	local rpc_call
+	vim.lsp.rpc.start = function(argv, dispatchers, options)
+		rpc_call = { argv = argv, dispatchers = dispatchers, options = options }
+		return { rpc = true }
+	end
+	local dispatchers = { notification = function() end }
+	local rpc = clangd.rpc_start(dispatchers, {
+		root_dir = root,
+		cmd_cwd = root,
+		cmd_env = { TEST = "1" },
+		detached = true,
+	})
+	lsp_runtime._resolve = original_resolve
+	vim.lsp.rpc.start = original_rpc_start
+	assert(rpc.rpc and rpc_call.dispatchers == dispatchers)
+	assert(rpc_call.argv[2] == "--compile-commands-dir=" .. root, "native RPC start lost its root database")
+	assert(rpc_call.options.cwd == root and rpc_call.options.env.TEST == "1" and rpc_call.options.detached == true)
 	assert(vim.fn.writefile({ "{" }, root .. "/compile_commands.json") == 0)
 	local valid, message = clangd.validate_compile_commands(root)
 	assert(valid == nil and message:find("invalid", 1, true), "malformed database was accepted")

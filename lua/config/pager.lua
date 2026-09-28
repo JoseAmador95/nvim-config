@@ -7,6 +7,7 @@
 -- lua/config/lazy.lua checks M.active and, when true, loads only M.specs()
 -- instead of `{ import = "plugins" }` -- an allowlist that is safe by default.
 local M = {}
+local markdown_view
 
 local MAX_STRIP_BYTES = 64 * 1024 * 1024
 local STRIP_CHUNK_BYTES = 256 * 1024
@@ -15,7 +16,7 @@ local STRIP_CHUNK_BYTES = 256 * 1024
 -- nvimpager script). Available immediately in init.lua, no load-order caveats.
 M.active = vim.env.NVIM_APPNAME == "nvimpager"
 
--- Treesitter parsers for the pager: markdown (required by render-markdown) plus
+-- Treesitter parsers for the pager: markdown source plus
 -- a common code set to highlight sources and ``` fenced blocks. Edit freely.
 M.parsers = {
 	"markdown",
@@ -30,7 +31,7 @@ M.parsers = {
 }
 
 -- Minimal plugin allowlist for pager mode. Reuses the real plugin specs so the
--- theme/colors and render-markdown behavior match the editor exactly.
+-- theme/colors and the same reading renderer as the editor.
 function M.specs()
 	-- Reuse the snacks spec but drop its day-to-day picker keymaps
 	-- (<leader>ff/fb/fh/u): those are editor-workflow bindings that make no sense
@@ -46,7 +47,7 @@ function M.specs()
 		require("plugins.core"), -- plenary (dormant) + nvim-web-devicons
 		require("plugins.colorscheme"), -- VSCode/Catppuccin themes (+ OSC11 bg detection)
 		snacks, -- picker engine used by :SetFileType; no editor keymaps
-		require("plugins.render-markdown"), -- activates on ft=markdown
+		require("plugins.md-render"), -- read-only document view
 		{
 			-- Slim treesitter: only already-installed M.parsers, with no implicit
 			-- network work and no textobjects/context/rainbow.
@@ -252,6 +253,9 @@ local function apply_filetype(win, ft)
 	if not ft or ft == "" or not vim.api.nvim_win_is_valid(win) then
 		return nil, "Filetype or pager window is invalid"
 	end
+	if markdown_view and not markdown_view.pager_show_source(win) then
+		return nil, "Pager source buffer is unavailable"
+	end
 	local buf = vim.api.nvim_win_get_buf(win)
 	local stripped, strip_err = M.strip_ansi(buf)
 	if not stripped then
@@ -270,7 +274,14 @@ local function apply_filetype(win, ft)
 		vim.notify("Set filetype failed: " .. tostring(err), vim.log.levels.ERROR, { title = "pager" })
 		return nil, tostring(err)
 	end
+	if markdown_view then
+		markdown_view.pager_filetype_changed(buf)
+	end
 	return true
+end
+
+function M.set_markdown_view(view)
+	markdown_view = view
 end
 
 -- Pick a filetype with the snacks picker (falls back to vim.ui.select).

@@ -3,6 +3,8 @@ local contracts = require("local_plugins.contracts")
 
 local uv = vim.uv
 local DEFAULT_STOP_TIMEOUT_MS = 5000
+local DEFAULT_MAX_OUTPUT_LINES = 10000
+local MAX_OUTPUT_LINES = 100000
 local records = {}
 local dependencies
 local create
@@ -16,6 +18,7 @@ local SETUP_KEYS = {
 	defer = true,
 	open_location = true,
 	stop_timeout_ms = true,
+	max_output_lines = true,
 	buffer_mappings = true,
 	on_state_change = true,
 }
@@ -243,6 +246,7 @@ local function status_snapshot(record, key)
 			restart_pending = false,
 			accepting_input = false,
 			stop_timeout_ms = dependencies and dependencies.stop_timeout_ms or DEFAULT_STOP_TIMEOUT_MS,
+			max_output_lines = dependencies and dependencies.max_output_lines or DEFAULT_MAX_OUTPUT_LINES,
 			stop_timed_out = false,
 		}
 	end
@@ -263,6 +267,7 @@ local function status_snapshot(record, key)
 		restart_pending = record.restart_pending ~= nil,
 		accepting_input = accepting_input,
 		stop_timeout_ms = record.dependencies.stop_timeout_ms,
+		max_output_lines = record.dependencies.max_output_lines,
 		stop_requested_at_ms = record.stop_requested_at_ms,
 		stop_deadline_ms = record.stop_deadline_ms,
 		stop_timed_out = record.stop_timed_out == true,
@@ -383,7 +388,7 @@ local function hide_record(record)
 		return nil, "terminal does not exist"
 	end
 	local hidden, err = backend_call(record, "hide")
-	if hidden then
+	if hidden and records[record.key] == record and record.state ~= "disposed" then
 		record.visible = false
 		emit_state(record, "hidden")
 	end
@@ -539,13 +544,30 @@ local function resolve(spec, create_missing)
 end
 
 local function show_and_focus(record)
+	local exit_seen = record.exit_seen
 	local shown, show_err = backend_call(record, "show")
 	if not shown then
 		return nil, show_err
 	end
+	if
+		records[record.key] ~= record
+		or record.state == "disposed"
+		or record.dispose_pending
+		or record.exit_seen ~= exit_seen
+	then
+		return record
+	end
 	local focused, focus_err = backend_call(record, "focus")
 	if not focused then
 		return nil, focus_err
+	end
+	if
+		records[record.key] ~= record
+		or record.state == "disposed"
+		or record.dispose_pending
+		or record.exit_seen ~= exit_seen
+	then
+		return record
 	end
 	record.visible = true
 	emit_state(record, "shown")
@@ -584,6 +606,18 @@ function M.setup(opts)
 	if type(stop_timeout_ms) ~= "number" or stop_timeout_ms < 0 or stop_timeout_ms % 1 ~= 0 then
 		error("setup.stop_timeout_ms must be a non-negative integer")
 	end
+	local max_output_lines = opts.max_output_lines
+	if max_output_lines == nil then
+		max_output_lines = DEFAULT_MAX_OUTPUT_LINES
+	end
+	if
+		type(max_output_lines) ~= "number"
+		or max_output_lines < 1
+		or max_output_lines > MAX_OUTPUT_LINES
+		or max_output_lines % 1 ~= 0
+	then
+		error(("setup.max_output_lines must be an integer between 1 and %d"):format(MAX_OUTPUT_LINES))
+	end
 	local mapping_options = opts.buffer_mappings
 	if mapping_options == nil then
 		mapping_options = {}
@@ -610,6 +644,7 @@ function M.setup(opts)
 		defer = opts.defer or vim.defer_fn,
 		open_location = opts.open_location,
 		stop_timeout_ms = stop_timeout_ms,
+		max_output_lines = max_output_lines,
 		buffer_mappings = mappings,
 		on_state_change = opts.on_state_change,
 	}
@@ -621,11 +656,13 @@ function M.effective_config()
 	if not dependencies then
 		return {
 			stop_timeout_ms = DEFAULT_STOP_TIMEOUT_MS,
+			max_output_lines = DEFAULT_MAX_OUTPUT_LINES,
 			buffer_mappings = { close = "q", open_location = "gf" },
 		}
 	end
 	return copy({
 		stop_timeout_ms = dependencies.stop_timeout_ms,
+		max_output_lines = dependencies.max_output_lines,
 		buffer_mappings = dependencies.buffer_mappings,
 	})
 end
@@ -885,7 +922,22 @@ function M.lines(identity)
 	if not record or record.state == "disposed" then
 		return nil, "terminal does not exist"
 	end
-	return backend_call(record, "lines")
+	local values, lines_err = backend_call(record, "lines", record.dependencies.max_output_lines)
+	if not values then
+		return nil, lines_err
+	end
+	if type(values) ~= "table" or not vim.islist(values) then
+		return nil, "terminal backend lines must be an array"
+	end
+	local first = math.max(1, #values - record.dependencies.max_output_lines + 1)
+	local result = {}
+	for index = first, #values do
+		if type(values[index]) ~= "string" then
+			return nil, "terminal backend lines must contain only strings"
+		end
+		result[#result + 1] = values[index]
+	end
+	return result
 end
 
 M._normalize = normalize

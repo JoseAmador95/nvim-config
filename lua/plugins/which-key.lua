@@ -27,7 +27,7 @@ return {
 			{ "<leader>g", group = "git" },
 			{ "<leader>h", group = "git hunks" },
 			{ "<leader>l", group = "lsp/diagnostics" },
-			{ "<leader>m", group = "markdown" },
+			{ "<leader>m", group = "markdown/multicursor" },
 			{ "<leader>p", group = "python" },
 			{ "<leader>r", group = "review" },
 			{ "<leader>s", group = "swap/split/spell" },

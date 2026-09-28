@@ -115,21 +115,33 @@ end
 
 function Registry:_refresh(invocation)
 	local action = self.actions[invocation.id]
-	local target, target_err = self.target.revalidate(invocation.target, action.target)
+	if not action then
+		return nil, "Unknown action: " .. tostring(invocation.id)
+	end
+	local target_ok, target, target_err = pcall(self.target.revalidate, invocation.target, action.target)
+	if not target_ok then
+		return nil, "Action target revalidation failed: " .. tostring(target)
+	end
 	if action.target ~= "none" and not target then
-		return nil, target_err
+		return nil, target_err or "Action target is no longer available"
 	end
 	local context = vim.deepcopy(invocation.context or {})
 	context.target = target
 	if self.refresh_context and action.target ~= "none" then
-		local refreshed, refresh_err = self.refresh_context(context, target)
+		local refresh_ok, refreshed, refresh_err = pcall(self.refresh_context, context, target)
+		if not refresh_ok then
+			return nil, "Action context refresh failed: " .. tostring(refreshed)
+		end
 		if not refreshed then
 			return nil, refresh_err or "Action context is no longer available"
+		end
+		if type(refreshed) ~= "table" then
+			return nil, "Action context refresh must return a table"
 		end
 		context = refreshed
 		context.target = target
 	end
-	local current = action and action.available(context) or { available = false, error = "Unknown action" }
+	local current = action.available(context)
 	if not current.available then
 		return nil, current.error or current.reason or ("Action is no longer available: " .. tostring(invocation.id))
 	end
@@ -177,6 +189,7 @@ function Registry:bind(id, context, surface)
 			local refreshed, refresh_err = self:_refresh(invocation)
 			if not refreshed then
 				self:_notify(refresh_err)
+				self:_emit("rejected", { id = id, error = refresh_err })
 				return
 			end
 			local ok, result = pcall(action.execute, refreshed)
@@ -196,16 +209,25 @@ function Registry:bind(id, context, surface)
 				self:_notify(confirmation_err)
 				return false, confirmation_err
 			end
-			self.confirm(action.confirmation, function(accepted)
+			local confirm_ok, confirm_err = pcall(self.confirm, action.confirmation, function(accepted)
 				if state ~= "pending" then
 					return
 				end
-				if accepted then
+				if accepted == true then
 					execute_once()
 				else
 					state = "done"
 				end
 			end)
+			if not confirm_ok then
+				if state == "pending" then
+					state = "done"
+				end
+				local message = "Confirmation adapter failed: " .. tostring(confirm_err)
+				self:_notify(message, vim.log.levels.ERROR)
+				self:_emit("error", { id = id, error = message })
+				return false, message
+			end
 			return true
 		end
 		execute_once()

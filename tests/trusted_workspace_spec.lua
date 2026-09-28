@@ -56,7 +56,7 @@ test("local_config delegates merge and snapshots while preserving host APIs", fu
 		"  plugins = {",
 		"    theme_router = { background = 'dark', transparent = true },",
 		"    clangd_compile_db = { path = 'host-clangd', profile = 'full' },",
-		"    log_workbench = { max_lines = 1000, max_bytes = 4096 },",
+		"    log_workbench = { max_lines = 1000, max_bytes = 4096, continuity_bytes = 32768, max_matches = 5000, scan_lines_per_tick = 250 },",
 		"    diagram_view = { cache = { max_bytes = 2 * 1024 * 1024 } },",
 		"  },",
 		"  dap = { ui = 'dap-view' },",
@@ -94,6 +94,10 @@ test("local_config delegates merge and snapshots while preserving host APIs", fu
 	equal("light", effective.plugins.clangd_compile_db.profile, "allowed project clangd profile did not override host")
 	equal(9, effective.plugins.native_review.hunk_context, "allowed project review settings were lost")
 	equal(77, effective.plugins.log_workbench.max_lines, "project logs were not handed to the current host API")
+	equal(2048, effective.plugins.log_workbench.max_bytes, "project log byte reduction was not applied")
+	equal(32768, effective.plugins.log_workbench.continuity_bytes, "project replaced host continuity cost")
+	equal(5000, effective.plugins.log_workbench.max_matches, "project replaced host match cap")
+	equal(250, effective.plugins.log_workbench.scan_lines_per_tick, "project replaced host scan cost")
 	equal("dark", effective.plugins.theme_router.background, "project theme escaped its boundary")
 	equal("dap-view", effective.dap.ui, "project DAP setting escaped its boundary")
 	equal(2 * 1024 * 1024, effective.plugins.diagram_view.cache.max_bytes, "project diagram cache escaped its boundary")
@@ -131,19 +135,56 @@ test("local_config delegates merge and snapshots while preserving host APIs", fu
 	)
 	assert(vim.fn.filereadable(vim.fs.joinpath(root, "trust-state", "trusted-workspace.json")) == 1)
 
+	local project_source
+	for _, source in ipairs(status.sources) do
+		if source.id == "local-config-project" then
+			project_source = source
+			break
+		end
+	end
+	assert(project_source, "local config project source is missing")
+	local authority_path =
+		vim.fs.joinpath(repo, "local-plugins", "trusted-workspace.nvim", "lua", "trusted_workspace", "init.lua")
+	local external_authority = assert(loadfile(authority_path))()
+	assert(external_authority.setup({ state_root = vim.fs.joinpath(root, "trust-state"), mode = "full" }))
+	assert(external_authority.revoke_approval(project_source.repo, project_source.id))
+	assert(
+		external_authority.has_approval(project_source.repo, project_source.id, project_source.fingerprint) == false,
+		"second authority instance did not durably revoke local config"
+	)
+
+	local authority_approve = authority.approve
+	local approval_calls = 0
+	authority.approve = function(...)
+		approval_calls = approval_calls + 1
+		return authority_approve(...)
+	end
+	local reload_ok, reloaded = xpcall(local_config.reload, debug.traceback)
+	authority.approve = authority_approve
+	assert(reload_ok, reloaded)
+	equal("project-clangd", reloaded.plugins.clangd_compile_db.path, "durable reapproval changed project values")
+	equal(1, approval_calls, "local config did not reconcile its durable exact approval")
+	assert(
+		external_authority.has_approval(project_source.repo, project_source.id, project_source.fingerprint),
+		"local config reload did not restore its exact durable approval"
+	)
+
 	vim.fn.delete(root, "rf")
 end)
 
-test("project local config cannot override the host Markdown rendering preset", function()
+test("project local config rejects host-only log indexing controls", function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
 	local host_path = vim.fs.joinpath(root, "host.lua")
 	assert(vim.fn.writefile({
-		"return { plugins = { render_markdown = { preset = 'minimal' } } }",
+		"return { plugins = { log_workbench = {",
+		"  max_lines = 1000, max_bytes = 4096, continuity_bytes = 32768,",
+		"  max_matches = 5000, scan_lines_per_tick = 250,",
+		"} } }",
 	}, host_path) == 0)
 	assert(vim.fn.writefile({
-		"return { plugins = { render_markdown = { preset = 'semantic' } } }",
+		"return { plugins = { log_workbench = { max_lines = 77, max_matches = 1 } } }",
 	}, vim.fs.joinpath(project, ".nvim-local.lua")) == 0)
 
 	vim.cmd.cd(vim.fn.fnameescape(project))
@@ -157,25 +198,27 @@ test("project local config cannot override the host Markdown rendering preset", 
 	local local_config = require("config.local_config")
 	local effective = local_config.read()
 
-	equal("minimal", effective.plugins.render_markdown.preset, "project replaced the host Markdown preset")
+	equal(1000, effective.plugins.log_workbench.max_lines, "rejected project source partially reduced log lines")
+	equal(5000, effective.plugins.log_workbench.max_matches, "project replaced the host match cap")
+	equal(250, effective.plugins.log_workbench.scan_lines_per_tick, "project replaced the host scan budget")
 	local errors = table.concat(local_config.errors(), "\n")
-	assert(errors:find("project source", 1, true), "project Markdown rejection was not reported")
-	assert(errors:find("render_markdown", 1, true), "project Markdown rejection omitted the forbidden field")
-	equal(0, #require("trusted_workspace").status().pending, "rejected Markdown preset remained pending")
+	assert(errors:find("project source", 1, true), "project log indexing rejection was not reported")
+	assert(errors:find("max_matches", 1, true), "project rejection omitted the forbidden log field")
+	equal(0, #require("trusted_workspace").status().pending, "rejected log controls remained pending")
 
 	vim.fn.delete(root, "rf")
 end)
 
-test("project local config permits review context only and rejects host-only composer style", function()
+test("project local config permits review context only and rejects host-only review controls", function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
 	local host_path = vim.fs.joinpath(root, "host.lua")
 	assert(vim.fn.writefile({
-		"return { plugins = { native_review = { hunk_context = 4, composer = { style = 'minimal' } } } }",
+		"return { plugins = { native_review = { hunk_context = 4, max_files = 123, max_file_bytes = 456, max_model_bytes = 789, composer = { style = 'minimal' } } } }",
 	}, host_path) == 0)
 	assert(vim.fn.writefile({
-		"return { plugins = { native_review = { hunk_context = 99, composer = { style = 'card' } } } }",
+		"return { plugins = { native_review = { hunk_context = 99, max_files = 1, composer = { style = 'card' } } } }",
 	}, vim.fs.joinpath(project, ".nvim-local.lua")) == 0)
 
 	vim.cmd.cd(vim.fn.fnameescape(project))
@@ -190,10 +233,17 @@ test("project local config permits review context only and rejects host-only com
 	local effective = local_config.read()
 
 	equal(4, effective.plugins.native_review.hunk_context, "rejected project source partially changed review context")
+	equal(123, effective.plugins.native_review.max_files, "project replaced the host review file limit")
+	equal(456, effective.plugins.native_review.max_file_bytes, "project replaced the host per-file review limit")
+	equal(789, effective.plugins.native_review.max_model_bytes, "project replaced the host aggregate review limit")
 	equal("minimal", effective.plugins.native_review.composer.style, "project replaced the host composer style")
 	local errors = table.concat(local_config.errors(), "\n")
 	assert(errors:find("project source", 1, true), "project composer rejection was not reported")
-	assert(errors:find("composer", 1, true), "project composer rejection omitted the forbidden field")
+	assert(errors:find("native_review", 1, true), "project rejection omitted the forbidden review object")
+	assert(
+		errors:find("max_files", 1, true) or errors:find("composer", 1, true),
+		"project rejection omitted its first forbidden review control"
+	)
 	equal(0, #require("trusted_workspace").status().pending, "rejected composer remained pending")
 
 	vim.fn.delete(root, "rf")

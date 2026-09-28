@@ -1,4 +1,28 @@
 local redraw_profile = require("config.redraw_profile")
+local notify_broker = require("config.notify_broker")
+
+local notify_lease
+
+local function release_notify_lease()
+	if notify_lease then
+		notify_broker.release(notify_lease)
+		notify_lease = nil
+	end
+end
+
+local function notification_text(message)
+	if message == nil then
+		return ""
+	end
+	if type(message) ~= "table" then
+		return type(message) == "string" and message or tostring(message)
+	end
+	local lines = {}
+	for _, value in ipairs(message) do
+		lines[#lines + 1] = tostring(value)
+	end
+	return table.concat(lines, "\n")
+end
 
 return {
 	"folke/noice.nvim",
@@ -44,7 +68,7 @@ return {
 				enabled = true,
 				format = "lsp_progress",
 				format_done = "lsp_progress_done",
-				throttle = redraw_profile.low_bandwidth() and 100 or 1000 / 30,
+				throttle = redraw_profile.noice_progress_throttle_ms(),
 				view = "mini",
 			},
 			override = {
@@ -90,41 +114,30 @@ return {
 	config = function(_, opts)
 		require("noice").setup(opts)
 
-		-- Own `vim.notify`: mirror the text into native history once, then create
-		-- exactly one Snacks toast. Noice's notify source is disabled above, so it
-		-- cannot wrap this function or feed the toast back into itself.
-		vim.notify = function(msg, level, notify_opts)
-			local function dispatch()
-				local text
-				if msg ~= nil then
-					if type(msg) == "table" then
-						local lines = {}
-						for _, value in ipairs(msg) do
-							lines[#lines + 1] = tostring(value)
-						end
-						text = table.concat(lines, "\n")
-					else
-						text = type(msg) == "string" and msg or tostring(msg)
-					end
-					local hl = "Normal"
-					if level == vim.log.levels.ERROR then
-						hl = "ErrorMsg"
-					elseif level == vim.log.levels.WARN then
-						hl = "WarningMsg"
-					end
-					pcall(vim.api.nvim_echo, { { text, hl } }, true, {
-						kind = "nvim_config_notify",
-						err = level == vim.log.levels.ERROR,
-					})
+		-- Mirror the text into native history once, then create exactly one Snacks
+		-- toast. The broker owns vim.notify and invalidates this provider on
+		-- deactivate or repeated configuration.
+		release_notify_lease()
+		local notifier = require("snacks").notifier
+		notify_lease = assert(notify_broker.acquire("noice", function(message, level, notify_opts)
+			local text = notification_text(message)
+			-- Publish the visual backend first. If it fails, the broker owns the
+			-- fallback and native history; echoing first would duplicate history.
+			local handle = notifier.notify(text, level, notify_opts)
+			if message ~= nil then
+				local hl = "Normal"
+				if level == vim.log.levels.ERROR then
+					hl = "ErrorMsg"
+				elseif level == vim.log.levels.WARN then
+					hl = "WarningMsg"
 				end
-				return require("snacks").notifier.notify(text or "", level, notify_opts)
+				pcall(vim.api.nvim_echo, { { text, hl } }, true, {
+					kind = "nvim_config_notify",
+					err = level == vim.log.levels.ERROR,
+				})
 			end
-
-			if vim.in_fast_event() then
-				vim.schedule(dispatch)
-				return
-			end
-			return dispatch()
-		end
+			return handle
+		end))
 	end,
+	deactivate = release_notify_lease,
 }

@@ -32,7 +32,7 @@ printf '%s\n' 'return { plugins = { theme_router = { background = "light" } } }'
 export NVIM_CONFIG_ROOT="$repo_root"
 export NVIM_CONFIG_OFFLINE=1
 export PYTHONDONTWRITEBYTECODE=1
-export TMPDIR="$check_tmp/tmp"
+export TMPDIR="$check_tmp"
 unset NVIM_APPNAME NVIMPAGER_FILETYPE
 
 if [ -n "${NVIM_CONFIG_XDG_ROOT:-}" ]; then
@@ -168,6 +168,13 @@ run_config_test() {
 		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
 }
 
+run_config_test_without_file() {
+	test_name=$1
+	test_path=$2
+	run_check "$test_name" env "NVIM_CONFIG_TEST=$test_path" "$NVIM_BIN" \
+		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua"
+}
+
 run_dap_view_test() {
 	test_name=$1
 	test_path=$2
@@ -234,16 +241,21 @@ run_vscode_test() {
 run_redraw_profile_test() {
 	label=$1
 	profile=$2
-	config_file=$3
-	shift 3
+	inline_diagnostics=$3
+	config_file=$4
+	shift 4
 	run_check "redraw_profile_spec ($label)" env "$@" NVIM_CONFIG_FILE="$config_file" \
 		NVIM_CONFIG_EXPECTED_REDRAW_PROFILE="$profile" \
+		NVIM_CONFIG_EXPECTED_INLINE_DIAGNOSTICS="$inline_diagnostics" \
 		NVIM_CONFIG_TEST="$repo_root/tests/redraw_profile_spec.lua" "$NVIM_BIN" \
 		--headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
 }
 
 run_pure_test lock_spec
 run_pure_test core_spec
+run_pure_test clipboard_spec
+run_pure_test whitespace_spec
+run_pure_test execution_spec
 run_pure_test ci_spec
 run_pure_test security_spec
 run_check "trusted_workspace_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
@@ -299,20 +311,35 @@ run_check "action_palette_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 run_check "devcontainer_editor_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/local-plugins/devcontainer-editor.nvim/tests/devcontainer_editor_spec.lua"
 run_check "devcontainer_editor_cli_spec" python3 "$repo_root/tests/devcontainer_editor_cli_spec.py"
+run_check "verified_npm_bundle_spec" python3 "$repo_root/tests/verified_npm_bundle_spec.py"
 
-for pure_spec in lazy_lock_spec local_plugins_spec local_config_plugins_spec trusted_workspace_spec markdown_spec project_settings_spec theme_router_spec diagram_view_spec verified_tools_host_spec log_watch_spec log_workbench_spec treesitter_spec pager_spec lint_spec menu_spec action_palette_adapter_spec tabs_spec editor_spec navigation_history_spec auto_session_spec notification_spec ux_spec statusline_performance_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec tool_bootstrap_spec provision_runtime_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec; do
+for pure_spec in lazy_lock_spec lazy_attestation_spec local_plugins_spec local_config_plugins_spec trusted_workspace_spec markdown_spec project_settings_spec theme_router_spec diagram_view_spec verified_tools_host_spec log_watch_spec log_workbench_spec treesitter_spec pager_spec formatting_spec lint_spec menu_spec action_palette_adapter_spec tabs_spec editor_spec editor_actions_spec navigation_history_spec lsp_navigation_spec lsp_runtime_spec multicursor_spec oil_spec snacks_spec viewer_commands_spec jqx_spec hex_spec auto_session_spec notification_spec ux_spec statusline_performance_spec inline_diagnostics_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec npm_release_installer_spec tool_bootstrap_spec provision_runtime_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec devcontainer_runtime_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec workflow_execution_spec redraw_profile_lifecycle_spec; do
 	run_pure_test "$pure_spec"
 done
+run_pure_test markdown_view_spec
 
 run_config_test startup_spec "$repo_root/tests/startup_spec.lua"
+hex_binary="$check_tmp/initial.bin"
+hex_text="$check_tmp/initial.txt"
+printf '\001\002binary fixture\n' > "$hex_binary"
+printf '%s\n' 'plain text' > "$hex_text"
+run_check "hex_startup_spec (binary)" env NVIM_CONFIG_TEST="$repo_root/tests/hex_startup_spec.lua" \
+	NVIM_CONFIG_HEX_FILE="$hex_binary" NVIM_CONFIG_HEX_EXPECTED=binary "$NVIM_BIN" --headless -i NONE \
+	--cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$hex_binary"
+run_check "hex_startup_spec (text)" env NVIM_CONFIG_TEST="$repo_root/tests/hex_startup_spec.lua" \
+	NVIM_CONFIG_HEX_FILE="$hex_text" NVIM_CONFIG_HEX_EXPECTED=text "$NVIM_BIN" --headless -i NONE \
+	--cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua" "$hex_text"
 run_config_test load_contract_spec "$repo_root/tests/load_contract_spec.lua"
-run_redraw_profile_test full full "$check_tmp/no-local-config.lua"
-run_redraw_profile_test low-bandwidth low-bandwidth "$low_bandwidth_config"
-run_redraw_profile_test ssh full "$check_tmp/no-local-config.lua" SSH_CONNECTION=fixture
+run_config_test oil_git_status_spec "$repo_root/tests/oil_git_status_spec.lua"
+run_redraw_profile_test full full current-line "$check_tmp/no-local-config.lua" SSH_TTY= SSH_CONNECTION=
+run_redraw_profile_test low-bandwidth low-bandwidth off "$low_bandwidth_config" SSH_TTY= SSH_CONNECTION=
+run_redraw_profile_test ssh full settled-line "$check_tmp/no-local-config.lua" SSH_TTY= SSH_CONNECTION=fixture
 run_config_test log_profile_spec "$repo_root/tests/log_profile_spec.lua"
 run_config_test menu_lifecycle_spec "$repo_root/tests/menu_lifecycle_spec.lua"
 run_config_test tooling_spec "$repo_root/tests/tooling_spec.lua"
-run_config_test tooling_ui_spec "$repo_root/tests/tooling_ui_spec.lua"
+# Keep this DAP/formatter boundary independent from file-triggered LSP startup:
+# opening AGENTS.md legitimately resolves Marksman before VimEnter.
+run_config_test_without_file tooling_ui_spec "$repo_root/tests/tooling_ui_spec.lua"
 run_dap_view_test dap_view_profile_spec "$repo_root/tests/dap_view_profile_spec.lua"
 run_dap_session_test python "$repo_root/tests/dap_session_spec.lua"
 run_dap_session_test cpp "$repo_root/tests/dap_session_spec.lua"
@@ -332,6 +359,8 @@ run_check "startup smoke" "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua
 	-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
 	"+quitall"
 run_check "provision-runtime syntax" sh -n scripts/provision-runtime
+run_check "devcontainer-runtime syntax" sh -n scripts/devcontainer-runtime
+run_check "devcontainer-runtime shellcheck" "$SHELLCHECK_BIN" -s sh scripts/devcontainer-runtime
 run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests local-plugins
 run_check "ShellCheck" "$SHELLCHECK_BIN" \
 	scripts/check-config scripts/bootstrap-config scripts/install-ci-tools scripts/provision-runtime

@@ -19,12 +19,34 @@ it no longer contains; a rejected refresh preserves the previous registry
 snapshot and its signs.
 
 Every imported file entry is bound to the source descriptor identity and a
-content digest at report-load time. A modified buffer, in-place source edit, or
-path replacement makes that entry stale. The default `stale = "hide"` removes
-owned signs immediately, and a failed refresh re-renders the preserved report
-without ever restoring stale signs. The default report ceiling is 50 MiB and
-`signs = "all"`; covered-only, missing-only, and no-sign modes are also
-available.
+content digest at report-load time. Canonical aliases are rejected before a
+second bind. The descriptor's `fstat()` size is checked before reading or
+hashing: each source is capped at 16 MiB and the unique sources represented by
+one model are capped at 64 MiB. The same configurable ceiling independently
+bounds a conservative normalized-model estimate (source records plus unique
+line entries), so a small report cannot expand into an unbounded Lua model.
+Host options may only reduce those hard limits. Line numbers are restricted to
+the range supported by Neovim's sign API.
+A modified buffer, in-place source edit, or path replacement makes that entry
+stale. The default `stale = "hide"` removes owned signs immediately, and a
+failed refresh re-renders the preserved report without ever restoring stale
+signs. The default report ceiling is 50 MiB (hard maximum 256 MiB) and the
+default sign mode is `signs = "all"`; covered-only, missing-only, and no-sign
+modes are also available.
+
+Runtime redraw work is indexed by canonical source path. Once a buffer enters
+the modified state, subsequent `TextChanged`/`TextChangedI` callbacks perform no
+source reads, hashes, canonicalization, or sign replacement; the transition
+removes owned signs once. Unmodified lifecycle events compare the bound
+descriptor metadata first and also re-resolve the buffer name. If a symlink is
+retargeted, old-target signs and buffer state are released before a reload can
+index the new canonical target. Sources whose identity is still exact are never
+re-read. Loading or refreshing a report remains the only path that reads and
+hashes source contents.
+
+Coverage.py entries must classify every line into at most one of
+`executed_lines`, `missing_lines`, and `excluded_lines`; overlap is rejected
+instead of affecting totals or signs ambiguously.
 
 `setup()` rejects unknown options before changing configuration. Repeated setup
 replaces its autocmd group and adapters deterministically. `effective_config()`,

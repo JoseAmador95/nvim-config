@@ -24,16 +24,23 @@ local temp_counter = 0
 local test_hook
 
 local MAX_MESSAGE = 64 * 1024
+local MAX_LOG = 256 * 1024
 local MAX_WARNING = 512
 local DEFAULT_ACK_TIMEOUT_MS = 5000
 local DEFAULT_MAX_MESSAGES_PER_TICK = 32
 local DEFAULT_POLL_INTERVAL_MS = 100
+local MESSAGE_VERSION = 2
+local LEGACY_RECORD_VERSION = 2
+local CLI_RECORD_VERSION = 3
+local RUNTIME_RECORD_VERSION = 4
+local PHASE_RECORD_VERSION = 5
+local RECORD_VERSION = 6
 
 local function public_defaults()
 	return {
 		ack_timeout_ms = DEFAULT_ACK_TIMEOUT_MS,
 		claim_timeout_ms = 2000,
-		cli = "devcontainer",
+		docker_path = "docker",
 		lockfile_policy = "preserve",
 		max_messages_per_tick = DEFAULT_MAX_MESSAGES_PER_TICK,
 		poll_interval_ms = DEFAULT_POLL_INTERVAL_MS,
@@ -45,7 +52,7 @@ end
 local SETUP_KEYS = {
 	ack_timeout_ms = true,
 	claim_timeout_ms = true,
-	cli = true,
+	docker_path = true,
 	event = true,
 	launcher = true,
 	lockfile_policy = true,
@@ -53,6 +60,7 @@ local SETUP_KEYS = {
 	notify = true,
 	open = true,
 	poll_interval_ms = true,
+	resolve_cli = true,
 	spool_root = true,
 	ssh_agent = true,
 	state_root = true,
@@ -131,12 +139,13 @@ if declared and ffi.abi("64bit") then
 end
 local HOST_ACTIONS = {
 	container_log = true,
+	editor_ready = true,
 	host_editor = true,
 	lazygit = true,
 	tmux_dev_refresh = true,
 	tmux_dev_refresh_check = true,
 }
-local RECORD_KEYS = {
+local RECORD_KEYS_V4 = {
 	version = true,
 	host_root = true,
 	config_path = true,
@@ -154,6 +163,52 @@ local RECORD_KEYS = {
 	updated_at = true,
 	exit_code = true,
 	error = true,
+	cli_path = true,
+	docker_path = true,
+}
+local RECORD_KEYS_V5 = vim.tbl_extend("force", {}, RECORD_KEYS_V4)
+RECORD_KEYS_V5.phase = true
+local RECORD_KEYS_V6 = vim.tbl_extend("force", {}, RECORD_KEYS_V5)
+RECORD_KEYS_V6.podman_connection = true
+local RECORD_KEYS_V3 = vim.tbl_extend("force", {}, RECORD_KEYS_V4)
+RECORD_KEYS_V3.docker_path = nil
+local RECORD_KEYS_V2 = vim.tbl_extend("force", {}, RECORD_KEYS_V3)
+RECORD_KEYS_V2.cli_path = nil
+local RECORD_KEYS_BY_VERSION = {
+	[LEGACY_RECORD_VERSION] = RECORD_KEYS_V2,
+	[CLI_RECORD_VERSION] = RECORD_KEYS_V3,
+	[RUNTIME_RECORD_VERSION] = RECORD_KEYS_V4,
+	[PHASE_RECORD_VERSION] = RECORD_KEYS_V5,
+	[RECORD_VERSION] = RECORD_KEYS_V6,
+}
+local RECORD_PHASES = {
+	claimed = true,
+	["preparing-config"] = true,
+	["starting-container"] = true,
+	["checking-ssh-agent"] = true,
+	["checking-editor-config"] = true,
+	["opening-editor"] = true,
+	["monitoring-editor"] = true,
+	["returning-host"] = true,
+}
+local CLI_PATH_RECORD_VERSIONS = {
+	[CLI_RECORD_VERSION] = true,
+	[RUNTIME_RECORD_VERSION] = true,
+	[PHASE_RECORD_VERSION] = true,
+	[RECORD_VERSION] = true,
+}
+local DOCKER_PATH_RECORD_VERSIONS = {
+	[RUNTIME_RECORD_VERSION] = true,
+	[PHASE_RECORD_VERSION] = true,
+	[RECORD_VERSION] = true,
+}
+local PHASE_RECORD_VERSIONS = {
+	[PHASE_RECORD_VERSION] = true,
+	[RECORD_VERSION] = true,
+}
+local PODMAN_CONNECTION_KEYS = {
+	name = true,
+	machine_pin = true,
 }
 local REQUEST_KEYS = {
 	version = true,
@@ -261,7 +316,7 @@ local function validate_setup(opts)
 	end
 	local candidate = copy(opts)
 	for field, fallback in pairs({
-		cli = "devcontainer",
+		docker_path = "docker",
 		lockfile_policy = "preserve",
 		ssh_agent = "auto",
 		claim_timeout_ms = 2000,
@@ -284,8 +339,8 @@ local function validate_setup(opts)
 			return nil, value_err
 		end
 	end
-	if type(candidate.cli) ~= "string" or candidate.cli == "" or candidate.cli:find("%z") then
-		return nil, "devcontainer_editor cli must be a non-empty string"
+	if type(candidate.docker_path) ~= "string" or candidate.docker_path == "" or candidate.docker_path:find("%z") then
+		return nil, "devcontainer_editor docker_path must be a non-empty string"
 	end
 	if candidate.lockfile_policy ~= "preserve" then
 		return nil, "devcontainer_editor lockfile_policy must be preserve"
@@ -299,7 +354,7 @@ local function validate_setup(opts)
 	then
 		return nil, "devcontainer_editor launcher must be a non-empty string without NUL bytes"
 	end
-	for _, field in ipairs({ "event", "notify", "open", "uuid" }) do
+	for _, field in ipairs({ "event", "notify", "open", "resolve_cli", "uuid" }) do
 		if candidate[field] ~= nil and type(candidate[field]) ~= "function" then
 			return nil, "devcontainer_editor " .. field .. " must be a function"
 		end
@@ -514,6 +569,125 @@ local function open_root_directory(path)
 		return nil, "spool root changed while opening"
 	end
 	return fd
+end
+
+local function same_directory_identity(left, right)
+	return left
+		and right
+		and left.type == "directory"
+		and right.type == "directory"
+		and left.dev == right.dev
+		and left.ino == right.ino
+		and left.mode == right.mode
+		and left.uid == right.uid
+end
+
+local function private_directory(stat, owner)
+	return stat and stat.type == "directory" and stat.mode % 512 == tonumber("700", 8) and stat.uid == owner
+end
+
+local function open_canonical_private_directory(path, label, owner)
+	local real = uv.fs_realpath(path)
+	if not real or vim.fs.normalize(real) ~= path then
+		return nil, label .. " is not one canonical real directory"
+	end
+	local fd, open_err = open_root_directory(path)
+	if not fd then
+		return nil, label .. " is unsafe: " .. tostring(open_err)
+	end
+	local opened = uv.fs_fstat(fd)
+	local lexical = uv.fs_lstat(path)
+	if not private_directory(opened, owner) or not same_directory_identity(opened, lexical) then
+		close_fd(fd)
+		return nil, label .. " is not one owner-only real directory"
+	end
+	return fd
+end
+
+local function open_existing_private_child_directory(parent_fd, parent_path, name, label, owner)
+	local path = vim.fs.joinpath(parent_path, name)
+	local real = uv.fs_realpath(path)
+	local before = uv.fs_lstat(path)
+	if not real or vim.fs.normalize(real) ~= path or not private_directory(before, owner) then
+		return nil, label .. " is not one canonical owner-only real directory"
+	end
+	local flags = bit.bor(
+		descriptor_api.O_RDONLY,
+		descriptor_api.O_DIRECTORY,
+		descriptor_api.O_NOFOLLOW,
+		descriptor_api.O_CLOEXEC
+	)
+	local fd, open_err = openat(parent_fd, name, flags)
+	if not fd then
+		return nil, label .. " could not be opened safely: " .. tostring(open_err)
+	end
+	local opened = uv.fs_fstat(fd)
+	local after = uv.fs_lstat(path)
+	if
+		not private_directory(opened, owner)
+		or not same_directory_identity(before, opened)
+		or not same_directory_identity(opened, after)
+	then
+		close_fd(fd)
+		return nil, label .. " changed while opening"
+	end
+	return fd, path
+end
+
+local function private_log_snapshot(stat, owner)
+	if
+		not stat
+		or stat.type ~= "file"
+		or stat.nlink ~= 1
+		or stat.mode % 512 ~= tonumber("600", 8)
+		or stat.uid ~= owner
+		or stat.size > MAX_LOG
+	then
+		return nil
+	end
+	return {
+		dev = stat.dev,
+		ino = stat.ino,
+		mode = stat.mode,
+		nlink = stat.nlink,
+		uid = stat.uid,
+	}
+end
+
+local function same_log_identity(left, right)
+	return left
+		and right
+		and left.dev == right.dev
+		and left.ino == right.ino
+		and left.mode == right.mode
+		and left.nlink == right.nlink
+		and left.uid == right.uid
+end
+
+local function validate_log_at(parent_fd, path, name, owner)
+	local before = private_log_snapshot(uv.fs_lstat(path), owner)
+	if not before then
+		return nil, "Dev Container lifecycle log is missing or unsafe"
+	end
+	local flags = bit.bor(descriptor_api.O_RDONLY, descriptor_api.O_NOFOLLOW, descriptor_api.O_CLOEXEC)
+	local fd, open_err = openat(parent_fd, name, flags)
+	if not fd then
+		return nil, "Dev Container lifecycle log could not be opened safely: " .. tostring(open_err)
+	end
+	local opened = private_log_snapshot(uv.fs_fstat(fd), owner)
+	local hooked, hook_err = fire_test_hook("before_log_revalidation", { path = path })
+	local after = private_log_snapshot(uv.fs_lstat(path), owner)
+	local closed, close_err = close_fd(fd)
+	if not hooked then
+		return nil, "Dev Container lifecycle log validation hook failed: " .. tostring(hook_err)
+	end
+	if not opened or not after or not same_log_identity(before, opened) or not same_log_identity(opened, after) then
+		return nil, "Dev Container lifecycle log changed while validating"
+	end
+	if not closed then
+		return nil, "Dev Container lifecycle log could not be closed safely: " .. tostring(close_err)
+	end
+	return true
 end
 
 local function open_child_directory(parent_fd, name)
@@ -1157,38 +1331,51 @@ function M.network_authorized()
 	return vim.env.NVIM_CONFIG_OFFLINE ~= "1"
 end
 
-local function workspace_record_path(host_root)
+local function workspace_record_path(host_root, resolved_state_root)
 	if type(host_root) ~= "string" or host_root == "" or host_root:find("%z") then
 		return nil, "host root must be a non-empty string"
 	end
-	local root, root_err = state_root()
+	local root, root_err = resolved_state_root, nil
+	if root == nil then
+		root, root_err = state_root()
+	end
 	if not root then
 		return nil, root_err or "state root is unavailable"
 	end
 	return vim.fs.joinpath(root, "workspaces", vim.fn.sha256(host_root) .. ".json")
 end
 
-function M.status(host_root)
-	if host_root == nil then
-		return copy({
-			configured = is_configured,
-			transport = transport_status,
-			watcher = {
-				active = watcher ~= nil,
-				failures = watcher_failures,
-			},
-		})
+local function decode_workspace_record(path)
+	local payload, read_err = secure_read(path, "workspace record")
+	if not payload then
+		return nil, read_err
 	end
-	local path, path_err = workspace_record_path(host_root)
+	local decoded, value = pcall(vim.json.decode, payload)
+	if not decoded or type(value) ~= "table" then
+		return nil, "workspace record is not JSON"
+	end
+	local keys = RECORD_KEYS_BY_VERSION[value.version]
+	if not keys then
+		return nil, "workspace record version is unsupported"
+	end
+	local exact, exact_err = exact_keys(value, keys, "workspace record")
+	return exact and value or nil, exact and nil or exact_err
+end
+
+local function workspace_status(host_root, resolved_state_root)
+	local path, path_err = workspace_record_path(host_root, resolved_state_root)
 	if not path then
 		return nil, path_err
 	end
-	local value, err = decode_secure(path, "workspace record", RECORD_KEYS)
+	local value, err = decode_workspace_record(path)
 	if not value then
 		return nil, err
 	end
-	if value.version ~= 2 or value.host_root ~= host_root then
+	if not RECORD_KEYS_BY_VERSION[value.version] or value.host_root ~= host_root then
 		return nil, "workspace record identity does not match"
+	end
+	if PHASE_RECORD_VERSIONS[value.version] and not RECORD_PHASES[value.phase] then
+		return nil, "workspace record phase is invalid"
 	end
 	if not ({ starting = true, running = true, stopped = true, error = true, dead = true })[value.status] then
 		return nil, "workspace record status is invalid"
@@ -1211,6 +1398,74 @@ function M.status(host_root)
 	then
 		return nil, "workspace record container root is invalid"
 	end
+	if CLI_PATH_RECORD_VERSIONS[value.version] then
+		local cli = value.cli_path
+		if cli == vim.NIL then
+			cli = nil
+		end
+		if
+			cli ~= nil
+			and (
+				type(cli) ~= "string"
+				or cli:sub(1, 1) ~= "/"
+				or cli:sub(1, 2) == "//"
+				or cli:find("%z")
+				or vim.fs.normalize(cli) ~= cli
+			)
+		then
+			return nil, "workspace record Dev Containers CLI path is invalid"
+		end
+		if cli == nil and value.status ~= "starting" and value.status ~= "error" then
+			return nil, "workspace record Dev Containers CLI path is missing"
+		end
+		value.cli_path = cli
+	end
+	if DOCKER_PATH_RECORD_VERSIONS[value.version] then
+		local docker = value.docker_path
+		if docker == vim.NIL then
+			docker = nil
+		end
+		if
+			docker ~= nil
+			and (
+				type(docker) ~= "string"
+				or docker:sub(1, 1) ~= "/"
+				or docker:sub(1, 2) == "//"
+				or docker:find("%z")
+				or vim.fs.normalize(docker) ~= docker
+			)
+		then
+			return nil, "workspace record Docker-compatible engine path is invalid"
+		end
+		if docker == nil and value.status ~= "starting" and value.status ~= "error" then
+			return nil, "workspace record Docker-compatible engine path is missing"
+		end
+		value.docker_path = docker
+	end
+	if value.version == RECORD_VERSION then
+		local connection = value.podman_connection
+		if connection == vim.NIL then
+			connection = nil
+		end
+		if connection ~= nil then
+			local exact, exact_err =
+				exact_keys(connection, PODMAN_CONNECTION_KEYS, "workspace record Podman connection")
+			if not exact then
+				return nil, exact_err
+			end
+			if
+				type(connection.name) ~= "string"
+				or #connection.name > 128
+				or not connection.name:match("^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+				or type(connection.machine_pin) ~= "string"
+				or #connection.machine_pin ~= 64
+				or not connection.machine_pin:match("^[0-9a-f]+$")
+			then
+				return nil, "workspace record Podman connection is invalid"
+			end
+		end
+		value.podman_connection = connection
+	end
 	local workspace, workspace_err = M.workspace_key(value.workspace_key)
 	if not workspace then
 		return nil, workspace_err
@@ -1224,6 +1479,62 @@ function M.status(host_root)
 	end
 	value.workspace_key = workspace
 	return copy(value)
+end
+
+function M.status(host_root)
+	if host_root == nil then
+		return copy({
+			configured = is_configured,
+			transport = transport_status,
+			watcher = {
+				active = watcher ~= nil,
+				failures = watcher_failures,
+			},
+		})
+	end
+	return workspace_status(host_root)
+end
+
+function M.log_path(host_root)
+	if not descriptor_api or type(uv.getuid) ~= "function" then
+		return nil, "secure lifecycle log inspection is unavailable on this platform"
+	end
+	local root, root_err = state_root()
+	if not root then
+		return nil, root_err
+	end
+	local owner = uv.getuid()
+	local root_fd, open_err = open_canonical_private_directory(root, "state root", owner)
+	if not root_fd then
+		return nil, open_err
+	end
+	local value, status_err = workspace_status(host_root, root)
+	if not value then
+		close_fd(root_fd)
+		return nil, status_err
+	end
+	local name = vim.fn.sha256(host_root) .. ".log"
+	local expected = vim.fs.joinpath(root, "logs", name)
+	if type(value.log_path) ~= "string" or value.log_path ~= expected then
+		close_fd(root_fd)
+		return nil, "workspace record lifecycle log path does not match"
+	end
+	local logs_fd, logs_path_or_err =
+		open_existing_private_child_directory(root_fd, root, "logs", "logs directory", owner)
+	if not logs_fd then
+		close_fd(root_fd)
+		return nil, logs_path_or_err
+	end
+	local valid, valid_err = validate_log_at(logs_fd, expected, name, owner)
+	local logs_closed, logs_close_err = close_fd(logs_fd)
+	local root_closed, root_close_err = close_fd(root_fd)
+	if not valid then
+		return nil, valid_err
+	end
+	if not logs_closed or not root_closed then
+		return nil, "could not close lifecycle log hierarchy: " .. tostring(logs_close_err or root_close_err)
+	end
+	return expected
 end
 
 local function spool_root()
@@ -1265,7 +1576,12 @@ local function auth_token(spool)
 	if not value then
 		return nil, err
 	end
-	if value.version ~= 2 or type(value.token) ~= "string" or #value.token < 32 or value.token:find("%z") then
+	if
+		value.version ~= MESSAGE_VERSION
+		or type(value.token) ~= "string"
+		or #value.token < 32
+		or value.token:find("%z")
+	then
 		return nil, "spool authentication schema is invalid"
 	end
 	return value.token
@@ -1273,7 +1589,7 @@ end
 
 local function acknowledge(spool, token, request, ok, err)
 	local ack = {
-		version = 2,
+		version = MESSAGE_VERSION,
 		request_id = request.request_id,
 		ok = ok == true,
 		action = request.action,
@@ -1311,7 +1627,7 @@ local function consume_request(spool, name, token)
 		return nil, decode_err
 	end
 	if
-		request.version ~= 2
+		request.version ~= MESSAGE_VERSION
 		or not valid_id(request.request_id)
 		or name ~= request.request_id .. ".json"
 		or request.action ~= "open_location"
@@ -1458,7 +1774,7 @@ local function request_ack(spool, token, request, dependencies, callback)
 			if
 				ack
 				and (
-					ack.version ~= 2
+					ack.version ~= MESSAGE_VERSION
 					or ack.request_id ~= request.request_id
 					or ack.action ~= request.action
 					or type(ack.ok) ~= "boolean"
@@ -1531,7 +1847,7 @@ function M.request_host(action, dependencies, on_success)
 		return nil, append_cleanup_failure(uuid_err or "host request id is not one canonical UUIDv4", close_err)
 	end
 	local request = {
-		version = 2,
+		version = MESSAGE_VERSION,
 		request_id = request_id,
 		action = action,
 		created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -1564,8 +1880,60 @@ function M.request_host(action, dependencies, on_success)
 	return true, request_id
 end
 
+local function canonical_executable(value, label)
+	if type(value) ~= "string" or value == "" or value:find("%z") then
+		return nil, label .. " must resolve to a non-empty executable path"
+	end
+	local selected = value:sub(1, 1) == "/" and value or vim.fn.exepath(value)
+	if selected == "" or selected:sub(1, 1) ~= "/" or selected:sub(1, 2) == "//" then
+		return nil, label .. " is unavailable"
+	end
+	selected = vim.fs.normalize(selected)
+	local resolved = uv.fs_realpath(selected)
+	local stat = resolved and uv.fs_stat(resolved) or nil
+	if
+		not resolved
+		or resolved:sub(1, 1) ~= "/"
+		or not stat
+		or stat.type ~= "file"
+		or vim.fn.executable(resolved) ~= 1
+	then
+		return nil, label .. " is not one executable regular file"
+	end
+	return vim.fs.normalize(resolved)
+end
+
+function M.resolve_runtime()
+	if type(configured.resolve_cli) ~= "function" then
+		return nil, "certified Dev Containers CLI resolver is not configured"
+	end
+	local called, selected, resolve_err = pcall(configured.resolve_cli)
+	if not called then
+		return nil, "certified Dev Containers CLI resolution failed: " .. tostring(selected)
+	end
+	if selected == nil then
+		return nil, tostring(resolve_err or "no certified Dev Containers CLI is active")
+	end
+	local cli, cli_err = canonical_executable(selected, "certified Dev Containers CLI")
+	if not cli then
+		return nil, cli_err
+	end
+	local docker, docker_err = canonical_executable(configured.docker_path, "Docker-compatible engine")
+	if not docker then
+		return nil, docker_err
+	end
+	return { cli_path = cli, docker_path = docker }
+end
+
 function M.lifecycle_argv(action, spec)
-	if action ~= "up" and action ~= "status" and action ~= "log" and action ~= "host" and action ~= "doctor" then
+	if
+		action ~= "up"
+		and action ~= "restart-dead"
+		and action ~= "status"
+		and action ~= "log"
+		and action ~= "host"
+		and action ~= "doctor"
+	then
 		return nil, "unsupported lifecycle action"
 	end
 	local launcher = configured.launcher
@@ -1577,11 +1945,29 @@ function M.lifecycle_argv(action, spec)
 		vim.list_extend(argv, { "--repo", spec.root })
 	end
 	if action == "up" or action == "doctor" then
-		vim.list_extend(argv, { "--cli", configured.cli or "devcontainer" })
+		local runtime
+		local runtime_err
+		if type(spec) == "table" and (spec.cli_path ~= nil or spec.docker_path ~= nil) then
+			local cli, cli_err = canonical_executable(spec.cli_path, "recorded Dev Containers CLI")
+			local docker, docker_err = canonical_executable(spec.docker_path, "recorded Docker-compatible engine")
+			if not cli or not docker then
+				return nil, cli_err or docker_err
+			end
+			runtime = { cli_path = cli, docker_path = docker }
+		else
+			runtime, runtime_err = M.resolve_runtime()
+		end
+		if not runtime then
+			return nil, runtime_err
+		end
+		vim.list_extend(argv, { "--cli-path", runtime.cli_path, "--docker-path", runtime.docker_path })
 		vim.list_extend(argv, { "--lockfile-policy", configured.lockfile_policy or "preserve" })
 		vim.list_extend(argv, { "--ssh-agent", configured.ssh_agent or "auto" })
+		if action == "doctor" and type(spec) == "table" and spec.config then
+			vim.list_extend(argv, { "--config", spec.config })
+		end
 	end
-	if action == "up" and type(spec) == "table" then
+	if (action == "up" or action == "restart-dead") and type(spec) == "table" then
 		if type(spec.tmux_pane) ~= "string" or not spec.tmux_pane:match("^%%%d+$") then
 			return nil, "Dev Container lifecycle requires one explicit tmux pane"
 		end
@@ -1596,11 +1982,16 @@ function M.lifecycle_argv(action, spec)
 		if spec.recreate then
 			argv[#argv + 1] = "--recreate"
 		end
-		if spec.allow_network then
+		if action == "up" and spec.allow_network then
 			argv[#argv + 1] = "--allow-network"
 		end
-	elseif action == "up" then
+	elseif action == "up" or action == "restart-dead" then
 		return nil, "Dev Container lifecycle requires one explicit tmux pane"
+	elseif action == "host" and type(spec) == "table" and spec.tmux_pane ~= nil then
+		if type(spec.tmux_pane) ~= "string" or not spec.tmux_pane:match("^%%%d+$") then
+			return nil, "Dev Container host recovery requires one explicit tmux pane"
+		end
+		vim.list_extend(argv, { "--tmux-pane", spec.tmux_pane })
 	end
 	return argv
 end
@@ -1661,7 +2052,7 @@ function M.effective_config()
 	return copy({
 		ack_timeout_ms = configured.ack_timeout_ms,
 		claim_timeout_ms = configured.claim_timeout_ms,
-		cli = configured.cli,
+		docker_path = configured.docker_path,
 		lockfile_policy = configured.lockfile_policy,
 		max_messages_per_tick = configured.max_messages_per_tick,
 		poll_interval_ms = configured.poll_interval_ms,
@@ -1720,7 +2111,7 @@ M._set_test_hook = function(callback)
 	assert(callback == nil or type(callback) == "function", "test hook must be a function or nil")
 	test_hook = callback
 end
-M._record_keys = RECORD_KEYS
+M._record_keys = RECORD_KEYS_V6
 M._request_keys = REQUEST_KEYS
 M._ack_keys = ACK_KEYS
 

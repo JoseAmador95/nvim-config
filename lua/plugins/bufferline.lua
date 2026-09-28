@@ -9,17 +9,22 @@ return {
 	config = function()
 		local tabs = require("config.tabs")
 		local palette = require("config.palette")
+		local redraw_profile = require("config.redraw_profile")
 		local function request_close(tabpage)
 			return tabs.request_close(tabpage)
 		end
-		local function open_context_menu()
+		local function open_context_menu(tabpage)
+			if type(tabpage) ~= "number" or not vim.api.nvim_tabpage_is_valid(tabpage) then
+				return false
+			end
+			vim.api.nvim_set_current_tabpage(tabpage)
 			return require("config.menu").open_context({ move_cursor = false })
 		end
 
 		require("bufferline").setup({
 			options = {
 				mode = "tabs",
-				diagnostics = "nvim_lsp",
+				diagnostics = redraw_profile.bufferline_diagnostics() and "nvim_lsp" or false,
 				show_buffer_icons = true,
 				show_buffer_close_icons = true,
 				show_close_icon = false,
@@ -28,7 +33,7 @@ return {
 				middle_mouse_command = request_close,
 				name_formatter = tabs.name_formatter,
 				separator_style = "thin",
-				hover = { enabled = true },
+				hover = { enabled = redraw_profile.bufferline_hover() },
 				numbers = "none",
 			},
 			highlights = function(defaults)
@@ -52,5 +57,8 @@ return {
 				return highlights
 			end,
 		})
+		redraw_profile.register_repaint("bufferline", function()
+			vim.cmd.redrawtabline()
+		end)
 	end,
 }

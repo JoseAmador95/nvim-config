@@ -29,6 +29,7 @@ local function fake_backend(options)
 		opened = {},
 		stop_count = 0,
 		dispose_count = 0,
+		last_lines_limit = nil,
 		options = options or {},
 	}
 	function backend.open(spec, callbacks)
@@ -61,6 +62,9 @@ local function fake_backend(options)
 	function backend.show(handle)
 		handle.visible = true
 		handle.show_count = handle.show_count + 1
+		if backend.options.exit_during_show ~= nil then
+			handle.callbacks.on_exit(backend.options.exit_during_show)
+		end
 		return true
 	end
 	function backend.focus(handle)
@@ -84,7 +88,8 @@ local function fake_backend(options)
 		handle.visible = false
 		return true
 	end
-	function backend.lines(handle)
+	function backend.lines(handle, max_lines)
+		backend.last_lines_limit = max_lines
 		return vim.api.nvim_buf_get_lines(handle.buf, 0, -1, false)
 	end
 	return backend
@@ -216,6 +221,46 @@ test("quick failure during starting settles with retained output", function()
 	assert(backend.dispose_count == 0, "quick failure discarded its backend view")
 end)
 
+test("a synchronous exit while showing never focuses or revives a disposed terminal", function()
+	local backend = setup_backend({ exit_during_show = 0 })
+	local record = assert(terminal.open(spec("show-exit")))
+	assert(record.state == "disposed" and terminal.status(record).state == "disposed")
+	assert(record.handle.focus_count == 0, "focus ran after show synchronously disposed the terminal")
+	assert(record.visible == false, "show revived the disposed terminal visibility")
+	assert(backend.dispose_count == 1, "the disposed terminal view was not closed exactly once")
+end)
+
+test("a synchronous failure while showing retains output without stale focus", function()
+	local backend = setup_backend({ exit_during_show = 9 })
+	local record = assert(terminal.open(spec("show-failure")))
+	assert(record.state == "exited-retained" and terminal.status(record).exit_code == 9)
+	assert(record.handle.focus_count == 0, "focus ran after show synchronously observed process exit")
+	assert(backend.dispose_count == 0, "synchronous failure discarded its retained output")
+end)
+
+test("lines are tail-bounded and returned as caller-owned copies", function()
+	terminal._reset()
+	local backend = fake_backend()
+	terminal.setup({
+		backend = backend,
+		max_output_lines = 2,
+		schedule = function(callback)
+			callback()
+		end,
+	})
+	local record = assert(terminal.open(spec("bounded-lines")))
+	vim.api.nvim_buf_set_lines(record.buf, 0, -1, false, { "one", "two", "three", "four" })
+	local lines = assert(terminal.lines(record))
+	assert(backend.last_lines_limit == 2, "the backend did not receive the configured read bound")
+	assert(vim.deep_equal(lines, { "three", "four" }), "terminal output did not retain the bounded tail")
+	lines[1] = "mutated"
+	assert(vim.deep_equal(assert(terminal.lines(record)), { "three", "four" }), "terminal lines share backend state")
+	local ok = pcall(terminal.setup, { backend = backend, max_output_lines = 0 })
+	assert(not ok and terminal.effective_config().max_output_lines == 2, "invalid output bound mutated setup state")
+	ok = pcall(terminal.setup, { backend = backend, max_output_lines = 100001 })
+	assert(not ok and terminal.effective_config().max_output_lines == 2, "unsafe output bound escaped validation")
+end)
+
 test("stop remains pending until exit and then retains output", function()
 	local backend = setup_backend()
 	local value = spec("stop")
@@ -322,12 +367,14 @@ test("configuration, mappings, events, and stop timeout stay observable without 
 	local initial = terminal.status()
 	assert(initial.configured == false and #initial.terminals == 0)
 	assert(terminal.effective_config().stop_timeout_ms == 5000)
+	assert(terminal.effective_config().max_output_lines == 10000)
 	local backend = fake_backend()
 	local deferred = {}
 	local events = {}
 	terminal.setup({
 		backend = backend,
 		stop_timeout_ms = 7,
+		max_output_lines = 11,
 		buffer_mappings = { close = "x", open_location = false },
 		defer = function(callback, milliseconds)
 			assert(milliseconds == 7)
@@ -346,7 +393,9 @@ test("configuration, mappings, events, and stop timeout stay observable without 
 	end
 	assert(mappings.x and not mappings.q and not mappings.gf, "configured buffer mappings were not exact")
 	local effective = terminal.effective_config()
-	assert(effective.stop_timeout_ms == 7 and effective.buffer_mappings.close == "x")
+	assert(
+		effective.stop_timeout_ms == 7 and effective.max_output_lines == 11 and effective.buffer_mappings.close == "x"
+	)
 	effective.buffer_mappings.close = "mutated"
 	assert(terminal.effective_config().buffer_mappings.close == "x", "effective config shares state")
 	local before = terminal.status(record)

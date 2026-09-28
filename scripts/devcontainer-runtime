@@ -1,0 +1,10 @@
+#!/bin/sh
+# Resolve and preflight the host Dev Container runtime without loading init.lua.
+set -u
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+nvim_bin=$(command -v nvim 2>/dev/null) || {
+	printf '%s\n' 'devcontainer-runtime: nvim is unavailable' >&2
+	exit 127
+}
+exec "$nvim_bin" --headless -u NONE -i NONE -l "$script_dir/devcontainer-runtime.lua" "$@"

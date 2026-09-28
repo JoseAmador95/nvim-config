@@ -7,6 +7,8 @@ local deferred = require("config.deferred")
 local lifecycle
 local lifecycle_configured = false
 local ensure_lifecycle
+local DEFAULT_MAX_OUTPUT_LINES = 10000
+local max_output_lines = DEFAULT_MAX_OUTPUT_LINES
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve config.terminal source")
 local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
 local devcontainer_bashrc = vim.fs.joinpath(config_root, "scripts", "devcontainer-bashrc")
@@ -103,6 +105,9 @@ local function window_options(spec, callbacks)
 		end
 		bound = true
 		local buf = win.buf
+		if vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].buftype == "terminal" then
+			vim.bo[buf].scrollback = max_output_lines
+		end
 		local exit_reported = false
 		local function report_exit(status)
 			if exit_reported then
@@ -222,11 +227,13 @@ function snacks_backend.dispose(win)
 	return ok and true or nil, ok and nil or tostring(err)
 end
 
-function snacks_backend.lines(win)
+function snacks_backend.lines(win, max_lines)
 	if not win or not win.buf_valid or not win:buf_valid() then
 		return nil, "terminal does not exist"
 	end
-	return vim.api.nvim_buf_get_lines(win.buf, 0, -1, false)
+	max_lines = math.min(tonumber(max_lines) or max_output_lines, max_output_lines)
+	local count = vim.api.nvim_buf_line_count(win.buf)
+	return vim.api.nvim_buf_get_lines(win.buf, math.max(0, count - max_lines), -1, false)
 end
 
 local function parse_location(spec, buf)
@@ -263,8 +270,10 @@ end
 
 local lifecycle_policy = require("config.local_config").plugin("terminal_lifecycle", {
 	stop_timeout_ms = 5000,
+	max_output_lines = DEFAULT_MAX_OUTPUT_LINES,
 	buffer_mappings = { close = "q", open_location = "gf" },
 })
+max_output_lines = lifecycle_policy.max_output_lines
 
 local function configure_lifecycle()
 	local candidate = lifecycle
@@ -283,6 +292,7 @@ local function configure_lifecycle()
 		schedule = vim.schedule,
 		open_location = parse_location,
 		stop_timeout_ms = lifecycle_policy.stop_timeout_ms,
+		max_output_lines = max_output_lines,
 		buffer_mappings = lifecycle_policy.buffer_mappings,
 	})
 	if not ok then

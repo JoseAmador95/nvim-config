@@ -2,6 +2,10 @@
 -- commands, and notifications remain configuration policy.
 local M = {}
 local deferred = require("config.deferred")
+local local_config = require("config.local_config")
+
+local DEFAULT_MAX_MATCHES = 20000
+local DEFAULT_SCAN_LINES_PER_TICK = 1000
 
 local matches
 local configured = false
@@ -20,6 +24,28 @@ local colors = {
 local color_index = {}
 for index, entry in ipairs(colors) do
 	color_index[entry.name] = index
+end
+
+local function positive_integer(value, fallback)
+	value = tonumber(value)
+	if not value or value < 1 then
+		return fallback
+	end
+	return math.floor(value)
+end
+
+local function match_settings()
+	local value = local_config.plugin("log_workbench", {
+		max_matches = DEFAULT_MAX_MATCHES,
+		scan_lines_per_tick = DEFAULT_SCAN_LINES_PER_TICK,
+	})
+	if type(value) ~= "table" then
+		value = {}
+	end
+	return {
+		max_matches = positive_integer(value.max_matches, DEFAULT_MAX_MATCHES),
+		scan_lines_per_tick = positive_integer(value.scan_lines_per_tick, DEFAULT_SCAN_LINES_PER_TICK),
+	}
 end
 
 local function notify(message, level)
@@ -45,7 +71,11 @@ local function ensure_matches()
 		end
 		matches = result
 	end
-	local ok, setup_ok, setup_err = pcall(matches.setup)
+	local limits = match_settings()
+	local ok, setup_ok, setup_err = pcall(matches.setup, {
+		max_matches = limits.max_matches,
+		scan_lines_per_tick = limits.scan_lines_per_tick,
+	})
 	if not ok then
 		return nil, setup_ok
 	end

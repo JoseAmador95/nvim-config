@@ -199,6 +199,186 @@ test("host coalesces focus and terminal refreshes with reload priority", functio
 	vim.defer_fn = original_defer
 end)
 
+test("registered painters propagate failure before palette repaint", function()
+	local original_router = package.loaded.theme_router
+	local original_local_config = package.loaded["config.local_config"]
+	local original_palette = package.loaded["config.palette"]
+	local original_theme = package.loaded["config.theme"]
+	local registered = {}
+	local palette_calls = 0
+	local palette_result = true
+	package.loaded.theme_router = {
+		setup = function()
+			return { colorscheme = "vscode", source = "default", validity = { valid = true } }
+		end,
+		register = function(name, painter)
+			registered[name] = painter
+			return true
+		end,
+	}
+	package.loaded["config.local_config"] = {
+		plugin = function()
+			return { reload_on_focus = false }
+		end,
+	}
+	package.loaded["config.palette"] = {
+		apply = function()
+			palette_calls = palette_calls + 1
+			return palette_result, palette_result and nil or "palette rejected"
+		end,
+	}
+	package.loaded["config.theme"] = nil
+	local theme = require("config.theme")
+	assert(theme.register("reject", function()
+		return false, "painter rejected"
+	end))
+	local painted, paint_err = registered.reject("reject", { background = "dark" })
+	assert(not painted and paint_err == "painter rejected", "painter false/error was not propagated exactly")
+	equal(0, palette_calls, "palette ran after a rejected painter")
+
+	assert(theme.register("throw", function()
+		error("painter exploded")
+	end))
+	painted, paint_err = registered.throw("throw", { background = "dark" })
+	assert(not painted and paint_err:find("painter exploded", 1, true), "painter exception was not propagated")
+	equal(0, palette_calls, "palette ran after a throwing painter")
+
+	assert(theme.register("success", function() end))
+	assert(registered.success("success", { background = "light" }))
+	equal(1, palette_calls, "palette did not run after a successful painter")
+	palette_result = false
+	painted, paint_err = registered.success("success", { background = "light" })
+	assert(not painted and paint_err == "palette rejected", "palette false/error was not propagated")
+
+	package.loaded["config.theme"] = original_theme
+	package.loaded.theme_router = original_router
+	package.loaded["config.local_config"] = original_local_config
+	package.loaded["config.palette"] = original_palette
+end)
+
+test("every host operation invalidates queued refreshes on false returns and exceptions", function()
+	local original_defer = vim.defer_fn
+	local original_router = package.loaded.theme_router
+	local original_local_config = package.loaded["config.local_config"]
+	local original_theme = package.loaded["config.theme"]
+	local original_notify = vim.notify
+	local deferred = {}
+	local responses = {}
+	local calls = {}
+	local notifications = {}
+	vim.defer_fn = function(callback, delay)
+		deferred[#deferred + 1] = { callback = callback, delay = delay }
+	end
+	vim.notify = function(message)
+		notifications[#notifications + 1] = tostring(message)
+	end
+	local function operation(name, value)
+		calls[name] = (calls[name] or 0) + 1
+		if responses[name] == "false" then
+			return false, name .. " rejected"
+		end
+		if responses[name] == "throw" then
+			error(name .. " exploded")
+		end
+		return true, value
+	end
+	package.loaded.theme_router = {
+		setup = function()
+			return { colorscheme = "vscode", source = "default", validity = { valid = true } }
+		end,
+		apply = function()
+			return operation("apply", "vscode")
+		end,
+		repaint = function()
+			return operation("repaint", "vscode")
+		end,
+		persist = function()
+			return operation("persist")
+		end,
+		select = function()
+			return operation("select")
+		end,
+		reload = function()
+			return operation("reload", "vscode")
+		end,
+		reset = function()
+			return operation("reset", "vscode")
+		end,
+		selection = function()
+			return { colorscheme = "vscode", source = "default", validity = { valid = true } }
+		end,
+	}
+	package.loaded["config.local_config"] = {
+		plugin = function()
+			return { reload_on_focus = false }
+		end,
+	}
+	package.loaded["config.theme"] = nil
+	local theme = require("config.theme")
+	vim.defer_fn = original_defer
+	theme.setup()
+
+	local actions = {
+		apply = function()
+			return theme.apply("vscode")
+		end,
+		repaint = theme.repaint,
+		persist = function()
+			return theme.save("vscode")
+		end,
+		select = function()
+			return theme.select("vscode")
+		end,
+		reload = theme.reload,
+		reset = theme.reset,
+	}
+	local function queue()
+		vim.api.nvim_exec_autocmds("OptionSet", { pattern = "background" })
+		equal(1, #deferred, "background change did not queue exactly one refresh")
+		return table.remove(deferred, 1).callback
+	end
+	for _, mode in ipairs({ "false", "throw" }) do
+		for name, action in pairs(actions) do
+			local stale = queue()
+			responses[name] = mode
+			local ok, err = action()
+			assert(not ok, name .. " " .. mode .. " result was accepted")
+			local expected = name .. (mode == "false" and " rejected" or " exploded")
+			assert(tostring(err):find(expected, 1, true), name .. " did not propagate its exact failure")
+			responses[name] = nil
+			local repaint_before = calls.repaint or 0
+			stale()
+			equal(repaint_before, calls.repaint or 0, name .. " left a stale refresh after " .. mode)
+			local fresh = queue()
+			fresh()
+			equal(repaint_before + 1, calls.repaint or 0, name .. " left the coalescer wedged after " .. mode)
+		end
+	end
+
+	responses.repaint = "false"
+	queue()()
+	assert(
+		table.concat(notifications, "\n"):find("Theme refresh failed: repaint rejected", 1, true),
+		"scheduled false/error was not notified"
+	)
+	responses.repaint = "throw"
+	queue()()
+	assert(
+		table.concat(notifications, "\n"):find("Theme refresh failed:", 1, true)
+			and table.concat(notifications, "\n"):find("repaint exploded", 1, true),
+		"scheduled exception was not notified"
+	)
+
+	pcall(vim.api.nvim_del_augroup_by_name, "NvimConfigThemeReload")
+	pcall(vim.api.nvim_del_user_command, "Theme")
+	pcall(vim.api.nvim_del_user_command, "ThemeReset")
+	package.loaded["config.theme"] = original_theme
+	package.loaded.theme_router = original_router
+	package.loaded["config.local_config"] = original_local_config
+	vim.defer_fn = original_defer
+	vim.notify = original_notify
+end)
+
 if #failures > 0 then
 	error(table.concat(failures, "\n\n"))
 end

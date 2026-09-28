@@ -7,6 +7,7 @@ local root = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(root)
 vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
+require("config.local_plugins").setup()
 
 local failures = {}
 local count = 0
@@ -21,6 +22,125 @@ local function test(name, callback)
 end
 
 local review = require("config.code_review")
+
+local function assert_native_review_unloaded(context)
+	assert(package.loaded["config.native_review"] == nil, context .. " loaded the native review host adapter")
+	for name in pairs(package.loaded) do
+		assert(
+			name ~= "native_review" and name:sub(1, #"native_review.") ~= "native_review.",
+			context .. " loaded " .. name
+		)
+	end
+end
+
+test("host registration and neutral observers preserve the first-action boundary", function()
+	assert_native_review_unloaded("requiring config.code_review")
+	local status = review.status()
+	assert(vim.deep_equal(status, { active = false, mode_on = false }))
+	status.active = true
+	assert(review.status().active == false, "neutral review status shares mutable state")
+	assert(review.snapshot(true) == nil, "unloaded review exposed a snapshot")
+	assert(review.suspend_for_session() and review.restore_after_session(), "unloaded session hook was not neutral")
+	assert(review.capture_location() == nil, "unloaded review exposed a navigation location")
+	assert(
+		review.restore_location({ kind = "provider", provider = "native-review", payload = {} }) == false,
+		"unloaded review claimed to restore a navigation location"
+	)
+	assert_native_review_unloaded("probing unloaded review navigation")
+	assert(not review.lsp_blocked(0), "unloaded review blocked LSP navigation")
+	assert(not review.enforce_lsp_blocked(0, 17), "unloaded review stopped an LSP client")
+	assert(review.lsp_definition_options(0, 0) == nil, "unloaded review exposed definition routing")
+
+	local root_calls = 0
+	local wrapped_root = review.wrap_lsp_root_dir(function(_, on_dir)
+		root_calls = root_calls + 1
+		on_dir(root)
+	end)
+	local observed_root
+	wrapped_root(0, function(value)
+		observed_root = value
+	end)
+	assert(root_calls == 1 and observed_root == root, "neutral review wrapper changed ordinary root discovery")
+
+	review.setup()
+	review.setup()
+	for _, command in ipairs({
+		"ReviewOpen",
+		"ReviewScope",
+		"ReviewScopeBack",
+		"ReviewSessions",
+		"ReviewMode",
+		"ReviewPanel",
+		"ReviewFiles",
+		"ReviewCommits",
+		"ReviewComments",
+		"ReviewThreads",
+		"ReviewCode",
+		"ReviewNext",
+		"ReviewPrev",
+		"ReviewRefresh",
+		"ReviewLayout",
+		"ReviewContext",
+		"ReviewInlineComments",
+		"ReviewComment",
+		"ReviewFileComment",
+		"ReviewGeneralComment",
+		"ReviewEdit",
+		"ReviewDeleteDraft",
+		"ReviewChangeType",
+		"ReviewReply",
+		"ReviewResolve",
+		"ReviewReopen",
+		"ReviewToggleResolve",
+		"ReviewReanchor",
+		"ReviewExport",
+		"ReviewClose",
+	}) do
+		assert(vim.fn.exists(":" .. command) == 2, command .. " was not registered lazily")
+	end
+	assert(#review.mapping_specs() == 25, "host mapping catalogue is incomplete")
+	require("config.statusline").refresh_buffer(0)
+	require("plugins.auto-session")
+	require("plugins.navic")
+	require("config.lsp_navigation")
+	require("config.lsp_servers")
+	require("plugins.trouble")
+	assert_native_review_unloaded("registering review consumers")
+
+	local function close_without_notification()
+		local original_notify = vim.notify
+		vim.notify = function() end
+		local ok, err = pcall(vim.cmd, "ReviewClose")
+		vim.notify = original_notify
+		assert(ok, err)
+	end
+	close_without_notification()
+	local first_runtime =
+		assert(package.loaded["config.native_review"], "first Review action did not load host adapter")
+	local first_product = assert(package.loaded.native_review, "first Review action did not load native-review")
+	local first_controller =
+		assert(package.loaded["native_review.controller"], "first Review action omitted controller")
+	local first_autocmds = vim.api.nvim_get_autocmds({ group = "NvimConfigCodeReview" })
+	assert(#first_autocmds > 0, "first Review action did not set up controller events")
+
+	local blocked = vim.api.nvim_create_buf(false, true)
+	vim.b[blocked].nvim_review_role = "snapshot"
+	local blocked_root
+	wrapped_root(blocked, function(value)
+		blocked_root = value
+	end)
+	assert(blocked_root == nil and root_calls == 1, "deferred root wrapper did not adopt the review LSP gate")
+	vim.api.nvim_buf_delete(blocked, { force = true })
+
+	close_without_notification()
+	assert(package.loaded["config.native_review"] == first_runtime, "second Review action replaced host adapter")
+	assert(package.loaded.native_review == first_product, "second Review action replaced native-review")
+	assert(package.loaded["native_review.controller"] == first_controller, "second Review action replaced controller")
+	assert(
+		#vim.api.nvim_get_autocmds({ group = "NvimConfigCodeReview" }) == #first_autocmds,
+		"second Review action duplicated controller setup"
+	)
+end)
 
 test("ReviewOpen parser keeps the exact native scope vocabulary", function()
 	assert(vim.deep_equal(review._parse_open({}), { kind = "branch" }))
@@ -128,6 +248,92 @@ test("inline comment previews use status, range, first content, and Unicode-safe
 	assert(short:find("short body", 1, true) and short:sub(-3) ~= "…")
 end)
 
+test("inactive comment types keep their label and rail under an issue-only catalogue", function()
+	local types = require("native_review.comment_types")
+	local extras = {}
+	for index, definition in ipairs(types.all()) do
+		if index > 1 then
+			extras[#extras + 1] = {
+				id = definition.id,
+				icon = definition.icon,
+				highlight = definition.highlight,
+				default_link = definition.default_link,
+				rail_rank = definition.rail_rank,
+				severity = definition.severity,
+			}
+		end
+	end
+	types.reset()
+	local ok, err = xpcall(function()
+		assert(vim.deep_equal(types.ids(), { "issue" }), "issue was not the sole default type")
+		local item = {
+			type = "retired",
+			body = "Historical body",
+			anchor = {
+				kind = "range",
+				path = "lua/example.lua",
+				side = "right",
+				layer = "history",
+				start_line = 1,
+				end_line = 1,
+			},
+			resolution = "open",
+			deliveries = {},
+		}
+		assert(review._inline_preview_text(item, 80):find("[· retired]", 1, true))
+		assert(review._inline_preview_chunks(item, 80)[2][2] == "Comment")
+		local buf = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one" })
+		vim.b[buf].nvim_review_path = "lua/example.lua"
+		vim.b[buf].nvim_review_side = "right"
+		vim.b[buf].nvim_review_layer = "history"
+		review.decorate_buffer({ root = "/tmp/review-inactive", session = { items = { item } } }, buf)
+		local signs = vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })
+		local found = false
+		for _, sign in ipairs(signs) do
+			found = found or (sign[4].sign_hl_group == "Comment" and vim.trim(sign[4].sign_text or "") == "·")
+		end
+		vim.api.nvim_buf_delete(buf, { force = true })
+		assert(found, "inactive historical comment lost its rail")
+
+		types.configure({
+			{
+				id = "custom",
+				icon = "界",
+				highlight = "NvimReviewCommentCustom",
+				default_link = "DiagnosticSignInfo",
+				rail_rank = 2,
+			},
+		})
+		require("config.native_review").controller.setup()
+		assert(vim.deep_equal(types.ids(), { "issue", "custom" }), "controller kept its old type list")
+		assert(
+			vim.api.nvim_get_hl(0, { name = "NvimReviewCommentCustom", link = true }).link == "DiagnosticSignInfo",
+			"reconfigured type did not receive its highlight"
+		)
+		item.type = "custom"
+		item.anchor.end_line = 2
+		assert(review._inline_preview_text(item, 80):find("[界 custom]", 1, true))
+		local custom_buf = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_buf_set_lines(custom_buf, 0, -1, false, { "one", "two" })
+		vim.b[custom_buf].nvim_review_path = "lua/example.lua"
+		vim.b[custom_buf].nvim_review_side = "right"
+		vim.b[custom_buf].nvim_review_layer = "history"
+		review.decorate_buffer({ root = "/tmp/review-custom", session = { items = { item } } }, custom_buf)
+		local custom_signs = vim.api.nvim_buf_get_extmarks(custom_buf, -1, 0, -1, { details = true })
+		assert(
+			#custom_signs == 2
+				and custom_signs[1][4].sign_hl_group == "NvimReviewCommentCustom"
+				and custom_signs[1][4].sign_text == "界",
+			"new configured type did not receive a comment rail"
+		)
+		vim.api.nvim_buf_delete(custom_buf, { force = true })
+	end, debug.traceback)
+	types.configure(extras)
+	require("config.native_review").controller.setup()
+	assert(ok, err)
+end)
+
 test("inclusive cursor matching covers multiline overlaps", function()
 	local location = { path = "lua/example.lua", side = "right", layer = "history", line = 5 }
 	assert(review._contains_line({
@@ -206,7 +412,7 @@ test("comment rails compact each line and type with stable priorities", function
 	range_item("question", 2, 2)
 	range_item("question", 2, 2, { reply_to = items[3].id })
 	for _ = 1, 9 do
-		range_item("rationale", 3, 3)
+		range_item("objection!", 3, 3)
 	end
 	range_item("pedantic", 1, 3)
 	range_item("praise", 4, 5)
@@ -245,7 +451,7 @@ test("comment rails compact each line and type with stable priorities", function
 		},
 		[2] = { NvimReviewCommentQuestion = "2", NvimReviewCommentPedantic = "│" },
 		[3] = {
-			NvimReviewCommentRationale = "9",
+			NvimReviewCommentObjection = "9",
 			NvimReviewCommentPedantic = "╰",
 			NvimReviewCommentPraise = "╭♥",
 		},
@@ -256,7 +462,7 @@ test("comment rails compact each line and type with stable priorities", function
 		NvimReviewCommentIssue = 89,
 		NvimReviewCommentSuggestion = 88,
 		NvimReviewCommentQuestion = 87,
-		NvimReviewCommentRationale = 86,
+		NvimReviewCommentObjection = 86,
 		NvimReviewCommentPedantic = 85,
 		NvimReviewCommentPraise = 84,
 	}
@@ -318,7 +524,7 @@ test("file comments render as virtual line zero only on their exact side", funct
 					side = "left",
 					layer = "history",
 				}),
-				comment(4, "rationale", "review-only comment", { kind = "general" }),
+				comment(4, "objection!", "review-only comment", { kind = "general" }),
 			},
 		},
 	}
@@ -371,7 +577,7 @@ test("comment sign highlights are theme-linked, restored, and user-overridable",
 		NvimReviewCommentIssue = "DiagnosticSignError",
 		NvimReviewCommentSuggestion = "DiagnosticSignWarn",
 		NvimReviewCommentQuestion = "DiagnosticSignInfo",
-		NvimReviewCommentRationale = "Special",
+		NvimReviewCommentObjection = "Special",
 		NvimReviewCommentPedantic = "DiagnosticSignHint",
 		NvimReviewCommentPraise = "DiagnosticSignOk",
 	}
@@ -402,6 +608,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 	local originals = {
 		resolve = scope_module.resolve,
 		load = store.load,
+		list = store.list,
 		new = store.new,
 		save = store.save,
 		edit = store.edit,
@@ -420,6 +627,8 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		show = presenter.show,
 		clear = presenter.clear,
 		current_target = presenter.current_target,
+		capture_location = presenter.capture_location,
+		restore_location = presenter.restore_location,
 		refresh_winbars = presenter.refresh_winbars,
 		panel_new = panel.new,
 		panel_open = panel.open,
@@ -895,6 +1104,65 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(review.mode("on") and workspace.mode_on and calls.shown == 3)
 		review_tab = vim.api.nvim_get_current_tabpage()
 		assert(#vim.api.nvim_list_tabpages() == tabs + 1 and review_tab ~= invocation_tab)
+
+		calls.async_superseded_callback = false
+		calls.async_old_workspace = workspace
+		review.open_async({ kind = "commit", rev = "CHILD" }, repository, function()
+			calls.async_superseded_callback = true
+		end)
+		review.open_async({ kind = "commit", rev = "HEAD" }, repository, function(value)
+			calls.async_completed_workspace = value
+		end)
+		assert(review.status().pending and review.status().operation.kind == "open")
+		assert(review._active_workspace() == calls.async_old_workspace, "pending open replaced the visible review")
+		assert(
+			vim.wait(1000, function()
+				return calls.async_completed_workspace ~= nil
+			end),
+			"asynchronous review open did not complete"
+		)
+		assert(not calls.async_superseded_callback, "superseded review open invoked its completion")
+		workspace = calls.async_completed_workspace
+		assert(review._active_workspace() == workspace and not review.status().pending)
+
+		calls.async_prior_model = workspace.model
+		review.refresh_async(function(value)
+			calls.async_refreshed = value
+		end)
+		assert(review.status().pending and review._active_workspace().model == calls.async_prior_model)
+		assert(
+			vim.wait(1000, function()
+				return calls.async_refreshed ~= nil
+			end),
+			"asynchronous review refresh did not complete"
+		)
+		assert(calls.async_refreshed == true and workspace.model ~= calls.async_prior_model)
+		assert(review._active_workspace() == workspace and not review.status().pending)
+
+		local guarded_model = workspace.model
+		local guarded_session = vim.deepcopy(workspace.session)
+		guarded_session.revision = guarded_session.revision + 1
+		calls.async_guard_finished = false
+		review.refresh_async(function(value, refresh_err)
+			calls.async_guard_value = value
+			calls.async_guard_error = refresh_err
+			calls.async_guard_finished = true
+		end)
+		vim.schedule(function()
+			workspace.session = guarded_session
+			workspace.scope = guarded_session.scope
+			workspace.generation = workspace.generation + 1
+		end)
+		assert(
+			vim.wait(1000, function()
+				return calls.async_guard_finished
+			end),
+			"guarded asynchronous refresh did not complete"
+		)
+		assert(calls.async_guard_value == nil and calls.async_guard_error:find("content changed", 1, true))
+		assert(workspace.session == guarded_session, "pending refresh replaced a newer live session")
+		assert(workspace.model == guarded_model, "rejected pending refresh replaced the visible model")
+
 		vim.api.nvim_set_current_tabpage(invocation_tab)
 		vim.cmd("tabnew")
 		local manual_invocation_tab = vim.api.nvim_get_current_tabpage()
@@ -1165,6 +1433,32 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		local integration_origin_win = workspace.panel.source_win
 		vim.api.nvim_set_current_win(integration_origin_win)
 		local stub_mode_state = workspace.mode_state
+		local navigation_regression = {
+			stub_mode = {
+				new = mode.new,
+				enable = mode.enable,
+				disable = mode.disable,
+				suspend = mode.suspend,
+				restore = mode.restore,
+				enroll_affected_buffer = mode.enroll_affected_buffer,
+			},
+		}
+		navigation_regression.use_real_mode = function()
+			mode.new = originals.mode_new
+			mode.enable = originals.enable
+			mode.disable = originals.disable
+			mode.suspend = originals.mode_suspend
+			mode.restore = originals.mode_restore
+			mode.enroll_affected_buffer = originals.enroll_affected_buffer
+		end
+		navigation_regression.use_stub_mode = function()
+			mode.new = navigation_regression.stub_mode.new
+			mode.enable = navigation_regression.stub_mode.enable
+			mode.disable = navigation_regression.stub_mode.disable
+			mode.suspend = navigation_regression.stub_mode.suspend
+			mode.restore = navigation_regression.stub_mode.restore
+			mode.enroll_affected_buffer = navigation_regression.stub_mode.enroll_affected_buffer
+		end
 		local stub_presenter = {
 			show = presenter.show,
 			clear = presenter.clear,
@@ -1187,6 +1481,10 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(vim.api.nvim_buf_get_lines(left.buf, 3, 4, false)[1] == "old four", "old line was not real text")
 		vim.api.nvim_set_current_win(left.win)
 		vim.api.nvim_win_set_cursor(left.win, { 4, 0 })
+		local stale_navigation = assert(review.capture_location())
+		assert(stale_navigation.kind == "provider" and stale_navigation.provider == "native-review")
+		assert(stale_navigation.payload.side == "old" and stale_navigation.payload.path == entry.old_path)
+		assert(stale_navigation.payload.line == 4 and stale_navigation.payload.col == 1)
 		review.comment(4, 4, "question")
 		assert(#calls.composed == composed_before_old_side + 1, "old-side comment did not reach the composer")
 		local old_options = calls.composed[#calls.composed].options
@@ -1223,6 +1521,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 
 		local confirmations = {}
 		vim.ui.select = function(choices, options, callback)
+			assert(options.kind == "native_review", "delete confirmation omitted its review picker kind")
 			confirmations[#confirmations + 1] = {
 				choices = vim.deepcopy(choices),
 				options = vim.deepcopy(options),
@@ -1246,6 +1545,9 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(calls.delete_session == latest_session, "delete did not refetch the latest active session")
 		assert(#workspace.session.items == 0, "confirmed deletion did not save")
 		assert(workspace.generation > generation_before_delete, "saved deletion did not advance workspace generation")
+		local cursor_after_delete = vim.api.nvim_win_get_cursor(vim.api.nvim_get_current_win())
+		assert(review.restore_location(stale_navigation) == false, "stale review generation restored navigation")
+		assert(vim.deep_equal(vim.api.nvim_win_get_cursor(vim.api.nvim_get_current_win()), cursor_after_delete))
 		vim.ui.select = original_select
 
 		local current_comment_id = string.rep("8", 64)
@@ -1300,7 +1602,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(not new_inline_options.anchor.context:find("old four", 1, true))
 
 		vim.api.nvim_win_set_cursor(inline.win, { 3, 0 })
-		review.comment(3, 3, "rationale")
+		review.comment(3, 3, "objection!")
 		local shared_options = calls.composed[#calls.composed].options
 		assert(shared_options.anchor.side == "right" and shared_options.anchor.start_line == 3)
 		review.comment(3, 4, "question")
@@ -1387,7 +1689,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			{
 				id = string.rep("a", 64),
 				sequence = 8,
-				type = "rationale",
+				type = "objection!",
 				body = "Panel only",
 				anchor = { kind = "general" },
 				reply_to = vim.NIL,
@@ -1525,7 +1827,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		workspace.session.items = {}
 		(function()
 			local other_old_lines = {}
-			for index = 1, 12 do
+			for index = 1, 120 do
 				other_old_lines[index] = ("other %02d"):format(index)
 			end
 			local other_new_lines = vim.deepcopy(other_old_lines)
@@ -1557,6 +1859,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			assert(vim.fn.mkdir(fixture_root, "p") == 1)
 			originals.definition_fixture_root = fixture_root
 			local paths = {
+				["added.lua"] = fixture_root .. "/added.lua",
 				["new.lua"] = fixture_root .. "/new.lua",
 				["missing.lua"] = fixture_root .. "/missing.lua",
 				["old.lua"] = fixture_root .. "/old.lua",
@@ -1670,6 +1973,647 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			workspace.layout = "inline"
 			workspace.context = "hunks"
 			assert(review.present(entry.identity), "definition route origin could not be presented")
+			local navigation_origin_presentation = integration_state.presentation
+			local navigation_origin_line = assert(navigation_origin_presentation.projection.by_source.new[4])
+			vim.api.nvim_set_current_win(navigation_origin_presentation.inline.win)
+			vim.api.nvim_win_set_cursor(navigation_origin_presentation.inline.win, { navigation_origin_line, 2 })
+			local navigation_origin = assert(review.capture_location())
+			assert(review.present(other_entry.identity), "navigation destination could not be presented")
+			local navigation_destination_presentation = integration_state.presentation
+			local navigation_destination_line = assert(navigation_destination_presentation.projection.by_source.new[4])
+			vim.api.nvim_set_current_win(navigation_destination_presentation.inline.win)
+			vim.api.nvim_win_set_cursor(
+				navigation_destination_presentation.inline.win,
+				{ navigation_destination_line, 3 }
+			)
+			local navigation_destination = assert(review.capture_location())
+			assert(navigation_origin.document_key ~= navigation_destination.document_key)
+			require("config.navigation_history").reset()
+			assert(
+				require("config.navigation_history").record_transition(navigation_origin, navigation_destination),
+				"review locations were not accepted by the shared navigation history"
+			)
+			assert(
+				require("config.navigation_history").back({ fallback = false }),
+				"shared navigation history could not restore the review origin"
+			)
+			assert(workspace.entry_identity == entry.identity and integration_state.presentation.entry == entry)
+			assert(
+				require("config.navigation_history").forward({ fallback = false }),
+				"shared navigation history could not restore the review destination"
+			)
+			assert(
+				workspace.entry_identity == other_entry.identity and integration_state.presentation.entry == other_entry
+			)
+			require("config.navigation_history").reset()
+			presenter.capture_location = function()
+				return nil, "simulated navigation capture failure"
+			end
+			local failed_capture, capture_err = review.capture_location()
+			presenter.capture_location = originals.capture_location
+			assert(failed_capture == nil)
+			assert(capture_err == "simulated navigation capture failure")
+			local events_before_origin_restore = #review_events
+			assert(review.restore_location(vim.deepcopy(navigation_origin)), "cross-entry origin did not restore")
+			assert(#review_events == events_before_origin_restore + 1, "origin restore did not emit exactly once")
+			assert(workspace.entry_identity == entry.identity and integration_state.presentation.entry == entry)
+			local restored_origin_line = assert(integration_state.presentation.projection.by_source.new[4])
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(integration_state.presentation.inline.win), {
+				restored_origin_line,
+				2,
+			}))
+			local events_before_destination_restore = #review_events
+			assert(
+				review.restore_location(vim.deepcopy(navigation_destination)),
+				"cross-entry destination did not restore"
+			)
+			assert(
+				#review_events == events_before_destination_restore + 1,
+				"destination restore did not emit exactly once"
+			)
+			assert(
+				workspace.entry_identity == other_entry.identity and integration_state.presentation.entry == other_entry
+			)
+			local restored_destination_line = assert(integration_state.presentation.projection.by_source.new[4])
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(integration_state.presentation.inline.win), {
+				restored_destination_line,
+				3,
+			}))
+
+			local function current_model_entry(identity)
+				for _, candidate in ipairs(workspace.model.entries) do
+					if candidate.identity == identity then
+						return candidate
+					end
+				end
+				return nil
+			end
+			local origin_identity = entry.identity
+			local destination_identity = other_entry.identity
+			local original_present_for_churn = review.present
+			review.present = function(identity, ...)
+				for index, candidate in ipairs(workspace.model.entries) do
+					if candidate.identity == identity then
+						workspace.model.entries[index] = vim.deepcopy(candidate)
+						break
+					end
+				end
+				return original_present_for_churn(identity, ...)
+			end
+			local events_before_model_churn = #review_events
+			local notifications_before_model_churn = #notifications
+			local churn_ok, churn_err = xpcall(function()
+				assert(review.restore_location(vim.deepcopy(navigation_origin)), "copied origin entry did not restore")
+				local current_origin = assert(current_model_entry(origin_identity))
+				assert(current_origin ~= entry, "origin entry object was not replaced by the regression fixture")
+				assert(integration_state.presentation.entry == current_origin)
+				local current_origin_line = assert(integration_state.presentation.projection.by_source.new[4])
+				assert(vim.deep_equal(vim.api.nvim_win_get_cursor(integration_state.presentation.inline.win), {
+					current_origin_line,
+					2,
+				}))
+
+				assert(
+					review.restore_location(vim.deepcopy(navigation_destination)),
+					"copied destination entry did not restore"
+				)
+				local current_destination = assert(current_model_entry(destination_identity))
+				assert(
+					current_destination ~= other_entry,
+					"destination entry object was not replaced by the regression fixture"
+				)
+				assert(integration_state.presentation.entry == current_destination)
+				local current_destination_line = assert(integration_state.presentation.projection.by_source.new[4])
+				assert(vim.deep_equal(vim.api.nvim_win_get_cursor(integration_state.presentation.inline.win), {
+					current_destination_line,
+					3,
+				}))
+			end, debug.traceback)
+			review.present = original_present_for_churn
+			assert(churn_ok, churn_err)
+			assert(#notifications == notifications_before_model_churn, "equivalent entry churn emitted a warning")
+			assert(#review_events == events_before_model_churn + 2, "entry churn did not emit once per restore")
+			entry = assert(current_model_entry(origin_identity))
+			other_entry = assert(current_model_entry(destination_identity))
+
+			do
+				local origin_before_drift = entry
+				local destination_before_drift = other_entry
+				local rollback_location = assert(review.capture_location())
+				local events_before_drift = #review_events
+				local notifications_before_drift = #notifications
+				local original_present = review.present
+				local restored
+				review.present = function(identity, ...)
+					if identity == origin_identity then
+						for index, candidate in ipairs(workspace.model.entries) do
+							if candidate.identity == identity then
+								local changed = vim.deepcopy(candidate)
+								changed.new_text = "semantic-drift-" .. changed.new_text
+								changed.hunks =
+									vim.diff(changed.old_text, changed.new_text, { result_type = "indices" })
+								workspace.model.entries[index] = changed
+								break
+							end
+						end
+					end
+					return original_present(identity, ...)
+				end
+				local fixture_ok, fixture_err = xpcall(function()
+					restored = review.restore_location(vim.deepcopy(navigation_origin))
+				end, debug.traceback)
+				review.present = original_present
+				for index, candidate in ipairs(workspace.model.entries) do
+					if candidate.identity == origin_identity then
+						workspace.model.entries[index] = origin_before_drift
+						break
+					end
+				end
+				assert(fixture_ok, fixture_err)
+				assert(restored == false, "semantic destination drift reported navigation success")
+				assert(#review_events == events_before_drift, "rolled-back semantic destination drift emitted state")
+				assert(#notifications == notifications_before_drift + 1)
+				assert(notifications[#notifications]:find("review destination model changed", 1, true))
+				assert(notifications[#notifications]:find("review entry changed in the current model", 1, true))
+				assert(not notifications[#notifications]:find("rollback failed", 1, true))
+				assert(
+					workspace.entry_identity == destination_before_drift.identity
+						and integration_state.presentation.entry == destination_before_drift
+				)
+				assert(vim.deep_equal(review.capture_location(), rollback_location))
+			end
+			entry = assert(current_model_entry(origin_identity))
+			other_entry = assert(current_model_entry(destination_identity))
+
+			do
+				local mutable_model = workspace.model
+				local backing_model = vim.deepcopy(mutable_model)
+				local readonly_value
+				local function readonly_list(value)
+					local copy = {}
+					for index, child in ipairs(value) do
+						copy[index] = readonly_value(child)
+					end
+					return copy
+				end
+				local function readonly_object(value)
+					return setmetatable({}, {
+						__index = function(_, key)
+							return readonly_value(value[key])
+						end,
+						__newindex = function()
+							error("review model is immutable", 2)
+						end,
+						__metatable = false,
+					})
+				end
+				readonly_value = function(value)
+					if type(value) ~= "table" then
+						return value
+					end
+					return vim.islist(value) and readonly_list(value) or readonly_object(value)
+				end
+				workspace.model = readonly_object(backing_model)
+				local events_before_proxy_model = #review_events
+				local notifications_before_proxy_model = #notifications
+				local proxy_ok, proxy_err = xpcall(function()
+					assert(review.restore_location(vim.deepcopy(navigation_origin)))
+					assert(integration_state.presentation.entry.identity == origin_identity)
+					assert(review.restore_location(vim.deepcopy(navigation_destination)))
+					assert(integration_state.presentation.entry.identity == destination_identity)
+				end, debug.traceback)
+				workspace.model = mutable_model
+				local cleaned, cleanup_err = review.present(destination_identity, nil, {
+					emit = false,
+					side = navigation_destination.payload.side,
+				})
+				local cursor_cleaned, cursor_cleanup_err = originals.restore_location(
+					integration_state,
+					navigation_destination.payload,
+					integration_state.presentation.generation
+				)
+				assert(proxy_ok, proxy_err)
+				assert(cleaned == true, cleanup_err)
+				assert(cursor_cleaned == true, cursor_cleanup_err)
+				assert(#notifications == notifications_before_proxy_model, "immutable proxy model emitted a warning")
+				assert(
+					#review_events == events_before_proxy_model + 2,
+					"immutable proxy restores did not emit exactly once"
+				)
+			end
+			entry = assert(current_model_entry(origin_identity))
+			other_entry = assert(current_model_entry(destination_identity))
+
+			local binary_entry = {
+				identity = "history\0before.bin\0after.bin",
+				status = "M",
+				layer = "history",
+				old_path = "before.bin",
+				new_path = "after.bin",
+				path = "after.bin",
+				old_text = "\0old binary bytes",
+				new_text = "\0new binary bytes",
+				hunks = {},
+				metadata_only = true,
+				binary = true,
+				submodule = false,
+				added = false,
+				deleted = false,
+			}
+			workspace.model.entries = { entry, other_entry, snapshot_entry, binary_entry }
+			workspace.layout = "split"
+			assert(review.present(binary_entry.identity), "metadata history origin could not be presented")
+			local binary_left = assert(integration_state.presentation.left)
+			vim.api.nvim_set_current_win(binary_left.win)
+			vim.api.nvim_win_set_cursor(binary_left.win, { 1, 3 })
+			local binary_old = assert(review.capture_location())
+			assert(binary_old.payload.side == "old" and binary_old.payload.line == 0)
+			workspace.layout = "inline"
+			assert(review.present(other_entry.identity))
+			assert(review.restore_location(vim.deepcopy(binary_old)), "metadata OLD history location did not restore")
+			assert(integration_state.presentation.entry == binary_entry)
+			assert(integration_state.presentation.inline.side == "old")
+			assert(vim.deep_equal(review.capture_location(), binary_old))
+
+			local added_entry = vim.deepcopy(other_entry)
+			added_entry.identity = "history\0\0added.lua"
+			added_entry.status = "A"
+			added_entry.old_path = nil
+			added_entry.old_text = ""
+			added_entry.new_path = "added.lua"
+			added_entry.path = added_entry.new_path
+			added_entry.new_text = "added line\n"
+			added_entry.added = true
+			added_entry.hunks = vim.diff(added_entry.old_text, added_entry.new_text, { result_type = "indices" })
+			write_disk("added.lua", added_entry.new_text)
+			workspace.model.entries = { entry, other_entry, snapshot_entry, binary_entry, added_entry }
+			workspace.layout = "split"
+			assert(review.present(added_entry.identity), "added-file history fixture could not be presented")
+			local added_left = assert(integration_state.presentation.left)
+			vim.api.nvim_set_current_win(added_left.win)
+			local alignment_location, alignment_err = review.capture_location()
+			assert(alignment_location == nil and alignment_err == nil, "alignment-only OLD pane was not neutral")
+			local added_right = assert(integration_state.presentation.right)
+			vim.api.nvim_set_current_win(added_right.win)
+			local added_location = assert(review.capture_location())
+			assert(added_location.payload.side == "new" and added_location.payload.path == added_entry.new_path)
+
+			workspace.layout = "inline"
+			assert(review.present(other_entry.identity), "rollback origin could not be presented")
+			local rollback_origin = integration_state.presentation
+			local rollback_line = assert(rollback_origin.projection.by_source.new[4])
+			vim.api.nvim_set_current_win(rollback_origin.inline.win)
+			vim.api.nvim_win_set_cursor(rollback_origin.inline.win, { rollback_line, 3 })
+			local rollback_location = assert(review.capture_location())
+			vim.api.nvim_set_current_tabpage(invocation_tab)
+			vim.api.nvim_set_current_win(invocation_win)
+			local ordinary_cursor = vim.api.nvim_win_get_cursor(invocation_win)
+			local events_before_failed_navigation = #review_events
+			local notifications_before_failed_navigation = #notifications
+			local show_before_snapshot_failure = presenter.show
+			local snapshot_failure_show_calls = 0
+			presenter.show = function(...)
+				snapshot_failure_show_calls = snapshot_failure_show_calls + 1
+				return show_before_snapshot_failure(...)
+			end
+			presenter.capture_location = function()
+				return nil, "simulated origin snapshot failure"
+			end
+			assert(
+				review.restore_location(vim.deepcopy(navigation_origin)) == false,
+				"failed origin snapshot reported navigation success"
+			)
+			presenter.capture_location = originals.capture_location
+			presenter.show = show_before_snapshot_failure
+			assert(snapshot_failure_show_calls == 0, "failed origin snapshot presented the destination")
+			assert(vim.api.nvim_get_current_tabpage() == invocation_tab)
+			assert(vim.api.nvim_get_current_win() == invocation_win)
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(invocation_win), ordinary_cursor))
+			assert(#review_events == events_before_failed_navigation, "failed origin snapshot emitted review state")
+			assert(#notifications == notifications_before_failed_navigation + 1)
+			assert(notifications[#notifications]:find("simulated origin snapshot failure", 1, true))
+			assert(
+				workspace.entry_identity == other_entry.identity and integration_state.presentation.entry == other_entry
+			)
+			vim.api.nvim_win_call(integration_state.presentation.inline.win, function()
+				assert(vim.deep_equal(review.capture_location(), rollback_location))
+			end)
+			local generation_before_stale_snapshot = workspace.generation
+			local stale_snapshot_show_calls = 0
+			presenter.show = function(...)
+				stale_snapshot_show_calls = stale_snapshot_show_calls + 1
+				return show_before_snapshot_failure(...)
+			end
+			presenter.capture_location = function(state)
+				local location = assert(originals.capture_location(state))
+				workspace.generation = workspace.generation + 1
+				return location
+			end
+			assert(
+				review.restore_location(vim.deepcopy(navigation_origin)) == false,
+				"stale owner snapshot reported navigation success"
+			)
+			presenter.capture_location = originals.capture_location
+			presenter.show = show_before_snapshot_failure
+			assert(stale_snapshot_show_calls == 0, "stale owner snapshot presented the destination")
+			assert(vim.api.nvim_get_current_tabpage() == invocation_tab)
+			assert(vim.api.nvim_get_current_win() == invocation_win)
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(invocation_win), ordinary_cursor))
+			assert(#review_events == events_before_failed_navigation, "stale owner snapshot emitted review state")
+			assert(#notifications == notifications_before_failed_navigation + 1, "stale owner snapshot notified")
+			assert(
+				workspace.entry_identity == other_entry.identity and integration_state.presentation.entry == other_entry
+			)
+			workspace.generation = generation_before_stale_snapshot
+			events_before_failed_navigation = #review_events
+			notifications_before_failed_navigation = #notifications
+			presenter.restore_location = function(state, location, generation)
+				if location.entry_identity == entry.identity then
+					error("simulated navigation cursor failure")
+				end
+				return originals.restore_location(state, location, generation)
+			end
+			local original_present_for_rollback_churn = review.present
+			review.present = function(identity, ...)
+				for index, candidate in ipairs(workspace.model.entries) do
+					if candidate.identity == identity then
+						workspace.model.entries[index] = vim.deepcopy(candidate)
+						break
+					end
+				end
+				return original_present_for_rollback_churn(identity, ...)
+			end
+			local failed_navigation = review.restore_location(vim.deepcopy(navigation_origin))
+			review.present = original_present_for_rollback_churn
+			assert(failed_navigation == false, "failed navigation cursor restoration reported success")
+			presenter.restore_location = originals.restore_location
+			entry = assert(current_model_entry(origin_identity))
+			other_entry = assert(current_model_entry(destination_identity))
+			assert(vim.api.nvim_get_current_tabpage() == invocation_tab)
+			assert(vim.api.nvim_get_current_win() == invocation_win)
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(invocation_win), ordinary_cursor))
+			assert(#review_events == events_before_failed_navigation, "rolled-back navigation emitted review state")
+			assert(#notifications == notifications_before_failed_navigation + 1)
+			assert(notifications[#notifications]:find("simulated navigation cursor failure", 1, true))
+			assert(not notifications[#notifications]:find("rollback failed", 1, true))
+			assert(
+				workspace.entry_identity == other_entry.identity and integration_state.presentation.entry == other_entry
+			)
+			local rolled_back_location
+			vim.api.nvim_win_call(integration_state.presentation.inline.win, function()
+				rolled_back_location = review.capture_location()
+			end)
+			assert(vim.deep_equal(rolled_back_location, rollback_location), "rollback changed the review cursor")
+
+			do
+				local destination_before_drift = other_entry
+				local events_before_drift = #review_events
+				local notifications_before_drift = #notifications
+				local original_present = review.present
+				local original_restore_location = presenter.restore_location
+				local drifted_destination
+				local restored
+				presenter.restore_location = function(state, location, generation)
+					if location.entry_identity == origin_identity then
+						return false, "simulated semantic rollback trigger"
+					end
+					return original_restore_location(state, location, generation)
+				end
+				review.present = function(identity, ...)
+					if identity == destination_identity then
+						for index, candidate in ipairs(workspace.model.entries) do
+							if candidate.identity == identity then
+								drifted_destination = vim.deepcopy(candidate)
+								drifted_destination.new_text = "semantic-drift-" .. drifted_destination.new_text
+								drifted_destination.hunks = vim.diff(
+									drifted_destination.old_text,
+									drifted_destination.new_text,
+									{ result_type = "indices" }
+								)
+								workspace.model.entries[index] = drifted_destination
+								break
+							end
+						end
+					end
+					return original_present(identity, ...)
+				end
+				local fixture_ok, fixture_err = xpcall(function()
+					restored = review.restore_location(vim.deepcopy(navigation_origin))
+				end, debug.traceback)
+				review.present = original_present
+				presenter.restore_location = original_restore_location
+				local presentation_was_drifted = integration_state.presentation.entry == drifted_destination
+				for index, candidate in ipairs(workspace.model.entries) do
+					if candidate.identity == destination_identity then
+						workspace.model.entries[index] = destination_before_drift
+						break
+					end
+				end
+				local cleaned, cleanup_err = review.present(destination_identity, nil, {
+					emit = false,
+					side = rollback_location.payload.side,
+				})
+				local cursor_cleaned, cursor_cleanup_err = original_restore_location(
+					integration_state,
+					rollback_location.payload,
+					integration_state.presentation.generation
+				)
+				vim.api.nvim_set_current_tabpage(invocation_tab)
+				vim.api.nvim_set_current_win(invocation_win)
+				assert(fixture_ok, fixture_err)
+				assert(restored == false, "semantic rollback drift reported navigation success")
+				assert(presentation_was_drifted, "semantic rollback fixture did not present the changed entry")
+				assert(cleaned == true, cleanup_err)
+				assert(cursor_cleaned == true, cursor_cleanup_err)
+				assert(#review_events == events_before_drift + 1, "failed semantic rollback hid visible state")
+				assert(#notifications == notifications_before_drift + 1)
+				assert(notifications[#notifications]:find("simulated semantic rollback trigger", 1, true))
+				assert(notifications[#notifications]:find("rollback failed", 1, true))
+				assert(notifications[#notifications]:find("review entry changed in the current model", 1, true))
+			end
+			other_entry = assert(current_model_entry(destination_identity))
+
+			events_before_failed_navigation = #review_events
+			notifications_before_failed_navigation = #notifications
+			presenter.show = function(state, selected, options)
+				if selected == entry then
+					originals.clear(state)
+					error("simulated navigation presentation failure")
+				end
+				return originals.show(state, selected, options)
+			end
+			assert(
+				review.restore_location(vim.deepcopy(navigation_origin)) == false,
+				"failed destination presentation reported success"
+			)
+			presenter.show = originals.show
+			assert(vim.api.nvim_get_current_tabpage() == invocation_tab)
+			assert(vim.api.nvim_get_current_win() == invocation_win)
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(invocation_win), ordinary_cursor))
+			assert(#review_events == events_before_failed_navigation, "presentation rollback emitted review state")
+			assert(#notifications == notifications_before_failed_navigation + 1)
+			assert(notifications[#notifications]:find("simulated navigation presentation failure", 1, true))
+			assert(
+				workspace.entry_identity == other_entry.identity and integration_state.presentation.entry == other_entry
+			)
+			vim.api.nvim_win_call(integration_state.presentation.inline.win, function()
+				rolled_back_location = review.capture_location()
+			end)
+			assert(vim.deep_equal(rolled_back_location, rollback_location), "presentation rollback changed the cursor")
+
+			navigation_regression.panel_panes = workspace.panel.panes
+			navigation_regression.panel_visible = workspace.panel.visible
+			navigation_regression.panel_focus = workspace.panel.focused
+			navigation_regression.review_tab = vim.api.nvim_win_get_tabpage(integration_state.presentation.inline.win)
+			vim.api.nvim_set_current_tabpage(navigation_regression.review_tab)
+			vim.api.nvim_set_current_win(integration_state.presentation.inline.win)
+			navigation_regression.panel_buf = vim.api.nvim_create_buf(false, true)
+			vim.api.nvim_buf_set_lines(navigation_regression.panel_buf, 0, -1, false, { "review panel focus" })
+			navigation_regression.panel_win = vim.api.nvim_open_win(navigation_regression.panel_buf, true, {
+				relative = "editor",
+				row = 1,
+				col = 1,
+				width = 24,
+				height = 1,
+				style = "minimal",
+			})
+			workspace.panel.panes = {
+				files = { buf = navigation_regression.panel_buf, win = navigation_regression.panel_win },
+			}
+			workspace.panel.visible = true
+			workspace.panel.focused = "files"
+			navigation_regression.fail_destination = function(message)
+				presenter.show = function(state, selected, options)
+					if selected == entry then
+						originals.clear(state)
+						error(message)
+					end
+					return originals.show(state, selected, options)
+				end
+				local restored = review.restore_location(vim.deepcopy(navigation_origin))
+				presenter.show = originals.show
+				assert(restored == false, "focus rollback fixture reported navigation success")
+			end
+			vim.api.nvim_set_current_tabpage(invocation_tab)
+			vim.api.nvim_set_current_win(invocation_win)
+			navigation_regression.fail_destination("simulated panel-focus destination failure")
+			assert(vim.api.nvim_get_current_tabpage() == invocation_tab)
+			vim.api.nvim_set_current_tabpage(navigation_regression.review_tab)
+			assert(
+				vim.api.nvim_get_current_win() == navigation_regression.panel_win,
+				"rollback forgot active review panel focus"
+			)
+			review.code()
+			navigation_regression.focused_source = assert(integration_state.presentation.inline)
+			assert(vim.api.nvim_get_current_win() == navigation_regression.focused_source.win)
+			vim.api.nvim_set_current_tabpage(invocation_tab)
+			vim.api.nvim_set_current_win(invocation_win)
+			navigation_regression.fail_destination("simulated code-focus destination failure")
+			assert(vim.api.nvim_get_current_tabpage() == invocation_tab)
+			vim.api.nvim_set_current_tabpage(navigation_regression.review_tab)
+			assert(
+				vim.api.nvim_get_current_win() == integration_state.presentation.inline.win,
+				"visible panel overrode the last real review code focus"
+			)
+			workspace.panel.visible = false
+			if vim.api.nvim_win_is_valid(navigation_regression.panel_win) then
+				vim.api.nvim_win_close(navigation_regression.panel_win, true)
+			end
+			if vim.api.nvim_buf_is_valid(navigation_regression.panel_buf) then
+				vim.api.nvim_buf_delete(navigation_regression.panel_buf, { force = true })
+			end
+			workspace.panel.panes = navigation_regression.panel_panes
+			workspace.panel.visible = navigation_regression.panel_visible
+			workspace.panel.focused = navigation_regression.panel_focus
+			vim.api.nvim_set_current_tabpage(invocation_tab)
+			vim.api.nvim_set_current_win(invocation_win)
+
+			events_before_failed_navigation = #review_events
+			notifications_before_failed_navigation = #notifications
+			navigation_regression.rollback_generation = workspace.generation
+			presenter.restore_location = function(state, location, generation)
+				if location.entry_identity == entry.identity then
+					return false, "simulated destination cursor failure"
+				end
+				local restored, restore_err = originals.restore_location(state, location, generation)
+				if restored then
+					workspace.generation = workspace.generation + 1
+				end
+				return restored, restore_err
+			end
+			assert(
+				review.restore_location(vim.deepcopy(navigation_origin)) == false,
+				"generation-invalidated rollback reported navigation success"
+			)
+			presenter.restore_location = originals.restore_location
+			assert(workspace.generation == navigation_regression.rollback_generation + 1)
+			assert(vim.api.nvim_get_current_tabpage() == invocation_tab)
+			assert(vim.api.nvim_get_current_win() == invocation_win)
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(invocation_win), ordinary_cursor))
+			assert(#review_events == events_before_failed_navigation + 1, "invalid rollback hid its visible state")
+			assert(#notifications == notifications_before_failed_navigation + 1)
+			assert(notifications[#notifications]:find("rollback failed", 1, true))
+			assert(
+				workspace.entry_identity == other_entry.identity and integration_state.presentation.entry == other_entry
+			)
+			workspace.generation = navigation_regression.rollback_generation
+
+			workspace.layout = "split"
+			assert(review.present(other_entry.identity), "split rollback origin could not be presented")
+			local split_origin = integration_state.presentation
+			local split_left = assert(split_origin.left)
+			local split_right = assert(split_origin.right)
+			local left_cursor = { 20, 1 }
+			local right_cursor = { 90, 4 }
+			vim.api.nvim_win_call(split_left.win, function()
+				vim.fn.winrestview({ lnum = left_cursor[1], col = left_cursor[2], topline = 12 })
+			end)
+			vim.api.nvim_win_call(split_right.win, function()
+				vim.fn.winrestview({ lnum = right_cursor[1], col = right_cursor[2], topline = 78 })
+			end)
+			local function pane_view(win)
+				local view
+				vim.api.nvim_win_call(win, function()
+					view = vim.fn.winsaveview()
+				end)
+				return view
+			end
+			local left_view = pane_view(split_left.win)
+			local right_view = pane_view(split_right.win)
+			vim.api.nvim_set_current_win(split_left.win)
+			vim.api.nvim_set_current_tabpage(invocation_tab)
+			vim.api.nvim_set_current_win(invocation_win)
+			events_before_failed_navigation = #review_events
+			notifications_before_failed_navigation = #notifications
+			presenter.show = function(state, selected, options)
+				if selected == entry then
+					originals.clear(state)
+					error("simulated split destination failure")
+				end
+				return originals.show(state, selected, options)
+			end
+			assert(
+				review.restore_location(vim.deepcopy(navigation_origin)) == false,
+				"failed split navigation reported success"
+			)
+			presenter.show = originals.show
+			assert(vim.api.nvim_get_current_tabpage() == invocation_tab)
+			assert(vim.api.nvim_get_current_win() == invocation_win)
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(invocation_win), ordinary_cursor))
+			assert(#review_events == events_before_failed_navigation, "split rollback emitted review state")
+			assert(#notifications == notifications_before_failed_navigation + 1)
+			assert(notifications[#notifications]:find("simulated split destination failure", 1, true))
+			assert(
+				workspace.entry_identity == other_entry.identity and integration_state.presentation.entry == other_entry
+			)
+			assert(integration_state.presentation.layout == "split")
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(integration_state.presentation.left.win), left_cursor))
+			assert(vim.deep_equal(vim.api.nvim_win_get_cursor(integration_state.presentation.right.win), right_cursor))
+			assert(pane_view(integration_state.presentation.left.win).topline == left_view.topline)
+			assert(pane_view(integration_state.presentation.right.win).topline == right_view.topline)
+
+			workspace.layout = "inline"
+			assert(review.present(entry.identity), "definition route origin could not be restored after history proof")
 			local definition_origin = integration_state.presentation.inline
 			local definition_tab = vim.api.nvim_get_current_tabpage()
 			local origin_display = assert(integration_state.presentation.projection.by_source.new[3])
@@ -1875,10 +2819,119 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			)
 			assert(#opened == opened_before_rejection, "unmappable review target escaped to ordinary navigation")
 			disk[paths["other.lua"]] = other_new_text
+			navigation_regression.events_before_reentrant_present = #review_events
+			navigation_regression.notifications_before_reentrant_present = #notifications
+			navigation_regression.use_real_mode()
+			presenter.show = function(state, selected, options)
+				local shown, show_err = originals.show(state, selected, options)
+				if shown and selected == other_entry then
+					assert(review.mode("off"), "reentrant presentation fixture could not release the surface")
+				end
+				return shown, show_err
+			end
+			assert(
+				review.restore_location(vim.deepcopy(navigation_destination)) == false,
+				"reentrant surface release reported navigation success"
+			)
+			presenter.show = originals.show
+			assert(not workspace.mode_on and integration_state.enabled == false)
+			assert(integration_state.presentation == nil, "reentrant release resurrected the destination UI")
+			assert(workspace.entry_identity == entry.identity, "stale presentation committed its destination")
+			assert(review.status().entry.identity == entry.identity)
+			assert(
+				#review_events == navigation_regression.events_before_reentrant_present + 1,
+				"reentrant release emitted stale state"
+			)
+			assert(#notifications == navigation_regression.notifications_before_reentrant_present + 1)
+			assert(notifications[#notifications]:find("rollback failed", 1, true))
+			navigation_regression.recovered_after_reentrant_release = review.mode("on")
+			integration_state = workspace.mode_state
+			assert(
+				navigation_regression.recovered_after_reentrant_release,
+				"review did not recover after a reentrant presentation release"
+			)
+			assert(workspace.entry_identity == entry.identity and integration_state.presentation.entry == entry)
+
+			navigation_regression.panel_refresh = panel.refresh
+			navigation_regression.events_before_panel_release = #review_events
+			navigation_regression.notifications_before_panel_release = #notifications
+			panel.refresh = function(...)
+				local refreshed = navigation_regression.panel_refresh(...)
+				assert(review.mode("off"), "reentrant panel fixture could not release the review surface")
+				return refreshed
+			end
+			navigation_regression.panel_result, navigation_regression.panel_err = review.present(other_entry.identity)
+			panel.refresh = navigation_regression.panel_refresh
+			assert(navigation_regression.panel_result == nil, "reentrant panel refresh reported presentation success")
+			assert(
+				type(navigation_regression.panel_err) == "string"
+					and navigation_regression.panel_err:find("owner changed", 1, true),
+				"reentrant panel refresh did not report its stale owner"
+			)
+			assert(not workspace.mode_on and integration_state.presentation == nil)
+			assert(workspace.entry_identity == entry.identity, "reentrant panel refresh committed its destination")
+			assert(review.status().entry.identity == entry.identity)
+			assert(workspace.resume_ui and workspace.resume_ui.entry_identity == entry.identity)
+			assert(
+				#review_events == navigation_regression.events_before_panel_release + 1,
+				"reentrant panel refresh emitted stale state"
+			)
+			assert(
+				#notifications == navigation_regression.notifications_before_panel_release,
+				"reentrant panel refresh emitted an unexpected notification"
+			)
+			navigation_regression.recovered_after_panel_release = review.mode("on")
+			integration_state = workspace.mode_state
+			assert(
+				navigation_regression.recovered_after_panel_release,
+				"review did not recover after a reentrant panel refresh"
+			)
+			assert(workspace.entry_identity == entry.identity and integration_state.presentation.entry == entry)
+			navigation_regression.use_stub_mode()
 			workspace.model.entries = { entry }
 			workspace.layout = "inline"
 			workspace.context = "full"
 			assert(review.present(entry.identity))
+			navigation_regression.generation_before_reentrant_capture = workspace.generation
+			navigation_regression.events_before_reentrant_capture = #review_events
+			navigation_regression.use_real_mode()
+			presenter.capture_location = function(state)
+				local location = assert(originals.capture_location(state))
+				assert(review.mode("off"), "reentrant capture fixture could not release the review surface")
+				return location
+			end
+			navigation_regression.released_capture, navigation_regression.released_capture_err =
+				review.capture_location()
+			presenter.capture_location = originals.capture_location
+			assert(
+				navigation_regression.released_capture == nil,
+				"capture published a token after its review surface was released"
+			)
+			assert(
+				type(navigation_regression.released_capture_err) == "string"
+					and navigation_regression.released_capture_err:find("owner changed", 1, true),
+				"released capture did not report its stale owner"
+			)
+			assert(
+				workspace.generation > navigation_regression.generation_before_reentrant_capture
+					and not workspace.mode_on
+			)
+			assert(
+				#review_events == navigation_regression.events_before_reentrant_capture + 1,
+				"failed capture emitted extra review state"
+			)
+			navigation_regression.recovered_after_reentrant_capture = review.mode("on")
+			integration_state = workspace.mode_state
+			integration_origin_win = integration_state and integration_state.origin.win or nil
+			if integration_state then
+				stub_mode_state.origin = vim.deepcopy(integration_state.origin)
+			end
+			navigation_regression.use_stub_mode()
+			assert(
+				navigation_regression.recovered_after_reentrant_capture,
+				"review did not recover after rejecting a released capture"
+			)
+			assert(workspace.entry_identity == entry.identity and integration_state.presentation.entry == entry)
 			host_fs.read_binary = originals.fs_read_binary
 			host_repo.relative_existing = originals.repo_relative_existing
 			host_repo.resolve_relative = originals.repo_resolve_relative
@@ -2008,7 +3061,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		local general_item = {
 			id = string.rep("e", 64),
 			sequence = 6,
-			type = "rationale",
+			type = "objection!",
 			body = "general body",
 			anchor = { kind = "general", stale = false },
 			reply_to = vim.NIL,
@@ -2087,6 +3140,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(not review._show_inline_preview(), "panel/nofile buffer produced a passive preview")
 		local picker
 		vim.ui.select = function(choices, options, callback)
+			assert(options.kind == "native_review", "comment action omitted its review picker kind")
 			picker = { choices = choices, options = options, callback = callback }
 		end
 		workspace.panel.visible = true
@@ -2348,6 +3402,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(#calls.composed == composed_before + 1 and #preview_marks() == 0)
 		local range_options = calls.composed[#calls.composed].options
 		assert(range_options.title == "New")
+		assert(range_options.start_in_insert == nil, "new range comment overrode the Insert default")
 		assert(range_options.source_win == source_win and range_options.anchor_line == 3)
 		assert(range_options.anchor_range.first == 2 and range_options.anchor_range.last == 3)
 		assert(range_options.anchor.kind == "range" and range_options.anchor.anchor_line == nil)
@@ -2356,15 +3411,17 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		review.file_comment("praise")
 		local file_options = calls.composed[#calls.composed].options
 		assert(file_options.title == "New file comment" and file_options.selected_type == "praise")
+		assert(file_options.start_in_insert == nil, "new file comment overrode the Insert default")
 		assert_modal_options(file_options, "file")
 		assert(file_options.anchor.start_line == nil and file_options.anchor.anchor_line == nil)
 
 		workspace.panel.visible = true
 		vim.api.nvim_set_current_win(comments_win)
-		workspace.panel.callbacks.general_comment("rationale")
+		workspace.panel.callbacks.general_comment("objection!")
 		local general_options = calls.composed[#calls.composed].options
 		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
-		assert(general_options.title == "New review-level comment" and general_options.selected_type == "rationale")
+		assert(general_options.title == "New review-level comment" and general_options.selected_type == "objection!")
+		assert(general_options.start_in_insert == nil, "new review-level comment overrode the Insert default")
 		assert_modal_options(general_options, "general")
 		assert(general_options.anchor.kind == "general" and general_options.anchor.anchor_line == nil)
 
@@ -2375,6 +3432,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		local edit_options = calls.composed[#calls.composed].options
 		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
 		assert(edit_options.title == "Edit")
+		assert(edit_options.start_in_insert == false, "range edit did not request Normal mode")
 		assert(edit_options.type_cycle == true and edit_options.selected_type == first.type)
 		assert(edit_options.source_win == source_win and edit_options.anchor_line == 4)
 		assert(edit_options.anchor_range.first == 2 and edit_options.anchor_range.last == 4)
@@ -2385,9 +3443,29 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		local reply_options = calls.composed[#calls.composed].options
 		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
 		assert(reply_options.title == "Reply" and reply_options.selected_type == first.type)
+		assert(reply_options.start_in_insert == true, "range reply stopped requesting Insert mode")
 		assert(reply_options.type_cycle == false, "range reply unexpectedly enabled type cycling")
 		assert(reply_options.source_win == source_win and reply_options.anchor_line == 4)
 		assert(reply_options.anchor_range.first == 2 and reply_options.anchor_range.last == 4)
+
+		do
+			local retired = vim.deepcopy(first)
+			retired.type = "retired"
+			workspace.session.items = { retired }
+			workspace.panel.visible = true
+			vim.api.nvim_set_current_win(comments_win)
+			review.edit(retired.id)
+			local retired_edit = calls.composed[#calls.composed]
+			assert(retired_edit.options.selected_type == "retired", "editing changed an inactive type before save")
+			assert(retired_edit.callback("Updated historical body", false, nil))
+			assert(workspace.session.items[1].type == "retired", "editing silently changed an inactive type")
+			workspace.panel.visible = true
+			vim.api.nvim_set_current_win(comments_win)
+			review.reply(retired.id)
+			local retired_reply = calls.composed[#calls.composed]
+			assert(retired_reply.options.selected_type == "issue", "reply to an inactive type was not an issue")
+			assert(retired_reply.options.type_cycle == false)
+		end
 
 		workspace.session.items = { file_item }
 		workspace.panel.visible = true
@@ -2396,6 +3474,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		local file_edit_options = calls.composed[#calls.composed].options
 		assert(not workspace.panel.visible and vim.api.nvim_get_current_win() == source_win)
 		assert(file_edit_options.title == "Edit file comment" and file_edit_options.selected_type == file_item.type)
+		assert(file_edit_options.start_in_insert == false, "file edit did not request Normal mode")
 		assert(file_edit_options.type_cycle == true)
 		assert_modal_options(file_edit_options, "file")
 		workspace.panel.visible = true
@@ -2406,6 +3485,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(
 			file_reply_options.title == "Reply to file comment" and file_reply_options.selected_type == file_item.type
 		)
+		assert(file_reply_options.start_in_insert == true, "file reply stopped requesting Insert mode")
 		assert(file_reply_options.type_cycle == false)
 		assert_modal_options(file_reply_options, "file")
 
@@ -2419,6 +3499,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			general_edit_options.title == "Edit review-level comment"
 				and general_edit_options.selected_type == general_item.type
 		)
+		assert(general_edit_options.start_in_insert == false, "review-level edit did not request Normal mode")
 		assert_modal_options(general_edit_options, "general")
 		workspace.panel.visible = true
 		vim.api.nvim_set_current_win(comments_win)
@@ -2429,6 +3510,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			general_reply_options.title == "Reply to review-level comment"
 				and general_reply_options.selected_type == general_item.type
 		)
+		assert(general_reply_options.start_in_insert == true, "review-level reply stopped requesting Insert mode")
 		assert_modal_options(general_reply_options, "general")
 
 		-- Comment UIs always reacquire the owned review tab. The ordinary source
@@ -2462,6 +3544,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		duplicate_entry.layer = "unstaged"
 		local target_picker
 		vim.ui.select = function(choices, options, callback)
+			assert(options.kind == "native_review", "layer chooser omitted its review picker kind")
 			target_picker = { choices = vim.deepcopy(choices), options = options, callback = callback }
 		end
 		assert(review.mode("off") and vim.api.nvim_get_current_tabpage() == ordinary_tab)
@@ -2516,7 +3599,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			{
 				name = "general",
 				run = function()
-					review.general_comment("rationale")
+					review.general_comment("objection!")
 				end,
 			},
 		}
@@ -2572,11 +3655,21 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			local scope_selection
 			local scope_input
 			vim.ui.select = function(choices, options, callback)
+				assert(options.kind == "native_review", "scope/session chooser omitted its review picker kind")
 				scope_selection = { choices = choices, options = options, callback = callback }
 			end
 			vim.ui.input = function(options, callback)
 				scope_input = { options = options, callback = callback }
 			end
+			store.list = function()
+				return { workspace.session }
+			end
+			review._choose_saved(repository)
+			store.list = originals.list
+			local saved_selection = assert(scope_selection, "saved sessions did not open their chooser")
+			assert(saved_selection.options.prompt == "Saved review session")
+			saved_selection.callback(nil)
+			scope_selection = nil
 			review._open_scope_picker(repository)
 			local stale_scope_selection = assert(scope_selection, "scope picker did not expose its callback")
 			local newer_workspace = assert(review.open({ kind = "commit", rev = "CHILD" }, repository))
@@ -2753,6 +3846,15 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(#vim.api.nvim_list_tabpages() == tabs and review._active_workspace() == nil)
 		assert(#review_events == events_before_close + 1 and review_events[#review_events].active == false)
 		assert(vim.deep_equal(review.status(), { active = false, mode_on = false }))
+		calls.async_cancelled_open_callback = false
+		review.open_async({ kind = "commit", rev = "HEAD" }, repository, function()
+			calls.async_cancelled_open_callback = true
+		end)
+		assert(review.status().pending, "scheduled open was not reported pending")
+		assert(not review.close(), "close without an active review unexpectedly succeeded")
+		vim.wait(50)
+		assert(not calls.async_cancelled_open_callback and review._active_workspace() == nil)
+		assert(not review.status().pending, "logical close retained a pending completion")
 
 		store.save = function(_, value)
 			local copy = vim.deepcopy(value)
@@ -2766,7 +3868,13 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		preview_discard_expected = teardown_preview_receipt
 		local preview_discards_before_teardown = calls.preview_discards
 		local preview_restores_before_teardown = calls.preview_restores
+		calls.async_teardown_refresh_callback = false
+		review.refresh_async(function()
+			calls.async_teardown_refresh_callback = true
+		end)
 		assert(review.teardown())
+		vim.wait(50)
+		assert(not calls.async_teardown_refresh_callback, "teardown allowed a stale refresh completion")
 		assert(calls.preview_discards == preview_discards_before_teardown + 1, "teardown leaked its preview receipt")
 		assert(calls.preview_restores == preview_restores_before_teardown, "teardown restored suspended preview UI")
 		assert(review._active_workspace() == nil and #vim.api.nvim_list_tabpages() == tabs)
@@ -2776,6 +3884,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			scope_module.resolve = value
 		elseif
 			name == "load"
+			or name == "list"
 			or name == "new"
 			or name == "save"
 			or name == "edit"
@@ -2798,7 +3907,14 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			or name == "mode_restore"
 		then
 			mode[name:gsub("^mode_", "")] = value
-		elseif name == "show" or name == "clear" or name == "current_target" or name == "refresh_winbars" then
+		elseif
+			name == "show"
+			or name == "clear"
+			or name == "current_target"
+			or name == "capture_location"
+			or name == "restore_location"
+			or name == "refresh_winbars"
+		then
 			presenter[name] = value
 		elseif name:sub(1, 6) == "panel_" then
 			panel[name:sub(7)] = value

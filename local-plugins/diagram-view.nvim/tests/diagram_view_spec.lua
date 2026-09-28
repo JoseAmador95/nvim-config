@@ -53,6 +53,7 @@ local function setup(opts)
 			callback()
 		end,
 		defer = opts.defer,
+		system = opts.system,
 		plantuml_policy = opts.plantuml_policy,
 		notify = opts.notify,
 		event = opts.event,
@@ -205,6 +206,7 @@ test("cancellation kills active work and ignores a late callback", function()
 	local callback
 	local killed = {}
 	local log = {}
+	local completions = {}
 	setup({
 		spawn = function(_, _, done)
 			callback = done
@@ -217,13 +219,23 @@ test("cancellation kills active work and ignores a late callback", function()
 	})
 	renderer(false)
 	presenter(log)
-	local session = assert(diagram.open({ renderer = "test", presenter = "test", kind = "mermaid", source = "A" }))
+	local session = assert(diagram.open({
+		renderer = "test",
+		presenter = "test",
+		kind = "mermaid",
+		source = "A",
+		on_done = function(result, err)
+			completions[#completions + 1] = { result = result, err = err }
+		end,
+	}))
 	equal("running", session:status().state)
 	assert(session:cancel("closed"))
 	equal({ 15 }, killed)
 	equal(1, log.closed)
+	equal({ { err = "closed" } }, completions, "cancellation did not complete on_done exactly once")
 	callback({ code = 0, stdout = "too late", stderr = "" })
 	assert(log.delivered == nil, "late renderer output reached the presenter")
+	equal(1, #completions, "late renderer output completed a cancelled request again")
 	equal({}, diagram.status().sessions)
 end)
 
@@ -284,6 +296,144 @@ test("combined stdout and stderr obey the per-stage output ceiling", function()
 	equal("error", session:status().state)
 	assert(log.error:find("exceeds 5 bytes", 1, true), log.error)
 	assert(log.delivered == nil)
+end)
+
+test("default process capture stops at the output ceiling", function()
+	local killed = 0
+	local observed
+	local log = {}
+	setup({
+		max_stage_output_bytes = 5,
+		system = function(_, options, callback)
+			observed = options
+			options.stdout(nil, "1234")
+			options.stderr(nil, "56")
+			callback({ code = 143, signal = 15 })
+			return {
+				kill = function()
+					killed = killed + 1
+				end,
+			}
+		end,
+	})
+	renderer(false)
+	presenter(log)
+	local session = assert(diagram.open({ renderer = "test", presenter = "test", kind = "mermaid", source = "large" }))
+	equal("error", session:status().state)
+	assert(log.error:find("exceeds 5 bytes", 1, true), log.error)
+	equal(1, killed, "bounded process capture did not terminate the renderer")
+	assert(type(observed.stdout) == "function" and type(observed.stderr) == "function")
+	assert(observed.timeout == nil, "vim.system retained a second competing timeout")
+end)
+
+test("default process capture rejects stream read failures", function()
+	local log = {}
+	setup({
+		system = function(_, options, callback)
+			options.stdout("stdout read failed", nil)
+			callback({ code = 0, signal = 0 })
+			return { kill = function() end }
+		end,
+	})
+	renderer(false)
+	presenter(log)
+	local session = assert(diagram.open({ renderer = "test", presenter = "test", kind = "mermaid", source = "A" }))
+	equal("error", session:status().state)
+	assert(log.error:find("stdout read failed", 1, true), log.error)
+	assert(log.delivered == nil, "a partial stream was presented after a read failure")
+end)
+
+test("presenter-driven buffer teardown cannot reenter cancellation", function()
+	local session
+	local closes = 0
+	local cancelled = 0
+	setup({
+		spawn = function()
+			return { kill = function() end }
+		end,
+		event = function(event)
+			if event.kind == "cancelled" then
+				cancelled = cancelled + 1
+			end
+		end,
+	})
+	renderer(false)
+	assert(diagram.register_presenter("reentrant", {
+		open = function()
+			return {}
+		end,
+		deliver = function() end,
+		close = function()
+			closes = closes + 1
+			assert(session:cancel("presenter recursion") == false)
+			return true
+		end,
+	}))
+	session = assert(diagram.open({ renderer = "test", presenter = "reentrant", kind = "mermaid", source = "A" }))
+	assert(session:cancel("closed"))
+	equal(1, closes, "presenter close reentered itself")
+	equal(1, cancelled, "reentrant close emitted duplicate lifecycle events")
+end)
+
+test("a duplicated runner callback completes a session exactly once", function()
+	local deliveries = 0
+	local completions = 0
+	setup({
+		spawn = function(_, _, callback)
+			callback({ code = 0, stdout = "first", stderr = "" })
+			callback({ code = 0, stdout = "second", stderr = "" })
+			return { kill = function() end }
+		end,
+	})
+	renderer(false)
+	assert(diagram.register_presenter("once", {
+		open = function()
+			return {}
+		end,
+		deliver = function(_, result)
+			deliveries = deliveries + 1
+			equal("first", result.data)
+		end,
+	}))
+	local session = assert(diagram.open({
+		renderer = "test",
+		presenter = "once",
+		kind = "mermaid",
+		source = "A",
+		on_done = function(result, err)
+			completions = completions + 1
+			assert(result and not err)
+		end,
+	}))
+	equal("presented", session:status().state)
+	equal(1, deliveries, "duplicate runner completion reached the presenter")
+	equal(1, completions, "duplicate runner completion reached on_done")
+end)
+
+test("runner and completion exceptions still conclude exactly once", function()
+	local completions = {}
+	setup({
+		spawn = function()
+			error("runner exploded")
+		end,
+	})
+	renderer(false)
+	presenter({})
+	local session = assert(diagram.open({
+		renderer = "test",
+		presenter = "test",
+		kind = "mermaid",
+		source = "A",
+		on_done = function(result, err)
+			completions[#completions + 1] = { result = result, err = err }
+			error("completion exploded")
+		end,
+	}))
+	equal("error", session:status().state)
+	equal(1, #completions)
+	assert(completions[1].result == nil and completions[1].err:find("runner exploded", 1, true))
+	assert(session:cancel("closed after error"))
+	equal(1, #completions, "cancelling an errored session completed on_done again")
 end)
 
 test("cache is private, reused, and rejects a symlink root", function()

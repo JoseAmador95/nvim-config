@@ -2,6 +2,7 @@
 -- terminal UI, repository resolution, and quickfix integration remain here.
 local M = {}
 local deferred = require("config.deferred")
+local workflow = require("config.workflow_execution")
 
 local workbench
 local DEFAULT_POLICY = {
@@ -12,6 +13,7 @@ local DEFAULT_POLICY = {
 }
 local last_identity
 local configured = false
+local catalog_commands = {}
 
 local function policy()
 	return require("config.local_config").plugin("just_workbench", DEFAULT_POLICY)
@@ -70,10 +72,6 @@ end
 
 local function context()
 	local options = policy()
-	local binary = just_binary(options)
-	if not binary then
-		return nil, ("host %s was not found in PATH (it is never installed automatically)"):format(options.binary)
-	end
 	local root, root_err = require("config.repo").current_root(0)
 	if not root then
 		return nil, root_err
@@ -90,7 +88,17 @@ local function context()
 			options.root_mode == "nearest" and "no justfile exists between the current buffer and repository root"
 				or "no justfile exists at the repository root"
 	end
-	return { runtime = "host", task_root = task_root, justfile = justfile, just_bin = binary }
+	return { runtime = "host", task_root = task_root, justfile = justfile }, options
+end
+
+local function resolve_just(options, expected, root)
+	return workflow.host_executable("build", function()
+		local binary = just_binary(options)
+		if not binary then
+			return nil, ("host %s was not found in PATH (it is never installed automatically)"):format(options.binary)
+		end
+		return binary
+	end, expected, { root = root }, "host Just executable")
 end
 
 local function terminal_adapter()
@@ -174,6 +182,16 @@ local function configure(overrides)
 end
 
 local function execute(catalog, action, values, decision)
+	local expected = type(catalog) == "table" and catalog_commands[catalog.id] or nil
+	if not expected then
+		notify("Could not run recipe: catalog executable binding is unavailable", vim.log.levels.ERROR)
+		return
+	end
+	local command, authority_err = resolve_just(policy(), expected, catalog.task_root)
+	if not command then
+		notify("Could not run recipe: " .. tostring(authority_err), vim.log.levels.ERROR)
+		return
+	end
 	local result, err = workbench.run(catalog, action.name, values, decision and { decision = decision } or nil)
 	if result then
 		if result.outcome == "started" or result.outcome == "replaced" then
@@ -206,38 +224,173 @@ local function execute(catalog, action, values, decision)
 	end)
 end
 
-local function prompt_parameters(catalog, action, index, values)
+local function parameter_cardinality(parameter)
+	local minimum = parameter.min
+	if minimum == nil then
+		minimum = parameter.default == nil and not parameter.flag and parameter.kind ~= "star" and 1 or 0
+	end
+	local maximum = parameter.max
+	if maximum == nil then
+		maximum = (parameter.kind ~= "singular" or parameter.multiple) and math.huge or 1
+	end
+	return minimum, maximum
+end
+
+local function parameter_switch(parameter)
+	if parameter.long then
+		return parameter.long:sub(1, 1) == "-" and parameter.long or ("--" .. parameter.long)
+	end
+	if parameter.short then
+		return parameter.short:sub(1, 1) == "-" and parameter.short or ("-" .. parameter.short)
+	end
+	return parameter.name
+end
+
+local function prompt_parameters(catalog, action, index, bindings, used_entries, argv_limit)
 	index = index or 1
-	values = values or {}
+	bindings = bindings or {}
+	used_entries = used_entries or 0
+	argv_limit = argv_limit or workbench.limits().max_recipe_argv_entries
 	local parameter = action.parameters[index]
 	if not parameter then
-		execute(catalog, action, values)
+		execute(catalog, action, bindings)
 		return
 	end
-	local variadic = parameter.kind == "plus" or parameter.kind == "star" or parameter.kind == "variadic"
-	local default = type(parameter.default) == "string" and parameter.default or ""
-	vim.ui.input({
-		prompt = ("just %s: %s%s: "):format(action.name, parameter.name, variadic and " (literal value)" or ""),
-		default = default,
-	}, function(value)
-		if value == nil then
+	local minimum, declared_maximum = parameter_cardinality(parameter)
+	local remaining = argv_limit - used_entries
+
+	if parameter.flag then
+		local maximum = math.min(declared_maximum, remaining)
+		if minimum > maximum then
+			notify(
+				("Arguments for %s exceed the hard limit of %d argv entries"):format(parameter.name, argv_limit),
+				vim.log.levels.ERROR
+			)
 			return
 		end
-		local optional = parameter.default ~= nil or parameter.kind == "star"
-		if value == "" and not optional then
-			notify("A value is required for " .. parameter.name, vim.log.levels.WARN)
+		if maximum == 0 then
+			prompt_parameters(catalog, action, index + 1, bindings, used_entries, argv_limit)
 			return
 		end
-		if value == "" then
-			prompt_parameters(catalog, action, index + 1, values)
-		elseif variadic then
-			values[#values + 1] = value
-			prompt_parameters(catalog, action, index + 1, values)
-		else
-			values[#values + 1] = value
-			prompt_parameters(catalog, action, index + 1, values)
+
+		local label = parameter_switch(parameter)
+		if maximum <= 1 then
+			local choices = {
+				{ value = true, label = "Include " .. label },
+				{ value = false, label = "Skip " .. label },
+			}
+			vim.ui.select(choices, {
+				prompt = ("just %s: %s"):format(action.name, parameter.name),
+				format_item = function(item)
+					return item.label
+				end,
+			}, function(choice)
+				if choice == nil then
+					return
+				end
+				local count = choice.value and 1 or 0
+				if count < minimum then
+					notify(
+						("At least %d occurrence(s) are required for %s"):format(minimum, parameter.name),
+						vim.log.levels.WARN
+					)
+					prompt_parameters(catalog, action, index, bindings, used_entries, argv_limit)
+					return
+				end
+				if choice.value then
+					bindings[parameter.name] = true
+				end
+				prompt_parameters(catalog, action, index + 1, bindings, used_entries + count, argv_limit)
+			end)
+			return
 		end
-	end)
+
+		local default_count = type(parameter.default) == "number" and parameter.default
+			or parameter.default == true and 1
+			or minimum
+		vim.ui.input({
+			prompt = ("just %s: %s occurrence count: "):format(action.name, label),
+			default = tostring(default_count),
+		}, function(value)
+			if value == nil then
+				return
+			end
+			if value == "" and minimum == 0 then
+				prompt_parameters(catalog, action, index + 1, bindings, used_entries, argv_limit)
+				return
+			end
+			local count = type(value) == "string" and value:match("^%d+$") and tonumber(value) or nil
+			if not count or count < minimum or count > maximum then
+				notify(
+					("Enter a decimal integer between %d and %d for %s"):format(minimum, maximum, parameter.name),
+					vim.log.levels.WARN
+				)
+				prompt_parameters(catalog, action, index, bindings, used_entries, argv_limit)
+				return
+			end
+			if count > 0 then
+				bindings[parameter.name] = count
+			end
+			prompt_parameters(catalog, action, index + 1, bindings, used_entries + count, argv_limit)
+		end)
+		return
+	end
+
+	local width = (parameter.long or parameter.short) and 2 or 1
+	local maximum = math.min(declared_maximum, math.floor(remaining / width))
+	if minimum > maximum then
+		notify(
+			("Arguments for %s exceed the hard limit of %d argv entries"):format(parameter.name, argv_limit),
+			vim.log.levels.ERROR
+		)
+		return
+	end
+	if maximum == 0 then
+		prompt_parameters(catalog, action, index + 1, bindings, used_entries, argv_limit)
+		return
+	end
+
+	local collected = {}
+	local repeated = maximum > 1
+	local function prompt_value()
+		if #collected >= maximum then
+			bindings[parameter.name] = collected
+			prompt_parameters(catalog, action, index + 1, bindings, used_entries + (#collected * width), argv_limit)
+			return
+		end
+		local suffix = repeated and (" value %d (empty to finish)"):format(#collected + 1) or ""
+		vim.ui.input({
+			prompt = ("just %s: %s%s: "):format(action.name, parameter_switch(parameter), suffix),
+			default = #collected == 0 and type(parameter.default) == "string" and parameter.default or "",
+		}, function(value)
+			if value == nil then
+				return
+			end
+			if value == "" then
+				if #collected < minimum then
+					notify(
+						("At least %d value(s) are required for %s"):format(minimum, parameter.name),
+						vim.log.levels.WARN
+					)
+					prompt_value()
+					return
+				end
+				if #collected > 0 then
+					bindings[parameter.name] = collected
+				end
+				prompt_parameters(catalog, action, index + 1, bindings, used_entries + (#collected * width), argv_limit)
+				return
+			end
+			collected[#collected + 1] = value
+			if not repeated or #collected >= maximum then
+				bindings[parameter.name] = collected
+				prompt_parameters(catalog, action, index + 1, bindings, used_entries + (#collected * width), argv_limit)
+				return
+			end
+			prompt_value()
+		end)
+	end
+	prompt_value()
 end
 
 local function choose(catalog, requested)
@@ -275,9 +428,9 @@ local function choose(catalog, requested)
 end
 
 function M.run(requested, overrides)
-	local ctx, ctx_err = context()
+	local ctx, options = context()
 	if not ctx then
-		notify(ctx_err, vim.log.levels.ERROR)
+		notify(options, vim.log.levels.ERROR)
 		return
 	end
 	local core, setup_err = configure(overrides)
@@ -285,12 +438,19 @@ function M.run(requested, overrides)
 		notify("Could not initialize Just workbench: " .. tostring(setup_err), vim.log.levels.ERROR)
 		return
 	end
+	local binary, authority_err = resolve_just(options, nil, ctx.task_root)
+	if not binary then
+		notify("Could not list recipes: " .. tostring(authority_err), vim.log.levels.ERROR)
+		return
+	end
+	ctx.just_bin = binary
 	local handle, catalog_err = core.catalog(ctx, function(catalog, err)
 		vim.schedule(function()
 			if not catalog then
 				notify("Could not list recipes: " .. tostring(err), vim.log.levels.ERROR)
 				return
 			end
+			catalog_commands[catalog.id] = binary
 			choose(catalog, requested)
 		end)
 	end)

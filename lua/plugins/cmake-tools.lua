@@ -19,7 +19,7 @@ return {
 		opts = function()
 			return {
 				cmake_use_preset = true,
-				cmake_regenerate_on_save = true,
+				cmake_regenerate_on_save = false,
 				cmake_generate_options = { "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" },
 				cmake_compile_commands_options = {
 					action = "none",

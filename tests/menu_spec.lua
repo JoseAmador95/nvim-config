@@ -108,6 +108,125 @@ test("context capture records the origin editor target", function()
 	equal(vim.bo.modifiable, captured.modifiable, "captured modifiable state")
 end)
 
+test("file path actions are palette-only and reflect the origin window", function()
+	local actions = require("config.menu.actions")
+	local original_clipboard = package.loaded["config.clipboard"]
+	local original_cwd = vim.fn.getcwd()
+	local origin_buf = vim.api.nvim_get_current_buf()
+	local root = vim.fn.tempname()
+	local source = vim.fs.joinpath(root, "real.lua")
+	local link = vim.fs.joinpath(root, "alias.lua")
+	local nested = vim.fs.joinpath(root, "nested")
+	local copied = {}
+
+	local ok, err = xpcall(function()
+		assert(vim.fn.mkdir(vim.fs.joinpath(root, ".git"), "p", 448) == 1)
+		assert(vim.fn.mkdir(nested, "p", 448) == 1)
+		assert(vim.fn.writefile({ "return true" }, source) == 0)
+		assert(vim.uv.fs_symlink(source, link))
+		vim.cmd("enew")
+		local bufnr = vim.api.nvim_get_current_buf()
+		local target_win = vim.api.nvim_get_current_win()
+		vim.api.nvim_buf_set_name(bufnr, link)
+		vim.cmd("new")
+		local unrelated_win = vim.api.nvim_get_current_win()
+		vim.api.nvim_set_current_win(target_win)
+		vim.api.nvim_cmd({ cmd = "lcd", args = { nested } }, {})
+
+		local captured = context.capture()
+		equal("alias.lua", vim.fs.basename(captured.path), "capture resolved the lexical symlink path")
+		equal(vim.fn.getcwd(), captured.cwd, "capture ignored the origin window-local cwd")
+		equal(vim.fs.dirname(captured.path), captured.git_root, "capture did not find the lexical Git root")
+
+		local palette = catalog.build(captured, function() end, "palette")
+		local compact = catalog.build(captured, function() end, "context")
+		for _, id in ipairs({
+			"file.copy_absolute_path",
+			"file.copy_cwd_relative_path",
+			"file.copy_git_relative_path",
+		}) do
+			local item = assert(find_item(palette, id), id .. " is unavailable for a named file")
+			equal("window", item.target, id .. " does not retain origin-window semantics")
+			assert(not find_item(compact, id), id .. " leaked into the context menu")
+		end
+
+		package.loaded["config.clipboard"] = {
+			copy_text = function(value)
+				copied[#copied + 1] = value
+				return true
+			end,
+		}
+		local target = captured.target
+		vim.api.nvim_set_current_win(unrelated_win)
+		vim.api.nvim_cmd({ cmd = "lcd", args = { original_cwd } }, {})
+		assert(actions.execute("file.copy_absolute_path", target))
+		assert(actions.execute("file.copy_cwd_relative_path", target))
+		assert(actions.execute("file.copy_git_relative_path", target))
+		equal(unrelated_win, vim.api.nvim_get_current_win(), "path action stole focus from the caller window")
+		equal({ captured.path, "../alias.lua", "alias.lua" }, copied, "path copies changed lexical origin semantics")
+		for _, value in ipairs(copied) do
+			assert(not value:find("\n", 1, true), "copied path gained a newline")
+		end
+
+		local unnamed = catalog.build(context.new({ buftype = "", path = nil }), function() end, "palette")
+		local special = catalog.build(context.new({ buftype = "nofile", path = link }), function() end, "palette")
+		local outside = catalog.build(context.new({ buftype = "", path = link }), function() end, "palette")
+		for _, id in ipairs({
+			"file.copy_absolute_path",
+			"file.copy_cwd_relative_path",
+			"file.copy_git_relative_path",
+		}) do
+			assert(not find_item(unnamed, id), id .. " is available for an unnamed buffer")
+			assert(not find_item(special, id), id .. " is available for a special buffer")
+		end
+		assert(find_item(outside, "file.copy_absolute_path"), "absolute path requires a Git repository")
+		assert(find_item(outside, "file.copy_cwd_relative_path"), "cwd-relative path requires a Git repository")
+		assert(not find_item(outside, "file.copy_git_relative_path"), "Git-relative path is available outside Git")
+		vim.api.nvim_win_close(unrelated_win, true)
+	end, debug.traceback)
+
+	package.loaded["config.clipboard"] = original_clipboard
+	pcall(vim.api.nvim_cmd, { cmd = "lcd", args = { original_cwd } }, {})
+	if vim.api.nvim_get_current_buf() ~= origin_buf then
+		pcall(vim.api.nvim_buf_delete, vim.api.nvim_get_current_buf(), { force = true })
+	end
+	vim.fn.delete(root, "rf")
+	assert(ok, err)
+end)
+
+test("session recents are unique, bounded, and accept only palette executions", function()
+	local recent = require("config.menu.recent")
+	recent.teardown()
+	recent.configure(2)
+	assert(not recent.observe({ kind = "executed", id = "ignored.context", surface = "context" }))
+	assert(not recent.observe({ kind = "rejected", id = "ignored.rejected", surface = "palette" }))
+	assert(not recent.observe({ kind = "error", id = "ignored.error", surface = "palette" }))
+	assert(recent.observe({ kind = "executed", id = "first", surface = "palette" }))
+	assert(recent.observe({ kind = "executed", id = "second", surface = "palette" }))
+	assert(recent.observe({ kind = "executed", id = "first", surface = "palette" }))
+	equal({ "first", "second" }, recent.ids(), "MRU order or deduplication drifted")
+
+	local ordered = recent.order({
+		{ id = "second", text = "second search" },
+		{ id = "third", text = "third search" },
+		{ id = "first", text = "first search" },
+	})
+	equal(
+		{ "first", "second", "third" },
+		vim.tbl_map(function(item)
+			return item.id
+		end, ordered),
+		"visible recents were not pinned newest-first"
+	)
+	assert(ordered[1].recent and ordered[2].recent and not ordered[3].recent, "recent decoration is incorrect")
+	equal("first search", ordered[1].text, "recent decoration changed fuzzy-search text")
+
+	recent.configure(0)
+	equal({}, recent.ids(), "zero recent limit retained session history")
+	assert(not recent.observe({ kind = "executed", id = "disabled", surface = "palette" }))
+	recent.teardown()
+end)
+
 test("catalog exposes stable descriptor ids, labels, hints, and dispatch", function()
 	local actions = require("config.menu.actions")
 	local dispatched
@@ -139,6 +258,14 @@ test("catalog exposes stable descriptor ids, labels, hints, and dispatch", funct
 	equal("gd", definition.hint, "definition hint")
 	definition.run()
 	equal("lsp.definition", dispatched, "descriptor dispatched the wrong action")
+	local devcontainer_recovery =
+		assert(find_item(sections, "command.devcontainer_host"), "Dev Container recovery descriptor missing")
+	equal("Recover / Return to Host Editor", devcontainer_recovery.label, "Dev Container recovery label")
+	equal(
+		{ "recover", "recovery", "lifecycle", "error", "stopped", "dead", "host" },
+		devcontainer_recovery.keywords,
+		"Dev Container recovery keywords"
+	)
 	assert(find_item(sections, "command.lazygit"), "retained LazyGit action is missing")
 	for _, id in ipairs({
 		"command.bookmark_add",
@@ -188,9 +315,9 @@ test("every curated definition has an executable action", function()
 			end
 		end
 	end
-	assert(descriptor_count == 292, "post-retirement catalog must retain exactly 292 explicit descriptors")
+	assert(descriptor_count == 287, "catalog must retain exactly 287 explicit descriptors")
 	equal(
-		"29e6f0178b8bcd4b5cac741d0a71155fdfa36fabe7270ecd7234bc0c718c4ce4",
+		"37f68e224bbb6b820472ebe4cb5990c79285c39d528e5b875a51a53c71c94c2d",
 		vim.fn.sha256(table.concat(inventory, "\0")),
 		"descriptor labels, order, availability or search metadata drifted"
 	)
@@ -315,25 +442,16 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 		"command.diagram_show",
 		"command.diagram_show_svg",
 		"command.diagram_show_ascii",
-		"markdown.render_toggle",
-		"command.markdown_render_enable",
-		"command.markdown_render_disable",
-		"command.markdown_render_buffer_toggle",
-		"command.markdown_render_buffer_enable",
-		"command.markdown_render_buffer_disable",
-		"command.markdown_render_preview",
-		"command.markdown_render_expand",
-		"command.markdown_render_contract",
+		"command.markdown_view",
 		"command.markdown_preview",
 		"command.markdown_preview_open",
 		"command.markdown_preview_stop",
 	}) do
 		assert(find_item(markdown_palette, id), "Markdown render action is missing: " .. id)
 	end
-	for _, id in ipairs({ "command.diagram_show", "markdown.render_toggle", "command.markdown_preview" }) do
+	for _, id in ipairs({ "command.diagram_show", "command.markdown_view", "command.markdown_preview" }) do
 		assert(find_item(markdown_menu, id), "context menu lost a Markdown render action: " .. id)
 	end
-	assert(not find_item(markdown_menu, "command.markdown_render_enable"), "palette render action leaked into context")
 	assert(not find_section(lua_sections, "render"), "render section leaked into Lua")
 	assert(not find_section(catalog.build(context.new({ filetype = "yaml" }), dispatch), "file.yaml"))
 	assert(not find_section(catalog.build(context.new({ filetype = "xml" }), dispatch), "file.xml"))
@@ -468,6 +586,24 @@ test("shared wrap action keeps wrap and linebreak in sync", function()
 
 	vim.wo.wrap = original_wrap
 	vim.wo.linebreak = original_linebreak
+end)
+
+test("new-file action delegates window normalization to the tabs adapter", function()
+	local actions = require("config.menu.actions")
+	local tabs = require("config.tabs")
+	local original_new_file = tabs.new_file
+	local calls = 0
+	tabs.new_file = function()
+		calls = calls + 1
+		return true
+	end
+
+	local ok, err = xpcall(function()
+		assert(actions.execute("file.new", context.capture().target), "new-file target was rejected")
+		equal(1, calls, "menu bypassed the tabs new-file adapter")
+	end, debug.traceback)
+	tabs.new_file = original_new_file
+	assert(ok, err)
 end)
 
 test("case transforms target words, lines, and exact visual ranges", function()
@@ -909,15 +1045,67 @@ test("command wrappers preserve structured plugin arguments", function()
 		equal({}, calls[1].options, "Trouble wrapper options")
 		actions.execute("command.diagram_show_svg", target)
 		equal({ cmd = "DiagramShow", args = { "svg" }, bang = false }, calls[2].specification, "SVG wrapper")
-		actions.execute("command.markdown_render_enable", target)
+		actions.execute("command.markdown_view", target)
 		equal(
-			{ cmd = "MarkdownRender", args = { "enable" }, bang = false },
+			{ cmd = "MarkdownView", args = {}, bang = false },
 			calls[3].specification,
-			"Markdown render wrapper"
+			"Markdown reading view wrapper"
 		)
 	end, debug.traceback)
 
 	vim.api.nvim_cmd = original_cmd
+	assert(ok, err)
+end)
+
+test("command wrapper errors remove only Vim transport stacks", function()
+	local actions = require("config.menu.actions")
+	local original_notify = vim.notify
+	local original_formatting = package.loaded["config.formatting"]
+	local notifications = {}
+	local command_name = "DevContainerStatus"
+	assert(vim.fn.exists(":" .. command_name) == 0, "test command already exists")
+
+	local ok, err = xpcall(function()
+		vim.notify = function(message, level)
+			notifications[#notifications + 1] = { message = message, level = level }
+		end
+		vim.api.nvim_create_user_command(command_name, function()
+			vim.api.nvim_err_writeln("concise lifecycle failure")
+		end, {})
+		assert(actions.execute("command.devcontainer_status", context.capture().target) == false)
+		equal(1, #notifications, "Vim wrapper error notification count")
+		equal("concise lifecycle failure", notifications[1].message, "Vim wrapper error was not sanitized")
+		equal(vim.log.levels.WARN, notifications[1].level, "Vim wrapper error level")
+		assert(not notifications[1].message:find("stack traceback", 1, true), "Vim wrapper stack leaked")
+
+		vim.api.nvim_del_user_command(command_name)
+		notifications = {}
+		vim.api.nvim_create_user_command(command_name, function()
+			error("real Lua command failure")
+		end, {})
+		assert(actions.execute("command.devcontainer_status", context.capture().target) == false)
+		equal(1, #notifications, "Lua command error notification count")
+		assert(notifications[1].message:find("real Lua command failure", 1, true), "Lua failure detail was lost")
+		assert(notifications[1].message:find("stack traceback", 1, true), "real Lua stack was sanitized")
+
+		notifications = {}
+		package.loaded["config.formatting"] = {
+			format = function()
+				error("Vim: embedded detail")
+			end,
+		}
+		assert(actions.execute("format.buffer", context.capture().target) == false)
+		equal(1, #notifications, "embedded Vim text notification count")
+		assert(
+			notifications[1].message:find("Vim: embedded detail", 1, true),
+			"embedded Vim text truncated a genuine Lua failure"
+		)
+		assert(notifications[1].message:find("stack traceback", 1, true), "embedded Vim text lost its Lua stack")
+	end, debug.traceback)
+
+	pcall(vim.api.nvim_del_user_command, command_name)
+	package.loaded["config.formatting"] = original_formatting
+	vim.notify = original_notify
 	assert(ok, err)
 end)
 
@@ -1511,6 +1699,7 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 	local dispatched = {}
 	local origin = vim.api.nvim_get_current_buf()
 	local original_filetype = vim.bo.filetype
+	local recent = require("config.menu.recent")
 
 	local ok, err = xpcall(function()
 		local registry = action_palette.new({ notify = function() end })
@@ -1538,11 +1727,15 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 		package.loaded["config.pager"] = { active = false }
 		package.loaded["config.menu"] = nil
 		vim.bo.filetype = "markdown"
+		recent.teardown()
+		recent.configure(5)
+		recent.observe({ kind = "executed", id = "session.search", surface = "palette" })
 
 		local menu = require("config.menu")
 		menu.open_palette()
 		assert(captured, "palette did not open")
 		equal("menu_actions", captured.source, "palette source")
+		equal(false, captured.matcher.sort_empty, "empty-query order was left to fuzzy sorting")
 		assert(type(captured.format) == "function", "palette format is not custom")
 		local session_item
 		for _, item in ipairs(captured.items) do
@@ -1552,12 +1745,14 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 			end
 		end
 		assert(session_item, "session search is absent from the shared palette")
+		equal("session.search", captured.items[1].id, "visible recent action was not pinned first")
+		assert(session_item.recent, "recent action lacks its visual marker")
 		equal("Sessions: Search and Restore", session_item.display, "palette item is not namespaced")
-		assert(session_item.text:find(session_item.display, 1, true), "palette searchable text lost its display")
+		equal("Sessions: Search and Restore <leader>Sp", session_item.text, "recent marker changed fuzzy-search text")
 		local expected_labels = {
 			["command.diagram_show_svg"] = "Render: Diagram as SVG",
 			["command.markdown_preview_open"] = "Render: Open Markdown Browser Preview",
-			["command.markdown_render_enable"] = "Render: Enable Markdown Inline Rendering",
+			["command.markdown_view"] = "Render: Toggle Markdown Reading View",
 			["search.open"] = "Search / Replace: Open",
 			["view.toggle_wrap"] = "View: Toggle Wrap",
 		}
@@ -1569,7 +1764,7 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 		end
 		assert(next(expected_labels) == nil, "palette label fixtures are missing")
 		equal(
-			{ { session_item.display }, { "  <leader>Sp", "Comment" } },
+			{ { "󰋚 " .. session_item.display }, { "  <leader>Sp", "Comment" } },
 			captured.format(session_item),
 			"palette format"
 		)
@@ -1602,6 +1797,7 @@ test("Snacks palette flattens the shared catalog and confirms once", function()
 	package.loaded.snacks = original_snacks
 	package.loaded["config.pager"] = original_pager
 	vim.bo.filetype = original_filetype
+	recent.teardown()
 	assert(ok, err)
 end)
 

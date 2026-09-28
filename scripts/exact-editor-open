@@ -785,8 +785,6 @@ def validate_pane(argument_parser: argparse.ArgumentParser, arguments: argparse.
     """Validate the optional exact tmux pane selector."""
     if arguments.tmux_pane is None:
         return
-    if not arguments.wait_editor:
-        argument_parser.error("--tmux-pane requires --wait-editor")
     if not arguments.tmux_pane.startswith("%") or not arguments.tmux_pane[1:].isdigit():
         argument_parser.error("--tmux-pane must be an exact tmux pane id")
 

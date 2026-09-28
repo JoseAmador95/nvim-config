@@ -88,7 +88,7 @@ end)
 test("runtimepath harness loads local boundaries early and deterministically", function()
 	local init = table.concat(vim.fn.readfile(vim.fs.joinpath(repo, "init.lua")), "\n")
 	local harness_call = assert(init:find('require("config.local_plugins").setup()', 1, true))
-	local first_host_require = assert(init:find('require("config.local_config").apply_env()', 1, true))
+	local first_host_require = assert(init:find('require("config.local_config")', 1, true))
 	assert(harness_call < first_host_require, "local plugin harness is not loaded before host modules")
 
 	local harness = require("config.local_plugins")

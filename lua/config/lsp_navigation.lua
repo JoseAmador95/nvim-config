@@ -2,7 +2,8 @@ local M = {}
 
 local editor = require("config.editor")
 local markdown_navigation = require("config.markdown_navigation")
-local review_lsp = require("config.native_review").lsp
+local navigation_history = require("config.navigation_history")
+local review = require("config.code_review")
 
 local NATIVE_DEFAULT_KEYMAPS = {
 	{ "n", "K", "vim.lsp.buf.hover()" },
@@ -16,15 +17,18 @@ local NATIVE_DEFAULT_KEYMAPS = {
 	{ "x", "gra", "vim.lsp.buf.code_action()" },
 }
 
+local owned_mappings = {}
+
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.INFO, { title = "LSP" })
 end
 
+local function lsp_error_message(err)
+	return type(err) == "table" and (err.message or vim.inspect(err)) or tostring(err)
+end
+
 local function review_definition_options(bufnr, winid)
-	if type(review_lsp.definition_options) ~= "function" then
-		return nil
-	end
-	return review_lsp.definition_options(bufnr, winid)
+	return review.lsp_definition_options(bufnr, winid)
 end
 
 local open_location_list
@@ -44,7 +48,7 @@ end
 local function has_client(method, title, bufnr, options)
 	options = options or {}
 	local target = bufnr or vim.api.nvim_get_current_buf()
-	if review_lsp.blocked(target) then
+	if review.lsp_blocked(target) then
 		notify((title or "LSP") .. ": disabled for historical review content")
 		return nil, "blocked"
 	end
@@ -71,6 +75,8 @@ local function request_location_at(action, bufnr, line, column, options)
 	if not clients then
 		return false
 	end
+	options = vim.tbl_extend("force", {}, options or {})
+	options.history_origin = vim.deepcopy(navigation_history.capture())
 	local row = math.max(0, math.min(line - 1, vim.api.nvim_buf_line_count(bufnr) - 1))
 	local text = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
 	local byte_column = math.max(0, math.min(column - 1, #text))
@@ -81,22 +87,33 @@ local function request_location_at(action, bufnr, line, column, options)
 		end
 		return params
 	end, function(results)
-		if not options_pending(action, options or {}) then
+		if not options_pending(action, options) then
 			return
 		end
 		local items = {}
-		for client_id, response in pairs(results) do
+		local errors = {}
+		for client_id, response in pairs(results or {}) do
 			local client = vim.lsp.get_client_by_id(client_id)
-			if client and response and response.result then
+			local response_error = response and (response.err or response.error) or nil
+			if response_error then
+				errors[#errors + 1] = (client and client.name or ("client " .. tostring(client_id)))
+					.. ": "
+					.. lsp_error_message(response_error)
+			elseif client and response and response.result then
 				local locations = vim.islist(response.result) and response.result or { response.result }
 				vim.list_extend(items, vim.lsp.util.locations_to_items(locations, client.offset_encoding))
 			end
 		end
+		if #errors > 0 then
+			notify(action.title .. ": " .. table.concat(errors, "; "), vim.log.levels.WARN)
+		end
 		if #items == 0 then
-			notify(action.title .. ": no locations found")
+			if #errors == 0 then
+				notify(action.title .. ": no locations found")
+			end
 			return
 		end
-		open_location_list(action, vim.tbl_extend("force", {}, options or {}, { items = items }))
+		open_location_list(action, vim.tbl_extend("force", {}, options, { items = items }))
 	end)
 	return true
 end
@@ -105,17 +122,18 @@ local function request_location_from_client(action, client, bufnr, line, column,
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return false
 	end
+	options = vim.tbl_extend("force", {}, options or {})
+	options.history_origin = vim.deepcopy(navigation_history.capture())
 	local row = math.max(0, math.min(line - 1, vim.api.nvim_buf_line_count(bufnr) - 1))
 	local text = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
 	local byte_column = math.max(0, math.min(column - 1, #text))
 	local params = position_params(bufnr, row, byte_column, client)
 	local sent = client:request(action.method, params, function(err, result)
-		if not options_pending(action, options or {}) then
+		if not options_pending(action, options) then
 			return
 		end
 		if err then
-			local message = type(err) == "table" and err.message or tostring(err)
-			notify(action.title .. ": " .. tostring(message), vim.log.levels.WARN)
+			notify(action.title .. ": " .. lsp_error_message(err), vim.log.levels.WARN)
 			return
 		end
 		if not result then
@@ -128,7 +146,7 @@ local function request_location_from_client(action, client, bufnr, line, column,
 			notify(action.title .. ": no locations found")
 			return
 		end
-		open_location_list(action, vim.tbl_extend("force", {}, options or {}, { items = items }))
+		open_location_list(action, vim.tbl_extend("force", {}, options, { items = items }))
 	end, bufnr)
 	if not sent then
 		notify(action.title .. ": client rejected the request", vim.log.levels.WARN)
@@ -137,17 +155,47 @@ local function request_location_from_client(action, client, bufnr, line, column,
 	return true
 end
 
-local function snacks_lsp_picker(method, title, picker_fn)
+local function snacks_picker_confirm(origin)
+	return function(picker, item)
+		picker:close()
+		if not item then
+			return
+		end
+		if type(item.buf) == "number" and vim.api.nvim_buf_is_valid(item.buf) then
+			local name = vim.api.nvim_buf_get_name(item.buf)
+			if name == "" or vim.bo[item.buf].buftype ~= "" then
+				return
+			end
+		end
+		local path = item.file
+		if (not path or path == "") and item.buf then
+			path = vim.api.nvim_buf_get_name(item.buf)
+		end
+		if not path or path == "" then
+			return
+		end
+		local pos = item.pos or {}
+		editor.open_file_in_tab(path, {
+			lnum = pos[1] or 1,
+			col = (pos[2] or 0) + 1,
+			history_origin = origin,
+		})
+	end
+end
+
+local function snacks_lsp_picker(method, title, picker_name)
 	return function()
 		if not has_client(method, title) then
 			return
 		end
-		local ok = pcall(require, "snacks")
-		if ok then
-			picker_fn()
-		else
+		local origin = vim.deepcopy(navigation_history.capture())
+		local ok, snacks = pcall(require, "snacks")
+		local picker = ok and snacks.picker and snacks.picker[picker_name] or nil
+		if type(picker) ~= "function" then
 			notify("Snacks picker not available", vim.log.levels.WARN)
+			return
 		end
+		picker({ confirm = snacks_picker_confirm(origin) })
 	end
 end
 
@@ -157,7 +205,7 @@ options_valid = function(action, options)
 	end
 	local ok, valid = pcall(options.valid)
 	if not ok then
-		notify(action.title .. ": location request could not be revalidated", vim.log.levels.WARN)
+		notify(action.title .. ": location request could not be revalidated: " .. tostring(valid), vim.log.levels.WARN)
 		return false
 	end
 	return valid == true
@@ -170,7 +218,10 @@ options_pending = function(action, options)
 	end
 	local ok, valid = pcall(pending)
 	if not ok then
-		notify(action.title .. ": pending location request could not be revalidated", vim.log.levels.WARN)
+		notify(
+			action.title .. ": pending location request could not be revalidated: " .. tostring(valid),
+			vim.log.levels.WARN
+		)
 		return false
 	end
 	return valid == true
@@ -205,11 +256,16 @@ local function dispatch_location(action, item, options)
 	-- Review routers return true when consumed and false only for a verified
 	-- outside-diff destination. Errors and missing decisions fail closed.
 	if routed then
+		local route_origin = navigation_history.capture()
 		local ok, handled, route_err = pcall(options.route, location)
 		if not ok then
 			notify(action.title .. ": review location routing failed: " .. tostring(handled), vim.log.levels.WARN)
 			return false
 		elseif handled == true then
+			local destination = navigation_history.capture()
+			if route_origin and destination and not navigation_history.same_location(route_origin, destination) then
+				navigation_history.record_transition(options.history_origin, destination)
+			end
 			return true
 		elseif route_err then
 			notify(action.title .. ": " .. tostring(route_err), vim.log.levels.WARN)
@@ -222,6 +278,7 @@ local function dispatch_location(action, item, options)
 	editor.open_file_in_tab(location.path, {
 		lnum = location.lnum,
 		col = location.col,
+		history_origin = options.history_origin,
 	})
 	return true
 end
@@ -265,13 +322,10 @@ open_location_list = function(action, options)
 		notify(action.title .. ": invalid locations from server", vim.log.levels.WARN)
 		return
 	end
-	local confirm = "open_in_tab"
-	if type(options.route) == "function" or type(options.valid) == "function" then
-		confirm = function(picker, item)
-			picker:close()
-			if item then
-				dispatch_location(action, item._lsp_location or item, options)
-			end
+	local confirm = function(picker, item)
+		picker:close()
+		if item then
+			dispatch_location(action, item._lsp_location or item, options)
 		end
 	end
 	snacks.picker.pick({
@@ -323,9 +377,11 @@ local function goto_location(name)
 	if navigation_options and not options_valid(action, navigation_options) then
 		return false
 	end
+	local request_options = vim.tbl_extend("force", {}, navigation_options or {})
+	request_options.history_origin = vim.deepcopy(navigation_history.capture())
 	action.request({
 		on_list = function(options)
-			open_location_list(action, vim.tbl_extend("force", {}, options, navigation_options or {}))
+			open_location_list(action, vim.tbl_extend("force", {}, options, request_options))
 		end,
 	})
 	return true
@@ -365,7 +421,7 @@ end
 ---@return boolean
 function M.navigation_allowed(bufnr, title)
 	local target = bufnr or vim.api.nvim_get_current_buf()
-	if review_lsp.blocked(target) then
+	if review.lsp_blocked(target) then
 		notify((title or "LSP") .. ": disabled for historical review content")
 		return false
 	end
@@ -411,7 +467,12 @@ function M.definition_or_native(bufnr)
 		return request_location_at(action, target, cursor[1], cursor[2] + 1, navigation_options)
 	end
 	if reason == "missing" then
+		local origin = navigation_history.capture()
 		vim.cmd("normal! gd")
+		local destination = navigation_history.capture()
+		if not navigation_history.same_location(origin, destination) then
+			navigation_history.record_transition(origin, destination)
+		end
 		return true
 	end
 	return false
@@ -483,8 +544,9 @@ function M.hover_at(bufnr, line, column, options)
 	return true
 end
 
-local function global_keymap(mode, lhs)
-	for _, mapping in ipairs(vim.api.nvim_get_keymap(mode)) do
+local function current_keymap(mode, lhs, bufnr)
+	local mappings = bufnr and vim.api.nvim_buf_get_keymap(bufnr, mode) or vim.api.nvim_get_keymap(mode)
+	for _, mapping in ipairs(mappings) do
 		if mapping.lhs == lhs then
 			return mapping
 		end
@@ -495,11 +557,72 @@ local function delete_default_keymaps(bufnr)
 	local options = bufnr and { buffer = bufnr } or nil
 	for _, default in ipairs(NATIVE_DEFAULT_KEYMAPS) do
 		local mode, lhs, description = unpack(default)
-		local mapping = not bufnr and global_keymap(mode, lhs) or nil
-		if bufnr or (mapping and mapping.desc == description) then
+		local mapping = current_keymap(mode, lhs, bufnr)
+		if mapping and mapping.desc == description then
 			pcall(vim.keymap.del, mode, lhs, options)
 		end
 	end
+end
+
+local function owned_callback(bufnr, mode, lhs)
+	return owned_mappings[bufnr] and owned_mappings[bufnr][mode] and owned_mappings[bufnr][mode][lhs]
+end
+
+local function remember_owned(bufnr, mode, lhs, callback)
+	owned_mappings[bufnr] = owned_mappings[bufnr] or {}
+	owned_mappings[bufnr][mode] = owned_mappings[bufnr][mode] or {}
+	owned_mappings[bufnr][mode][lhs] = callback
+end
+
+local function forget_owned(bufnr, mode, lhs)
+	local modes = owned_mappings[bufnr]
+	if not modes or not modes[mode] then
+		return
+	end
+	modes[mode][lhs] = nil
+	if next(modes[mode]) == nil then
+		modes[mode] = nil
+	end
+	if next(modes) == nil then
+		owned_mappings[bufnr] = nil
+	end
+end
+
+local function set_owned_keymap(bufnr, modes, lhs, callback, options)
+	modes = type(modes) == "table" and modes or { modes }
+	for _, mode in ipairs(modes) do
+		local mapping = current_keymap(mode, lhs, bufnr)
+		local owned = owned_callback(bufnr, mode, lhs)
+		if not mapping or (owned and mapping.callback == owned) then
+			local mapping_options = vim.tbl_extend("force", {}, options or {}, { buffer = bufnr })
+			vim.keymap.set(mode, lhs, callback, mapping_options)
+			remember_owned(bufnr, mode, lhs, callback)
+		elseif owned then
+			forget_owned(bufnr, mode, lhs)
+		end
+	end
+end
+
+local function clear_owned_keymaps(bufnr)
+	local modes = owned_mappings[bufnr]
+	owned_mappings[bufnr] = nil
+	for mode, mappings in pairs(modes or {}) do
+		for lhs, callback in pairs(mappings) do
+			local mapping = current_keymap(mode, lhs, bufnr)
+			if mapping and mapping.callback == callback then
+				pcall(vim.keymap.del, mode, lhs, { buffer = bufnr })
+			end
+		end
+	end
+end
+
+local function has_remaining_client(bufnr, detaching_client_id)
+	for _, client in ipairs(vim.lsp.get_clients({ bufnr = bufnr })) do
+		if client.id ~= detaching_client_id then
+			return true
+		end
+	end
+	return false
 end
 
 function M.setup()
@@ -507,7 +630,7 @@ function M.setup()
 	markdown_navigation.setup({
 		allowed = M.navigation_allowed,
 		eligible = function(bufnr)
-			return not review_lsp.blocked(bufnr)
+			return not review.lsp_blocked(bufnr)
 		end,
 		definition = M.definition_or_native,
 		marksman = function(bufnr, line, column)
@@ -519,7 +642,7 @@ function M.setup()
 	vim.api.nvim_create_autocmd("FileType", {
 		group = group,
 		callback = function(event)
-			if review_lsp.enforce_blocked(event.buf) then
+			if review.enforce_lsp_blocked(event.buf) then
 				return
 			end
 			delete_default_keymaps(event.buf)
@@ -529,48 +652,61 @@ function M.setup()
 	vim.api.nvim_create_autocmd("LspAttach", {
 		group = group,
 		callback = function(event)
-			if review_lsp.enforce_blocked(event.buf, event.data and event.data.client_id or nil) then
+			if review.enforce_lsp_blocked(event.buf, event.data and event.data.client_id or nil) then
 				return
 			end
 			delete_default_keymaps(event.buf)
-			local definition = markdown_navigation.handler(event.buf) or M.definition
-			vim.keymap.set("n", "gd", definition, { buffer = event.buf, silent = true, desc = "Go to definition" })
-			vim.keymap.set("n", "gD", M.declaration, { buffer = event.buf, silent = true, desc = "Go to declaration" })
-			vim.keymap.set(
+			if not markdown_navigation.handler(event.buf) then
+				set_owned_keymap(event.buf, "n", "gd", M.definition, { silent = true, desc = "Go to definition" })
+			end
+			set_owned_keymap(event.buf, "n", "gD", M.declaration, { silent = true, desc = "Go to declaration" })
+			set_owned_keymap(
+				event.buf,
 				"n",
 				"gi",
-				snacks_lsp_picker("textDocument/implementation", "Go to implementation", function()
-					Snacks.picker.lsp_implementations({ confirm = "open_in_tab" })
-				end),
-				{ buffer = event.buf, silent = true, desc = "Go to implementation" }
+				snacks_lsp_picker("textDocument/implementation", "Go to implementation", "lsp_implementations"),
+				{ silent = true, desc = "Go to implementation" }
 			)
-			vim.keymap.set(
+			set_owned_keymap(
+				event.buf,
 				"n",
 				"gr",
-				snacks_lsp_picker("textDocument/references", "References", function()
-					Snacks.picker.lsp_references({ confirm = "open_in_tab" })
-				end),
-				{ buffer = event.buf, silent = true, desc = "References" }
+				snacks_lsp_picker("textDocument/references", "References", "lsp_references"),
+				{ silent = true, desc = "References" }
 			)
-			vim.keymap.set("n", "K", function()
+			set_owned_keymap(event.buf, "n", "K", function()
 				vim.lsp.buf.hover(hover_opts)
-			end, { buffer = event.buf, silent = true, desc = "Hover symbol documentation" })
-			vim.keymap.set("n", "<C-k>", vim.lsp.buf.signature_help, {
-				buffer = event.buf,
+			end, { silent = true, desc = "Hover symbol documentation" })
+			set_owned_keymap(event.buf, "n", "<C-k>", vim.lsp.buf.signature_help, {
 				silent = true,
 				desc = "Signature help",
 			})
-			vim.keymap.set("n", "<leader>lr", vim.lsp.buf.rename, {
-				buffer = event.buf,
+			set_owned_keymap(event.buf, "n", "<leader>lr", vim.lsp.buf.rename, {
 				silent = true,
 				desc = "Rename",
 			})
-			vim.keymap.set({ "n", "v" }, "<leader>ca", vim.lsp.buf.code_action, {
-				buffer = event.buf,
+			set_owned_keymap(event.buf, { "n", "v" }, "<leader>ca", vim.lsp.buf.code_action, {
 				silent = true,
 				desc = "Code action",
 			})
 		end,
+	})
+	vim.api.nvim_create_autocmd("LspDetach", {
+		group = group,
+		callback = function(event)
+			local client_id = event.data and event.data.client_id or nil
+			if not has_remaining_client(event.buf, client_id) then
+				clear_owned_keymaps(event.buf)
+			end
+		end,
+		desc = "Remove mappings after the last LSP client detaches",
+	})
+	vim.api.nvim_create_autocmd("BufWipeout", {
+		group = group,
+		callback = function(event)
+			owned_mappings[event.buf] = nil
+		end,
+		desc = "Forget disposed LSP mapping ownership",
 	})
 end
 

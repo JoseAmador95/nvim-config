@@ -14,31 +14,45 @@ The closure is hashed again after cataloging and immediately before opening or
 replacing an execution, or before format inspection, so changed source cannot
 launch code without a fresh authorization/catalog.
 
-`run()` accepts literal argv values and keeps exactly one transcript identity per
-runtime/task root. If a terminal already exists it returns the intrinsic choices
-`focus`, `replace`, and `cancel`; it never stops or replaces a process without the
-host explicitly selecting `replace`. Conflict discovery, `focus`, and `cancel`
-remain available when the catalog closure has since changed because they launch
-no code; `focus` addresses the existing terminal by its stable key and never
-validates against the newly requested argv. `open` and `replace` still fail closed on that drift. `format()` exposes
-non-mutating canonical dump and `--fmt --check` operations. Host adapters own all
-UI and policy prompts.
+`run()` preserves its legacy literal `string[]` argv input. It also accepts a
+bindings object keyed by parameter name, for example `{ verbose = true, quiet =
+2, define = { "A=1", "B=2" }, target = "prod" }`. Flags accept a boolean or
+non-negative repetition count. Options and positionals accept one string or a
+string array. Bindings are emitted in catalog declaration order, independent of
+Lua table order; `--long` is preferred and `-short` is the fallback, and every
+repeated option gets its own option/value argv pair. Omitted defaults remain
+omitted so Just applies them. Per-parameter minimum and maximum cardinality are
+checked immediately before launch or replacement. Recipe-supplied argv is also
+bounded to 4,096 materialized entries: an option switch and its value count as
+two entries, and aggregate accounting rejects overflow before allocating the
+argv. This fixed core safety limit is not host- or project-configurable.
+
+Exactly one transcript identity is kept per runtime/task root. If a terminal
+already exists `run()` returns the intrinsic choices `focus`, `replace`, and
+`cancel`; it never stops or replaces a process without the host explicitly
+selecting `replace`. Conflict discovery, `focus`, and `cancel` remain available
+when the catalog closure has since changed because they launch no code; `focus`
+addresses the existing terminal by its stable key and never validates against
+the newly requested argv. `open` and `replace` still fail closed on that drift.
+`format()` exposes non-mutating canonical dump and `--fmt --check` operations.
+Host adapters own all UI and policy prompts.
 
 Catalogs preserve modern parameter metadata and compute exact minimum/maximum
-argument cardinality, including bounded and variadic parameters. Variadic input
-remains one literal argv value; the plugin never whitespace-splits it. Private
-recipes, aliases, modules, and every descendant of a private module are omitted.
+argument cardinality, including bounded and variadic parameters. Every legacy
+value and every structured repeated value remains one literal argv entry; the
+plugin never whitespace-splits it. Private recipes, aliases, modules, and every
+descendant of a private module are omitted.
 The catalog and execution both retain the same canonical absolute `just`
 executable. Optional `--one` support is probed only when an invocation is about
 to launch, fails closed on an invalid probe result, and is cached per absolute
 binary for that setup lifetime.
 
-Public API: `setup(opts)`, `catalog(spec, callback)`, `run(catalog, name, values,
-opts)`, `transcript(identity)`, `status(identity)`, `stop(identity)`, and
-`format(catalog, mode, callback)`. Unknown setup keys are rejected before state
-changes. Because every setup input is an injected adapter, `effective_config()`
-always returns a fresh empty table and setup events carry that safe projection.
-`status()` returns a copied aggregate with `configured`, catalogs, requests,
-capabilities, and callback-free execution summaries; contextual status,
-transcript, and catalog values are also caller-owned. `teardown()`
-deterministically clears all process-local catalogs and executions.
+Public API: `setup(opts)`, `catalog(spec, callback)`, `run(catalog, name,
+values_or_bindings, opts)`, `limits()`, `transcript(identity)`, `status(identity)`,
+`stop(identity)`, and `format(catalog, mode, callback)`. Unknown setup keys are
+rejected before state changes. Because every setup input is an injected adapter,
+`effective_config()` always returns a fresh empty table and setup events carry
+that safe projection. `status()` returns a copied aggregate with `configured`,
+catalogs, requests, capabilities, and callback-free execution summaries;
+contextual status, transcript, and catalog values are also caller-owned.
+`teardown()` deterministically clears all process-local catalogs and executions.

@@ -1828,6 +1828,11 @@ function M.setup_deferred(dependencies)
 	local setup = deps.setup or function()
 		return M.setup(deps.options or {})
 	end
+	if active then
+		pcall(vim.api.nvim_del_augroup_by_name, "exact_editor_rpc_deferred")
+		return active
+	end
+	local group = vim.api.nvim_create_augroup("exact_editor_rpc_deferred", { clear = true })
 
 	local function queue()
 		if deferred or active then
@@ -1840,18 +1845,24 @@ function M.setup_deferred(dependencies)
 				return
 			end
 			deferred = false
-			if not active and ui_count() > 0 then
-				setup()
+			if active then
+				pcall(vim.api.nvim_del_augroup_by_name, "exact_editor_rpc_deferred")
+				return
+			end
+			if ui_count() == 0 then
+				return
+			end
+			local result = setup()
+			if active or result then
+				pcall(vim.api.nvim_del_augroup_by_name, "exact_editor_rpc_deferred")
 			end
 		end)
 	end
 
+	vim.api.nvim_create_autocmd("UIEnter", { group = group, callback = queue })
 	if ui_count() > 0 then
 		queue()
-		return
 	end
-	local group = vim.api.nvim_create_augroup("exact_editor_rpc_deferred", { clear = true })
-	vim.api.nvim_create_autocmd("UIEnter", { group = group, once = true, callback = queue })
 end
 
 M._cleanup = cleanup

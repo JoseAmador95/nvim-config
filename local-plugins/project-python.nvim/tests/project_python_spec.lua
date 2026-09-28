@@ -41,8 +41,13 @@ terminal.status = function(identity)
 	terminal_calls[#terminal_calls + 1] = { action = "status", value = vim.deepcopy(identity) }
 	return { exists = false, running = false }
 end
-terminal.send = function(identity, text)
-	terminal_calls[#terminal_calls + 1] = { action = "send", value = vim.deepcopy(identity), text = text }
+terminal.send = function(identity, text, root)
+	terminal_calls[#terminal_calls + 1] = {
+		action = "send",
+		value = vim.deepcopy(identity),
+		text = text,
+		root = root,
+	}
 	return true
 end
 
@@ -265,9 +270,23 @@ test("discovery never executes Python and REPL uses only the injected lifecycle"
 		assert(project_python.repl("open", service))
 		assert(project_python.repl("send", service, { text = "print(42)" }))
 		assert(terminal_calls[#terminal_calls].text == "print(42)")
+		assert(terminal_calls[#terminal_calls].root == service, "REPL send lost its canonical project root")
 	end, debug.traceback)
 	vim.system = original_system
 	assert(ok, err)
+end)
+
+test("REPL launch revalidates a cached interpreter without refreshing discovery", function()
+	configure()
+	local python = executable(service .. "/.venv/bin/python")
+	assert(project_python.snapshot(service).value.interpreter == python)
+	assert(vim.fn.delete(python) == 0)
+	local spec, err = project_python.repl_spec(service)
+	assert(spec == nil and err == "project Python is unavailable", "stale snapshot remained executable by the REPL")
+	assert(
+		project_python.snapshot(service).value.interpreter == python,
+		"REPL validation mutated the published snapshot"
+	)
 end)
 
 test("defaultInterpreterPath is approved and diagnostics enumerate without executing", function()

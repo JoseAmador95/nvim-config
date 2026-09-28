@@ -4,7 +4,6 @@
 -- (macos-option-as-alt = left → la Option izquierda emite <A-...>).
 return {
 	"mrjones2014/smart-splits.nvim",
-	lazy = false,
 	cond = function()
 		return not vim.g.vscode
 	end,

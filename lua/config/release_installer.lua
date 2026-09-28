@@ -154,7 +154,10 @@ local function run_test_hook(phase, details)
 		return true
 	end
 	local ok, err = pcall(test_hook, phase, vim.deepcopy(details or {}))
-	return ok and true or nil, ok and nil or tostring(err)
+	if not ok then
+		return nil, tostring(err)
+	end
+	return true
 end
 
 local function bounded_warnings(values)
@@ -446,7 +449,10 @@ local function sync_directories(directories, label)
 			end
 		end
 	end
-	return #warnings == 0 and true or nil, table.concat(warnings, "; ")
+	if #warnings > 0 then
+		return nil, table.concat(warnings, "; ")
+	end
+	return true
 end
 
 local function read_all_fd(fd)
@@ -875,7 +881,10 @@ local function discard_entry(directory, name, expected, label)
 		return nil, label .. "-cleanup-failed:" .. tostring(remove_err)
 	end
 	local synced, sync_err = sync_directory(directory, label .. "-cleanup-parent")
-	return true, synced and nil or tostring(sync_err)
+	if not synced then
+		return true, tostring(sync_err)
+	end
+	return true
 end
 
 local function write_all(fd, contents)
@@ -1149,7 +1158,10 @@ local function discard_nonfile_entry(directory, name, expected, label)
 				)
 		end
 		local synced, sync_err = sync_directory(directory, label .. "-cleanup-parent")
-		return true, synced and nil or tostring(sync_err)
+		if not synced then
+			return true, tostring(sync_err)
+		end
+		return true
 	end
 	local quarantine = temporary_entry_name(name, "discard")
 	local moved, move_err = renameat_noreplace(directory, name, directory, quarantine)
@@ -1180,7 +1192,10 @@ local function discard_nonfile_entry(directory, name, expected, label)
 		return nil, label .. "-cleanup-quarantine-retained:" .. path .. "; " .. tostring(remove_err)
 	end
 	local removed_synced, removed_sync_err = sync_directory(directory, label .. "-cleanup-parent")
-	return true, removed_synced and nil or tostring(removed_sync_err)
+	if not removed_synced then
+		return true, tostring(removed_sync_err)
+	end
+	return true
 end
 
 local function discard_any_entry(directory, name, expected, label)
@@ -1534,7 +1549,11 @@ local function rollback_exchanged(candidate, target, published, previous)
 				exchange_sync_err
 			))
 	end
-	return true, exchanged_synced and discard_err or tostring(discard_err or exchange_sync_err)
+	local warning = discard_err
+	if not exchanged_synced then
+		warning = warning and (tostring(exchange_sync_err) .. "; " .. tostring(warning)) or tostring(exchange_sync_err)
+	end
+	return true, warning
 end
 
 local function cleanup_previous(candidate, target, published, previous)
@@ -1827,10 +1846,14 @@ local function promote_file(plan, candidate_path, candidate_root, relative, mode
 	local result, promote_err, warnings, retain_stage
 	if previous == false then
 		result, warnings, retain_stage = promote_initial(candidate, target, mode)
-		promote_err = result and nil or warnings
+		if not result then
+			promote_err = warnings
+		end
 	else
 		result, warnings, retain_stage = promote_existing(candidate, target, previous, mode)
-		promote_err = result and nil or warnings
+		if not result then
+			promote_err = warnings
+		end
 	end
 	if not result then
 		local retained = entry_snapshot(candidate.directory, candidate.name, "candidate-pin")
@@ -2009,7 +2032,11 @@ local function extract(plan, controller, binding, stage_directory, callback)
 				return
 			end
 			local candidate, write_err = write_staged_file(extract_directory, plan.entry.executable, result.stdout, 384)
-			finish(candidate, candidate and nil or "extract-write-failed:" .. tostring(write_err))
+			if not candidate then
+				finish(nil, "extract-write-failed:" .. tostring(write_err))
+				return
+			end
+			finish(candidate)
 		end)
 		return
 	end
@@ -2043,7 +2070,11 @@ local function extract(plan, controller, binding, stage_directory, callback)
 		end
 		local candidate = vim.fs.joinpath(extract_root, plan.asset.member)
 		local ok, err = safe_candidate(candidate, extract_root, false)
-		finish(ok and candidate or nil, ok and nil or err)
+		if not ok then
+			finish(nil, err)
+			return
+		end
+		finish(candidate)
 	end)
 end
 

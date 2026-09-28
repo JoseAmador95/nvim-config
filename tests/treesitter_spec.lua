@@ -53,6 +53,7 @@ end
 
 local installed = {}
 local starts = {}
+local stops = {}
 local install_calls = {}
 local install_task
 
@@ -84,8 +85,12 @@ local original_stop = vim.treesitter.stop
 local original_get_lang = vim.treesitter.language.get_lang
 vim.treesitter.start = function(buf, lang)
 	starts[#starts + 1] = { buf = buf, lang = lang }
+	vim.treesitter.highlighter.active[buf] = { language = lang }
 end
-vim.treesitter.stop = function() end
+vim.treesitter.stop = function(buf)
+	stops[#stops + 1] = buf
+	vim.treesitter.highlighter.active[buf] = nil
+end
 vim.treesitter.language.get_lang = function(ft)
 	return ft
 end
@@ -98,6 +103,7 @@ local default_installed_revision = runtime._installed_revision
 local function reset_runtime()
 	runtime.setup({ parsers = {}, highlight = false, indent = false })
 	starts = {}
+	stops = {}
 	install_calls = {}
 	install_task = nil
 	runtime._expected_revision = default_expected_revision
@@ -137,6 +143,55 @@ test("skips buffers larger than 200 KiB", function()
 
 	equal({}, starts_for(buf), "oversized buffer unexpectedly started Tree-sitter")
 	equal("", vim.bo[buf].indentexpr, "oversized buffer unexpectedly enabled Tree-sitter indentation")
+end)
+
+test("stops an oversized highlighter that predates host setup", function()
+	reset_runtime()
+	local buf = make_buffer(".lua", string.rep("x", 200 * 1024 + 1), "lua")
+	installed = { "lua" }
+	vim.treesitter.highlighter.active[buf] = { language = "lua" }
+	runtime.setup({ parsers = { "lua" }, highlight = true, indent = true })
+
+	equal({}, starts_for(buf), "oversized pre-existing highlighter was restarted")
+	equal({ buf }, stops, "oversized pre-existing highlighter was not stopped")
+	local policy = runtime.policy(buf)
+	assert(not policy.eligible and policy.reason == "max-bytes-exceeded", "host did not expose live size policy")
+end)
+
+test("host observers receive copied live eligibility edges", function()
+	reset_runtime()
+	local buf = make_buffer(".lua", "tiny", "lua")
+	installed = { "lua" }
+	local changes = {}
+	runtime.setup({ parsers = { "lua" }, highlight = true, indent = true })
+	runtime.observe_policy("treesitter-spec", function(current, previous)
+		changes[#changes + 1] = { current = current, previous = previous }
+	end)
+	equal({}, changes, "observer replayed initial policy state")
+	local limit = runtime.policy(buf).max_bytes
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { string.rep("x", limit + 1) })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf })
+	assert(
+		vim.wait(1000, function()
+			return #changes == 1
+		end, 5),
+		"growth eligibility edge was not observed"
+	)
+	assert(changes[1].previous.eligible and not changes[1].current.eligible, "growth edge was reversed")
+	changes[1].current.reason = "mutated"
+	equal("max-bytes-exceeded", runtime.policy(buf).reason, "observer received shared policy state")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "tiny" })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf })
+	assert(
+		vim.wait(1000, function()
+			return #changes == 2
+		end, 5),
+		"shrink eligibility edge was not observed"
+	)
+	assert(not changes[2].previous.eligible and changes[2].current.eligible, "shrink edge was reversed")
+	runtime.observe_policy("treesitter-spec", nil)
 end)
 
 test("starts only configured parsers that are installed", function()
@@ -328,6 +383,66 @@ test("editor and pager plugin specs never install parsers implicitly", function(
 	vim.g.vscode = previous_vscode
 end)
 
+test("UFO selects from live policy and reselects only attached buffers", function()
+	reset_runtime()
+	local original_policy = runtime.policy
+	local original_observe = runtime.observe_policy
+	local original_ufo = package.loaded.ufo
+	local eligible = {}
+	local observer
+	local setup_options
+	local attached = {}
+	local detach_calls = {}
+	local attach_calls = {}
+	runtime.policy = function(buf)
+		return { buf = buf, eligible = eligible[buf] == true }
+	end
+	runtime.observe_policy = function(name, callback)
+		assert(name == "ufo", "UFO used an unstable policy observer name")
+		observer = callback
+	end
+	package.loaded.ufo = {
+		setup = function(options)
+			setup_options = options
+		end,
+		hasAttached = function(buf)
+			return attached[buf] == true
+		end,
+		detach = function(buf)
+			detach_calls[#detach_calls + 1] = buf
+			attached[buf] = nil
+		end,
+		attach = function(buf)
+			attach_calls[#attach_calls + 1] = buf
+			attached[buf] = true
+		end,
+	}
+
+	local spec = dofile(vim.fs.joinpath(repo, "lua", "plugins", "ufo.lua"))[1]
+	spec.config()
+	assert(type(observer) == "function", "UFO did not observe runtime policy transitions")
+	local buf = vim.api.nvim_get_current_buf()
+	eligible[buf] = true
+	equal({ "treesitter", "indent" }, setup_options.provider_selector(buf), "eligible UFO provider order changed")
+	eligible[buf] = false
+	equal({ "indent" }, setup_options.provider_selector(buf), "ineligible UFO buffer retained Tree-sitter")
+
+	attached[buf] = true
+	observer({ buf = buf, eligible = false }, { buf = buf, eligible = true })
+	equal({ buf }, detach_calls, "UFO did not invalidate its cached provider")
+	equal({ buf }, attach_calls, "UFO did not reselect after policy transition")
+	detach_calls = {}
+	attach_calls = {}
+	attached[buf] = nil
+	observer({ buf = buf, eligible = true }, { buf = buf, eligible = false })
+	equal({}, detach_calls, "UFO touched a manually detached buffer")
+	equal({}, attach_calls, "UFO reclaimed a manually detached buffer")
+
+	runtime.policy = original_policy
+	runtime.observe_policy = original_observe
+	package.loaded.ufo = original_ufo
+end)
+
 runtime.teardown()
 vim.treesitter.start = original_start
 vim.treesitter.stop = original_stop
@@ -350,5 +465,5 @@ if #failures > 0 then
 	vim.cmd("cquit")
 end
 
-print(string.format("treesitter_spec: %d tests passed", 9))
+print(string.format("treesitter_spec: %d tests passed", 13))
 vim.cmd("quitall!")

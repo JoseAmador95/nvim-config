@@ -676,6 +676,7 @@ local function clear_one_cursor_guard(presentation, win)
 	end
 	presentation.cursor_guards[win] = nil
 	guard.active = false
+	guard.redraw_pending = false
 	for _, id in ipairs(guard.autocmds or {}) do
 		pcall(vim.api.nvim_del_autocmd, id)
 	end
@@ -723,6 +724,34 @@ local function install_cursor_guard(state, presentation, buf, win, visible, omit
 			clear_one_cursor_guard(presentation, win)
 		end,
 	})
+	if presentation.layout == "inline" then
+		guard.autocmds[#guard.autocmds + 1] = vim.api.nvim_create_autocmd("WinScrolled", {
+			pattern = tostring(win),
+			desc = "Invalidate scrolled native review hunk rows",
+			callback = function()
+				if not guard.active or guard.redraw_pending or state.presentation ~= presentation then
+					return
+				end
+				guard.redraw_pending = true
+				vim.schedule(function()
+					guard.redraw_pending = false
+					if
+						not guard.active
+						or state.presentation ~= presentation
+						or presentation.cursor_guards[win] ~= guard
+						or not valid_win(win)
+						or vim.api.nvim_win_get_buf(win) ~= buf
+					then
+						return
+					end
+					-- Concealed gaps plus virtual bands can leave duplicate screen rows
+					-- after scrolling with scrolloff. Invalidate after the scroll completes;
+					-- doing this inside WinScrolled still permits stale cached rows.
+					vim.api.nvim__redraw({ win = win, valid = false })
+				end)
+			end,
+		})
+	end
 	guard.last_line = vim.api.nvim_win_get_cursor(win)[1]
 	correct_concealed_cursor(guard)
 end
@@ -1169,7 +1198,7 @@ end
 ---Render one entry in the state's origin tab without creating a tab.
 ---@param state table
 ---@param entry table
----@param options? { layout?: "inline"|"split", context?: "hunks"|"full" }
+---@param options? { layout?: "inline"|"split", context?: "hunks"|"full", side?: "old"|"new" }
 ---@return boolean?
 ---@return string? err
 function M.show(state, entry, options)
@@ -1181,6 +1210,16 @@ function M.show(state, entry, options)
 	end
 	if context ~= "hunks" and context ~= "full" then
 		return nil, "context must be hunks or full"
+	end
+	local preferred_side = options.side
+	if preferred_side ~= nil and preferred_side ~= "old" and preferred_side ~= "new" then
+		return nil, "side must be old or new"
+	end
+	local preferred_path = preferred_side == "old" and entry.old_path
+		or preferred_side == "new" and entry.new_path
+		or nil
+	if preferred_side and not preferred_path then
+		return nil, "preferred logical review side has no source path"
 	end
 	if not state.enabled then
 		return nil, "review mode is not enabled"
@@ -1206,6 +1245,8 @@ function M.show(state, entry, options)
 	local visibility_hunk_context = layout == "split" and math.max(1, hunk_context) or hunk_context
 	local old_line_count = #text_lines(entry.old_text or "")
 	local new_line_count = #text_lines(entry.new_text or "")
+	local logical_old_line_count = entry.metadata_only and 0 or source_line_count(entry.old_text or "")
+	local logical_new_line_count = entry.metadata_only and 0 or source_line_count(entry.new_text or "")
 	local presentation = {
 		cursor_guards = {},
 		entry = entry,
@@ -1214,10 +1255,11 @@ function M.show(state, entry, options)
 		visibility_hunk_context = visibility_hunk_context,
 		layout = layout,
 		context = context,
+		preferred_side = nil,
 		projection = projection,
 		source_line_counts = {
-			old = source_line_count(entry.old_text or ""),
-			new = source_line_count(entry.new_text or ""),
+			old = logical_old_line_count,
+			new = logical_new_line_count,
 		},
 		decorations = {},
 		owned_buffers = {},
@@ -1235,7 +1277,7 @@ function M.show(state, entry, options)
 	state.handlers.prev_hunk = M.prev_hunk
 
 	if layout == "inline" then
-		local side = projection and "unified" or entry.new_path and "new" or "old"
+		local side = projection and "unified" or preferred_side or entry.new_path and "new" or "old"
 		local buf = projection and unified_scratch(entry, projection, presentation.generation, state)
 			or scratch(entry, side, state)
 		presentation.inline = { win = state.origin.win, buf = buf, side = side, real = false }
@@ -1352,6 +1394,11 @@ function M.clear(state)
 	if not presentation then
 		return
 	end
+	if presentation.logical_cursor_autocmd then
+		pcall(vim.api.nvim_del_autocmd, presentation.logical_cursor_autocmd)
+		presentation.logical_cursor_autocmd = nil
+	end
+	presentation.logical_cursor = nil
 	if presentation.band_refresh_autocmd then
 		pcall(vim.api.nvim_del_autocmd, presentation.band_refresh_autocmd)
 		presentation.band_refresh_autocmd = nil
@@ -1759,6 +1806,259 @@ function M.rows_for_anchor(state, anchor, expected_generation)
 		anchor.end_line or anchor.start_line,
 		anchor.path
 	)
+end
+
+local function logical_source_path(entry, side)
+	if side == "old" then
+		return entry.old_path
+	elseif side == "new" then
+		return entry.new_path
+	end
+	return nil
+end
+
+local function validate_logical_location(presentation, location)
+	if type(location) ~= "table" then
+		return nil, "logical review location is required"
+	elseif type(location.entry_identity) ~= "string" or location.entry_identity == "" then
+		return nil, "logical review entry identity is required"
+	elseif location.entry_identity ~= presentation.entry.identity then
+		return nil, "logical review entry is not currently presented"
+	elseif type(location.layer) ~= "string" or location.layer == "" then
+		return nil, "logical review layer is required"
+	elseif location.layer ~= (presentation.entry.layer or "history") then
+		return nil, "logical review layer is not currently presented"
+	elseif location.side ~= "old" and location.side ~= "new" then
+		return nil, "logical review side must be old or new"
+	elseif type(location.path) ~= "string" or location.path == "" then
+		return nil, "logical review path is required"
+	elseif location.path ~= logical_source_path(presentation.entry, location.side) then
+		return nil, "logical review path is not represented by this entry"
+	elseif not integer(location.line) or location.line < 0 then
+		return nil, "logical review line must be a non-negative integer"
+	elseif not integer(location.col) or location.col < 1 then
+		return nil, "logical review column must be a positive integer"
+	elseif location.line == 0 and location.col ~= 1 then
+		return nil, "logical file locations must use column one"
+	end
+	local line_count = presentation.source_line_counts[location.side]
+	if location.line == 0 then
+		if line_count ~= 0 then
+			return nil, "logical file location is only valid for empty or metadata content"
+		end
+	elseif location.line > line_count then
+		return nil, "logical review line is outside the represented source"
+	end
+	return true
+end
+
+local function matching_side(presentation, side)
+	local expected = side == "old" and "old" or "new"
+	for _, name in ipairs({ "inline", "left", "right" }) do
+		local target = presentation[name]
+		if target and target.side == expected then
+			return target
+		end
+	end
+	return nil
+end
+
+---Capture the current visual review cursor as one stable OLD/NEW source location.
+---@param state table
+---@return table? location
+---@return string? err
+function M.capture_location(state)
+	local presentation = state and state.presentation
+	if not presentation or type(presentation.entry) ~= "table" then
+		return nil, "review presentation is unavailable"
+	end
+	local win = vim.api.nvim_get_current_win()
+	local cursor = vim.api.nvim_win_get_cursor(win)
+	local location
+	if
+		presentation.layout == "inline"
+		and presentation.projection
+		and presentation.inline
+		and presentation.inline.win == win
+		and valid_buf(presentation.inline.buf)
+		and vim.api.nvim_win_get_buf(win) == presentation.inline.buf
+	then
+		local restored_cursor = presentation.logical_cursor
+		local side
+		local path
+		local source_line
+		if restored_cursor and restored_cursor.win == win and restored_cursor.display_line == cursor[1] then
+			side = restored_cursor.side
+			path = restored_cursor.path
+			source_line = restored_cursor.source_line
+		else
+			presentation.logical_cursor = nil
+			presentation.preferred_side = nil
+			local source, source_err = M.source_at(state, cursor[1], presentation.generation)
+			if not source then
+				return nil, source_err
+			end
+			side = source.side
+			path = source.path
+			source_line = source.source_line
+			if source.kind == "context" and presentation.preferred_side == "old" and source.old_path then
+				side = "old"
+				path = source.old_path
+				source_line = source.old_line
+			elseif source.kind == "context" and presentation.preferred_side == "new" and source.new_path then
+				side = "new"
+				path = source.new_path
+				source_line = source.new_line
+			elseif source.kind == "empty" and presentation.preferred_side == "old" and presentation.entry.old_path then
+				side = "old"
+				path = presentation.entry.old_path
+				source_line = 0
+			elseif source.kind == "empty" and presentation.preferred_side == "new" and presentation.entry.new_path then
+				side = "new"
+				path = presentation.entry.new_path
+				source_line = 0
+			end
+		end
+		location = {
+			entry_identity = presentation.entry.identity,
+			layer = presentation.entry.layer or "history",
+			side = side,
+			path = path,
+			line = source_line,
+			col = source_line == 0 and 1 or cursor[2] + 1,
+		}
+	else
+		local target
+		for _, name in ipairs({ "inline", "left", "right" }) do
+			local candidate = presentation[name]
+			if
+				candidate
+				and candidate.win == win
+				and valid_buf(candidate.buf)
+				and vim.api.nvim_win_get_buf(win) == candidate.buf
+			then
+				target = candidate
+				break
+			end
+		end
+		if not target or (target.side ~= "old" and target.side ~= "new") then
+			return nil, "current window is not an OLD/NEW review source"
+		end
+		local line_count = presentation.source_line_counts[target.side]
+		location = {
+			entry_identity = presentation.entry.identity,
+			layer = presentation.entry.layer or "history",
+			side = target.side,
+			path = logical_source_path(presentation.entry, target.side),
+			line = line_count == 0 and 0 or cursor[1],
+			col = line_count == 0 and 1 or cursor[2] + 1,
+		}
+	end
+	local valid, validation_err = validate_logical_location(presentation, location)
+	return valid and location or nil, validation_err
+end
+
+---Restore one stable OLD/NEW source location into the current presentation.
+---@param state table
+---@param location table
+---@param expected_generation? integer
+---@return boolean?
+---@return string? err
+function M.restore_location(state, location, expected_generation)
+	local presentation = state and state.presentation
+	if not presentation then
+		return nil, "review presentation is unavailable"
+	elseif expected_generation and presentation.generation ~= expected_generation then
+		return nil, "review presentation generation changed"
+	end
+	local valid, validation_err = validate_logical_location(presentation, location)
+	if not valid then
+		return nil, validation_err
+	end
+	local generation = presentation.generation
+
+	local target
+	local target_line
+	if presentation.layout == "inline" and presentation.projection and presentation.inline then
+		local anchor = {
+			kind = location.line == 0 and "file" or "range",
+			layer = location.layer,
+			path = location.path,
+			side = location.side == "old" and "left" or "right",
+		}
+		if location.line > 0 then
+			anchor.start_line = location.line
+			anchor.end_line = location.line
+		end
+		local resolved, resolve_err = M.locate_anchor(state, anchor, generation)
+		if not resolved then
+			return nil, resolve_err
+		end
+		local revealed, reveal_err = M.reveal_rows(state, { resolved.display_line }, generation)
+		if not revealed then
+			return nil, reveal_err
+		end
+		target = presentation.inline
+		target_line = resolved.display_line
+	else
+		target = matching_side(presentation, location.side)
+		if not target then
+			return nil, "logical review side has no active pane"
+		end
+		target_line = location.line == 0 and 1 or location.line
+		local revealed, reveal_err = reveal_target_rows(state, presentation, target, { target_line })
+		if not revealed then
+			return nil, reveal_err
+		end
+	end
+
+	if
+		state.presentation ~= presentation
+		or presentation.generation ~= generation
+		or not valid_win(target.win)
+		or not valid_buf(target.buf)
+		or vim.api.nvim_win_get_buf(target.win) ~= target.buf
+	then
+		return nil, "review presentation changed while restoring its logical location"
+	end
+	local line = vim.api.nvim_buf_get_lines(target.buf, target_line - 1, target_line, false)[1] or ""
+	local column = math.max(0, math.min(location.col - 1, #line))
+	vim.api.nvim_set_current_win(target.win)
+	vim.api.nvim_win_set_cursor(target.win, { target_line, column })
+	presentation.preferred_side = location.side
+	if presentation.logical_cursor_autocmd then
+		pcall(vim.api.nvim_del_autocmd, presentation.logical_cursor_autocmd)
+	end
+	presentation.logical_cursor = {
+		win = target.win,
+		display_line = target_line,
+		side = location.side,
+		path = location.path,
+		source_line = location.line,
+	}
+	local logical_cursor_autocmd
+	logical_cursor_autocmd = vim.api.nvim_create_autocmd("CursorMoved", {
+		buffer = target.buf,
+		callback = function()
+			local logical_cursor = presentation.logical_cursor
+			if
+				state.presentation ~= presentation
+				or not logical_cursor
+				or not valid_win(logical_cursor.win)
+				or vim.api.nvim_get_current_win() == logical_cursor.win
+					and vim.api.nvim_win_get_cursor(logical_cursor.win)[1] ~= logical_cursor.display_line
+			then
+				if state.presentation == presentation then
+					presentation.logical_cursor = nil
+					presentation.logical_cursor_autocmd = nil
+					presentation.preferred_side = nil
+				end
+				pcall(vim.api.nvim_del_autocmd, logical_cursor_autocmd)
+			end
+		end,
+	})
+	presentation.logical_cursor_autocmd = logical_cursor_autocmd
+	return true
 end
 
 ---@param state table

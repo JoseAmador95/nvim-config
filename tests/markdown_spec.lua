@@ -31,194 +31,10 @@ local function temp_dir()
 	return path
 end
 
-test("render presets derive every Markdown role from the active palette", function()
-	local palette = require("config.palette")
-	vim.o.background = "light"
-	vim.api.nvim_set_hl(0, "Normal", { bg = 0xfafafa, fg = 0x202020 })
-	vim.api.nvim_set_hl(0, "Comment", { fg = 0x707070 })
-	vim.api.nvim_set_hl(0, "DiagnosticInfo", { fg = 0x0066cc })
-	vim.api.nvim_set_hl(0, "DiagnosticWarn", { fg = 0xcc8800 })
-	vim.api.nvim_set_hl(0, "Constant", { fg = 0xaa3377 })
-	vim.api.nvim_set_hl(0, "Statement", { fg = 0x6633aa })
-	vim.api.nvim_set_hl(0, "Type", { fg = 0x008877 })
-	vim.api.nvim_set_hl(0, "Function", { fg = 0x2255aa })
-	vim.api.nvim_set_hl(0, "String", { fg = 0x338833 })
-
-	local colors = palette.current()
-	local subtle = palette.markdown_highlights("subtle")
-	equal(
-		palette.blend(colors.background, colors.foreground, 0.07),
-		subtle.RenderMarkdownCode.bg,
-		"light code blend changed"
-	)
-	equal(
-		palette.blend(colors.background, colors.accent, 0.08),
-		subtle.RenderMarkdownCodeInline.bg,
-		"light inline blend changed"
-	)
-	equal(palette.blend(colors.background, colors.accent, 0.12), subtle.RenderMarkdownH1Bg.bg, "light H1 blend changed")
-	equal(palette.blend(colors.background, colors.accent, 0.09), subtle.RenderMarkdownH2Bg.bg, "light H2 blend changed")
-	equal(
-		palette.blend(colors.background, colors.foreground, 0.07),
-		subtle.RenderMarkdownH6Bg.bg,
-		"neutral heading blend changed"
-	)
-	equal(colors.accent, subtle.RenderMarkdownLink.fg, "link role is not accent-colored")
-	equal(colors.accent, subtle.RenderMarkdownLinkTitle.fg, "link title role is not accent-colored")
-	equal(colors.accent, subtle.RenderMarkdownBullet.fg, "bullet role is not accent-colored")
-	equal(colors.muted, subtle.RenderMarkdownQuote.fg, "quote role is not muted")
-	for level = 1, 6 do
-		equal(colors.muted, subtle["RenderMarkdownQuote" .. level].fg, "nested quote role is not muted")
-	end
-	equal(colors.foreground, subtle.RenderMarkdownTableHead.fg, "table head is not readable")
-	assert(subtle.RenderMarkdownTableHead.bold, "table head lost its neutral emphasis")
-	equal(colors.foreground, subtle.RenderMarkdownTableRow.fg, "table row is not readable")
-
-	local minimal = palette.markdown_highlights("minimal")
-	for _, name in ipairs({
-		"RenderMarkdownCode",
-		"RenderMarkdownCodeInline",
-		"RenderMarkdownH1Bg",
-		"RenderMarkdownH2Bg",
-		"RenderMarkdownH3Bg",
-		"RenderMarkdownH4Bg",
-		"RenderMarkdownH5Bg",
-		"RenderMarkdownH6Bg",
-	}) do
-		equal({}, minimal[name], name .. " retained a background in minimal mode")
-	end
-
-	local semantic = palette.markdown_highlights("semantic")
-	for level = 1, 6 do
-		equal(
-			colors.rainbow[level],
-			semantic["RenderMarkdownH" .. level].fg,
-			"semantic heading lost rainbow foreground"
-		)
-		equal(
-			palette.blend(colors.background, colors.rainbow[level], 0.10),
-			semantic["RenderMarkdownH" .. level .. "Bg"].bg,
-			"semantic heading blend changed"
-		)
-	end
-
-	vim.o.background = "dark"
-	vim.api.nvim_set_hl(0, "Normal", { bg = 0x101010, fg = 0xe0e0e0 })
-	colors = palette.current()
-	subtle = palette.markdown_highlights("subtle")
-	equal(
-		palette.blend(colors.background, colors.foreground, 0.10),
-		subtle.RenderMarkdownCode.bg,
-		"dark code blend changed"
-	)
-	equal(
-		palette.blend(colors.background, colors.accent, 0.12),
-		subtle.RenderMarkdownCodeInline.bg,
-		"dark inline blend changed"
-	)
-	equal(palette.blend(colors.background, colors.accent, 0.16), subtle.RenderMarkdownH1Bg.bg, "dark H1 blend changed")
-	equal(palette.blend(colors.background, colors.accent, 0.12), subtle.RenderMarkdownH2Bg.bg, "dark H2 blend changed")
-	semantic = palette.markdown_highlights("semantic")
-	equal(
-		palette.blend(colors.background, colors.rainbow[1], 0.14),
-		semantic.RenderMarkdownH1Bg.bg,
-		"dark semantic blend changed"
-	)
-
-	vim.api.nvim_set_hl(0, "Normal", { fg = 0xe0e0e0 })
-	assert(palette.current().transparent, "transparent Normal was not detected")
-	for _, preset in ipairs({ "subtle", "minimal", "semantic" }) do
-		for name, attributes in pairs(palette.markdown_highlights(preset)) do
-			assert(attributes.bg == nil, name .. " introduced an opaque background for transparent Normal")
-		end
-	end
-end)
-
-test("render-markdown stays eager in full and low-bandwidth profiles and repaints on ColorScheme", function()
-	local saved = {}
-	for _, name in ipairs({ "config.redraw_profile", "config.deferred", "config.local_config", "config.palette" }) do
-		saved[name] = package.loaded[name]
-	end
-	local low_bandwidth = false
-	local setup_options
-	local presets = {}
-	local renderer_palette_observations = {}
-	package.loaded["config.redraw_profile"] = {
-		low_bandwidth = function()
-			return low_bandwidth
-		end,
-	}
-	package.loaded["config.local_config"] = {
-		plugin = function(name)
-			assert(name == "render_markdown")
-			return { preset = "semantic" }
-		end,
-	}
-	package.loaded["config.palette"] = {
-		apply_markdown = function(preset)
-			presets[#presets + 1] = preset
-		end,
-	}
-	package.loaded["config.deferred"] = {
-		load = function(name)
-			assert(name == "render-markdown")
-			vim.api.nvim_create_autocmd("ColorScheme", {
-				group = vim.api.nvim_create_augroup("MarkdownSpecRendererColors", { clear = true }),
-				callback = function()
-					renderer_palette_observations[#renderer_palette_observations + 1] = #presets
-				end,
-			})
-			return {
-				setup = function(options)
-					setup_options = options
-				end,
-				toggle = function() end,
-			}
-		end,
-	}
-
-	local render_path = vim.fs.joinpath(repo, "lua", "plugins", "render-markdown.lua")
-	local full = dofile(render_path)
-	assert(full.lazy == false, "render-markdown stopped loading eagerly")
-	assert(type(full.init) == "function", "render-markdown palette lost its pre-load lifecycle")
-	equal(true, full.opts.render_modes, "full renderer modes changed")
-	local original_vscode = vim.g.vscode
-	vim.g.vscode = true
-	full.init()
-	equal({}, presets, "Markdown palette init leaked into VSCode")
-	vim.g.vscode = nil
-	assert(full.cond(), "terminal renderer was disabled")
-	full.init()
-	equal({ "semantic" }, presets, "configured Markdown preset was not applied before plugin load")
-	vim.g.vscode = true
-	assert(not full.cond(), "renderer leaked into VSCode")
-	vim.g.vscode = original_vscode
-
-	full.config(nil, full.opts)
-	equal(full.opts, setup_options, "renderer setup did not receive the profile options")
-	vim.api.nvim_exec_autocmds("ColorScheme", { modeline = false })
-	equal({ "semantic", "semantic" }, presets, "ColorScheme did not repaint the Markdown palette")
-	equal({ 2 }, renderer_palette_observations, "renderer derived its cached colors before the host palette callback")
-
-	low_bandwidth = true
-	local low = dofile(render_path)
-	equal({ "n" }, low.opts.render_modes, "low-bandwidth renderer modes changed")
-	assert(low.opts.anti_conceal.enabled == false, "low-bandwidth anti-conceal was re-enabled")
-	local source = table.concat(vim.fn.readfile(render_path), "\n")
-	assert(not source:find("markdown_navigation", 1, true), "eager renderer imports Markdown navigation")
-	assert(not source:find("render-markdown.core", 1, true), "palette relies on a private render-markdown module")
-
-	pcall(vim.api.nvim_del_user_command, "MarkdownRender")
-	pcall(vim.api.nvim_del_augroup_by_name, "NvimConfigRenderMarkdownPalette")
-	pcall(vim.api.nvim_del_augroup_by_name, "MarkdownSpecRendererColors")
-	for name, value in pairs(saved) do
-		package.loaded[name] = value
-	end
-end)
-
 test("Markdown gd follows public Tree-sitter injections and routes targets conservatively", function()
 	local original_editor = package.loaded["config.editor"]
 	local original_pager = package.loaded["config.pager"]
+	local original_clipboard = package.loaded["config.clipboard"]
 	local original_navigation = package.loaded["config.markdown_navigation"]
 	local original_open = vim.ui.open
 	local original_notify = vim.notify
@@ -243,6 +59,12 @@ test("Markdown gd follows public Tree-sitter injections and routes targets conse
 	package.loaded["config.editor"] = {
 		open_file_in_tab = function(path)
 			opened_files[#opened_files + 1] = path
+		end,
+	}
+	package.loaded["config.clipboard"] = {
+		copy_text = function(value, register)
+			copied[#copied + 1] = { register, value, "v" }
+			return true
 		end,
 	}
 	package.loaded["config.pager"] = { active = true }
@@ -488,11 +310,13 @@ test("Markdown gd follows public Tree-sitter injections and routes targets conse
 	pcall(vim.api.nvim_del_augroup_by_name, "NvimConfigMarkdownNavigation")
 	package.loaded["config.editor"] = original_editor
 	package.loaded["config.pager"] = original_pager
+	package.loaded["config.clipboard"] = original_clipboard
 	package.loaded["config.markdown_navigation"] = original_navigation
 end)
 
 test("LSP boundary selects Marksman exactly and reports its absence without fallback", function()
 	local saved = {}
+	local original_navigation_history = package.loaded["config.navigation_history"]
 	for _, name in ipairs({
 		"config.editor",
 		"config.markdown_navigation",
@@ -517,6 +341,17 @@ test("LSP boundary selects Marksman exactly and reports its absence without fall
 	package.loaded["config.editor"] = {
 		open_file_in_tab = function(path, position)
 			opened = { path = path, position = position }
+		end,
+	}
+	package.loaded["config.navigation_history"] = {
+		capture = function()
+			return nil
+		end,
+		same_location = function(left, right)
+			return vim.deep_equal(left, right)
+		end,
+		record_transition = function()
+			return false
 		end,
 	}
 	local markdown_options
@@ -600,6 +435,7 @@ test("LSP boundary selects Marksman exactly and reports its absence without fall
 	for name, value in pairs(saved) do
 		package.loaded[name] = value
 	end
+	package.loaded["config.navigation_history"] = original_navigation_history
 end)
 
 if #failures > 0 then

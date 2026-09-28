@@ -7,35 +7,22 @@
 -- open) instead of replacing the buffer under the float. Directories are
 -- navigated inside the float as usual.
 
--- Open the entry under the cursor:
---   * directory / ".."  -> navigate into it inside the float
---   * file              -> close the float and open it in a tab (reusing one)
--- Falls back to oil's native select for adapters without a local path (ssh, ...).
-local function open_selection()
-	local oil = require("oil")
-	local entry = oil.get_cursor_entry()
-	if not entry then
+local deferred = require("config.deferred")
+local lazy = require("lazy")
+
+local function activate_git_status(args)
+	local buf = args.data and args.data.buf
+	if type(buf) ~= "number" or not vim.api.nvim_buf_is_valid(buf) then
 		return
 	end
-
-	if entry.type == "directory" then
-		oil.select()
-		return
-	end
-
-	local dir = oil.get_current_dir()
-	if not dir then
-		oil.select()
-		return
-	end
-
-	oil.close()
-	require("config.editor").open_file_in_tab(dir .. entry.name)
+	lazy.load({ plugins = { "oil-git-status.nvim" } })
+	deferred.load("oil-git-status").refresh_buffer(buf)
 end
 
 return {
 	{
 		"stevearc/oil.nvim",
+		main = "config.oil",
 		cond = function()
 			return not vim.g.vscode
 		end,
@@ -84,12 +71,6 @@ return {
 				preview_split = "auto",
 			},
 			keymaps = {
-				-- Route file opening through the repo's tab helper; keep oil's
-				-- editable-buffer model intact (no h/l hijacking).
-				["<CR>"] = {
-					desc = "Open (files reuse a tab, dirs navigate in)",
-					callback = open_selection,
-				},
 				["<C-t>"] = "actions.parent",
 				["?"] = "actions.show_help",
 				["q"] = "actions.close",
@@ -103,11 +84,20 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		-- Not lazy: nothing require()s this plugin, so with the repo's
-		-- `defaults = { lazy = true }` it would install but never load, and its
-		-- `User OilEnter` autocmd would never register (no signs). Load it at
-		-- startup so the autocmd is in place before the first oil buffer opens.
-		lazy = false,
+		-- Lazy's generic User-event replay skips ungrouped autocmds, including the
+		-- upstream OilEnter listener. Keep the plugin dormant and let this tiny host
+		-- listener load it with the original buffer still available, then refresh
+		-- that first buffer explicitly. Future events use the upstream listener.
+		lazy = true,
+		init = function()
+			vim.api.nvim_create_autocmd("User", {
+				group = vim.api.nvim_create_augroup("NvimConfigOilGitStatus", { clear = true }),
+				pattern = "OilEnter",
+				once = true,
+				callback = activate_git_status,
+				desc = "Load Git status for the first Oil buffer",
+			})
+		end,
 		dependencies = { "stevearc/oil.nvim" },
 		config = true,
 	},

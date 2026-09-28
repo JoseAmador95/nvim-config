@@ -62,7 +62,67 @@ local function emit(kind, session, extra)
 end
 
 local function default_spawn(argv, options, callback)
-	return vim.system(argv, options, callback)
+	local stdout = {}
+	local stderr = {}
+	local bytes = 0
+	local exceeded = false
+	local process
+	local kill_pending = false
+	local stream_error
+	local limit = options.max_output_bytes
+
+	local function append(parts, err, data)
+		if err and not stream_error then
+			stream_error = tostring(err)
+		end
+		if exceeded or type(data) ~= "string" or data == "" then
+			return
+		end
+		local remaining = limit - bytes
+		if #data > remaining then
+			if remaining > 0 then
+				parts[#parts + 1] = data:sub(1, remaining)
+				bytes = bytes + remaining
+			end
+			exceeded = true
+			if process and process.kill then
+				pcall(process.kill, process, 15)
+			else
+				kill_pending = true
+			end
+			return
+		end
+		parts[#parts + 1] = data
+		bytes = bytes + #data
+	end
+
+	process = state.options.system(argv, {
+		stdin = options.stdin,
+		text = options.text,
+		env = options.env,
+		stdout = function(err, data)
+			append(stdout, err, data)
+		end,
+		stderr = function(err, data)
+			append(stderr, err, data)
+		end,
+	}, function(result)
+		local error_output = table.concat(stderr)
+		if stream_error then
+			error_output = error_output .. (error_output ~= "" and "\n" or "") .. stream_error
+		end
+		callback({
+			code = not stream_error and type(result) == "table" and result.code or -1,
+			signal = type(result) == "table" and result.signal or 0,
+			stdout = table.concat(stdout),
+			stderr = error_output,
+			output_limit_exceeded = exceeded,
+		})
+	end)
+	if kill_pending and process and process.kill then
+		pcall(process.kill, process, 15)
+	end
+	return process
 end
 
 local function default_schedule(callback)
@@ -224,6 +284,17 @@ local function valid_output(plan, output)
 	return ok and valid == true
 end
 
+local function complete_request(session, result, err)
+	if session.completion_sent then
+		return false
+	end
+	session.completion_sent = true
+	if session.request.on_done then
+		pcall(session.request.on_done, result and copy(result) or nil, err, session)
+	end
+	return true
+end
+
 local function plan_key(renderer_name, request, plan, security_profile)
 	local stages = {}
 	for index, stage in ipairs(plan.stages) do
@@ -259,10 +330,11 @@ local function present_error(session, message)
 	if presenter.error then
 		pcall(presenter.error, session.presentation, message, session)
 	end
-	emit("error", session, { error = message })
-	if session.request.on_done then
-		pcall(session.request.on_done, nil, message, session)
+	if session.closed then
+		return
 	end
+	emit("error", session, { error = message })
+	complete_request(session, nil, message)
 end
 
 local function deliver(session, result)
@@ -280,10 +352,11 @@ local function deliver(session, result)
 		present_error(session, "diagram presenter failed: " .. tostring(err))
 		return
 	end
-	emit("presented", session, { cached = result.cached, path = result.path })
-	if session.request.on_done then
-		pcall(session.request.on_done, copy(session.result), nil, session)
+	if session.closed then
+		return
 	end
+	emit("presented", session, { cached = result.cached, path = result.path })
+	complete_request(session, session.result, nil)
 end
 
 function Session:_finish_stage(generation, result)
@@ -293,6 +366,13 @@ function Session:_finish_stage(generation, result)
 	self.active = nil
 	stop_timer(self.timeout)
 	self.timeout = nil
+	if type(result) == "table" and result.output_limit_exceeded then
+		present_error(
+			self,
+			("diagram renderer output exceeds %d bytes"):format(state.options.config.max_stage_output_bytes)
+		)
+		return
+	end
 	if type(result) ~= "table" or result.code ~= 0 then
 		local detail = type(result) == "table" and vim.trim((result.stderr or "") .. "\n" .. (result.stdout or ""))
 			or ""
@@ -370,6 +450,7 @@ function Session:_start_stage(generation)
 		text = stage.text,
 		env = env,
 		timeout = state.options.config.stage_timeout_ms,
+		max_output_bytes = state.options.config.max_stage_output_bytes,
 	}, callback)
 	if not ok then
 		callback({ code = -1, stdout = "", stderr = tostring(handle) })
@@ -379,9 +460,10 @@ function Session:_start_stage(generation)
 end
 
 function Session:cancel(reason)
-	if self.closed then
+	if self.closed or self.cancelling then
 		return false
 	end
+	self.cancelling = true
 	self.generation = self.generation + 1
 	self.cancel_reason = reason or "cancelled"
 	if self.active and self.active.kill then
@@ -391,6 +473,7 @@ function Session:cancel(reason)
 			self.timeout = nil
 			self.state = "cancel-failed"
 			self.error = "diagram process could not be stopped: " .. tostring(killed and result or result)
+			self.cancelling = false
 			emit("cancel-failed", self, { reason = self.cancel_reason, error = self.error })
 			return nil, self.error
 		end
@@ -402,11 +485,13 @@ function Session:cancel(reason)
 		if not closed or result == false then
 			self.state = "cancel-failed"
 			self.error = "diagram presentation could not be closed: " .. tostring(closed and result or result)
+			self.cancelling = false
 			emit("cancel-failed", self, { reason = self.cancel_reason, error = self.error })
 			return nil, self.error
 		end
 	end
 	self.closed = true
+	self.cancelling = false
 	self.state = "cancelled"
 	self.error = nil
 	self.active = nil
@@ -414,6 +499,7 @@ function Session:cancel(reason)
 	self.retained = nil
 	state.sessions[self.id] = nil
 	emit("cancelled", self, { reason = self.cancel_reason })
+	complete_request(self, nil, self.cancel_reason)
 	return true
 end
 
@@ -446,6 +532,7 @@ function M.setup(opts)
 		spawn = true,
 		schedule = true,
 		defer = true,
+		system = true,
 		plantuml_policy = true,
 	}
 	for key in pairs(opts) do
@@ -466,6 +553,9 @@ function M.setup(opts)
 	end
 	if opts.defer ~= nil and type(opts.defer) ~= "function" then
 		return nil, "setup.defer must be a function"
+	end
+	if opts.system ~= nil and type(opts.system) ~= "function" then
+		return nil, "setup.system must be a function"
 	end
 	if opts.plantuml_policy ~= nil and type(opts.plantuml_policy) ~= "function" then
 		return nil, "setup.plantuml_policy must be a function"
@@ -559,6 +649,7 @@ function M.setup(opts)
 		spawn = opts.spawn or default_spawn,
 		schedule = opts.schedule or default_schedule,
 		defer = opts.defer or default_defer,
+		system = opts.system or vim.system,
 		plantuml_policy = opts.plantuml_policy,
 		config = effective,
 	}

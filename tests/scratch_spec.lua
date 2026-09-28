@@ -197,6 +197,26 @@ local second = assert(host.open())
 assert(#setup_calls == 2, "second use discarded setup B or redundantly configured the core")
 vim.api.nvim_buf_delete(second.buf, { force = true })
 assert(releases == 2, "second-use scratch handle was not released")
+
+local failed_timer
+local state_c = vim.fn.tempname()
+assert(host.setup({
+	state_root = state_c,
+	new_timer = function()
+		failed_timer = new_timer()
+		failed_timer.start = function()
+			return false
+		end
+		return failed_timer
+	end,
+	schedule = function(callback)
+		callback()
+	end,
+}))
+assert(host.open() == nil, "failed heartbeat start still exposed a writable scratch buffer")
+assert(failed_timer.stopped and failed_timer.closed, "failed heartbeat timer was not disposed")
+assert(releases == 3, "failed heartbeat start retained the scratch lease")
+assert(#host.status().buffers == 0, "failed heartbeat start published an active lifecycle")
 assert(host.teardown())
 
 scratch.open = original_open

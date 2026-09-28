@@ -29,3 +29,11 @@ Explicit interpreter paths, environment directories,
 authoritative. `diagnostics(root)` returns every inspected candidate and
 validity without changing the selected snapshot. DAP, Neotest, and REPL helpers
 all consume the same root-bound snapshot.
+
+The injected terminal bridge receives the canonical project root as the third
+argument to `send(identity, text, root)`. This lets the host re-read durable
+execution authority at the final seam without adding a tool manifest or moving
+workspace policy into this provider-neutral plugin. In this configuration,
+REPL `open`, process-creating `toggle`, `restart`, and every queued `send` require
+a fresh durable `debug` grant through `config.execution`; denial or revocation
+occurs before the terminal adapter is called.

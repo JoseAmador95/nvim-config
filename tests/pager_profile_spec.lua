@@ -17,9 +17,26 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				local pager = require("config.pager")
 				assert(pager.active, "pager profile was not selected")
 				assert(require("config.redraw_profile").current() == "full", "pager accepted host redraw throttling")
+				assert(
+					require("config.redraw_profile").inline_diagnostics() == "off",
+					"pager enabled inline diagnostics"
+				)
+				assert(require("config.inline_diagnostics").status().mode == "off", "pager inline controller is active")
+				assert(vim.diagnostic.config().virtual_lines == false, "pager left diagnostic virtual lines enabled")
 				assert(require("config.theme").selection().colorscheme == "vscode", "pager default theme changed")
 				assert(vim.g.colors_name == "vscode", "pager did not apply the VSCode default")
-				assert(vim.bo.filetype == "markdown", "forced pager filetype was not applied")
+				assert(
+					vim.wait(1000, function()
+						return vim.b.md_render == true
+					end),
+					"Markdown did not render automatically in the pager"
+				)
+				local state = vim.w.md_render_state
+				assert(
+					state and vim.bo[state.source_buf].filetype == "markdown",
+					"forced pager filetype missed its source"
+				)
+				assert(not vim.bo.modifiable and vim.bo.readonly, "pager reading view is editable")
 
 				for _, command in ipairs({
 					"MenuOpen",
@@ -39,6 +56,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"DevContainerHostEditor",
 					"JustRun",
 					"JustImportLast",
+					"HexDump",
+					"HexAssemble",
+					"HexToggle",
 					"MermaidPreview",
 					"NvimConfigTrustProjectSettings",
 					"NvimConfigToolsInstall",
@@ -57,6 +77,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into the pager profile")
 				end
 				assert(package.loaded["config.exact_editor"] == nil, "exact editor adapter loaded in the pager")
+				assert(package.loaded["config.editor_actions"] == nil, "editor actions loaded in the pager")
 				assert(package.loaded["config.project_settings"] == nil, "project settings adapter loaded in the pager")
 				assert(package.loaded.tab_first == nil, "tab-first runtime loaded in the pager")
 				for _, name in ipairs({ "trusted_workspace", "treesitter_runtime", "theme_router" }) do
@@ -86,6 +107,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"explicit parser installer is missing from the pager"
 				)
 				assert(vim.fn.exists(":SetFileType") == 2, "pager SetFileType command is missing")
+				assert(vim.fn.exists(":MarkdownView") == 2, "pager MarkdownView command is missing")
 				assert(vim.fn.exists(":DiagramShow") == 2, "pager diagram command is missing")
 				assert(vim.fn.exists(":JsonTree") == 0, "JsonTree leaked into the pager")
 				assert(vim.fn.exists(":JqxList") == 0, "JqxList leaked into the pager")
@@ -102,6 +124,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				for _, plugin in ipairs({
 					"blink.cmp",
 					"bufferline.nvim",
+					"hex.nvim",
 					"mason.nvim",
 					"mermaid-nvim",
 					"noice.nvim",
@@ -114,7 +137,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				}) do
 					assert(not has_plugin(plugin), plugin .. " is present in the pager runtime")
 				end
-				assert(has_plugin("render-markdown.nvim"), "render-markdown is missing from the pager")
+				assert(has_plugin("md-render.nvim"), "md-render is missing from the pager")
+				assert(not has_plugin("render-markdown.nvim"), "inline renderer leaked into the pager")
 				assert(has_plugin("nvim-treesitter"), "Tree-sitter is missing from the pager")
 				assert(has_plugin("catppuccin"), "Catppuccin alternative is missing from the pager")
 				assert(Snacks.config.dashboard.enabled == false, "editor dashboard leaked into the pager")
@@ -133,6 +157,10 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				local menu_map = vim.fn.maparg("<leader><leader>", "n", false, true)
 				assert(vim.tbl_isempty(menu_map), "menu mapping leaked into the pager")
 				assert(
+					vim.tbl_isempty(vim.fn.maparg("gf", "n", false, true)),
+					"editor gf mapping leaked into the pager"
+				)
+				assert(
 					vim.tbl_isempty(vim.fn.maparg("<leader><leader>", "x", false, true)),
 					"visual menu mapping leaked into the pager"
 				)
@@ -146,6 +174,10 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 				local diagram_map = vim.fn.maparg("<leader>md", "n", false, true)
 				assert(not vim.tbl_isempty(diagram_map), "global pager diagram mapping is missing")
+				assert(
+					not vim.tbl_isempty(vim.fn.maparg("<leader>mv", "n", false, true)),
+					"pager Markdown view mapping is missing"
+				)
 			end, debug.traceback)
 
 			if not ok then

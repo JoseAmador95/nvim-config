@@ -156,7 +156,7 @@ local function heartbeat(buf, handle)
 	local interval = math.max(1, math.floor(effective_config.lease_seconds * 1000 / 3))
 	local lifecycle = { timer = timer, interval_ms = interval, lease_lost = false, error = nil, handle = handle }
 	active[buf] = lifecycle
-	local started, start_err = pcall(timer.start, timer, interval, interval, function()
+	local started, start_result = pcall(timer.start, timer, interval, interval, function()
 		(setup_options.schedule or vim.schedule)(function()
 			if active[buf] ~= lifecycle or not vim.api.nvim_buf_is_valid(buf) then
 				return
@@ -171,10 +171,10 @@ local function heartbeat(buf, handle)
 			end
 		end)
 	end)
-	if not started or start_err == nil then
+	if not started or start_result == nil or start_result == false then
 		active[buf] = nil
 		stop_timer(timer)
-		return nil, tostring(started and "heartbeat start failed" or start_err)
+		return nil, tostring(started and "heartbeat start failed" or start_result)
 	end
 	return true
 end

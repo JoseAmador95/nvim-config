@@ -1,6 +1,7 @@
 local M = {}
 local runtime = require("tab_first")
 local local_config = require("config.local_config")
+local code_review = require("config.code_review")
 
 local SPECIAL_FILETYPES = {
 	oil = true,
@@ -12,6 +13,24 @@ local SPECIAL_FILETYPES = {
 	qf = true,
 	NvimTree = true,
 	aerial = true,
+}
+
+local NEW_FILE_WINDOW_OPTIONS = {
+	"colorcolumn",
+	"cursorcolumn",
+	"cursorline",
+	"foldmethod",
+	"list",
+	"number",
+	"relativenumber",
+	"sidescrolloff",
+	"signcolumn",
+	"spell",
+	"statuscolumn",
+	"statusline",
+	"winbar",
+	"winhighlight",
+	"wrap",
 }
 
 local function enabled()
@@ -47,12 +66,9 @@ local function is_home_buffer(buf)
 		and (vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] or "") == ""
 end
 
-local function native_history_fallback(direction)
-	if direction < 0 then
-		vim.cmd([[execute "normal! \<C-o>"]])
-	else
-		vim.cmd([[execute "normal! \<C-i>"]])
-	end
+local function native_history_fallback(direction, count)
+	local key = direction < 0 and "<C-o>" or "<C-i>"
+	vim.api.nvim_feedkeys(tostring(count or 1) .. vim.keycode(key), "nx", false)
 end
 
 local configured = local_config.plugin("tab_first", {
@@ -73,13 +89,15 @@ runtime.setup({
 		max_entries = configured.history.max_entries,
 		scope = configured.history.scope,
 		native_fallback = native_history_fallback,
+		capture_location = code_review.capture_location,
+		restore_location = code_review.restore_location,
 		open_location = function(entry)
-			local ok = pcall(require("config.editor").open_file_in_tab, entry.path, {
+			require("config.editor").open_file_in_tab(entry.path, {
 				lnum = entry.lnum,
 				col = entry.col,
 				record_history = false,
 			})
-			return ok
+			return true
 		end,
 	},
 })
@@ -107,6 +125,19 @@ for _, name in ipairs({
 	M[name] = function(...)
 		return runtime[name](...)
 	end
+end
+
+---Create one unnamed normal buffer without inheriting transient window styling.
+---@return table
+function M.new_file()
+	local tabpage = vim.api.nvim_get_current_tabpage()
+	vim.api.nvim_cmd({ cmd = "enew" }, {})
+	local winid = vim.api.nvim_get_current_win()
+	for _, name in ipairs(NEW_FILE_WINDOW_OPTIONS) do
+		vim.api.nvim_set_option_value(name, nil, { scope = "local", win = winid })
+	end
+	M.unmark_home(tabpage)
+	return { tabpage = tabpage, winid = winid, bufnr = vim.api.nvim_get_current_buf() }
 end
 
 function M.setup()

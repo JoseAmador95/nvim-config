@@ -3,13 +3,15 @@
 Boundary: the plugin owns verified tool lifecycle and durable proof state; the
 host owns catalogs, installers, upstream managers, policy, commands, and UI.
 
-`verified-tools.nvim` owns the explicit lifecycle for release and Mason tools:
+`verified-tools.nvim` owns the explicit lifecycle for release, Mason, and
+immutable npm bundle tools:
 planning, two-job scheduling, cross-process locks, cancellation, watchdogs,
-attestation, repair, shims, and private schema-2 records. Tool manifests,
-installers, Mason registry access, network policy, commands, and health UI remain
-host-owned. The plugin does not install, probe external tools, or access the
-network during `setup()` or aggregate `status()`; aggregate `status()` also
-performs no filesystem I/O.
+attestation, repair, shims, private schema-2 managed records, and separate
+private external-certification records. Tool manifests, installers, Mason
+registry access, network policy, commands, and health UI remain host-owned. The
+plugin does not install, probe external tools, or access the network during
+`setup()` or aggregate `status()`; aggregate `status()` also performs no
+filesystem I/O.
 
 The host keeps startup and Mason readiness at setup-only. Its `plan(name)` API
 plans one requested identity, and aggregate `plan_all()` is available only to
@@ -77,6 +79,63 @@ host-configurable maximum-jobs knob. `cancel()` rejects the same malformed
 envelopes. `attest()` uses the same exact identity wrapper and accepts only a
 function callback when one is supplied.
 
+`resolve(spec_or_identity)` is the observational execution-path resolver. A
+managed schema-2 `succeeded` record has unconditional precedence. Its immutable
+plan and stored proof must still match every command, release artifact, or Mason
+receipt on disk; a failed, corrupt, unsafe, mismatched, or drifted managed record
+fails closed and is never bypassed by an external candidate. When no managed
+record exists, `resolve()` may use an exact external certification previously
+published by `certify_external(plan)`. It returns a fresh command-to-canonical-
+path map and never returns shim paths. Missing both authorities returns
+`nil, "absent"`.
+
+Dynamic bundles have an additional core-owned active pointer. After a
+successful live resolve, `activate(slot, identity)` atomically selects only a
+same-name `npm-release` identity; every pre-commit failure preserves the old
+pointer. `resolve_active(slot)` revalidates the pointer, succeeded record, exact
+bundle closure, and pointer identity a second time before returning
+`{identity, commands}`. Both APIs are offline and never plan, discover, prune,
+or fall back. The host exposes
+`config.tool_bootstrap.resolve("devcontainers-cli", "devcontainer")` as the
+read-only command lookup. npm-release is direct-only: it never publishes or
+removes a generic verified shim, so an unsuccessful upgrade cannot disturb the
+previous active command.
+
+External discovery and version processes run only during an explicit `plan()`.
+`certify_external()` then takes the identity lock, re-hashes every planned
+candidate, and takes the destination/shim resources in the same global order as
+managed operations. It rejects a shim that appeared after planning, then
+atomically publishes a private `0600` receipt under
+`external-records/`, and rechecks canonical path plus complete metadata before
+reporting success. Repeating that explicit action recertifies changed external
+executables. `claim()` is managed-only; `force_managed=true` bypasses external
+probing and allows a managed install/repair to supersede a retained external
+receipt. The install-only flag is not part of raw-spec equality during runtime
+resolution, but `force_managed=true` explicitly opts that request out of external
+authority; immutable identity, executable map, network declaration, and manifest
+remain exact. A release host may omit only its install-time
+`release_plan` projection when the current entry and integrity manifest still
+match exactly, so PATH-derived prerequisites do not become runtime authority.
+
+Resolution does not call planning, probes, processes, backends, network policy,
+notification, scheduling, or event callbacks; it does not inspect `PATH`,
+create, repair, recover, lock, cache, or write state. For release, Mason, and
+external authority it uses descriptor-bound receipt reads plus `realpath` and
+complete file metadata without hashing executable contents. `resolve_active()`
+is intentionally stricter: it rehashes the exact npm bundle closure and receipt
+on every resolution. Any metadata or closure change fails runtime. Explicit
+attestation or external recertification is the only path to replacement proof.
+External files and every lexical/canonical ancestor must be owned by root or the
+effective user; directories must not be group- or world-writable. An unsafe
+private external receipt is never overwritten implicitly: inspect and remove its
+exact entry manually, or choose managed authority explicitly.
+The small private Mason receipt is still read to validate its exact JSON content.
+State-record access requires the supported FFI ABI plus Darwin `F_GETPATH` or a
+mounted Linux `/proc/self/fd` view for descriptor binding.
+As with any POSIX pathname returned for later execution, a caller must still
+minimize the path-to-exec interval; no pathname API can make that later exec
+atomic with this validation.
+
 ## Tool specs and plans
 
 `plan(spec)` accepts only this envelope:
@@ -84,7 +143,7 @@ function callback when one is supplied.
 ```lua
 {
   identity = {
-    backend = "release" | "mason",
+    backend = "release" | "mason" | "npm-release",
     name = "logical-name",
     version = "exact-version",
     target = "exact-target",
@@ -108,7 +167,10 @@ The basename of every declared integrity command path must equal the installed
 basename in `executables`. Manifests and callback results must be finite,
 JSON-encodable data; mixed key types and non-finite numbers fail as ordinary
 validation errors rather than escaping with a Lua exception. `claim()` accepts
-only `{ mode = "auto" | "retry" | "repair" }`.
+only `{ mode = "auto" | "retry" | "repair" }`. An explicit managed repair may
+replace a `succeeded` record after the host has compared the current immutable
+spec and found it stale or drifted; `attest()` alone never changes the recorded
+plan.
 
 The logical identity name is never used to derive a filesystem path. Every plan
 contains the identity resource, canonical install-destination resource, and one
@@ -149,12 +211,36 @@ Mason integrity is exact:
 }
 ```
 
+An npm-release bundle uses an absolute, content-addressed root and receipt:
+
+```lua
+{
+  kind = "bundle-sha256",
+  source_sha256 = "<digest of the exact package, target, and private Node pin>",
+  receipt_path = "/absolute/private/bundle-receipts/<source_sha256>.json",
+  receipt = {
+    -- Exact npm package/version/tarball/SRI, target, bin map, and private Node
+    -- version/archive SHA-256 selected by the host.
+  },
+  commands = { devcontainer = "bin/devcontainer" },
+}
+```
+
+Core requires a private `0700` owner-only directory closure with only private
+`0600` regular data or `0700` executable files, no links or extra entries, and
+bounded path depth, entry count, and bytes. It descriptor-revalidates the live
+tree against the exact receipt and persists the closure digest plus receipt and
+command fingerprints. This proof is independent from the narrower Mason
+launcher contract below.
+
 The Mason receipt above is a host-created normalized `0600` receipt, not Mason's
 raw receipt. On every install and attestation the host must validate Mason's raw
-receipt, installed package version, and links before returning the private
-receipt path. Core independently reads the private receipt with
-`lstat/open/fstat`, requires exactly `{package, version, source_version}`, and
-hashes it and every command target.
+receipt, installed package version, and complete declared executable-link map
+before returning the private receipt path. Core independently reads the private
+receipt with `lstat/open/fstat`, requires exactly
+`{package, version, source_version}`, and hashes it and every canonical launcher
+target during explicit attestation. This is evidence for the declared launchers,
+not proof of Mason's transitive package/interpreter closure.
 
 ## External probe contract
 
@@ -175,8 +261,12 @@ called exactly once by `plan()` and must return one exact outcome:
 Thrown probes, `error`, malformed `compatible`, version mismatch, missing/extra
 commands, or unsafe paths stop planning before claim, attempt, backend, or
 network authorization. Compatible lexical paths and core-computed fingerprints
-are bound into the plan and revalidated at claim. `force_managed=true` bypasses
-the probe rather than interpreting a probe failure as managed fallback.
+are bound into that plan. `certify_external()` revalidates them while holding the
+identity lock and persists the exact plan as observational runtime authority.
+Runtime never repeats the probe or trusts an uncertified plan. A managed record,
+including an unhealthy one, always wins and therefore fails closed instead of
+falling back. `force_managed=true` bypasses the probe rather than interpreting a
+probe failure as managed fallback.
 
 ## Installer and attestation contracts
 
@@ -203,7 +293,10 @@ has verified the pinned archive and extracted bytes. It is the trusted
 install-time channel; echoing a manifest digest or hashing only the final shim is
 not evidence. Installer success is accepted only when the first callback value
 is exactly boolean `true`. A warning does not turn a committed installation into
-a false failure. Mason success must call `done(true, nil)`.
+a false failure. Mason success must call `done(true, nil)`. Host adapters must
+also acknowledge every terminal failure path exactly once; callback or
+post-install observation exceptions must become bounded `done(false, reason)`
+results rather than abandoning an owned lock.
 
 Release attestation returns paths, never claimed hashes:
 
@@ -236,9 +329,22 @@ inside `install_root`.
 Persisted proof uses version 1. Release proof contains
 `{kind, archive_sha256, commands, artifacts}`; Mason proof contains
 `{kind, receipt, commands}`. Each command/artifact value is the exact
-`{path, dev, ino, size, mtime_sec, mtime_nsec, sha256}` fingerprint. A schema-2
+`{path, dev, ino, size, mode, uid, gid, mtime_sec, mtime_nsec, ctime_sec,
+ctime_nsec, sha256}` fingerprint. Group- or world-writable payloads are rejected.
+A schema-2
 `succeeded` record without a structurally valid normalized plan and exact proof
-is exposed only as `repair-required` and is never silently rewritten.
+is exposed only as `repair-required` and is never silently rewritten. This also
+applies to older fingerprints that do not contain the complete metadata fields;
+they require an explicit managed repair.
+
+Known closure limit (`TODO(verified-tools-mason-closure)`): Mason attestation
+currently binds its exact raw source version, complete declared `bin` link map,
+private receipt, and each canonical launcher target. It does not yet attest the
+transitive package tree or the host interpreter used by a launcher; for example,
+JavaScript files loaded by a small Node launcher are outside the proof. The
+focused specs intentionally describe this launcher-only proof shape so a future
+closure manifest must change both the schema and its adversarial tests rather
+than silently broadening the claim.
 
 ## Locks, shims, cancellation, and recovery
 
@@ -272,7 +378,12 @@ unique transaction directory with a no-replace rename before cleanup, excluding
 a second cooperating recoverer. Process-local queued cancellation is the sole
 authority for its queued record.
 
-Release and Mason share two global slots. Each resource uses bounded Lamport
+A live or unverifiable owner is never reclaimed, including by a forced repair.
+Operational recovery is to close the owning editor and retry explicitly from a
+fresh process; callers must not delete private records or lock tickets.
+
+Release, npm-release, and Mason share two global backend-mutation slots. Each
+resource uses bounded Lamport
 bakery claims. Publication descriptor-relatively renames a unique, fully synced
 staging file onto an absent claim pathname with no-replace semantics, so a
 visible claim has one link. A destination collision preserves the rival, and a
@@ -294,8 +405,9 @@ under the complete resource lock set. This prevents an old wrapper or proof from
 exposing partially replaced content, including a partially written PlantUML JAR.
 Uncertain invalidation fails `repair-required` and retains quarantine evidence;
 it never restores the old executable path. After attestation, shim promotion is
-transactional across every declared command. Targets are re-fingerprinted
-immediately before promotion, all new links are created no-replace, and owner
+transactional across every declared command. Complete fingerprint metadata is
+revalidated immediately before and after link publication without re-hashing
+large payloads, all new links are created no-replace, and owner
 schema 2 is published only after every link succeeds. Partial promotion removes
 its own new entries but does not reactivate the pre-install shim. A different
 `{backend, name}` remains outside mutation. Drift/failure removes only

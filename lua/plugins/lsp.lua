@@ -1,31 +1,6 @@
--- Native Neovim 0.12 LSP setup. verified-tools owns all installation;
--- mason-lspconfig only supplies package mappings and native LSP integration.
-
-local function host_context()
-	local rust_tools = require("config.rust_tools")
-	return {
-		cmake_language_server_path = vim.fn.exepath("cmake-language-server"),
-		rust_analyzer_path = rust_tools.rust_analyzer(),
-	}
-end
-
-local function setup_mason_lsp()
-	local registry = require("mason-registry")
-	local original_refresh = registry.refresh
-	registry.refresh = function(callback)
-		vim.schedule(function()
-			callback(true, {})
-		end)
-	end
-	local ok, error_message = pcall(require("mason-lspconfig").setup, {
-		ensure_installed = {},
-		automatic_enable = false,
-	})
-	registry.refresh = original_refresh
-	if not ok then
-		error(error_message)
-	end
-end
+-- Native Neovim 0.12 LSP setup. verified-tools owns all installation. Mason's
+-- UI and its compatibility bridge are deliberately outside the file-open
+-- path: native lspconfig does not need either one to register these servers.
 
 local function retire_mason_mutations()
 	for _, name in ipairs({ "MasonInstall", "MasonUninstall", "MasonUninstallAll", "MasonUpdate" }) do
@@ -39,7 +14,6 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		event = "VeryLazy",
 		cmd = { "Mason", "MasonLog" },
 		config = function()
 			require("mason").setup({
@@ -67,26 +41,31 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
-		event = { "BufReadPre", "BufNewFile" },
+		-- Retain the pinned upstream API for dependency contract checks, but do
+		-- not put Mason or its registry into the normal LSP lifecycle.
+		lazy = true,
 		dependencies = {
 			"mason-org/mason.nvim",
+			"neovim/nvim-lspconfig",
+		},
+	},
+
+	{
+		"neovim/nvim-lspconfig",
+		cond = function()
+			return not vim.g.vscode
+		end,
+		event = { "BufReadPre", "BufNewFile" },
+		dependencies = {
 			"saghen/blink.cmp",
 			"b0o/SchemaStore.nvim",
 			"folke/neoconf.nvim",
-			"neovim/nvim-lspconfig",
 		},
 		config = function()
-			setup_mason_lsp()
-
-			local context = host_context()
 			local catalog = require("config.lsp_catalog")
 			require("config.lsp_navigation").setup()
-			require("config.lsp_servers").setup(context)
-			vim.lsp.enable(catalog.enabled_servers(function(executable)
-				if executable == "rust-analyzer" then
-					return context.rust_analyzer_path
-				end
-			end))
+			require("config.lsp_servers").setup()
+			vim.lsp.enable(catalog.enabled_servers())
 		end,
 	},
 }

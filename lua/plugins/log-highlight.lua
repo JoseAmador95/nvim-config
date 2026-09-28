@@ -1,20 +1,14 @@
 return {
 	"fei6409/log-highlight.nvim",
-	-- setup() contributes filetype rules and must run before detection.
+	-- Put the syntax backend on runtimepath before filetype detection, but do
+	-- not call its setup(): upstream setup generates after/syntax/log.vim under
+	-- stdpath(data) on every process. The host owns detection and fixed keyword
+	-- additions without runtime state writes.
 	event = { "BufReadPre", "BufNewFile" },
 	cond = function()
 		return not vim.g.vscode
 	end,
-	opts = {
-		extension = "log",
-		filename = {},
-		pattern = {},
-		keyword = {
-			error = { "ERROR", "FATAL", "CRITICAL" },
-			warning = { "WARN", "WARNING" },
-			info = { "INFO" },
-			debug = { "DEBUG", "TRACE" },
-			pass = { "OK", "SUCCESS" },
-		},
-	},
+	init = function()
+		vim.filetype.add({ extension = { log = "log" } })
+	end,
 }

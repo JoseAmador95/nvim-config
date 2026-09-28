@@ -6,6 +6,7 @@ local fs = require("config.fs")
 local manifest = require("config.toolchain")
 local paths = require("config.tool_paths")
 local release = require("config.release_installer")
+local npm_release = require("config.npm_release_installer")
 local legacy_state = require("config.tool_state")
 local engine = require("verified_tools")
 local uv = vim.uv
@@ -14,10 +15,47 @@ local markdown_ok, markdown_bridge = pcall(require, "verified_tools.markdown_pre
 local lazy_config_ok, lazy_config = pcall(require, "lazy.core.config")
 local setup_done = false
 local command_done = false
+local install_queue = {}
+local install_active = 0
+local install_draining = false
+local install_active_groups = {}
+local install_generation = 0
+local install_requests = {}
+local install_request_sequence = 0
 
-M._notify = function(message, level)
-	vim.notify(message, level or vim.log.levels.INFO, { title = "Tools" })
+local SPINNER = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+local PROGRESS_INTERVAL_MS = 500
+local FAILED_NAMES_LIMIT = 5
+
+M._notify = function(message, level, options)
+	local notify_options = { title = "Tools" }
+	for key, value in pairs(type(options) == "table" and options or {}) do
+		notify_options[key] = value
+	end
+	vim.notify(message, level or vim.log.levels.INFO, notify_options)
 end
+M._visual_notify = function(message, level, options)
+	local snacks = rawget(_G, "Snacks")
+	local notifier = type(snacks) == "table" and snacks.notifier or nil
+	if type(notifier) ~= "table" or type(notifier.notify) ~= "function" then
+		return false
+	end
+	local ok = pcall(notifier.notify, message, level, options)
+	return ok
+end
+M._visual_hide = function(id)
+	local snacks = rawget(_G, "Snacks")
+	local notifier = type(snacks) == "table" and snacks.notifier or nil
+	if type(notifier) ~= "table" or type(notifier.hide) ~= "function" then
+		return false
+	end
+	local ok = pcall(notifier.hide, id)
+	return ok
+end
+M._new_timer = function()
+	return uv.new_timer()
+end
+M._schedule = vim.schedule
 M._registry = function()
 	-- Loading mason-registry activates mason.nvim through Lazy. Resolve it only
 	-- after this adapter has finished publishing its own setup state so that a
@@ -41,6 +79,82 @@ local function sorted_keys(value)
 	local result = vim.tbl_keys(value or {})
 	table.sort(result)
 	return result
+end
+
+local function canonical_encode(value, seen)
+	local kind = type(value)
+	if kind == "nil" or kind == "boolean" or kind == "number" or kind == "string" then
+		local ok, encoded = pcall(vim.json.encode, value)
+		return ok and encoded or nil
+	end
+	if kind ~= "table" then
+		return nil
+	end
+	seen = seen or {}
+	if seen[value] then
+		return nil
+	end
+	seen[value] = true
+	local length = #value
+	local pieces = {}
+	if length > 0 then
+		for key in pairs(value) do
+			if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > length then
+				seen[value] = nil
+				return nil
+			end
+		end
+		for index = 1, length do
+			local encoded = canonical_encode(value[index], seen)
+			if not encoded then
+				seen[value] = nil
+				return nil
+			end
+			pieces[#pieces + 1] = encoded
+		end
+		seen[value] = nil
+		return "[" .. table.concat(pieces, ",") .. "]"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" then
+			seen[value] = nil
+			return nil
+		end
+	end
+	for _, key in ipairs(sorted_keys(value)) do
+		local key_ok, encoded_key = pcall(vim.json.encode, key)
+		local encoded_value = canonical_encode(value[key], seen)
+		if not key_ok or not encoded_value then
+			seen[value] = nil
+			return nil
+		end
+		pieces[#pieces + 1] = encoded_key .. ":" .. encoded_value
+	end
+	seen[value] = nil
+	return "{" .. table.concat(pieces, ",") .. "}"
+end
+
+local MANAGED_ONLY = { ["markdown-preview"] = true, ["devcontainers-cli"] = true }
+
+local function external_recovery(name, detail)
+	detail = tostring(detail)
+	if detail:find("managed authority", 1, true) then
+		return ("use :NvimConfigToolsInstall! %s to repair managed authority; external fallback is disabled"):format(
+			name
+		)
+	end
+	if
+		detail:find("unsafe", 1, true)
+		or detail:find("identity changed", 1, true)
+		or detail:find("permissions", 1, true)
+		or detail:find("could not be opened", 1, true)
+	then
+		return ("the unsafe private external receipt will not be overwritten; inspect and remove its exact entry under verified-tools/external-records before rerunning :NvimConfigToolsInstall %s, or use :NvimConfigToolsInstall! %s to select managed authority"):format(
+			name,
+			name
+		)
+	end
+	return ("rerun :NvimConfigToolsInstall %s to recertify, or use ! to select managed authority"):format(name)
 end
 
 local function platform_target()
@@ -100,18 +214,32 @@ end
 -- timeout, error, or split installation blocks planning.
 local function external_probe(identity, spec)
 	local candidates_by_command = {}
+	local safe_candidates_by_command = {}
 	local saw_any = false
 	local incompatible = {}
+	local unsafe = {}
 	for _, command in ipairs(sorted_keys(spec.executables)) do
 		local candidates = external_candidates(command)
 		candidates_by_command[command] = candidates
+		safe_candidates_by_command[command] = {}
 		if #candidates == 0 then
 			incompatible[#incompatible + 1] = command .. "=missing"
 		end
 		saw_any = saw_any or #candidates > 0
+		for _, path in ipairs(candidates) do
+			local safe, authority_err = engine.validate_external_candidate(path)
+			if not safe then
+				unsafe[#unsafe + 1] = command .. "@" .. path .. "=unsafe:" .. bounded(authority_err)
+			else
+				safe_candidates_by_command[command][#safe_candidates_by_command[command] + 1] = safe
+			end
+		end
 	end
 	if not saw_any then
 		return { outcome = "absent" }
+	end
+	if #unsafe > 0 then
+		return { outcome = "incompatible", detail = bounded(table.concat(unsafe, ";")) }
 	end
 	local entry = spec.manifest and spec.manifest.entry or {}
 	local probe_command = entry.version_probe or sorted_keys(spec.executables)[1]
@@ -120,24 +248,29 @@ local function external_probe(identity, spec)
 	end
 	local compatible_path
 	for index, path in ipairs(candidates_by_command[probe_command] or {}) do
-		local matches, detail = probe_candidate(path, identity.version)
-		if matches == nil then
-			return { outcome = "error", detail = probe_command .. ":" .. detail }
-		end
-		-- PATH executes the first candidate. Keep inspecting every later
-		-- candidate for probe errors, but never certify one hidden behind an
-		-- incompatible executable that would actually win command lookup.
-		if index == 1 and matches then
-			compatible_path = path
-		elseif not matches then
-			incompatible[#incompatible + 1] = probe_command .. "@" .. path .. "=" .. detail
+		local safe_path, authority_err = engine.validate_external_candidate(path)
+		if not safe_path then
+			incompatible[#incompatible + 1] = probe_command .. "@" .. path .. "=unsafe:" .. bounded(authority_err)
+		else
+			local matches, detail = probe_candidate(safe_path, identity.version)
+			if matches == nil then
+				return { outcome = "error", detail = probe_command .. ":" .. detail }
+			end
+			-- PATH executes the first candidate. Keep inspecting every later
+			-- candidate for probe errors, but never certify one hidden behind an
+			-- incompatible executable that would actually win command lookup.
+			if index == 1 and matches then
+				compatible_path = safe_path
+			elseif not matches then
+				incompatible[#incompatible + 1] = probe_command .. "@" .. path .. "=" .. detail
+			end
 		end
 	end
 	if not compatible_path then
 		incompatible[#incompatible + 1] = probe_command .. "=no-exact-version"
 	end
 	local probe_directory = compatible_path and vim.fs.dirname(compatible_path) or nil
-	for command, candidates in pairs(candidates_by_command) do
+	for command, candidates in pairs(safe_candidates_by_command) do
 		if #candidates == 0 or (compatible_path and vim.fs.dirname(candidates[1]) ~= probe_directory) then
 			compatible_path = nil
 			if #candidates > 0 then
@@ -150,7 +283,7 @@ local function external_probe(identity, spec)
 		return { outcome = "incompatible", detail = bounded(table.concat(incompatible, ";")) }
 	end
 	local selected = {}
-	for command, candidates in pairs(candidates_by_command) do
+	for command, candidates in pairs(safe_candidates_by_command) do
 		selected[command] = command == probe_command and compatible_path or candidates[1]
 	end
 	return { outcome = "compatible", version = identity.version, paths = selected }
@@ -189,6 +322,24 @@ function release_backend.run(plan, done, control)
 end
 function release_backend.attest(plan, done)
 	done(true, release_observation(plan))
+end
+
+local npm_release_backend = {}
+function npm_release_backend.run(plan, done, control)
+	local ready, reason = npm_release.preflight(plan.manifest.npm_release_plan)
+	if not ready then
+		done(false, reason)
+		return false
+	end
+	local controller = npm_release.install(plan.manifest.npm_release_plan, done)
+	if type(controller) == "table" and type(controller.cancel) == "function" then
+		control.set_cancel(controller.cancel)
+	end
+	return nil
+end
+function npm_release_backend.attest(plan, done)
+	local observed, observe_err = npm_release.observe(plan.manifest.npm_release_plan)
+	done(observed ~= nil, observed or observe_err)
 end
 
 local function same_timestamp(left, right)
@@ -319,7 +470,10 @@ local function decode_json_file(path, private)
 		return nil, read_err
 	end
 	local ok, value = pcall(vim.json.decode, data)
-	return ok and type(value) == "table" and value or nil, ok and nil or "json-invalid"
+	if not ok or type(value) ~= "table" then
+		return nil, "json-invalid"
+	end
+	return value
 end
 
 local function registry_package(name)
@@ -332,7 +486,10 @@ local function registry_package(name)
 		return nil, "mason-package-unavailable"
 	end
 	local package_ok, pkg = pcall(registry.get_package, name)
-	return package_ok and pkg or nil, package_ok and nil or "mason-package-unavailable"
+	if not package_ok then
+		return nil, "mason-package-unavailable"
+	end
+	return pkg
 end
 
 local function validate_raw_mason(plan)
@@ -485,29 +642,57 @@ end
 
 local mason_backend = {}
 function mason_backend.run(plan, done, control)
+	local completed = false
+	local function complete(ok, reason)
+		if completed then
+			return false
+		end
+		completed = true
+		done(ok, reason)
+		return true
+	end
+	local function defer_stage(stage, callback, ...)
+		local arguments = { n = select("#", ...), ... }
+		local scheduled, schedule_err = pcall(vim.schedule, function()
+			if completed then
+				return
+			end
+			local ok, err = xpcall(function()
+				callback(unpack(arguments, 1, arguments.n))
+			end, debug.traceback)
+			if not ok then
+				complete(false, stage .. "-crashed:" .. bounded(err))
+			end
+		end)
+		if not scheduled then
+			complete(false, stage .. "-schedule-failed:" .. bounded(schedule_err))
+			return nil
+		end
+		return true
+	end
 	local ready, prereq_err = check_mason_prerequisites(plan.manifest.entry)
 	if not ready then
-		done(false, prereq_err)
-		return false
+		complete(false, prereq_err)
+		return nil
 	end
 	local available, registry = pcall(M._registry)
 	if not available or type(registry) ~= "table" then
-		done(false, "mason-registry-unavailable")
-		return false
+		complete(false, "mason-registry-unavailable")
+		return nil
 	end
-	local refresh_ok = pcall(registry.refresh, function(success)
+	local function after_refresh(success)
 		if success ~= true then
-			done(false, "mason-refresh-failed")
+			complete(false, "mason-refresh-failed")
 			return
 		end
 		local second_ready, second_err = check_mason_prerequisites(plan.manifest.entry)
 		if not second_ready then
-			done(false, second_err)
+			complete(false, second_err)
 			return
 		end
 		local pkg, package_err = registry_package(plan.identity.name)
 		if not pkg then
-			done(false, package_err)
+			complete(false, package_err)
 			return
 		end
 		local install_ok, handle = pcall(
@@ -515,34 +700,55 @@ function mason_backend.run(plan, done, control)
 			pkg,
 			{ version = plan.identity.version, force = true },
 			function(installed)
-				if installed ~= true then
-					done(false, "mason-install-failed")
-					return
-				end
-				local observation, observation_err = mason_observation(plan, true)
-				done(observation ~= nil, observation and nil or observation_err)
+				defer_stage("mason-post-install", function()
+					if installed ~= true then
+						complete(false, "mason-install-failed")
+						return
+					end
+					local observe = M._mason_observation or mason_observation
+					local observation, observation_err = observe(plan, true)
+					if not observation then
+						complete(false, observation_err)
+						return
+					end
+					complete(true)
+				end)
 			end
 		)
 		if not install_ok then
-			done(false, "mason-install-start-failed:" .. bounded(handle))
+			complete(false, "mason-install-start-failed:" .. bounded(handle))
 		elseif type(handle) == "table" then
 			local cancel = handle.cancel or handle.terminate
 			if type(cancel) == "function" then
+				local cancel_sent = false
 				control.set_cancel(function()
+					if cancel_sent or completed then
+						return
+					end
+					if type(handle.is_closed) == "function" then
+						local inspected, closed = pcall(handle.is_closed, handle)
+						if not inspected or closed then
+							return
+						end
+					end
+					cancel_sent = true
 					pcall(cancel, handle)
 				end)
 			end
 		end
+	end
+	local refresh_ok, refresh_err = pcall(registry.refresh, function(success)
+		defer_stage("mason-refresh-continuation", after_refresh, success)
 	end)
 	if not refresh_ok then
-		done(false, "mason-refresh-start-failed")
-		return false
+		complete(false, "mason-refresh-start-failed:" .. bounded(refresh_err))
+		return nil
 	end
 	return nil
 end
 
-function mason_backend.attest(plan, done)
-	local observation, err = mason_observation(plan, false)
+function mason_backend.attest(plan, done, _, context)
+	local observation, err = mason_observation(plan, context and context.local_mason_adoption == true)
 	done(observation ~= nil, observation or err)
 end
 
@@ -573,7 +779,42 @@ local function release_spec(name, options)
 		},
 		executables = manifest.executable_map(plan.entry),
 		requires_network = true,
-		force_managed = options and options.force_managed == true or false,
+		force_managed = MANAGED_ONLY[name] == true or options and options.force_managed == true or false,
+	}
+end
+
+local function runtime_release_spec(name)
+	local entry = manifest.managed_tools[name]
+	if not entry then
+		return nil, "unknown"
+	end
+	local uname = uv.os_uname()
+	local asset, target = manifest.asset_for(entry, uname.sysname, uname.machine)
+	if not asset then
+		return nil, "unsupported"
+	end
+	local layout = manifest.release_layout(entry, asset)
+	return {
+		identity = {
+			backend = "release",
+			name = name,
+			version = entry.version,
+			target = target,
+			digest = "sha256:" .. asset.sha256:lower(),
+			install_root = paths.managed_root(),
+		},
+		manifest = {
+			entry = vim.deepcopy(entry),
+			integrity = {
+				kind = "release-sha256",
+				archive_sha256 = asset.sha256:lower(),
+				commands = layout.commands,
+				artifacts = layout.artifacts,
+			},
+		},
+		executables = manifest.executable_map(entry),
+		requires_network = true,
+		force_managed = MANAGED_ONLY[name] == true,
 	}
 end
 
@@ -584,10 +825,19 @@ local function mason_spec(name, options)
 	end
 	local target = platform_target()
 	local executables = manifest.executable_map(entry)
-	local digest_parts = { "mason", name, entry.version, target }
-	digest_parts[#digest_parts + 1] = "probe=" .. entry.version_probe
-	for _, command in ipairs(sorted_keys(executables)) do
-		digest_parts[#digest_parts + 1] = command .. "=" .. executables[command]
+	local integrity = manifest.mason_integrity(name, entry)
+	local encoded = canonical_encode({
+		schema = 1,
+		backend = "mason",
+		name = name,
+		version = entry.version,
+		target = target,
+		entry = entry,
+		integrity = integrity,
+		executables = executables,
+	})
+	if not encoded then
+		return nil, "Mason manifest contract is not canonically encodable"
 	end
 	return {
 		identity = {
@@ -595,13 +845,44 @@ local function mason_spec(name, options)
 			name = name,
 			version = entry.version,
 			target = target,
-			digest = "manifest:" .. vim.fn.sha256(table.concat(digest_parts, "\0")),
+			digest = "manifest:" .. vim.fn.sha256(encoded),
 			install_root = paths.mason_root(),
 		},
-		manifest = { entry = vim.deepcopy(entry), integrity = manifest.mason_integrity(name, entry) },
+		manifest = { entry = vim.deepcopy(entry), integrity = integrity },
 		executables = executables,
 		requires_network = true,
 		force_managed = options and options.force_managed == true or false,
+	}
+end
+
+local function npm_release_spec(name, selected)
+	local plan, plan_err = npm_release.plan(name, selected)
+	if not plan then
+		return nil, plan_err
+	end
+	return {
+		identity = {
+			backend = "npm-release",
+			name = name,
+			version = plan.metadata.version,
+			target = plan.target,
+			digest = "sha256:" .. plan.source_sha256,
+			install_root = plan.install_root,
+		},
+		manifest = {
+			entry = vim.deepcopy(plan.entry),
+			npm_release_plan = plan,
+			integrity = {
+				kind = "bundle-sha256",
+				source_sha256 = plan.source_sha256,
+				receipt_path = plan.receipt_path,
+				receipt = vim.deepcopy(plan.receipt),
+				commands = vim.deepcopy(plan.commands),
+			},
+		},
+		executables = { devcontainer = "devcontainer" },
+		requires_network = true,
+		force_managed = true,
 	}
 end
 
@@ -609,7 +890,23 @@ function M.spec(name, options)
 	if manifest.managed_tools[name] then
 		return release_spec(name, options)
 	end
+	if manifest.dynamic_entry(name) then
+		if type(options) ~= "table" or type(options.selected) ~= "table" then
+			return nil, "dynamic-version-requires-explicit-install"
+		end
+		return npm_release_spec(name, options.selected)
+	end
 	return mason_spec(name, options)
+end
+
+local function runtime_spec(name)
+	if manifest.managed_tools[name] then
+		return runtime_release_spec(name)
+	end
+	if manifest.dynamic_entry(name) then
+		return nil, "dynamic-runtime-uses-active-slot"
+	end
+	return mason_spec(name)
 end
 
 function M.plan(name, options)
@@ -623,7 +920,83 @@ function M.plan(name, options)
 	return engine.plan(spec)
 end
 
+---Resolve one manifest command through durable managed authority or an explicit
+---external certification. This never plans, probes, installs, retries, repairs,
+---searches PATH, or writes state. Non-bundle tools use their durable metadata;
+---an active npm bundle rehashes its exact closure before returning its command.
+---@param name string
+---@param command string
+---@return string? path
+---@return string? error_message
+function M.resolve(name, command)
+	if type(name) ~= "string" or name == "" or type(command) ~= "string" or command == "" then
+		return nil, "tool and command must be non-empty strings"
+	end
+	if manifest.dynamic_entry(name) then
+		if command ~= manifest.dynamic_entry(name).command then
+			return nil, ("tool %s does not provide %s"):format(name, command)
+		end
+		if not setup_done then
+			M.setup()
+		end
+		local active, active_err = engine.resolve_active(name)
+		if not active then
+			return nil,
+				("managed-only tool %s has no valid active bundle (%s); run :NvimConfigToolsInstall %s"):format(
+					name,
+					tostring(active_err),
+					name
+				)
+		end
+		local path = active.commands[command]
+		if type(path) ~= "string" or path == "" then
+			return nil, ("active tool resolution omitted %s"):format(command)
+		end
+		return path
+	end
+	local spec, spec_err = runtime_spec(name)
+	if not spec then
+		return nil, spec_err
+	end
+	if type(spec.executables) ~= "table" or spec.executables[command] == nil then
+		return nil, ("tool %s does not provide %s"):format(name, command)
+	end
+	if not setup_done then
+		M.setup()
+	end
+	local resolved, resolve_err = engine.resolve(spec)
+	if not resolved and resolve_err == "absent" then
+		if MANAGED_ONLY[name] then
+			return nil, ("managed-only tool %s is not installed; run :NvimConfigToolsInstall! %s"):format(name, name)
+		end
+		return nil,
+			("tool %s has no durable authority; run :NvimConfigToolsInstall %s to certify or install it, or use ! to force managed installation"):format(
+				name,
+				name
+			)
+	end
+	if not resolved then
+		if tostring(resolve_err):find("external certification:", 1, true) == 1 then
+			return nil, tostring(resolve_err) .. "; " .. external_recovery(name, resolve_err)
+		end
+		return nil,
+			("%s; run :NvimConfigToolsInstall! %s to repair managed authority"):format(tostring(resolve_err), name)
+	end
+	local path = resolved[command]
+	if type(path) ~= "string" or path == "" then
+		return nil, ("verified tool resolution omitted %s"):format(command)
+	end
+	return path
+end
+
 local function catalog_names()
+	local names = vim.deepcopy(manifest.managed_order)
+	vim.list_extend(names, manifest.dynamic_order or {})
+	vim.list_extend(names, manifest.mason_order)
+	return names
+end
+
+local function static_catalog_names()
 	local names = vim.deepcopy(manifest.managed_order)
 	vim.list_extend(names, manifest.mason_order)
 	return names
@@ -631,7 +1004,7 @@ end
 
 function M.plan_all(options)
 	local plans = {}
-	for _, name in ipairs(catalog_names()) do
+	for _, name in ipairs(static_catalog_names()) do
 		local plan = M.plan(name, options)
 		if plan then
 			plans[name] = plan
@@ -640,18 +1013,22 @@ function M.plan_all(options)
 	return vim.deepcopy(plans)
 end
 
-function M.import_legacy(name)
+function M.import_legacy(name, callback)
+	if callback ~= nil and type(callback) ~= "function" then
+		return nil, "legacy import callback must be a function"
+	end
 	if not setup_done then
 		M.setup()
 	end
 	local names
 	if name == nil then
-		names = catalog_names()
+		names = static_catalog_names()
 	elseif type(name) == "string" and (manifest.managed_tools[name] or manifest.mason_entry(name)) then
 		names = { name }
 	else
 		return nil, "unknown tool"
 	end
+	local started = false
 	for _, candidate in ipairs(names) do
 		local spec = M.spec(candidate)
 		if spec and engine.status(spec.identity) == nil then
@@ -660,20 +1037,216 @@ function M.import_legacy(name)
 			if record then
 				-- Schema-1 never carried archive/install evidence or a normalized
 				-- Mason receipt. Core therefore projects even old success as repair.
-				imported, import_err = engine.import_legacy(spec, { status = record.status, detail = record.detail })
+				imported, import_err =
+					engine.import_legacy(spec, { status = record.status, detail = record.detail }, callback)
 			elseif reason ~= "absent" and reason ~= "locked" then
-				imported, import_err = engine.import_legacy(spec, { status = reason })
+				imported, import_err = engine.import_legacy(spec, { status = reason }, callback)
 			end
+			started = started or imported == true
 			if import_err and import_err ~= "consumed" then
 				return nil, import_err
 			end
 		end
 	end
+	return true, nil, started
+end
+
+local function notify_safely(message, level, options)
+	return pcall(M._notify, message, level, options)
+end
+
+local function close_timer(timer)
+	if not timer then
+		return
+	end
+	pcall(timer.stop, timer)
+	local closing = false
+	if type(timer.is_closing) == "function" then
+		local ok, value = pcall(timer.is_closing, timer)
+		closing = ok and value == true
+	end
+	if not closing then
+		pcall(timer.close, timer)
+	end
+end
+
+local function progress_frame(request)
+	if request.finished or install_requests[request.id] ~= request then
+		return false
+	end
+	request.frame = request.frame + 1
+	local message = string.format(
+		"%s Installing tools · %d/%d settled",
+		SPINNER[((request.frame - 1) % #SPINNER) + 1],
+		request.settled,
+		request.total
+	)
+	local called, shown = pcall(M._visual_notify, message, vim.log.levels.INFO, {
+		id = request.id,
+		title = "Tools",
+		timeout = false,
+		history = false,
+	})
+	request.displayed = request.displayed or (called and shown == true)
+	return request.displayed
+end
+
+local function schedule_progress_frame(request)
+	if request.finished or install_requests[request.id] ~= request or request.scheduled then
+		return
+	end
+	request.scheduled = true
+	local scheduled = pcall(M._schedule, function()
+		request.scheduled = false
+		if not request.finished and install_requests[request.id] == request then
+			progress_frame(request)
+		end
+	end)
+	if not scheduled then
+		request.scheduled = false
+	end
+end
+
+local function begin_install_request(names)
+	install_request_sequence = install_request_sequence + 1
+	local request = {
+		id = "nvim-config:tools-install:" .. install_request_sequence,
+		names = vim.deepcopy(names),
+		total = #names,
+		settled = 0,
+		outcomes = {},
+		frame = 0,
+		displayed = false,
+		finished = false,
+		scheduled = false,
+	}
+	install_requests[request.id] = request
+	progress_frame(request)
+	pcall(vim.cmd, "redraw")
+	if not request.displayed then
+		return request
+	end
+	local created, timer = pcall(M._new_timer)
+	if not created or not timer then
+		return request
+	end
+	request.timer = timer
+	local started, result = pcall(timer.start, timer, PROGRESS_INTERVAL_MS, PROGRESS_INTERVAL_MS, function()
+		if not request.finished and install_requests[request.id] == request then
+			schedule_progress_frame(request)
+		end
+	end)
+	if not started or result == nil or result == false then
+		request.timer = nil
+		close_timer(timer)
+	end
+	return request
+end
+
+local function request_summary(request)
+	local failed = {}
+	for index, name in ipairs(request.names) do
+		if request.outcomes[index] == false then
+			failed[#failed + 1] = tostring(name)
+		end
+	end
+	table.sort(failed)
+	local message = string.format(
+		"Tool install request complete: %d succeeded, %d failed (%d total)",
+		request.total - #failed,
+		#failed,
+		request.total
+	)
+	if #failed > 0 then
+		local visible = {}
+		for index = 1, math.min(#failed, FAILED_NAMES_LIMIT) do
+			visible[#visible + 1] = failed[index]:sub(1, 64)
+		end
+		message = message .. "\nFailed tools: " .. table.concat(visible, ", ")
+		if #failed > #visible then
+			message = message .. string.format(" (+%d more)", #failed - #visible)
+		end
+	end
+	return message, #failed
+end
+
+local function finish_install_request(request)
+	if request.finished or install_requests[request.id] ~= request then
+		return false
+	end
+	request.finished = true
+	install_requests[request.id] = nil
+	local timer = request.timer
+	request.timer = nil
+	close_timer(timer)
+	local message, failed = request_summary(request)
+	local level = failed == 0 and vim.log.levels.INFO or vim.log.levels.WARN
+	local timeout = failed == 0 and 3000 or false
+	local visual_updated = false
+	if request.displayed then
+		local called, shown = pcall(M._visual_notify, message, level, {
+			id = request.id,
+			title = "Tools",
+			timeout = timeout,
+			history = false,
+		})
+		visual_updated = called and shown == true
+		if not visual_updated then
+			pcall(M._visual_hide, request.id)
+		end
+	end
+	local notified = notify_safely(message, level, {
+		id = request.id,
+		title = "Tools",
+		timeout = timeout,
+	})
+	if not notified and request.displayed and not visual_updated then
+		pcall(M._visual_hide, request.id)
+	end
 	return true
 end
 
-local function report(prefix, name, ok, reason)
-	M._notify((ok and prefix or "Failed to " .. prefix:lower()) .. name .. (reason and ": " .. reason or ""))
+local function settle_install_request(request, index, ok)
+	if request.finished or request.outcomes[index] ~= nil then
+		return false
+	end
+	request.outcomes[index] = ok == true
+	request.settled = request.settled + 1
+	if request.settled == request.total then
+		return finish_install_request(request)
+	end
+	if request.displayed then
+		schedule_progress_frame(request)
+	end
+	return true
+end
+
+local function reset_install_requests()
+	local requests = install_requests
+	install_requests = {}
+	for _, request in pairs(requests) do
+		request.finished = true
+		close_timer(request.timer)
+		request.timer = nil
+		if request.displayed then
+			pcall(M._visual_hide, request.id)
+		end
+	end
+end
+
+local REPORT_WORDING = {
+	install = { success = "Installed ", failure = "Failed to install " },
+	repair = { success = "Repaired ", failure = "Failed to repair " },
+	attest = { success = "Attested ", failure = "Failed to attest " },
+}
+
+local function report(action, name, ok, reason)
+	local wording = assert(REPORT_WORDING[action], "unknown report action")
+	local message = (ok and wording.success or wording.failure) .. name
+	if reason ~= nil and tostring(reason) ~= "" then
+		message = message .. ": " .. tostring(reason)
+	end
+	notify_safely(message)
 end
 
 local function repair_markdown_preview(name, identity)
@@ -683,9 +1256,15 @@ local function repair_markdown_preview(name, identity)
 	local root = M._markdown_plugin_root()
 	local record = root and engine.status(identity) or nil
 	if record and record.status == "succeeded" then
-		local ok, err = markdown_bridge.repair(root, record)
+		local called, ok, err = pcall(markdown_bridge.repair, root, record)
+		if not called then
+			notify_safely("markdown-preview bridge repair raised an error: " .. bounded(ok), vim.log.levels.WARN)
+			return
+		end
 		if not ok then
-			M._notify("markdown-preview bridge was not repaired: " .. tostring(err), vim.log.levels.WARN)
+			notify_safely("markdown-preview bridge was not repaired: " .. tostring(err), vim.log.levels.WARN)
+		elseif err then
+			notify_safely("markdown-preview bridge was repaired with a warning: " .. tostring(err), vim.log.levels.WARN)
 		end
 	end
 end
@@ -693,6 +1272,9 @@ end
 local function preflight(plan)
 	if plan.identity.backend == "release" then
 		return release.preflight(plan.manifest.release_plan)
+	end
+	if plan.identity.backend == "npm-release" then
+		return npm_release.preflight(plan.manifest.npm_release_plan)
 	end
 	return check_mason_prerequisites(plan.manifest.entry)
 end
@@ -710,51 +1292,336 @@ local function claim_mode(record)
 	return nil
 end
 
-local function start(name, force_managed)
-	local plan, plan_err = M.plan(name, { force_managed = force_managed })
+local function import_raw_mason(name, plan, callback)
+	local current = engine.status(plan.identity)
+	if plan.identity.backend ~= "mason" or current and current.status ~= "repair-required" then
+		return true, nil, false
+	end
+	local validated = validate_raw_mason(plan)
+	if not validated then
+		return true, nil, false
+	end
+	local spec, spec_err = M.spec(name, { force_managed = true })
+	if not spec then
+		return nil, spec_err, false
+	end
+	local imported, import_err = engine.import_legacy(spec, {
+		status = "present",
+		origin = "observed-raw-mason-state-v1",
+	}, callback)
+	if not imported then
+		if import_err == "consumed" then
+			return true, nil, false
+		end
+		return nil, import_err, false
+	end
+	return true, nil, imported == true
+end
+
+local function start_planned(name, force_managed, completion, supplied_plan)
+	local completed = false
+	local function finish(ok)
+		if completed then
+			return ok
+		end
+		completed = true
+		if type(completion) == "function" then
+			pcall(completion, ok == true)
+		end
+		return ok
+	end
+	local function finish_after(ok, callback)
+		if completed then
+			return ok
+		end
+		local callback_ok, callback_err = xpcall(callback, debug.traceback)
+		local result = finish(ok)
+		if not callback_ok then
+			notify_safely(name .. " completion reporting failed: " .. bounded(callback_err), vim.log.levels.WARN)
+		end
+		return result
+	end
+	local plan, plan_err = supplied_plan, nil
 	if not plan then
-		M._notify(name .. " cannot be planned (" .. tostring(plan_err) .. ")", vim.log.levels.WARN)
-		return false
+		plan, plan_err = M.plan(name, { force_managed = force_managed })
+	end
+	if not plan then
+		return finish_after(false, function()
+			M._notify(name .. " cannot be planned (" .. tostring(plan_err) .. ")", vim.log.levels.WARN)
+		end)
 	end
 	if plan.strategy == "external" then
-		M._notify(name .. " is supplied by compatible external executables")
+		local certified, certify_err = engine.certify_external(plan)
+		if not certified then
+			return finish_after(false, function()
+				M._notify(
+					name
+						.. " external executables were not certified ("
+						.. tostring(certify_err)
+						.. "); "
+						.. external_recovery(name, certify_err),
+					vim.log.levels.WARN
+				)
+			end)
+		end
+		return finish_after(true, function()
+			M._notify(name .. " external executables were certified for runtime use")
+		end)
+	end
+	local function activate_if_dynamic(ok, reason)
+		if ok ~= true or plan.identity.backend ~= "npm-release" then
+			return ok, reason
+		end
+		local activation_ok, activated, activation_err = xpcall(function()
+			return engine.activate(name, plan.identity)
+		end, debug.traceback)
+		if not activation_ok then
+			return false, "activation raised an error: " .. bounded(activated)
+		end
+		if not activated then
+			return false, activation_err or "activation-failed"
+		end
 		return true
 	end
-	local imported, import_err = M.import_legacy(name)
-	if not imported then
-		M._notify(name .. " legacy state could not be imported (" .. tostring(import_err) .. ")", vim.log.levels.WARN)
-		return false
-	end
-	local current = engine.status(plan.identity)
-	if current and current.status == "succeeded" then
-		return engine.attest(plan.identity, function(ok, reason)
-			if ok then
-				repair_markdown_preview(name, plan.identity)
+
+	local function continue_managed()
+		local current = engine.status(plan.identity)
+		if current and current.status == "succeeded" then
+			local current_spec, current_spec_err = runtime_spec(name)
+			local resolved, resolve_err
+			if plan.identity.backend == "npm-release" then
+				resolved, resolve_err = engine.resolve(plan.identity)
+			elseif current_spec then
+				resolved, resolve_err = engine.resolve(current_spec)
+			else
+				resolve_err = current_spec_err
 			end
-			report("Attested ", name, ok, reason)
-		end) ~= nil
-	end
-	local mode = claim_mode(current)
-	if not mode then
-		M._notify(name .. " already has active state " .. tostring(current and current.status), vim.log.levels.WARN)
-		return false
-	end
-	local ready, ready_err = preflight(plan)
-	if not ready then
-		M._notify(name .. " was not started (" .. tostring(ready_err) .. ")", vim.log.levels.WARN)
-		return false
-	end
-	local claim, claim_err = engine.claim(plan, { mode = mode })
-	if not claim then
-		M._notify(name .. " was not started (" .. tostring(claim_err) .. ")", vim.log.levels.WARN)
-		return false
-	end
-	return engine.run(claim, function(ok, reason)
-		if ok then
-			repair_markdown_preview(name, plan.identity)
+			if resolved then
+				local attestation, attestation_err = engine.attest(plan.identity, function(ok, reason)
+					ok, reason = activate_if_dynamic(ok, reason)
+					finish_after(ok, function()
+						if ok then
+							repair_markdown_preview(name, plan.identity)
+							report("attest", name, true)
+						else
+							report("attest", name, false, reason)
+						end
+					end)
+				end)
+				if not attestation then
+					return finish_after(false, function()
+						M._notify(
+							name .. " attestation was not started (" .. tostring(attestation_err) .. ")",
+							vim.log.levels.WARN
+						)
+					end)
+				end
+				return true
+			end
+			notify_safely(
+				name .. " managed authority requires repair before attestation (" .. tostring(resolve_err) .. ")",
+				vim.log.levels.WARN
+			)
 		end
-		report(mode == "repair" and "Repaired " or "Installed ", name, ok, reason)
-	end) ~= nil
+		local mode = claim_mode(current)
+		if current and current.status == "succeeded" then
+			mode = "repair"
+		end
+		if not mode then
+			return finish_after(false, function()
+				M._notify(
+					name .. " already has active state " .. tostring(current and current.status),
+					vim.log.levels.WARN
+				)
+			end)
+		end
+		local ready, ready_err = preflight(plan)
+		if not ready then
+			return finish_after(false, function()
+				M._notify(name .. " was not started (" .. tostring(ready_err) .. ")", vim.log.levels.WARN)
+			end)
+		end
+		local claim, claim_err = engine.claim(plan, { mode = mode })
+		if not claim then
+			return finish_after(false, function()
+				M._notify(name .. " was not started (" .. tostring(claim_err) .. ")", vim.log.levels.WARN)
+			end)
+		end
+		local running, run_err = engine.run(claim, function(ok, reason)
+			ok, reason = activate_if_dynamic(ok, reason)
+			finish_after(ok, function()
+				if ok then
+					repair_markdown_preview(name, plan.identity)
+				end
+				report(mode == "repair" and "repair" or "install", name, ok, reason)
+			end)
+		end)
+		if not running then
+			return finish_after(false, function()
+				M._notify(name .. " was not started (" .. tostring(run_err) .. ")", vim.log.levels.WARN)
+			end)
+		end
+		return true
+	end
+
+	local function import_succeeded()
+		return finish_after(true, function()
+			repair_markdown_preview(name, plan.identity)
+			report("attest", name, true)
+		end)
+	end
+
+	local function import_raw_then_continue()
+		local callback_called = false
+		local callback_result
+		local imported, import_err, import_started = import_raw_mason(name, plan, function(ok)
+			callback_called = true
+			callback_result = ok and import_succeeded() or continue_managed()
+		end)
+		if not imported then
+			return finish_after(false, function()
+				M._notify(
+					name .. " existing Mason state could not be imported (" .. tostring(import_err) .. ")",
+					vim.log.levels.WARN
+				)
+			end)
+		end
+		if import_started then
+			return callback_called and callback_result or true
+		end
+		return continue_managed()
+	end
+
+	local callback_called = false
+	local callback_result
+	if plan.identity.backend == "npm-release" then
+		return import_raw_then_continue()
+	end
+	local imported, import_err, import_started = M.import_legacy(name, function(ok)
+		callback_called = true
+		callback_result = ok and import_succeeded() or import_raw_then_continue()
+	end)
+	if not imported then
+		return finish_after(false, function()
+			M._notify(
+				name .. " legacy state could not be imported (" .. tostring(import_err) .. ")",
+				vim.log.levels.WARN
+			)
+		end)
+	end
+	if import_started or callback_called then
+		return callback_called and callback_result or true
+	end
+	return import_raw_then_continue()
+end
+
+local function start(name, force_managed, completion)
+	local entry = manifest.dynamic_entry(name)
+	if not entry then
+		return start_planned(name, force_managed, completion)
+	end
+	local completed = false
+	local function finish(ok)
+		if completed then
+			return ok
+		end
+		completed = true
+		if type(completion) == "function" then
+			pcall(completion, ok == true)
+		end
+		return ok
+	end
+	if not M._network_authorized() then
+		notify_safely(
+			name .. " was not started (network-disabled; latest discovery requires an explicit online install)",
+			vim.log.levels.WARN
+		)
+		return finish(false)
+	end
+	local function continue_discovery(ok, selected)
+		if ok ~= true then
+			notify_safely(name .. " latest discovery failed (" .. tostring(selected) .. ")", vim.log.levels.WARN)
+			finish(false)
+			return
+		end
+		local plan, plan_err = M.plan(name, { force_managed = true, selected = selected })
+		if not plan then
+			notify_safely(name .. " cannot be planned (" .. tostring(plan_err) .. ")", vim.log.levels.WARN)
+			finish(false)
+			return
+		end
+		local started = start_planned(name, true, finish, plan)
+		if not started then
+			finish(false)
+		end
+	end
+	local controller, discover_err = npm_release.discover(entry, function(...)
+		local arguments = { n = select("#", ...), ... }
+		local callback_ok, callback_err = xpcall(function()
+			continue_discovery(unpack(arguments, 1, arguments.n))
+		end, debug.traceback)
+		if not callback_ok then
+			notify_safely(
+				name .. " latest discovery continuation failed: " .. bounded(callback_err),
+				vim.log.levels.WARN
+			)
+			finish(false)
+		end
+	end)
+	if not controller then
+		notify_safely(
+			name .. " latest discovery was not started (" .. tostring(discover_err) .. ")",
+			vim.log.levels.WARN
+		)
+		return finish(false)
+	end
+	return true
+end
+
+local function drain_install_queue()
+	if install_draining then
+		return
+	end
+	install_draining = true
+	while install_active < 2 and #install_queue > 0 do
+		local selected
+		for index, candidate in ipairs(install_queue) do
+			if not install_active_groups[candidate.group] then
+				selected = index
+				break
+			end
+		end
+		if not selected then
+			break
+		end
+		local item = table.remove(install_queue, selected)
+		local generation = install_generation
+		install_active = install_active + 1
+		install_active_groups[item.group] = true
+		local settled = false
+		local function settle(ok)
+			if settled or generation ~= install_generation then
+				return
+			end
+			settled = true
+			install_active = math.max(0, install_active - 1)
+			install_active_groups[item.group] = nil
+			if type(item.completion) == "function" then
+				pcall(item.completion, ok)
+			end
+			drain_install_queue()
+		end
+		local started_ok, started = xpcall(function()
+			return start(item.name, item.force_managed, settle)
+		end, debug.traceback)
+		if not started_ok then
+			notify_safely(item.name .. " install chain raised an error: " .. bounded(started), vim.log.levels.WARN)
+			settle(false)
+		elseif started ~= true then
+			settle(false)
+		end
+	end
+	install_draining = false
 end
 
 local function contained(path, root)
@@ -769,7 +1636,9 @@ local function await_operation(starter, identity, timeout)
 	local reason
 	local started, start_err = starter(function(ok, value)
 		succeeded = ok == true
-		reason = ok and nil or tostring(value)
+		if not succeeded then
+			reason = tostring(value)
+		end
 		completed = true
 	end)
 	if not started then
@@ -805,22 +1674,35 @@ local function reconcile_tool(name, opts)
 	end
 	local current = engine.status(plan.identity)
 	if current and current.status == "succeeded" then
-		local attested, attest_err = await_operation(function(done)
-			return engine.attest(plan.identity, done)
-		end, plan.identity, opts.timeout)
-		if attested then
-			repair_markdown_preview(name, plan.identity)
-			return true, false
+		local current_spec, current_spec_err = runtime_spec(name)
+		local resolved, resolve_err
+		if current_spec then
+			resolved, resolve_err = engine.resolve(current_spec)
+		else
+			resolve_err = current_spec_err
 		end
-		current = engine.status(plan.identity)
+		if resolved then
+			local attested, attest_err = await_operation(function(done)
+				return engine.attest(plan.identity, done)
+			end, plan.identity, opts.timeout)
+			if attested then
+				repair_markdown_preview(name, plan.identity)
+				return true, false
+			end
+			resolve_err = attest_err
+			current = engine.status(plan.identity)
+		end
 		if opts.allow_network ~= true then
-			return false, false, attest_err or "drift"
+			return false, false, resolve_err or "drift"
 		end
 	end
 	if opts.allow_network ~= true then
 		return false, false, current and current.status or "missing"
 	end
 	local mode = claim_mode(current)
+	if current and current.status == "succeeded" then
+		mode = "repair"
+	end
 	if not mode then
 		return false, false, "active-state:" .. tostring(current and current.status)
 	end
@@ -907,7 +1789,7 @@ function M.provision_exact(opts)
 	local overall = true
 	local first_reason
 	local first_code
-	for _, name in ipairs(catalog_names()) do
+	for _, name in ipairs(static_catalog_names()) do
 		local ok, item_changed, reason, code = reconcile_tool(name, opts)
 		changed = changed or item_changed == true
 		overall = overall and ok
@@ -926,6 +1808,26 @@ function M.provision_exact(opts)
 				inventory.mason.exact = false
 				inventory.mason.problems[#inventory.mason.problems + 1] = name .. ":" .. tostring(item.problem)
 			end
+		end
+	end
+	for _, name in ipairs(manifest.dynamic_order or {}) do
+		local active, active_err = engine.resolve_active(name)
+		local command = manifest.dynamic_entry(name).command
+		local direct = active and active.commands[command] or nil
+		local effective = vim.fn.exepath(command)
+		local effective_real = effective ~= "" and uv.fs_realpath(effective) or nil
+		inventory.managed_tools[name] = {
+			version = active and active.identity.version or vim.NIL,
+			direct = direct or vim.NIL,
+			effective = effective ~= "" and effective or vim.NIL,
+			shadowed = not (direct and effective_real and effective_real == uv.fs_realpath(direct)),
+			exact = active ~= nil,
+			problem = active and vim.NIL or tostring(active_err or "missing"),
+		}
+		if not active then
+			overall = false
+			first_reason = first_reason or tostring(active_err or "missing")
+			first_code = first_code or "managed-tools"
 		end
 	end
 	table.sort(inventory.mason.required, function(left, right)
@@ -950,15 +1852,32 @@ function M.install(target, force)
 		return false
 	end
 	local names = target == "all" and catalog_names() or { target }
-	if target ~= "all" and not manifest.managed_tools[target] and not manifest.mason_entry(target) then
+	if
+		target ~= "all"
+		and not manifest.managed_tools[target]
+		and not manifest.dynamic_entry(target)
+		and not manifest.mason_entry(target)
+	then
 		M._notify("Unknown tool '" .. target .. "'", vim.log.levels.ERROR)
 		return false
 	end
-	local ok = true
-	for _, name in ipairs(names) do
-		ok = start(name, force == true) and ok
+	local request = begin_install_request(names)
+	local accepted = true
+	for index, name in ipairs(names) do
+		install_queue[#install_queue + 1] = {
+			name = name,
+			force_managed = force == true,
+			group = (manifest.managed_tools[name] or manifest.dynamic_entry(name)) and "release" or "mason",
+			completion = function(ok)
+				if not ok then
+					accepted = false
+				end
+				settle_install_request(request, index, ok)
+			end,
+		}
 	end
-	return ok
+	drain_install_queue()
+	return accepted
 end
 
 local function register_command()
@@ -973,7 +1892,7 @@ local function register_command()
 			nargs = "?",
 			bang = true,
 			complete = catalog_names,
-			desc = "Install or repair exact verified tools",
+			desc = "Certify external or install/repair exact managed tools",
 		})
 		command_done = true
 	end
@@ -983,7 +1902,7 @@ function M.setup()
 	if not setup_done then
 		engine.setup({
 			state_root = vim.fs.joinpath(paths.primary_state_root(), "verified-tools"),
-			backends = { release = release_backend, mason = mason_backend },
+			backends = { release = release_backend, ["npm-release"] = npm_release_backend, mason = mason_backend },
 			probe_external = external_probe,
 			network_authorized = M._network_authorized,
 			notify = M._notify,
@@ -1000,9 +1919,13 @@ function M.mason_ready()
 	return M.setup()
 end
 
+function M.busy()
+	local queued, active = engine._queue_size()
+	return install_active > 0 or #install_queue > 0 or queued > 0 or active > 0
+end
+
 function M.mason_busy()
-	local _, active = engine._queue_size()
-	return active > 0
+	return M.busy()
 end
 
 function M.mason_condition()
@@ -1024,11 +1947,18 @@ function M._reset_for_tests()
 	end
 	setup_done = false
 	command_done = false
+	install_generation = install_generation + 1
+	reset_install_requests()
+	install_queue = {}
+	install_active = 0
+	install_draining = false
+	install_active_groups = {}
 	engine._reset_for_tests()
 end
 
 M._external_probe = external_probe
 M._mason_observation = mason_observation
 M._check_mason_prerequisites = check_mason_prerequisites
+M._report = report
 
 return M

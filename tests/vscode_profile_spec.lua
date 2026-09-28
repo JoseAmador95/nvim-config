@@ -17,6 +17,15 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			local ok, err = xpcall(function()
 				assert(vim.g.vscode, "VSCode profile flag is missing")
 				assert(require("config.redraw_profile").current() == "full", "VSCode accepted host redraw throttling")
+				assert(
+					require("config.redraw_profile").inline_diagnostics() == "off",
+					"VSCode enabled inline diagnostics"
+				)
+				assert(
+					require("config.inline_diagnostics").status().mode == "off",
+					"VSCode inline controller is active"
+				)
+				assert(vim.diagnostic.config().virtual_lines == false, "VSCode left diagnostic virtual lines enabled")
 				assert(vim.g.nvim_config_initialized == true, "init.lua did not complete in the VSCode profile")
 				for _, command in ipairs({
 					"MenuOpen",
@@ -25,6 +34,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"NavigationHistory",
 					"CloseTab",
 					"DiagramShow",
+					"MarkdownView",
 					"ClangdSetCompileCommands",
 					"ClangdSwitchSourceHeader",
 					"CoverageLoad",
@@ -37,6 +47,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"DevContainerHostEditor",
 					"JustRun",
 					"JustImportLast",
+					"HexDump",
+					"HexAssemble",
+					"HexToggle",
 					"NvimConfigTrustProjectSettings",
 					"NvimConfigToolsInstall",
 					"LogWatchCurrentFile",
@@ -53,6 +66,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					assert(vim.fn.exists(":" .. command) == 0, command .. " leaked into VSCode")
 				end
 				assert(package.loaded["config.exact_editor"] == nil, "exact editor adapter loaded in VSCode")
+				assert(package.loaded["config.editor_actions"] == nil, "editor actions loaded in VSCode")
 				assert(package.loaded["config.project_settings"] == nil, "project settings adapter loaded in VSCode")
 				assert(package.loaded.tab_first == nil, "tab-first runtime loaded in VSCode")
 				for _, name in ipairs({ "trusted_workspace", "treesitter_runtime" }) do
@@ -85,6 +99,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					vim.tbl_isempty(vim.fn.maparg("<leader><leader>", "x", false, true)),
 					"visual palette mapping leaked into VSCode"
 				)
+				assert(vim.tbl_isempty(vim.fn.maparg("gf", "n", false, true)), "editor gf mapping leaked into VSCode")
 				assert(_G.ExactEditorRequest == nil, "exact editor RPC function leaked into VSCode")
 
 				require("lazy").load({ plugins = { "vscode-multi-cursor.nvim" } })
@@ -100,6 +115,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				for _, plugin in ipairs({
 					"bufferline.nvim",
 					"catppuccin",
+					"hex.nvim",
 					"mason.nvim",
 					"nvim-lint",
 					"remote-nvim.nvim",

@@ -1,17 +1,15 @@
-local virtual_lines = { current_line = true }
-if require("config.redraw_profile").low_bandwidth() then
-	virtual_lines = false
-end
+local inline_diagnostics = require("config.inline_diagnostics")
 
 vim.diagnostic.config({
 	virtual_text = false,
-	virtual_lines = virtual_lines,
+	virtual_lines = false,
 	severity_sort = true,
 	float = {
 		border = "rounded",
 		source = "if_many",
 	},
 })
+inline_diagnostics.setup()
 
 if vim.g.vscode then
 	return

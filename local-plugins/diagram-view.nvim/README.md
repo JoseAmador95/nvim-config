@@ -15,10 +15,21 @@ are owner-only (`0700`/`0600`); symlinks and non-regular entries are rejected.
 
 The normalized defaults are SVG mode, a 30-second timeout for each renderer
 stage, a 16 MiB combined stdout/stderr ceiling per stage, and a cache bounded to
-30 days and 256 MiB. Timed-out work is killed; generation checks ensure late
-callbacks can neither write cache entries nor reach presenters. Selection
+30 days and 256 MiB. The default process adapter streams stdout/stderr only up
+to that ceiling and terminates an overflowing renderer instead of first
+buffering its complete output. Timed-out work is killed; generation checks
+ensure late callbacks can neither write cache entries nor reach presenters.
+Presenter-driven close events cannot reenter session cancellation. Selection
 coordinates are accepted by `extract()`, while the host owns visual mappings
-and ranged commands.
+and ranged commands. A request `on_done` callback is completed at most once on
+presentation, failure, or successful cancellation, including runner exceptions
+and duplicate late completions.
+
+The repository host adapter resolves managed `mmdflux` and PlantUML commands
+through `verified-tools.nvim` immediately before an explicit render. This
+resolution stays deferred until `:DiagramShow`; it never installs or repairs a
+tool. The local `rsvg-convert` dependency is likewise passed to the renderer as
+an exact resolved path rather than a PATH basename.
 
 `setup()` rejects unknown top-level and cache options before replacing state.
 Repeated setup cancels active sessions and resets renderer/presenter

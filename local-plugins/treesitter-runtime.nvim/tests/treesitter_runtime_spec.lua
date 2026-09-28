@@ -136,6 +136,24 @@ test("current unsaved bytes stop on growth and reattach after shrink", function(
 	equal(2, #starts, "unsaved shrink did not reattach")
 end)
 
+test("initial oversized buffers stop a highlighter started before setup", function()
+	reset()
+	installed = { "lua" }
+	local buf = make_buffer(string.rep("x", 32), "lua", "PriorIndent()")
+	active[buf] = true
+	setup({ max_bytes = 16 })
+	equal({}, starts, "initial oversized buffer started another parser")
+	equal({ { buf = buf, language = "lua" } }, stops, "pre-existing oversized highlighter remained active")
+	equal("PriorIndent()", vim.bo[buf].indentexpr, "initial oversized buffer changed indentation")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "tiny" })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf })
+	wait_for(function()
+		return #starts == 1
+	end, "initial oversized buffer did not attach after shrinking")
+	equal({ { buf = buf, language = "lua" } }, starts, "shrink did not start policy-owned highlighting")
+end)
+
 test("allowlist and disabled profile teardown owned state", function()
 	reset()
 	installed = { "lua", "python" }
@@ -286,6 +304,59 @@ test("debounce coalesces reevaluation and reports exact eligibility reasons", fu
 	equal(16, status.max_bytes, "status omitted the effective size limit")
 	status.reason = "mutated"
 	equal("max-bytes-exceeded", runtime.status(buf).reason, "status shares plugin state")
+end)
+
+test("policy is a copied live query independent of recorded lifecycle state", function()
+	reset()
+	installed = { "lua" }
+	local buf = make_buffer("tiny", "lua", "KeepIndent()")
+	setup({ max_bytes = 16, indent = false })
+	local before_status = runtime.status(buf)
+	local before_starts = #starts
+	local before_stops = #stops
+	local policy = runtime.policy(buf)
+	assert(policy.eligible and policy.reason == "eligible", "eligible live policy is incorrect")
+	equal("lua", policy.language, "live policy omitted its language")
+	equal(16, policy.max_bytes, "live policy omitted its effective limit")
+	equal(false, policy.indent, "live policy omitted its effective indentation")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { string.rep("x", 32) })
+	policy = runtime.policy(buf)
+	assert(not policy.eligible and policy.reason == "max-bytes-exceeded", "policy reused stale recorded eligibility")
+	assert(policy.bytes > policy.max_bytes, "live policy did not inspect current contents")
+	equal(before_status, runtime.status(buf), "policy query changed recorded lifecycle state")
+	equal(before_starts, #starts, "policy query started a parser")
+	equal(before_stops, #stops, "policy query stopped a parser")
+
+	policy.reason = "mutated"
+	policy.max_bytes = 999
+	local current = runtime.policy(buf)
+	equal("max-bytes-exceeded", current.reason, "policy result shares runtime state")
+	equal(16, current.max_bytes, "policy result shares nested configuration")
+	vim.api.nvim_set_current_buf(buf)
+	equal(current, runtime.policy(0), "buffer zero did not resolve the current buffer")
+end)
+
+test("partial language overrides inherit independent global policy fields", function()
+	reset()
+	installed = { "lua", "python" }
+	local lua_buf = make_buffer("tiny", "lua", "LuaIndent()")
+	local python_buf = make_buffer("tiny", "python", "PythonIndent()")
+	setup({
+		allowlist = { "lua", "python" },
+		max_bytes = 16,
+		indent = true,
+		languages = {
+			lua = { max_bytes = 32 },
+			python = { indent = false },
+		},
+	})
+	local lua_policy = runtime.policy(lua_buf)
+	equal(32, lua_policy.max_bytes, "language maximum override was not selected")
+	equal(true, lua_policy.indent, "absent language indentation did not inherit globally")
+	local python_policy = runtime.policy(python_buf)
+	equal(16, python_policy.max_bytes, "absent language maximum did not inherit globally")
+	equal(false, python_policy.indent, "language indentation override was not selected")
 end)
 
 test("language overrides and setup contracts remain copied and transactional", function()

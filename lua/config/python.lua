@@ -2,6 +2,7 @@
 -- restarts, and upstream plugin integration remain configuration policy.
 local M = {}
 local deferred = require("config.deferred")
+local execution = require("config.execution")
 local engine_instance
 local engine_configured = false
 local local_config = require("config.local_config")
@@ -52,9 +53,9 @@ local function attached_ty_root(buf, start)
 	return best
 end
 
-local function project_value(key, root)
-	local ok, value = pcall(project_settings.get, key, {}, root)
-	return ok and type(value) == "table" and value or nil
+local function project_values(defaults, root)
+	local ok, values = pcall(project_settings.get_many, defaults, root)
+	return ok and type(values) == "table" and values or {}
 end
 
 local function direct_ty_environment(settings)
@@ -96,10 +97,15 @@ local function legacy_python(settings)
 end
 
 local function explicit_from_project_settings(root)
-	local ty_server = project_value("lspconfig.ty", root)
-	local vscode = project_value("vscode", root)
-	local legacy_server = project_value("lspconfig.pyright", root)
-	return ty_environment(ty_server) or ty_environment(vscode) or legacy_python(vscode) or legacy_python(legacy_server)
+	local values = project_values({ ["lspconfig.ty"] = {}, vscode = {}, ["lspconfig.pyright"] = {} }, root)
+	local ty_server = values["lspconfig.ty"]
+	local vscode = values.vscode
+	local legacy_server = values["lspconfig.pyright"]
+	return ty_environment(ty_server)
+		or ty_environment(vscode)
+		or legacy_python(vscode)
+		or legacy_python(legacy_server)
+		or {}
 end
 
 local function fallback_python()
@@ -112,24 +118,54 @@ local function fallback_python()
 	return nil
 end
 
+local function authorized_repl_spec(spec, callback)
+	local authorized, authority_err = execution.resolve("debug", function()
+		local root = spec and spec.launch and spec.launch.cwd or nil
+		local interpreter = spec and spec.launch and spec.launch.argv and spec.launch.argv[1] or nil
+		local root_stat = type(root) == "string" and uv.fs_stat(root) or nil
+		local interpreter_stat = type(interpreter) == "string" and uv.fs_stat(interpreter) or nil
+		if not root_stat or root_stat.type ~= "directory" then
+			return nil, "Python project root is unavailable"
+		end
+		if not interpreter_stat or interpreter_stat.type ~= "file" or not uv.fs_access(interpreter, "X") then
+			return nil, "project Python is no longer executable"
+		end
+		return vim.deepcopy(spec)
+	end, { root = spec.launch.cwd })
+	if not authorized then
+		return nil, authority_err
+	end
+	return callback(authorized)
+end
+
+local function authorized_repl_send(identity, text, root)
+	local authorized, authority_err = execution.resolve("debug", function()
+		return { identity = vim.deepcopy(identity), text = text }
+	end, { root = root })
+	if not authorized then
+		return nil, authority_err
+	end
+	return terminal.send(authorized.identity, authorized.text)
+end
+
 local terminal_bridge = {
 	status = function(identity)
 		return terminal.status(identity)
 	end,
 	open = function(spec)
-		return terminal.open(spec)
+		return authorized_repl_spec(spec, terminal.open)
 	end,
 	toggle = function(spec)
-		return terminal.toggle(spec)
+		return authorized_repl_spec(spec, terminal.toggle)
 	end,
 	focus = function(spec)
 		return terminal.focus(spec)
 	end,
 	restart = function(spec)
-		return terminal.restart(spec)
+		return authorized_repl_spec(spec, terminal.restart)
 	end,
-	send = function(identity, text)
-		return terminal.send(identity, text)
+	send = function(identity, text, root)
+		return authorized_repl_send(identity, text, root)
 	end,
 }
 
@@ -172,25 +208,33 @@ local engine = setmetatable({}, {
 	end,
 })
 
-local function root_for_start(start, buf)
+local function root_for_start(start, buf, repository_root, repository_root_supplied)
 	if type(start) ~= "string" or start == "" or start:find("%z") then
 		return nil
+	end
+	if not repository_root_supplied then
+		repository_root = repo.root(start)
 	end
 	return engine.resolve_root({
 		start = start,
 		attached_root = buf and attached_ty_root(buf, start) or nil,
-		repo_root = repo.root(start),
+		repo_root = repository_root,
 	})
 end
 
-function M.root(buf)
+---Resolve the Python project root for a buffer.
+---An explicitly supplied nil repository root means Git discovery already found no repository.
+---@param buf? integer
+---@param ... string?
+---@return string?
+function M.root(buf, ...)
 	buf = buf or 0
 	if buf ~= 0 and not vim.api.nvim_buf_is_valid(buf) then
 		return nil
 	end
 	local name = vim.api.nvim_buf_get_name(buf)
 	local start = name ~= "" and name or (uv.cwd() or vim.fn.getcwd())
-	return root_for_start(start, buf)
+	return root_for_start(start, buf, select(1, ...), select("#", ...) > 0)
 end
 
 function M.snapshot(root)
@@ -467,6 +511,11 @@ function M.setup_dap(dap, dap_python)
 	dap_python_module = dap_python or package.loaded["dap-python"]
 	install_dap_resolver()
 	dap.listeners.on_config.nvim_config_python = function(config)
+		for _, candidate in pairs(config) do
+			if candidate == dap.ABORT then
+				return config
+			end
+		end
 		local function value(field)
 			local candidate = config[field]
 			if type(candidate) == "function" then
@@ -483,7 +532,12 @@ function M.setup_dap(dap, dap_python)
 				break
 			end
 		end
-		return engine.apply_dap(config, resolved_root or M.root(0))
+		local resolved, snapshot = engine.apply_dap(config, resolved_root or M.root(0))
+		if config.type == "python" and snapshot and snapshot.source == "explicit" and snapshot.validity ~= "valid" then
+			resolved.pythonPath = dap.ABORT
+			notify("Debug launch aborted: the explicit Python interpreter is invalid", vim.log.levels.WARN)
+		end
+		return resolved
 	end
 end
 
@@ -546,13 +600,15 @@ function M.send(selection)
 		else
 			record, err = engine.repl("open", root, { interpreter = python })
 		end
-		repl_interpreters[root] = python
 	else
 		record, err = engine.repl("focus", root, { interpreter = python })
 	end
 	if not record then
 		notify("Could not prepare REPL: " .. tostring(err), vim.log.levels.ERROR)
 		return
+	end
+	if not status.running then
+		repl_interpreters[root] = python
 	end
 	queue_repl_text(root, payload)
 end

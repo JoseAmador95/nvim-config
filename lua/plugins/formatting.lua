@@ -1,3 +1,6 @@
+local formatting = require("config.formatting")
+local tombi = require("config.tombi")
+
 local function autoformat_enabled(bufnr)
 	local override = vim.b[bufnr].conform_format_on_save
 	if override ~= nil then
@@ -22,15 +25,10 @@ return {
 		end,
 		opts = {
 			format_on_save = function(bufnr)
-				if vim.bo[bufnr].buftype ~= "" then
+				if vim.bo[bufnr].buftype ~= "" or not autoformat_enabled(bufnr) then
 					return
 				end
-
-				if not autoformat_enabled(bufnr) then
-					return
-				end
-
-				return require("config.formatting").on_save(bufnr)
+				return formatting.on_save(bufnr)
 			end,
 			formatters_by_ft = {
 				lua = { "stylua" },
@@ -41,34 +39,40 @@ return {
 				bash = { "shfmt" },
 				zsh = { "shfmt" },
 				toml = { "tombi" },
-				rust = { "rustfmt" },
-				javascript = { "prettierd", "prettier", stop_after_first = true },
-				typescript = { "prettierd", "prettier", stop_after_first = true },
-				javascriptreact = { "prettierd", "prettier", stop_after_first = true },
-				typescriptreact = { "prettierd", "prettier", stop_after_first = true },
-				json = { "prettierd", "prettier", stop_after_first = true },
-				jsonc = { "prettierd", "prettier", stop_after_first = true },
-				yaml = { "prettierd", "prettier", stop_after_first = true },
-				markdown = { "prettierd", "prettier", stop_after_first = true },
+				javascript = { "prettierd" },
+				typescript = { "prettierd" },
+				javascriptreact = { "prettierd" },
+				typescriptreact = { "prettierd" },
+				json = { "prettierd" },
+				jsonc = { "prettierd" },
+				yaml = { "prettierd" },
+				markdown = { "prettierd" },
 			},
+			default_format_opts = { lsp_format = "never" },
 			formatters = {
+				["clang-format"] = { command = formatting.command("clang-format") },
+				prettierd = { command = formatting.command("prettierd") },
+				ruff_format = { command = formatting.command("ruff_format") },
+				shfmt = { command = formatting.command("shfmt") },
+				stylua = { command = formatting.command("stylua") },
 				tombi = {
-					env = require("config.tombi").env(),
-				},
-				rustfmt = {
-					command = function()
-						return require("config.rust_tools").rustfmt() or "rustfmt-not-available-outside-managed-paths"
-					end,
+					command = formatting.command("tombi"),
+					env = tombi.env(),
 				},
 			},
 		},
 		config = function(_, opts)
+			-- Lazy adds the plugin to runtimepath immediately before this callback;
+			-- loading the optional upstream module earlier would defeat lazy-loading.
 			local conform = require("conform")
-			conform.setup(opts)
+			local setup_opts = vim.deepcopy(opts)
+			conform.setup(setup_opts)
+			local guarded, guard_err = formatting.setup(conform)
+			assert(guarded, guard_err)
 
 			vim.api.nvim_create_user_command("FormatFile", function()
-				require("config.formatting").format({ async = true })
-			end, { desc = "Format current buffer" })
+				formatting.format({ async = true })
+			end, { desc = "Format current buffer", force = true })
 
 			vim.api.nvim_create_user_command("FormatToggle", function(args)
 				if args.bang then
@@ -98,6 +102,7 @@ return {
 			end, {
 				desc = "Toggle autoformat on save (! for buffer)",
 				bang = true,
+				force = true,
 			})
 		end,
 	},

@@ -8,6 +8,7 @@ local registered = false
 
 local function names()
 	local result = vim.deepcopy(manifest.managed_order or {})
+	vim.list_extend(result, manifest.dynamic_order or {})
 	vim.list_extend(result, manifest.mason_order or {})
 	return result
 end

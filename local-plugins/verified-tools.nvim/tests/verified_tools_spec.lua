@@ -70,11 +70,25 @@ local attested_evidence
 local hold_attestation
 local pending_attestation
 local probe_count
+local network_check_count
+local backend_run_count
 local instance_token
 local backend_observer
 
 local function mkdir(path)
 	assert(vim.fn.mkdir(path, "p") >= 0)
+end
+
+local function private_mkdir(path)
+	mkdir(path)
+	local cursor = path
+	while cursor:sub(1, #fixture) == fixture do
+		assert(vim.uv.fs_chmod(cursor, tonumber("700", 8)))
+		if cursor == fixture then
+			break
+		end
+		cursor = vim.fs.dirname(cursor)
+	end
 end
 
 local function write_file(path, contents, mode)
@@ -114,6 +128,25 @@ local function normalized_executables(value)
 		end
 	end
 	return result
+end
+
+local function canonical_encode(value)
+	if type(value) ~= "table" then
+		return vim.json.encode(value)
+	end
+	local parts = {}
+	if #value > 0 then
+		for _, item in ipairs(value) do
+			parts[#parts + 1] = canonical_encode(item)
+		end
+		return "[" .. table.concat(parts, ",") .. "]"
+	end
+	local keys = vim.tbl_keys(value)
+	table.sort(keys)
+	for _, key in ipairs(keys) do
+		parts[#parts + 1] = vim.json.encode(key) .. ":" .. canonical_encode(value[key])
+	end
+	return "{" .. table.concat(parts, ",") .. "}"
 end
 
 local function install_release(plan)
@@ -170,9 +203,60 @@ local function install_mason(plan, options)
 	return nil, observed
 end
 
+local function install_bundle(plan)
+	private_mkdir(plan.identity.install_root)
+	local entries = {}
+	local bytes = 0
+	local files = {
+		["bin/devcontainer"] = { contents = "#!/bin/sh\nexit 0\n", mode = tonumber("700", 8) },
+		["node/bin/node"] = { contents = "private-node\n", mode = tonumber("700", 8) },
+		["package/devcontainer.js"] = { contents = "process.exit(0);\n", mode = tonumber("600", 8) },
+		["package/package.json"] = { contents = '{"name":"@devcontainers/cli"}\n', mode = tonumber("600", 8) },
+	}
+	local directories = { "bin", "node", "node/bin", "package" }
+	for _, relative in ipairs(directories) do
+		private_mkdir(vim.fs.joinpath(plan.identity.install_root, relative))
+		entries[#entries + 1] = { kind = "directory", mode = tonumber("700", 8), path = relative }
+	end
+	for relative, item in pairs(files) do
+		write_file(vim.fs.joinpath(plan.identity.install_root, relative), item.contents, item.mode)
+		bytes = bytes + #item.contents
+		entries[#entries + 1] = {
+			kind = "file",
+			mode = item.mode,
+			path = relative,
+			sha256 = vim.fn.sha256(item.contents),
+			size = #item.contents,
+		}
+	end
+	table.sort(entries, function(left, right)
+		return left.path < right.path
+	end)
+	local receipt = vim.tbl_extend("force", vim.deepcopy(plan.manifest.integrity.receipt), {
+		bytes = bytes,
+		entries = entries,
+		closure_sha256 = vim.fn.sha256(canonical_encode(entries)),
+	})
+	local receipt_data = canonical_encode(receipt) .. "\n"
+	write_file(plan.manifest.integrity.receipt_path, receipt_data, tonumber("600", 8))
+	return {
+		kind = "bundle-install-evidence",
+		source_sha256 = plan.manifest.integrity.source_sha256,
+		receipt_sha256 = vim.fn.sha256(receipt_data),
+		warnings = {},
+	}, {
+		kind = "bundle-sha256",
+		source_sha256 = plan.manifest.integrity.source_sha256,
+		bundle_root = plan.identity.install_root,
+		receipt_path = plan.manifest.integrity.receipt_path,
+		commands = { devcontainer = vim.fs.joinpath(plan.identity.install_root, "bin", "devcontainer") },
+	}
+end
+
 local function backend(backend_name)
 	return {
 		run = function(plan, done, control)
+			backend_run_count = backend_run_count + 1
 			assert(plan.backend == backend_name)
 			if backend_observer then
 				backend_observer(plan)
@@ -226,11 +310,14 @@ local function configure(options)
 	hold_attestation = {}
 	pending_attestation = {}
 	probe_count = 0
+	network_check_count = 0
+	backend_run_count = 0
 	backend_observer = options.backend_observer
 	instance_token = options.instance_token or string.rep("a", 64)
 	local setup = {
 		state_root = options.state_root or state,
-		backends = { release = backend("release"), mason = backend("mason") },
+		backends = options.backends
+			or { release = backend("release"), ["npm-release"] = backend("npm-release"), mason = backend("mason") },
 		probe_external = function(identity, value)
 			probe_count = probe_count + 1
 			local observed = external[identity.name]
@@ -240,6 +327,7 @@ local function configure(options)
 			return vim.deepcopy(observed or { outcome = "absent" })
 		end,
 		network_authorized = function()
+			network_check_count = network_check_count + 1
 			return network
 		end,
 		defer = options.defer or function(callback)
@@ -301,6 +389,27 @@ local function spec(name, options)
 				commands = commands,
 				artifacts = vim.deepcopy(options.artifacts or {}),
 			}
+		elseif backend_name == "npm-release" then
+			value.manifest.integrity = {
+				kind = "bundle-sha256",
+				source_sha256 = archive_sha256,
+				receipt_path = fixture .. "/bundle-receipts/" .. archive_sha256 .. ".json",
+				receipt = {
+					schema = 1,
+					kind = "verified-npm-bundle-receipt",
+					name = name,
+					package = "@devcontainers/cli",
+					version = version,
+					target = "test-x86_64",
+					source_tarball = "https://registry.npmjs.org/@devcontainers/cli/-/cli-" .. version .. ".tgz",
+					source_integrity = "sha512-" .. string.rep("A", 88),
+					source_sha256 = archive_sha256,
+					node_version = "24.20.0",
+					node_archive_sha256 = string.rep("b", 64),
+					bin = { devcontainer = "devcontainer.js" },
+				},
+				commands = commands,
+			}
 		else
 			value.manifest.integrity = {
 				kind = "mason-local-integrity",
@@ -333,6 +442,8 @@ local function finish(name, options)
 	local evidence, observed
 	if entry.plan.backend == "release" then
 		evidence, observed = install_release(entry.plan)
+	elseif entry.plan.backend == "npm-release" then
+		evidence, observed = install_bundle(entry.plan)
 	else
 		evidence, observed = install_mason(entry.plan, options)
 	end
@@ -364,6 +475,10 @@ end
 
 local function record_path(plan)
 	return state .. "/records/" .. plan.identity_key .. ".json"
+end
+
+local function external_record_path(plan)
+	return state .. "/external-records/" .. plan.identity_key .. ".json"
 end
 
 local function write_private(path, value)
@@ -407,11 +522,12 @@ local function with_uv_override(name, replacement, callback)
 	vim.uv[name] = function(...)
 		return replacement(original, ...)
 	end
-	local ok, err = xpcall(callback, debug.traceback)
+	local ok, first, second, third = xpcall(callback, debug.traceback)
 	vim.uv[name] = original
 	if not ok then
-		error(err, 0)
+		error(first, 0)
 	end
+	return first, second, third
 end
 
 local function with_uv_overrides(replacements, callback)
@@ -429,6 +545,115 @@ local function with_uv_overrides(replacements, callback)
 	if not ok then
 		error(err, 0)
 	end
+end
+
+local function with_observational_filesystem(callback)
+	local names = {
+		"fs_chmod",
+		"fs_fchmod",
+		"fs_fsync",
+		"fs_link",
+		"fs_mkdir",
+		"fs_rename",
+		"fs_symlink",
+		"fs_unlink",
+		"fs_write",
+	}
+	local originals = {}
+	for _, name in ipairs(names) do
+		originals[name] = assert(vim.uv[name], "missing uv function " .. name)
+		vim.uv[name] = function()
+			error("resolve called " .. name)
+		end
+	end
+	local ok, first, second, third = xpcall(callback, debug.traceback)
+	for _, name in ipairs(names) do
+		vim.uv[name] = originals[name]
+	end
+	if not ok then
+		error(first, 0)
+	end
+	return first, second, third
+end
+
+local function without_planning(callback)
+	local original = tools.plan
+	tools.plan = function()
+		error("resolve called plan")
+	end
+	local ok, first, second, third = xpcall(callback, debug.traceback)
+	tools.plan = original
+	if not ok then
+		error(first, 0)
+	end
+	return first, second, third
+end
+
+local function without_payload_reads(paths, callback)
+	local watched = {}
+	for _, path in ipairs(paths) do
+		watched[path] = true
+	end
+	local opened = {}
+	local returned
+	with_uv_overrides({
+		fs_open = function(original, path, flags, mode)
+			local fd, err = original(path, flags, mode)
+			if fd and watched[path] then
+				opened[fd] = path
+			end
+			return fd, err
+		end,
+		fs_read = function(original, fd, ...)
+			if opened[fd] then
+				error("resolve read verified payload " .. opened[fd])
+			end
+			return original(fd, ...)
+		end,
+		fs_close = function(original, fd)
+			local closed, err = original(fd)
+			opened[fd] = nil
+			return closed, err
+		end,
+	}, function()
+		local function capture(...)
+			returned = { n = select("#", ...), ... }
+		end
+		capture(callback())
+	end)
+	return unpack(returned, 1, returned.n)
+end
+
+local function count_payload_reads(paths, callback)
+	local watched = {}
+	local counts = {}
+	for _, path in ipairs(paths) do
+		watched[path] = true
+		counts[path] = 0
+	end
+	local opened = {}
+	with_uv_overrides({
+		fs_open = function(original, path, flags, mode)
+			local fd, err = original(path, flags, mode)
+			if fd and watched[path] then
+				opened[fd] = path
+			end
+			return fd, err
+		end,
+		fs_read = function(original, fd, ...)
+			local path = opened[fd]
+			if path then
+				counts[path] = counts[path] + 1
+			end
+			return original(fd, ...)
+		end,
+		fs_close = function(original, fd)
+			local closed, err = original(fd)
+			opened[fd] = nil
+			return closed, err
+		end,
+	}, callback)
+	return counts
 end
 
 if vim.env.VERIFIED_TOOLS_RECORD_CRASH_CHILD == "1" then
@@ -453,6 +678,31 @@ if vim.env.VERIFIED_TOOLS_RECORD_CRASH_CHILD == "1" then
 	local crash_plan = assert(tools.plan(spec("record-exchange-crash", { root = crash_root })))
 	assert(tools.claim(crash_plan, { mode = "repair" }))
 	error("record exchange crash child unexpectedly completed")
+end
+
+if vim.env.VERIFIED_TOOLS_ACTIVE_CRASH_CHILD == "1" then
+	local crash_state = assert(vim.env.VERIFIED_TOOLS_ACTIVE_CRASH_STATE)
+	local crash_ready = assert(vim.env.VERIFIED_TOOLS_ACTIVE_CRASH_READY)
+	local crash_identity = vim.json.decode(assert(vim.env.VERIFIED_TOOLS_ACTIVE_CRASH_IDENTITY))
+	local crash_slot = assert(vim.env.VERIFIED_TOOLS_ACTIVE_CRASH_SLOT)
+	local pointer_path = crash_state .. "/active-slots/" .. vim.fn.sha256(crash_slot) .. ".json"
+	configure({
+		state = crash_state,
+		instance_token = string.rep("e", 64),
+		use_default_liveness = true,
+		interleave = function(stage, context)
+			if stage ~= "after-record-exchange" or context.path ~= pointer_path then
+				return
+			end
+			assert(vim.fn.writefile({ "ready" }, crash_ready) == 0)
+			vim.wait(60000, function()
+				return false
+			end, 10)
+			error("active-slot crash child was not killed")
+		end,
+	})
+	assert(tools.activate(crash_slot, crash_identity))
+	error("active-slot crash child unexpectedly completed")
 end
 
 test("integrity is required and normalized plans reject unknown or mutated fields", function()
@@ -503,7 +753,10 @@ test("external probe outcomes are strict and force_managed bypasses probing", fu
 	assert(compatible.strategy == "external")
 	assert(compatible.probe.paths["hosted-cli"].lexical == hosted_path)
 	assert(compatible.probe.paths["hosted-cli"].fingerprint.path == hosted_path)
-	assert(assert(tools.claim(compatible)).external == true)
+	local rejected, rejected_err = tools.claim(compatible)
+	assert(rejected == nil and rejected_err == "external plans must be persisted with certify_external()")
+	local certified = assert(tools.certify_external(compatible))
+	assert(certified.kind == "external-executable-certification")
 	external.probe_error = { outcome = "error", detail = "registry unavailable\nretry later" }
 	local errored, error_reason = tools.plan(spec("probe_error", { force_managed = false }))
 	assert(errored == nil and error_reason == "external probe error: registry unavailable retry later")
@@ -532,6 +785,76 @@ test("external probe outcomes are strict and force_managed bypasses probing", fu
 	local forced = assert(tools.plan(spec("forced")))
 	assert(forced.strategy == "managed" and forced.force_managed == true)
 	assert(probe_count == before_force)
+end)
+
+test("external authority rejects foreign owners and writable ancestor chains", function()
+	configure()
+	local foreign_path = executable(fixture .. "/foreign-external", "foreign-cli")
+	external.foreign = {
+		outcome = "compatible",
+		version = "1.0.0",
+		paths = { ["foreign-cli"] = foreign_path },
+	}
+	local actual = assert(vim.uv.fs_lstat(foreign_path))
+	local foreign_uid = actual.uid == 0 and 424242 or actual.uid + 1
+	local planned, plan_err
+	with_uv_override("fs_lstat", function(original, path)
+		local stat, err = original(path)
+		if stat and path == foreign_path then
+			stat = vim.deepcopy(stat)
+			stat.uid = foreign_uid
+		end
+		return stat, err
+	end, function()
+		planned, plan_err = tools.plan(spec("foreign", { command = "foreign-cli", force_managed = false }))
+	end)
+	assert(planned == nil and tostring(plan_err):find("owner is not root or the effective user", 1, true))
+
+	local writable_root = fixture .. "/writable-external"
+	mkdir(writable_root)
+	assert(vim.uv.fs_chmod(writable_root, tonumber("777", 8)))
+	local writable_path = executable(writable_root, "writable-cli")
+	external.writable = {
+		outcome = "compatible",
+		version = "1.0.0",
+		paths = { ["writable-cli"] = writable_path },
+	}
+	planned, plan_err = tools.plan(spec("writable", { command = "writable-cli", force_managed = false }))
+	assert(planned == nil and tostring(plan_err):find("untrusted or writable ancestor", 1, true))
+	assert(vim.uv.fs_chmod(writable_root, tonumber("700", 8)))
+end)
+
+test("prerequisite authority narrowly accepts a root-owned system hardlink shape", function()
+	local directory = fixture .. "/system-prerequisite"
+	private_mkdir(directory)
+	local source = executable(directory, "python3-source")
+	local candidate = directory .. "/python3"
+	assert(vim.uv.fs_link(source, candidate))
+	local rejected, rejected_err = tools.validate_external_candidate(candidate)
+	assert(rejected == nil and type(rejected_err) == "string", "certified tool authority accepted a hardlink")
+
+	with_uv_override("fs_lstat", function(original, path)
+		local info, err = original(path)
+		if info then
+			info = vim.deepcopy(info)
+			info.uid = 0
+		end
+		return info, err
+	end, function()
+		assert(tools.validate_prerequisite_candidate(candidate) == candidate)
+	end)
+
+	with_uv_override("fs_lstat", function(original, path)
+		local info, err = original(path)
+		if info then
+			info = vim.deepcopy(info)
+			info.uid = path == directory and 1 or 0
+		end
+		return info, err
+	end, function()
+		local unsafe, unsafe_err = tools.validate_prerequisite_candidate(candidate)
+		assert(unsafe == nil and tostring(unsafe_err):find("non-root-owned", 1, true))
+	end)
 end)
 
 test("identity destination and every shim remain scheduler and cross-process resources", function()
@@ -718,12 +1041,27 @@ test("release success requires install evidence and persists exact observed fing
 	assert(tools.run(managed, function(ok, reason, proof)
 		callback_result = { ok = ok, reason = reason, proof = proof }
 	end))
-	finish("release-evidence")
+	local payloads = {
+		managed.identity.install_root .. "/bin/private-bin",
+		managed.identity.install_root .. "/bin/helper-bin",
+		managed.identity.install_root .. "/share/release.json",
+	}
+	local payload_reads = count_payload_reads(payloads, function()
+		finish("release-evidence")
+	end)
+	for _, path in ipairs(payloads) do
+		assert(payload_reads[path] == 1, "explicit attestation re-read payload " .. path)
+	end
 	assert(callback_result.ok == true, tostring(callback_result.reason))
 	local proof = assert(callback_result.proof)
 	assert(proof.kind == "release-sha256" and proof.version == 1)
 	assert(proof.commands.public.path == vim.uv.fs_realpath(managed.identity.install_root .. "/bin/private-bin"))
 	assert(proof.artifacts["share/release.json"].path == managed.identity.install_root .. "/share/release.json")
+	for _, fingerprint in ipairs({ proof.commands.public, proof.artifacts["share/release.json"] }) do
+		assert(type(fingerprint.mode) == "number")
+		assert(type(fingerprint.uid) == "number" and type(fingerprint.gid) == "number")
+		assert(type(fingerprint.ctime_sec) == "number" and type(fingerprint.ctime_nsec) == "number")
+	end
 	local evidence = assert(attested_evidence["release-evidence"])
 	assert(evidence.kind == "release-install-evidence")
 	assert(evidence.artifacts["bin/private-bin"] == proof.commands.public.sha256)
@@ -812,6 +1150,11 @@ test("Mason requires a private receipt and accepts only canonical-contained comm
 	local stored = assert(tools.status(mason.identity))
 	assert(stored.status == "succeeded", tostring(stored.detail))
 	assert(stored.proof.kind == "mason-local-integrity")
+	-- TODO(verified-tools-mason-closure): replace this launcher-only shape with
+	-- a versioned transitive package/interpreter closure and mutation fixtures.
+	local proof_keys = vim.tbl_keys(stored.proof)
+	table.sort(proof_keys)
+	assert(vim.deep_equal(proof_keys, { "commands", "kind", "receipt", "version" }))
 	local receipt_path = mason.identity.install_root .. "/receipt.json"
 	assert(vim.uv.fs_lstat(receipt_path).mode % 512 == tonumber("600", 8))
 	local command_path = mason.identity.install_root .. "/bin/mason-real"
@@ -825,6 +1168,713 @@ test("Mason requires a private receipt and accepts only canonical-contained comm
 	finish("mason-public-receipt", { receipt_mode = tonumber("644", 8) })
 	stored = assert(tools.status(public_receipt.identity))
 	assert(stored.status == "failed" and stored.detail == "Mason receipt is unsafe: unsafe")
+end)
+
+test("npm bundles persist exact closures and active slots preserve the prior identity on failure", function()
+	configure()
+	local first_spec = spec("devcontainers-cli", {
+		backend = "npm-release",
+		command = "devcontainer",
+		version = "1.2.3",
+	})
+	local first_plan = assert(tools.plan(first_spec))
+	assert(first_plan.strategy == "managed" and first_plan.manifest.integrity.kind == "bundle-sha256")
+	assert(vim.tbl_isempty(first_plan.shims), "dynamic bundles must not publish generic PATH shims")
+	local first_claim = assert(tools.claim(first_plan))
+	assert(tools.run(first_claim))
+	finish("devcontainers-cli")
+	local first_record = assert(tools.status(first_plan.identity))
+	assert(first_record.status == "succeeded" and first_record.proof.kind == "bundle-sha256")
+	assert(first_record.proof.source_sha256 == first_plan.manifest.integrity.source_sha256)
+	assert(vim.uv.fs_lstat(tools.shim_bin() .. "/devcontainer") == nil, "dynamic install published a shim")
+	local wrong_slot, wrong_slot_err = tools.activate("different-slot", first_plan.identity)
+	assert(wrong_slot == nil and tostring(wrong_slot_err):find("exactly match", 1, true), tostring(wrong_slot_err))
+	local pointer = assert(tools.activate("devcontainers-cli", first_plan.identity))
+	assert(pointer.identity.version == "1.2.3")
+	local active = assert(with_observational_filesystem(function()
+		return tools.resolve_active("devcontainers-cli")
+	end))
+	assert(active.identity.version == "1.2.3")
+	assert(active.commands.devcontainer == first_plan.identity.install_root .. "/bin/devcontainer")
+	local pointer_path = state .. "/active-slots/" .. vim.fn.sha256("devcontainers-cli") .. ".json"
+	local before = read_file(pointer_path)
+	assert(vim.uv.fs_lstat(pointer_path).mode % 512 == tonumber("600", 8))
+	assert(vim.uv.fs_lstat(vim.fs.dirname(pointer_path)).mode % 512 == tonumber("700", 8))
+	local hostile = vim.json.decode(before)
+	hostile.identity.name = "other-slot"
+	hostile.identity_key = vim.fn.sha256(vim.json.encode({
+		hostile.identity.backend,
+		hostile.identity.name,
+		hostile.identity.version,
+		hostile.identity.target,
+		hostile.identity.digest,
+		hostile.identity.install_root,
+	}))
+	write_file(pointer_path, canonical_encode(hostile) .. "\n", tonumber("600", 8))
+	local hostile_active, hostile_err = tools.resolve_active("devcontainers-cli")
+	assert(hostile_active == nil and hostile_err == "active slot identity is invalid", tostring(hostile_err))
+	write_file(pointer_path, before, tonumber("600", 8))
+
+	local second_plan = assert(tools.plan(spec("devcontainers-cli", {
+		backend = "npm-release",
+		command = "devcontainer",
+		version = "1.2.4",
+	})))
+	assert(tools.run(assert(tools.claim(second_plan))))
+	finish("devcontainers-cli")
+	write_file(second_plan.identity.install_root .. "/package/devcontainer.js", "tampered bundle\n", tonumber("600", 8))
+	local switched, switch_err = tools.activate("devcontainers-cli", second_plan.identity)
+	assert(switched == nil and tostring(switch_err):find("changed", 1, true), tostring(switch_err))
+	assert(read_file(pointer_path) == before, "failed activation changed the prior pointer")
+	active = assert(with_observational_filesystem(function()
+		return tools.resolve_active("devcontainers-cli")
+	end))
+	assert(active.identity.version == "1.2.3", "failed activation selected the new identity")
+	assert(vim.uv.fs_lstat(first_plan.identity.install_root).type == "directory", "historical bundle was pruned")
+	assert(vim.uv.fs_lstat(tools.shim_bin() .. "/devcontainer") == nil, "failed upgrade changed PATH authority")
+
+	write_file(first_plan.identity.install_root .. "/package/extra.js", "extra\n", tonumber("600", 8))
+	local drifted, drift_err = with_observational_filesystem(function()
+		return tools.resolve_active("devcontainers-cli")
+	end)
+	assert(drifted == nil and tostring(drift_err):find("closure changed", 1, true), tostring(drift_err))
+	assert(read_file(pointer_path) == before, "runtime drift rewrote the active pointer")
+end)
+
+test("active-slot exchange survives a crash and serializes a competing same-slot activation", function()
+	local child_pid
+	configure({
+		process_alive = function(owner, token)
+			if owner == vim.uv.os_getpid() then
+				return token == string.rep("a", 64) and true or nil
+			end
+			if child_pid and owner == child_pid then
+				return token == string.rep("e", 64) and true or nil
+			end
+			return false
+		end,
+	})
+	local first_plan = assert(tools.plan(spec("devcontainers-cli", {
+		backend = "npm-release",
+		command = "devcontainer",
+		version = "6.0.0",
+	})))
+	assert(tools.run(assert(tools.claim(first_plan))))
+	finish("devcontainers-cli")
+	local second_plan = assert(tools.plan(spec("devcontainers-cli", {
+		backend = "npm-release",
+		command = "devcontainer",
+		version = "6.0.1",
+	})))
+	assert(tools.run(assert(tools.claim(second_plan))))
+	finish("devcontainers-cli")
+	assert(tools.activate("devcontainers-cli", first_plan.identity))
+
+	local pointer_path = state .. "/active-slots/" .. vim.fn.sha256("devcontainers-cli") .. ".json"
+	local before = read_file(pointer_path)
+	local ready = fixture .. "/active-slot-crash.ready"
+	local source = assert(vim.uv.fs_realpath(debug.getinfo(1, "S").source:sub(2)))
+	local child = vim.system({ vim.v.progpath, "--headless", "-u", "NONE", "-i", "NONE", "-l", source }, {
+		env = {
+			VERIFIED_TOOLS_ACTIVE_CRASH_CHILD = "1",
+			VERIFIED_TOOLS_ACTIVE_CRASH_STATE = state,
+			VERIFIED_TOOLS_ACTIVE_CRASH_READY = ready,
+			VERIFIED_TOOLS_ACTIVE_CRASH_IDENTITY = vim.json.encode(second_plan.identity),
+			VERIFIED_TOOLS_ACTIVE_CRASH_SLOT = "devcontainers-cli",
+		},
+		text = true,
+	})
+	child_pid = child.pid
+	local reached = vim.wait(5000, function()
+		return vim.uv.fs_lstat(ready) ~= nil
+	end, 5)
+	if not reached then
+		child:kill(9)
+		local failed = child:wait(5000)
+		error("child did not reach active-slot exchange: " .. tostring(failed.stderr))
+	end
+	local committed = read_file(pointer_path)
+	assert(committed ~= before, "active-slot exchange did not publish the competing identity")
+	assert(vim.json.decode(committed).identity.version == "6.0.1")
+	local transaction_present = not vim.tbl_isempty(vim.fn.glob(state .. "/record-transactions/*", false, true))
+
+	local competing, competing_err = tools.activate("devcontainers-cli", first_plan.identity)
+	local pointer_unchanged = read_file(pointer_path) == committed
+	child:kill(9)
+	local killed = child:wait(5000)
+	assert(killed.signal == 9, "active-slot exchange child was not killed")
+	assert(transaction_present, "crashed active-slot exchange did not retain a recoverable transaction")
+	assert(competing == nil and tostring(competing_err):find("locked", 1, true), tostring(competing_err))
+	assert(pointer_unchanged, "locked competitor changed the committed pointer")
+
+	local recovery_blocker_pid = 424242
+	configure({
+		state = state,
+		process_alive = function(owner, token)
+			if owner == vim.uv.os_getpid() then
+				return token == string.rep("a", 64) and true or nil
+			end
+			if owner == recovery_blocker_pid then
+				return token == string.rep("c", 64) and true or nil
+			end
+			return false
+		end,
+	})
+	local active_resource = "active-slot:" .. vim.fn.sha256("devcontainers-cli")
+	local active_lock_base = state .. "/locks/resources/" .. vim.fn.sha256(active_resource) .. ".lock"
+	local blocker = claim_file(active_lock_base, active_resource, recovery_blocker_pid, string.rep("f", 64), 1)
+	assert(tools.status(second_plan.identity).status == "succeeded")
+	assert(
+		not vim.tbl_isempty(vim.fn.glob(state .. "/record-transactions/*", false, true)),
+		"active-slot recovery crossed a live same-slot writer lock"
+	)
+	assert(read_file(pointer_path) == committed, "deferred recovery changed committed active-slot bytes")
+	assert(vim.uv.fs_unlink(blocker))
+	assert(tools.status(second_plan.identity).status == "succeeded")
+	assert(vim.tbl_isempty(vim.fn.glob(state .. "/record-transactions/*", false, true)))
+	assert(read_file(pointer_path) == committed, "crash recovery changed exact committed active-slot bytes")
+	local recovered = assert(tools.resolve_active("devcontainers-cli"))
+	assert(recovered.identity.version == "6.0.1")
+
+	assert(tools.activate("devcontainers-cli", first_plan.identity))
+	local retried = assert(tools.resolve_active("devcontainers-cli"))
+	assert(retried.identity.version == "6.0.0", "same-slot retry did not serialize after dead-owner recovery")
+end)
+
+test("same-slot activation lock and record CAS preserve a competing valid pointer", function()
+	local enabled = false
+	local fired = false
+	local pointer_path
+	local competing_bytes
+	local competing_plan
+	local displaced
+	configure({
+		interleave = function(stage, context)
+			if
+				stage ~= "record-target-checked"
+				or context.path ~= pointer_path
+				or context.target_present ~= true
+				or not enabled
+				or fired
+			then
+				return
+			end
+			fired = true
+			local nested, nested_err = tools.activate("devcontainers-cli", competing_plan.identity)
+			assert(nested == nil and nested_err == "locked", tostring(nested_err))
+			displaced = fixture .. "/active-slot-cas-displaced.json"
+			assert(vim.uv.fs_rename(pointer_path, displaced))
+			write_file(pointer_path, competing_bytes, tonumber("600", 8))
+		end,
+	})
+	local plans = {}
+	for _, version in ipairs({ "7.0.0", "7.0.1", "7.0.2" }) do
+		local plan = assert(tools.plan(spec("devcontainers-cli", {
+			backend = "npm-release",
+			command = "devcontainer",
+			version = version,
+		})))
+		assert(tools.run(assert(tools.claim(plan))))
+		finish("devcontainers-cli")
+		plans[#plans + 1] = plan
+	end
+	pointer_path = state .. "/active-slots/" .. vim.fn.sha256("devcontainers-cli") .. ".json"
+	competing_plan = plans[3]
+	assert(tools.activate("devcontainers-cli", competing_plan.identity))
+	competing_bytes = read_file(pointer_path)
+	assert(tools.activate("devcontainers-cli", plans[1].identity))
+	enabled = true
+	local activated, activation_err = tools.activate("devcontainers-cli", plans[2].identity)
+	enabled = false
+	assert(
+		activated == nil and tostring(activation_err):find("competing record was restored", 1, true),
+		tostring(activation_err)
+	)
+	assert(fired, "same-slot activation publication was not intercepted")
+	assert(read_file(pointer_path) == competing_bytes, "activation CAS replaced the competing valid pointer")
+	assert(vim.tbl_isempty(vim.fn.glob(state .. "/record-transactions/*", false, true)))
+	local active = assert(tools.resolve_active("devcontainers-cli"))
+	assert(active.identity.version == "7.0.2")
+	assert(vim.uv.fs_lstat(displaced).type == "file")
+end)
+
+test("npm bundle manifest evidence and observation envelopes are exact", function()
+	configure()
+	local value = spec("devcontainers-cli-exact", {
+		backend = "npm-release",
+		command = "devcontainer",
+	})
+	local bad = vim.deepcopy(value)
+	bad.manifest.integrity.receipt.injected = true
+	local invalid, invalid_err = tools.plan(bad)
+	assert(invalid == nil and tostring(invalid_err):find("receipt", 1, true))
+	local plan = assert(tools.plan(value))
+	assert(tools.run(assert(tools.claim(plan))))
+	finish("devcontainers-cli-exact", {
+		evidence = function(evidence)
+			evidence.injected = true
+			return evidence
+		end,
+	})
+	local record = assert(tools.status(plan.identity))
+	assert(record.status == "failed" and tostring(record.detail):find("evidence", 1, true))
+
+	local observation_plan = assert(tools.plan(spec("devcontainers-cli-observation", {
+		backend = "npm-release",
+		command = "devcontainer",
+	})))
+	assert(tools.run(assert(tools.claim(observation_plan))))
+	finish("devcontainers-cli-observation", {
+		observed = function(observed)
+			observed.injected = true
+			return observed
+		end,
+	})
+	local observed_record = assert(tools.status(observation_plan.identity))
+	assert(observed_record.status == "failed" and tostring(observed_record.detail):find("observation", 1, true))
+end)
+
+test("committed activation remains successful when lock cleanup reports a warning", function()
+	local notices = {}
+	local removed_lock = false
+	configure({
+		notify = function(message, level)
+			notices[#notices + 1] = { message = tostring(message), level = level }
+		end,
+		interleave = function(phase, context)
+			if
+				phase == "after-record-exchange"
+				and tostring(context.path):find("/active%-slots/")
+				and not removed_lock
+			then
+				for _, path in ipairs(vim.fn.glob(state .. "/locks/**/*", false, true)) do
+					if path:find(".ticket.", 1, true) then
+						assert(vim.uv.fs_unlink(path))
+						removed_lock = true
+						break
+					end
+				end
+			end
+		end,
+	})
+	local plan = assert(tools.plan(spec("devcontainers-cli", {
+		backend = "npm-release",
+		command = "devcontainer",
+		version = "5.0.0",
+	})))
+	assert(tools.run(assert(tools.claim(plan))))
+	finish("devcontainers-cli")
+	local pointer, activation_err = tools.activate("devcontainers-cli", plan.identity)
+	assert(pointer and activation_err == nil, tostring(activation_err))
+	assert(removed_lock, "fixture did not force a post-commit lock cleanup failure")
+	assert(
+		vim.iter(notices):any(function(item)
+			return item.level == vim.log.levels.WARN
+				and item.message:find("active slot was committed but lock release retained evidence", 1, true)
+		end),
+		vim.inspect(notices)
+	)
+	local active = assert(tools.resolve_active("devcontainers-cli"))
+	assert(active.identity.version == "5.0.0")
+end)
+
+test("resolve returns copied canonical managed command paths without lifecycle callbacks or writes", function()
+	local event_count, notice_count = 0, 0
+	configure({
+		events = function()
+			event_count = event_count + 1
+		end,
+		notify = function()
+			notice_count = notice_count + 1
+		end,
+	})
+	local value = spec("resolve-release", {
+		executables = { public = "private-bin", helper = "helper-bin" },
+		artifacts = { "share/release.json" },
+	})
+	local plan = assert(tools.plan(value))
+	local managed = assert(tools.claim(plan))
+	assert(tools.run(managed))
+	finish("resolve-release")
+	local record_before = read_file(record_path(plan))
+	local callback_counts = {
+		backend = backend_run_count,
+		events = event_count,
+		network = network_check_count,
+		notices = notice_count,
+		probe = probe_count,
+		timers = #timers,
+		attestations = vim.deepcopy(attestations),
+	}
+	local public_path = assert(vim.uv.fs_realpath(plan.identity.install_root .. "/bin/private-bin"))
+	local helper_path = assert(vim.uv.fs_realpath(plan.identity.install_root .. "/bin/helper-bin"))
+	local artifact_path = assert(vim.uv.fs_realpath(plan.identity.install_root .. "/share/release.json"))
+	local runtime_value = vim.deepcopy(value)
+	runtime_value.force_managed = false
+	local from_spec, from_identity, from_plan = with_observational_filesystem(function()
+		return without_payload_reads({ public_path, helper_path, artifact_path }, function()
+			return without_planning(function()
+				return assert(tools.resolve(runtime_value)),
+					assert(tools.resolve(plan.identity)),
+					assert(tools.resolve(plan))
+			end)
+		end)
+	end)
+	local from_wrapper = with_observational_filesystem(function()
+		return assert(tools.resolve({ identity = plan.identity }))
+	end)
+	local expected = { public = public_path, helper = helper_path }
+	assert(vim.deep_equal(from_spec, expected))
+	assert(vim.deep_equal(from_identity, expected))
+	assert(vim.deep_equal(from_plan, expected))
+	assert(vim.deep_equal(from_wrapper, expected))
+	local malformed, malformed_err = tools.resolve({ identity = plan.identity, extra = true })
+	assert(malformed == nil and tostring(malformed_err):find("must contain only identity", 1, true))
+	from_identity.public = "/changed-by-caller"
+	assert(assert(tools.resolve(plan.identity)).public == public_path, "resolved paths share caller state")
+	assert(read_file(record_path(plan)) == record_before, "resolve rewrote its durable record")
+	assert(
+		vim.deep_equal(callback_counts, {
+			backend = backend_run_count,
+			events = event_count,
+			network = network_check_count,
+			notices = notice_count,
+			probe = probe_count,
+			timers = #timers,
+			attestations = vim.deepcopy(attestations),
+		}),
+		"resolve called a configured lifecycle callback"
+	)
+end)
+
+test("explicit external certification becomes observational durable runtime authority", function()
+	configure()
+	local value = spec("resolve-external", { force_managed = false })
+	local external_path = executable(fixture .. "/external-resolve", "resolve-external")
+	external["resolve-external"] = {
+		outcome = "compatible",
+		version = value.identity.version,
+		paths = { ["resolve-external"] = external_path },
+	}
+	local plan = assert(tools.plan(value))
+	assert(plan.strategy == "external" and probe_count == 1)
+	local absent, absent_err = with_observational_filesystem(function()
+		return without_planning(function()
+			return tools.resolve(plan)
+		end)
+	end)
+	assert(absent == nil and absent_err == "absent")
+	assert(vim.uv.fs_lstat(state) == nil, "uncertified external resolution created state")
+	local certification = assert(tools.certify_external(plan))
+	assert(certification.identity_key == plan.identity_key)
+	local external_record = external_record_path(plan)
+	assert(vim.uv.fs_lstat(state).mode % 512 == tonumber("700", 8))
+	assert(vim.uv.fs_lstat(state .. "/external-records").mode % 512 == tonumber("700", 8))
+	assert(vim.uv.fs_lstat(external_record).mode % 512 == tonumber("600", 8))
+	local record_before = read_file(external_record)
+	local callbacks_before = {
+		backend = backend_run_count,
+		network = network_check_count,
+		probe = probe_count,
+		timers = #timers,
+	}
+	local by_plan, by_identity, by_spec = with_observational_filesystem(function()
+		return without_payload_reads({ external_path }, function()
+			return without_planning(function()
+				return assert(tools.resolve(plan)), assert(tools.resolve(plan.identity)), assert(tools.resolve(value))
+			end)
+		end)
+	end)
+	local expected = { ["resolve-external"] = assert(vim.uv.fs_realpath(external_path)) }
+	assert(vim.deep_equal(by_plan, expected))
+	assert(vim.deep_equal(by_identity, expected))
+	assert(vim.deep_equal(by_spec, expected))
+	local managed_only = vim.deepcopy(value)
+	managed_only.force_managed = true
+	local refused, refused_err = tools.resolve(managed_only)
+	assert(refused == nil and refused_err == "absent", "force-managed runtime spec accepted external authority")
+	assert(read_file(external_record) == record_before, "external resolve rewrote its certification")
+	assert(
+		vim.deep_equal(callbacks_before, {
+			backend = backend_run_count,
+			network = network_check_count,
+			probe = probe_count,
+			timers = #timers,
+		}),
+		"external resolution called a configured callback"
+	)
+	assert(probe_count == 1, "external resolution probed again")
+	local external_parent = vim.fs.dirname(external_path)
+	local parent_mode = assert(vim.uv.fs_lstat(external_parent)).mode % 512
+	assert(vim.uv.fs_chmod(external_parent, tonumber("777", 8)))
+	local authority_drift, authority_err = tools.resolve(value)
+	assert(authority_drift == nil and tostring(authority_err):find("untrusted or writable ancestor", 1, true))
+	assert(vim.uv.fs_chmod(external_parent, parent_mode))
+	assert(vim.uv.fs_chmod(external_record, tonumber("644", 8)))
+	local unsafe, unsafe_err = tools.certify_external(plan)
+	assert(unsafe == nil and tostring(unsafe_err):find("unsafe", 1, true))
+	assert(vim.uv.fs_lstat(external_record).mode % 512 == tonumber("644", 8), "unsafe receipt was overwritten")
+	assert(vim.uv.fs_chmod(external_record, tonumber("600", 8)))
+
+	local certified_state = state
+	configure({ state = certified_state })
+	local cold = with_observational_filesystem(function()
+		return without_payload_reads({ external_path }, function()
+			return without_planning(function()
+				return assert(tools.resolve(value))
+			end)
+		end)
+	end)
+	assert(vim.deep_equal(cold, expected))
+	assert(probe_count == 0, "cold external resolution probed the host")
+end)
+
+test("external certification refuses a verified shim published after planning", function()
+	configure()
+	local value = spec("external-shim-race", { command = "shared-race-cli", force_managed = false })
+	local external_path = executable(fixture .. "/external-shim-race", "shared-race-cli")
+	external["external-shim-race"] = {
+		outcome = "compatible",
+		version = value.identity.version,
+		paths = { ["shared-race-cli"] = external_path },
+	}
+	local plan = assert(tools.plan(value))
+	assert(plan.strategy == "external")
+	write_file(plan.shims["shared-race-cli"], "#!/bin/sh\nexit 0\n", tonumber("700", 8))
+	local certified, certify_err = tools.certify_external(plan)
+	assert(certified == nil and tostring(certify_err):find("verified shim could not be ruled out", 1, true))
+	assert(vim.uv.fs_lstat(external_record_path(plan)) == nil)
+end)
+
+test("managed records take precedence over external certification and fail closed on drift", function()
+	configure()
+	local value = spec("managed-precedence", { force_managed = false })
+	local external_path = executable(fixture .. "/external-precedence", "managed-precedence")
+	external["managed-precedence"] = {
+		outcome = "compatible",
+		version = value.identity.version,
+		paths = { ["managed-precedence"] = external_path },
+	}
+	local external_plan = assert(tools.plan(value))
+	assert(tools.certify_external(external_plan))
+	local managed_value = vim.deepcopy(value)
+	managed_value.force_managed = true
+	local managed_plan = assert(tools.plan(managed_value))
+	local managed = assert(tools.claim(managed_plan))
+	assert(tools.run(managed))
+	finish("managed-precedence")
+	local managed_path = managed_plan.identity.install_root .. "/bin/managed-precedence"
+	assert(assert(tools.resolve(value))["managed-precedence"] == vim.uv.fs_realpath(managed_path))
+	write_file(managed_path, "#!/bin/sh\n# drift\nexit 0\n", tonumber("700", 8))
+	local resolved, resolve_err = tools.resolve(value)
+	assert(resolved == nil and tostring(resolve_err):find("managed authority:", 1, true) == 1)
+	assert(tostring(resolve_err):find("verified command changed", 1, true))
+	assert(vim.uv.fs_lstat(external_record_path(external_plan)), "external certification was deleted")
+end)
+
+test("external certification never reports success after publication-time executable drift", function()
+	local external_path = executable(fixture .. "/external-certification-race", "external-certification-race")
+	local mutated = false
+	configure({
+		interleave = function(phase, payload)
+			if
+				phase == "after-record-exchange"
+				and tostring(payload.path):find("/external%-records/")
+				and not mutated
+			then
+				mutated = true
+				write_file(external_path, "#!/bin/sh\n# raced\nexit 0\n", tonumber("700", 8))
+			end
+		end,
+	})
+	local value = spec("external-certification-race", { force_managed = false })
+	external["external-certification-race"] = {
+		outcome = "compatible",
+		version = value.identity.version,
+		paths = { ["external-certification-race"] = external_path },
+	}
+	local plan = assert(tools.plan(value))
+	local certified, certify_err = tools.certify_external(plan)
+	assert(certified == nil and mutated)
+	assert(tostring(certify_err):find("changed while certification was published", 1, true))
+	assert(vim.uv.fs_lstat(external_record_path(plan)), "failed certification silently deleted its receipt")
+	local resolved, resolve_err = tools.resolve(value)
+	assert(resolved == nil and tostring(resolve_err):find("external certification:", 1, true) == 1)
+end)
+
+test("resolve rejects missing and unsafe durable record state without repairing it", function()
+	configure()
+	local absent_value = spec("resolve-absent")
+	local absent, absent_err = with_observational_filesystem(function()
+		return tools.resolve(absent_value)
+	end)
+	assert(absent == nil and absent_err == "absent")
+	assert(vim.uv.fs_lstat(state) == nil, "absent resolution created state")
+
+	local value = spec("resolve-record-safety")
+	local plan = assert(tools.plan(value))
+	local managed = assert(tools.claim(plan))
+	assert(tools.run(managed))
+	finish("resolve-record-safety")
+	local path = record_path(plan)
+	local original = read_file(path)
+
+	assert(vim.uv.fs_chmod(state, tonumber("755", 8)))
+	local result, err = tools.resolve(plan.identity)
+	assert(result == nil and tostring(err):find("0700", 1, true))
+	assert(vim.uv.fs_lstat(state).mode % 512 == tonumber("755", 8), "resolve repaired state-root mode")
+	assert(vim.uv.fs_chmod(state, tonumber("700", 8)))
+	local records = state .. "/records"
+	assert(vim.uv.fs_chmod(records, tonumber("755", 8)))
+	result, err = tools.resolve(plan.identity)
+	assert(result == nil and tostring(err):find("record child directory", 1, true))
+	assert(vim.uv.fs_lstat(records).mode % 512 == tonumber("755", 8), "resolve repaired records mode")
+	assert(vim.uv.fs_chmod(records, tonumber("700", 8)))
+
+	assert(vim.uv.fs_chmod(path, tonumber("644", 8)))
+	result, err = tools.resolve(plan.identity)
+	assert(result == nil and tostring(err):find("unsafe", 1, true))
+	assert(vim.uv.fs_lstat(path).mode % 512 == tonumber("644", 8), "resolve repaired record mode")
+	assert(read_file(path) == original)
+	assert(vim.uv.fs_chmod(path, tonumber("600", 8)))
+
+	write_file(path, "{\n")
+	result, err = tools.resolve(plan.identity)
+	assert(result == nil and tostring(err):find("exact succeeded schema%-2 record"))
+	assert(read_file(path) == "{\n", "resolve replaced corrupt record bytes")
+	write_file(path, original)
+
+	local target = path .. ".target"
+	assert(vim.uv.fs_rename(path, target))
+	assert(vim.uv.fs_symlink(target, path))
+	result, err = tools.resolve(plan.identity)
+	assert(result == nil and tostring(err):find("could not be opened", 1, true))
+	assert(vim.uv.fs_lstat(path).type == "link", "resolve replaced the record symlink")
+	assert(read_file(target) == original)
+end)
+
+test("resolve rejects a durable record changed while its proof is being checked", function()
+	configure()
+	local value = spec("resolve-record-race")
+	local plan = assert(tools.plan(value))
+	local managed = assert(tools.claim(plan))
+	assert(tools.run(managed))
+	finish("resolve-record-race")
+	local path = record_path(plan)
+	local changed = read_file(path) .. " "
+	local command_path = assert(vim.uv.fs_realpath(plan.identity.install_root .. "/bin/resolve-record-race"))
+	local fired = false
+	local resolved, resolve_err
+	with_uv_override("fs_open", function(original, opened_path, flags, mode)
+		if not fired and opened_path == command_path then
+			fired = true
+			local fd = assert(original(path, "w", tonumber("600", 8)))
+			assert(vim.uv.fs_write(fd, changed, 0) == #changed)
+			assert(vim.uv.fs_close(fd))
+		end
+		return original(opened_path, flags, mode)
+	end, function()
+		resolved, resolve_err = tools.resolve(plan.identity)
+	end)
+	assert(fired, "record race fixture did not run")
+	assert(resolved == nil and tostring(resolve_err):find("record changed while it was resolved", 1, true))
+	assert(read_file(path) == changed, "resolve repaired the changed record")
+end)
+
+test("resolve revalidates managed command artifact and Mason receipt fingerprints", function()
+	configure()
+	local command_value = spec("resolve-command-drift")
+	local command_plan = assert(tools.plan(command_value))
+	local command_job = assert(tools.claim(command_plan))
+	assert(tools.run(command_job))
+	finish("resolve-command-drift")
+	local command_path = command_plan.identity.install_root .. "/bin/resolve-command-drift"
+	external["resolve-command-drift"] = {
+		outcome = "compatible",
+		version = command_value.identity.version,
+		paths = { ["resolve-command-drift"] = executable(fixture .. "/external-drift", "resolve-command-drift") },
+	}
+	write_file(command_path, "#!/bin/sh\n# changed command\nexit 0\n", tonumber("700", 8))
+	local runtime_value = vim.deepcopy(command_value)
+	runtime_value.force_managed = false
+	local probes_before = probe_count
+	local resolved, resolve_err = tools.resolve(runtime_value)
+	assert(resolved == nil and tostring(resolve_err):find("verified command changed", 1, true))
+	assert(probe_count == probes_before, "drift resolution probed or fell back to an external executable")
+
+	local artifact_value = spec("resolve-artifact-drift", { artifacts = { "share/result.json" } })
+	local artifact_plan = assert(tools.plan(artifact_value))
+	local artifact_job = assert(tools.claim(artifact_plan))
+	assert(tools.run(artifact_job))
+	finish("resolve-artifact-drift")
+	write_file(artifact_plan.identity.install_root .. "/share/result.json", "changed artifact\n")
+	resolved, resolve_err = tools.resolve(artifact_plan.identity)
+	assert(resolved == nil and tostring(resolve_err):find("verified artifact changed", 1, true))
+
+	local mason_value = spec("resolve-receipt-drift", { backend = "mason" })
+	local mason_plan = assert(tools.plan(mason_value))
+	local mason_job = assert(tools.claim(mason_plan))
+	assert(tools.run(mason_job))
+	finish("resolve-receipt-drift")
+	local receipt_path = mason_plan.identity.install_root .. "/receipt.json"
+	assert(vim.uv.fs_chmod(receipt_path, tonumber("644", 8)))
+	resolved, resolve_err = tools.resolve(mason_plan.identity)
+	assert(resolved == nil and tostring(resolve_err):find("receipt is unsafe", 1, true))
+	assert(vim.uv.fs_lstat(receipt_path).mode % 512 == tonumber("644", 8), "resolve repaired receipt mode")
+	assert(vim.uv.fs_chmod(receipt_path, tonumber("600", 8)))
+	write_file(receipt_path, vim.json.encode({
+		package = mason_plan.identity.name,
+		version = mason_plan.identity.version,
+		source_version = "changed",
+	}) .. "\n")
+	resolved, resolve_err = tools.resolve(mason_plan.identity)
+	assert(resolved == nil and tostring(resolve_err):find("receipt content changed", 1, true))
+end)
+
+test("resolve rejects group or world-writable managed payloads without repairing permissions", function()
+	configure()
+	local command_value = spec("resolve-command-permissions")
+	local command_plan = assert(tools.plan(command_value))
+	local command_job = assert(tools.claim(command_plan))
+	assert(tools.run(command_job))
+	finish("resolve-command-permissions")
+	local command_path = command_plan.identity.install_root .. "/bin/resolve-command-permissions"
+	assert(vim.uv.fs_chmod(command_path, tonumber("777", 8)))
+	local resolved, resolve_err = tools.resolve(command_value)
+	assert(resolved == nil and tostring(resolve_err):find("non%-writable executable"))
+	assert(vim.uv.fs_lstat(command_path).mode % 512 == tonumber("777", 8), "resolve repaired command permissions")
+
+	local artifact_value = spec("resolve-artifact-permissions", { artifacts = { "share/result.json" } })
+	local artifact_plan = assert(tools.plan(artifact_value))
+	local artifact_job = assert(tools.claim(artifact_plan))
+	assert(tools.run(artifact_job))
+	finish("resolve-artifact-permissions")
+	local artifact_path = artifact_plan.identity.install_root .. "/share/result.json"
+	assert(vim.uv.fs_chmod(artifact_path, tonumber("666", 8)))
+	resolved, resolve_err = tools.resolve(artifact_value)
+	assert(resolved == nil and tostring(resolve_err):find("non%-writable regular file"))
+	assert(vim.uv.fs_lstat(artifact_path).mode % 512 == tonumber("666", 8), "resolve repaired artifact permissions")
+end)
+
+test("resolve rejects managed path substitution and inexact durable plan or proof", function()
+	configure()
+	local value = spec("resolve-inexact", { artifacts = { "share/result.json" } })
+	local plan = assert(tools.plan(value))
+	local managed = assert(tools.claim(plan))
+	assert(tools.run(managed))
+	finish("resolve-inexact")
+	local command_path = plan.identity.install_root .. "/bin/resolve-inexact"
+	local displaced = command_path .. ".displaced"
+	assert(vim.uv.fs_rename(command_path, displaced))
+	assert(vim.uv.fs_symlink(displaced, command_path))
+	local resolved, resolve_err = tools.resolve(plan.identity)
+	assert(resolved == nil and tostring(resolve_err):find("proof is invalid", 1, true))
+
+	local stored = vim.json.decode(read_file(record_path(plan)))
+	stored.plan.requires_network = not stored.plan.requires_network
+	write_private(record_path(plan), stored)
+	resolved, resolve_err = tools.resolve(plan.identity)
+	assert(resolved == nil and tostring(resolve_err):find("normalized plan was modified", 1, true))
 end)
 
 test("Mason backend evidence must be absent", function()
@@ -1178,6 +2228,66 @@ test("default liveness binds own PID to its token and never guesses another PID 
 	assert(other_status == nil and other_reason == "owner-unverifiable")
 end)
 
+test("default liveness preserves a live real owner and reclaims it after exit", function()
+	configure({ use_default_liveness = true })
+	local release = fixture .. "/default-liveness-release-" .. case_number
+	local ready = fixture .. "/default-liveness-ready-" .. case_number
+	local child_script = fixture .. "/default-liveness-child-" .. case_number .. ".lua"
+	write_file(child_script, table.concat({
+		"local ready = assert(vim.env.VERIFIED_TOOLS_LIVENESS_READY)",
+		"local release = assert(vim.env.VERIFIED_TOOLS_LIVENESS_RELEASE)",
+		"assert(vim.fn.writefile({ 'ready' }, ready) == 0)",
+		"assert(vim.wait(10000, function() return vim.uv.fs_lstat(release) ~= nil end, 10))",
+	}, "\n") .. "\n")
+	local child = vim.system({ vim.v.progpath, "--headless", "-u", "NONE", "-i", "NONE", "-l", child_script }, {
+		env = {
+			VERIFIED_TOOLS_LIVENESS_READY = ready,
+			VERIFIED_TOOLS_LIVENESS_RELEASE = release,
+		},
+		text = true,
+	})
+	local child_result
+	local ok, err = xpcall(function()
+		assert(
+			vim.wait(5000, function()
+				return vim.uv.fs_lstat(ready) ~= nil
+			end, 10),
+			"real liveness child did not become ready"
+		)
+		local owner_pid = assert(child.pid)
+		local plan = assert(tools.plan(spec("default-dead-owner")))
+		local owner_token = string.rep("b", 64)
+		write_private(record_path(plan), schema2(plan, "running", owner_pid, owner_token))
+		local resource = "identity:" .. plan.identity_key
+		local base = state .. "/locks/resources/" .. vim.fn.sha256(resource) .. ".lock"
+		local ticket = claim_file(base, resource, owner_pid, string.rep("d", 64))
+		local before = read_file(record_path(plan))
+
+		local live_status, live_reason = tools.status(plan.identity)
+		assert(live_status == nil and live_reason == "owner-unverifiable")
+		local live_claim, live_claim_reason = tools.claim(plan, { mode = "repair" })
+		assert(live_claim == nil and live_claim_reason == "lock-owner-unverifiable")
+		assert(vim.uv.fs_lstat(ticket), "live owner's lock ticket was removed")
+		assert(read_file(record_path(plan)) == before, "live owner's record was changed")
+
+		write_file(release, "release\n")
+		child_result = child:wait(5000)
+		assert(child_result.code == 0 and child_result.signal == 0, vim.inspect(child_result))
+
+		local dead_status = assert(tools.status(plan.identity))
+		assert(dead_status.status == "repair-required")
+		assert(dead_status.original_status == "running" and dead_status.detail == "dead-owner")
+		local recovered = assert(tools.claim(plan, { mode = "repair" }))
+		assert(recovered.record.status == "claimed" and recovered.record.pid == vim.uv.os_getpid())
+		assert(vim.uv.fs_lstat(ticket) == nil, "dead owner's lock ticket was not reclaimed")
+	end, debug.traceback)
+	if not child_result then
+		write_file(release, "release\n")
+		child_result = child:wait(5000)
+	end
+	assert(ok, err)
+end)
+
 test("schema-2 active records distinguish dead live unknown and unsupported owners", function()
 	local liveness = { [41001] = false, [41002] = true }
 	configure({
@@ -1250,6 +2360,105 @@ test("cancel after backend acknowledgement settles once and ignores a late attes
 	assert(tools.status(running_claim.identity).status == "cancelled")
 	local queued, active = tools._queue_size()
 	assert(queued == 0 and active == 0)
+end)
+
+test("actual fast-event backend callbacks settle once on the main loop", function()
+	local handles = {}
+	local observations = {}
+	local run_fast = false
+	local attest_fast = false
+	local cancel_fast = false
+	local cancel_primitive_calls = 0
+	local callbacks_on_main = true
+	local events_on_main = true
+	local function timer(callback)
+		local handle = assert(vim.uv.new_timer())
+		handles[#handles + 1] = handle
+		handle:start(0, 0, function()
+			handle:stop()
+			handle:close()
+			callback()
+		end)
+	end
+	local async_backend = {
+		run = function(plan, done, control)
+			local evidence, observed = install_release(plan)
+			observations[plan.identity.name] = observed
+			timer(function()
+				run_fast = run_fast or vim.in_fast_event()
+				control.set_cancel(function()
+					cancel_primitive_calls = cancel_primitive_calls + 1
+				end)
+				if plan.identity.name == "fast-cancel" then
+					cancel_fast = vim.in_fast_event()
+					vim.schedule(function()
+						assert(tools.cancel(plan.identity))
+					end)
+				end
+				done(true, evidence)
+				done(false, "late-backend-result")
+			end)
+		end,
+		attest = function(plan, done)
+			assert(plan.identity.name ~= "fast-cancel", "cancelled fast callback reached attestation")
+			timer(function()
+				attest_fast = vim.in_fast_event()
+				done(true, observations[plan.identity.name])
+				done(false, "late-attestation-result")
+			end)
+		end,
+	}
+	configure({
+		backends = { release = async_backend },
+		on_state_change = function()
+			events_on_main = events_on_main and not vim.in_fast_event()
+		end,
+		notify = function()
+			callbacks_on_main = callbacks_on_main and not vim.in_fast_event()
+		end,
+	})
+	local cancel_count = 0
+	local cancel_result
+	local cancel_claim = claim(spec("fast-cancel"))
+	assert(tools.run(cancel_claim, function(ok, reason)
+		callbacks_on_main = callbacks_on_main and not vim.in_fast_event()
+		cancel_count = cancel_count + 1
+		cancel_result = { ok = ok, reason = reason }
+	end))
+	assert(
+		vim.wait(3000, function()
+			return cancel_count == 1
+		end, 10),
+		"fast-event cancellation did not settle"
+	)
+	assert(cancel_result.ok == false and cancel_result.reason == "cancelled")
+	assert(cancel_primitive_calls == 1 and cancel_fast)
+	assert(tools.status(cancel_claim.identity).status == "cancelled")
+
+	local success_count = 0
+	local success_result
+	local success_claim = claim(spec("fast-success"))
+	assert(tools.run(success_claim, function(ok, reason)
+		callbacks_on_main = callbacks_on_main and not vim.in_fast_event()
+		success_count = success_count + 1
+		success_result = { ok = ok, reason = reason }
+	end))
+	assert(
+		vim.wait(3000, function()
+			return success_count == 1
+		end, 10),
+		"fast-event success did not settle"
+	)
+	assert(success_result.ok == true and success_result.reason == nil)
+	assert(tools.status(success_claim.identity).status == "succeeded")
+	assert(run_fast and attest_fast)
+	assert(callbacks_on_main and events_on_main)
+	for _, handle in ipairs(handles) do
+		if not handle:is_closing() then
+			handle:stop()
+			handle:close()
+		end
+	end
 end)
 
 test("queued and final persistence failures fail closed", function()
@@ -2516,25 +3725,85 @@ test("an absent state root revalidates its original parent after creation", func
 	local moved_parent = original_parent .. ".moved"
 	local swap_state = original_parent .. "/state"
 	mkdir(original_parent)
-	configure({ state = swap_state })
-	local plan = assert(tools.plan(spec("state-parent-swap")))
 	local fired = false
-	with_uv_override("fs_mkdir", function(original, path, mode)
-		local made, make_err = original(path, mode)
-		if not fired and path == swap_state and made then
-			fired = true
-			assert(vim.uv.fs_rename(original_parent, moved_parent))
-			assert(original(original_parent, tonumber("700", 8)))
-			assert(original(swap_state, tonumber("700", 8)))
-		end
-		return made, make_err
-	end, function()
-		local claimed, claim_err = tools.claim(plan)
-		assert(claimed == nil and claim_err == "state directory identity changed", tostring(claim_err))
-	end)
+	configure({
+		state = swap_state,
+		interleave = function(stage, context)
+			if not fired and stage == "before-state-directory-create" and context.path == swap_state then
+				fired = true
+				assert(vim.uv.fs_rename(original_parent, moved_parent))
+				assert(vim.uv.fs_mkdir(original_parent, tonumber("700", 8)))
+			end
+		end,
+	})
+	local plan = assert(tools.plan(spec("state-parent-swap")))
+	local claimed, claim_err = tools.claim(plan)
+	assert(claimed == nil and claim_err == "state directory identity changed", tostring(claim_err))
 	assert(fired, "state root creation was not intercepted")
 	assert(vim.uv.fs_lstat(swap_state .. "/records") == nil)
 	assert(vim.uv.fs_lstat(moved_parent .. "/state/records") == nil)
+end)
+
+test("a cooperative concurrent state-directory winner is adopted and barriered", function()
+	local concurrent_state = fixture .. "/concurrent-state-root"
+	local fired = false
+	configure({
+		state = concurrent_state,
+		interleave = function(stage, context)
+			if not fired and stage == "before-state-directory-create" and context.path == concurrent_state then
+				fired = true
+				assert(vim.uv.fs_mkdir(concurrent_state, tonumber("700", 8)))
+			end
+		end,
+	})
+	local original_sync = tools._sync_state_directory
+	local barriered_winner = false
+	local ok, err = xpcall(function()
+		tools._sync_state_directory = function(fd, path, role, created)
+			if path == concurrent_state and role == "child" and created == false then
+				barriered_winner = true
+			end
+			return original_sync(fd, path, role, created)
+		end
+		local plan = assert(tools.plan(spec("concurrent-state-root")))
+		assert(tools.claim(plan), "cooperative state root creation caused a false lifecycle failure")
+	end, debug.traceback)
+	tools._sync_state_directory = original_sync
+	assert(ok, err)
+	assert(fired and barriered_winner, "the concurrent state directory winner was not safely barriered")
+end)
+
+test("new state namespaces require a durable receiver barrier and retry safely", function()
+	local durable_state = fixture .. "/durable-state"
+	configure({ state = durable_state })
+	local plan = assert(tools.plan(spec("durable-state")))
+	local original_sync = tools._sync_state_directory
+	local barriers = {}
+	local ok, err = xpcall(function()
+		tools._sync_state_directory = function(fd, path, role, created)
+			barriers[#barriers + 1] = { path = path, role = role, created = created }
+			if path == fixture and role == "parent" and created then
+				return nil, "EIO: injected receiver barrier failure"
+			end
+			return original_sync(fd, path, role, created)
+		end
+		local claimed, claim_err = tools.claim(plan)
+		assert(claimed == nil, "claim succeeded before the namespace receiver was durable")
+		assert(tostring(claim_err):find("state directory parent fsync failed", 1, true), tostring(claim_err))
+		assert(barriers[1].path == durable_state and barriers[1].role == "child" and barriers[1].created)
+		assert(barriers[2].path == fixture and barriers[2].role == "parent" and barriers[2].created)
+		assert(vim.uv.fs_lstat(durable_state .. "/records") == nil)
+
+		tools._sync_state_directory = original_sync
+		assert(tools.claim(plan), "a retry could not recover the existing state-root entry")
+		assert(vim.uv.fs_lstat(durable_state .. "/records"))
+		tools._sync_state_directory = function()
+			error("a durable state-directory barrier was repeated")
+		end
+		assert(tools.status(plan.identity), "cached durable namespaces could not be reused")
+	end, debug.traceback)
+	tools._sync_state_directory = original_sync
+	assert(ok, err)
 end)
 
 test("hash callbacks are rejected and core digests cannot escape state", function()

@@ -8,13 +8,23 @@ local health = vim.health
 function M.check()
 	health.start("Local config (.nvim-local.lua)")
 
-	local ok, lc = pcall(require, "config.local_config")
-	if not ok then
-		health.error("config.local_config module failed to load: " .. tostring(lc))
+	local lc = package.loaded["config.local_config"]
+	if type(lc) ~= "table" or type(lc.observation) ~= "function" then
+		health.info("local config runtime state is not loaded; health did not activate it")
+		return
+	end
+	local ok, observed = pcall(lc.observation)
+	if not ok or type(observed) ~= "table" then
+		health.error("could not observe local config runtime state: " .. tostring(observed))
+		return
+	end
+	if not observed.evaluated then
+		health.info("local config has not been evaluated; health did not read or trust project configuration")
 		return
 	end
 
-	for index, s in ipairs(lc.sources()) do
+	local sources = type(observed.sources) == "table" and observed.sources or {}
+	for index, s in ipairs(sources) do
 		if s.status == "loaded" then
 			health.ok(s.path .. " loaded")
 			if index == 1 then
@@ -37,7 +47,7 @@ function M.check()
 		end
 	end
 
-	local errors = lc.errors()
+	local errors = type(observed.errors) == "table" and observed.errors or {}
 	if #errors == 0 then
 		health.ok("no validation errors")
 	else

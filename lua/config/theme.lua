@@ -63,7 +63,13 @@ local function paint_default(name)
 	if not ok then
 		return false, "Colorscheme '" .. name .. "' is not installed: " .. tostring(err)
 	end
-	require("config.palette").apply()
+	local palette_ok, palette_result, palette_err = pcall(function()
+		return require("config.palette").apply()
+	end)
+	if not palette_ok or palette_result == false then
+		return false,
+			"Palette repaint failed: " .. tostring(palette_ok and (palette_err or "rejected") or palette_result)
+	end
 	return true
 end
 
@@ -71,7 +77,7 @@ local function ensure_setup()
 	if initialized then
 		return true
 	end
-	local selection, err = router.setup({
+	local called, selection, err = pcall(router.setup, {
 		state_path = M.state_path(),
 		legacy_path = legacy_path(),
 		default = default_colorscheme(),
@@ -83,6 +89,10 @@ local function ensure_setup()
 			return { background = vim.o.background }
 		end,
 	})
+	if not called then
+		err = selection
+		selection = nil
+	end
 	if not selection then
 		notify("Could not initialize theme routing: " .. tostring(err), vim.log.levels.ERROR)
 		return false
@@ -95,6 +105,24 @@ local function reset_refresh_coalescer()
 	refresh_generation = refresh_generation + 1
 	refresh_pending = nil
 	refresh_scheduled = false
+end
+
+-- Explicit host operations supersede every queued refresh even when the core
+-- rejects, returns false, or throws. Preserve the core's return contract while
+-- making coalescer invalidation a finally-style guarantee.
+local function invoke_router(method, ...)
+	local callback = router[method]
+	local returned
+	if type(callback) ~= "function" then
+		returned = { false, "unknown theme router method: " .. tostring(method) }
+	else
+		returned = { pcall(callback, ...) }
+	end
+	reset_refresh_coalescer()
+	if not returned[1] then
+		return false, tostring(returned[2])
+	end
+	return unpack(returned, 2)
 end
 
 local function queue_refresh(kind)
@@ -112,18 +140,8 @@ local function queue_refresh(kind)
 		end
 		local pending = refresh_pending
 		refresh_pending = nil
-		local called, refresh_err = pcall(function()
-			if pending == "reload" then
-				router.reload()
-			elseif pending == "repaint" then
-				router.repaint()
-			end
-		end)
-		if generation == refresh_generation then
-			refresh_pending = nil
-			refresh_scheduled = false
-		end
-		if not called then
+		local refreshed, refresh_err = invoke_router(pending)
+		if not refreshed then
 			notify("Theme refresh failed: " .. tostring(refresh_err), vim.log.levels.ERROR)
 		end
 	end, REFRESH_COALESCE_MS)
@@ -143,10 +161,23 @@ function M.register(name, painter)
 	if not ensure_setup() then
 		return false
 	end
-	local ok, err = router.register(name, function(_, context)
-		painter(context.background)
-		require("config.palette").apply()
+	local called, ok, err = pcall(router.register, name, function(_, context)
+		local painter_called, painted, paint_err = pcall(painter, context.background)
+		if not painter_called or painted == false then
+			return false, tostring(painter_called and (paint_err or "rejected") or painted)
+		end
+		local palette_called, palette_result, palette_err = pcall(function()
+			return require("config.palette").apply()
+		end)
+		if not palette_called or palette_result == false then
+			return false, tostring(palette_called and (palette_err or "rejected") or palette_result)
+		end
+		return true
 	end)
+	if not called then
+		err = ok
+		ok = false
+	end
 	if not ok then
 		notify("Could not register theme painter: " .. tostring(err), vim.log.levels.ERROR)
 		return false
@@ -165,11 +196,7 @@ function M.apply(name)
 	if not ensure_setup() then
 		return false
 	end
-	local applied, err = router.apply(name)
-	if applied then
-		reset_refresh_coalescer()
-	end
-	return applied, err
+	return invoke_router("apply", name)
 end
 
 function M.repaint()
@@ -178,39 +205,33 @@ function M.repaint()
 	end
 	-- An explicit repaint owns the current frame and supersedes any delayed
 	-- OptionSet/OSC repaint already waiting in the coalescer.
-	local repainted, err = router.repaint()
-	if repainted then
-		reset_refresh_coalescer()
-	end
-	return repainted, err
+	return invoke_router("repaint")
 end
 
 function M.save(name)
-	return ensure_setup() and router.persist(name) or false
+	if not ensure_setup() then
+		return false, "theme router setup failed"
+	end
+	return invoke_router("persist", name)
 end
 
 function M.select(name)
 	if not ensure_setup() then
 		return false
 	end
-	local selected = router.select(name)
+	local selected, err, durable = invoke_router("select", name)
 	if not selected then
-		return false
+		return false, err, durable
 	end
-	reset_refresh_coalescer()
 	notify("Theme set to " .. name, vim.log.levels.INFO)
-	return true
+	return true, err, durable
 end
 
 function M.reload()
 	if not ensure_setup() then
 		return false
 	end
-	local reloaded, err = router.reload()
-	if reloaded then
-		reset_refresh_coalescer()
-	end
-	return reloaded, err
+	return invoke_router("reload")
 end
 
 function M.status()
@@ -225,13 +246,12 @@ function M.reset()
 	if not ensure_setup() then
 		return false
 	end
-	local reset, err = router.reset()
+	local reset, err, durable = invoke_router("reset")
 	if not reset then
-		return false
+		return false, err, durable
 	end
-	reset_refresh_coalescer()
 	notify("Theme reset to " .. M.selection().colorscheme, vim.log.levels.INFO)
-	return true, err
+	return true, err, durable
 end
 
 -- Interactive UI remains a host concern. Snacks previews when available and

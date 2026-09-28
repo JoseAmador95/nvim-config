@@ -31,6 +31,7 @@ end
 
 local original_snacks = package.loaded.snacks
 local original_editor = package.loaded["config.editor"]
+local original_local_config = package.loaded["config.local_config"]
 local original_jobwait = vim.fn.jobwait
 local original_jobstop = vim.fn.jobstop
 local original_chan_send = vim.api.nvim_chan_send
@@ -44,6 +45,13 @@ local notices = {}
 local jobwait_status = -1
 local defer_scheduled = false
 local scheduled = {}
+
+package.loaded["config.local_config"] = {
+	plugin = function(name, defaults)
+		assert(name == "terminal_lifecycle")
+		return vim.deepcopy(defaults)
+	end,
+}
 
 local function fake_win(opts, index)
 	local buf = vim.api.nvim_create_buf(false, true)
@@ -313,6 +321,21 @@ test("toggle creates visibly, then hides and restores one process", function()
 	assert(sent[#sent].payload == "print(1)\n")
 end)
 
+test("Snacks output reads are bounded before crossing the plugin boundary", function()
+	local value = spec("bounded-output")
+	local record = assert(terminal.open(value))
+	local lines = {}
+	for index = 1, 10002 do
+		lines[index] = tostring(index)
+	end
+	vim.api.nvim_buf_set_lines(record.handle.buf, 0, -1, false, lines)
+	local output = assert(terminal.lines(value))
+	assert(#output == 10000, "terminal output exceeded the host read bound")
+	assert(output[1] == "3" and output[#output] == "10002", "terminal output did not retain the newest lines")
+	local config = assert(terminal.effective_config())
+	assert(config.max_output_lines == 10000, "terminal host did not configure the safe output limit")
+end)
+
 test("focus accepts a stable key and reuses the existing process", function()
 	local value = spec("focus-key")
 	local opened_before = #opened
@@ -448,6 +471,7 @@ end)
 
 package.loaded.snacks = original_snacks
 package.loaded["config.editor"] = original_editor
+package.loaded["config.local_config"] = original_local_config
 vim.fn.jobwait = original_jobwait
 vim.fn.jobstop = original_jobstop
 vim.api.nvim_chan_send = original_chan_send

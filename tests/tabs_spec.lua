@@ -39,6 +39,9 @@ local menu_dismisses = 0
 local menu_context_options = {}
 package.loaded["config.pager"] = { active = false }
 package.loaded["config.local_config"] = {
+	get = function(_, default)
+		return vim.deepcopy(default)
+	end,
 	plugin = function(name, defaults)
 		assert(name == "tab_first")
 		return vim.deepcopy(defaults)
@@ -329,6 +332,28 @@ test("dashboard new file reuses the home tab as an unnamed normal buffer", funct
 	vim.bo[dashboard_buf].modified = false
 	vim.bo[dashboard_buf].modifiable = false
 	assert(tabs.mark_home(home), "could not mark dashboard fixture home")
+	local normalized_options = {
+		colorcolumn = "80",
+		cursorcolumn = true,
+		cursorline = false,
+		foldmethod = "marker",
+		list = true,
+		number = false,
+		relativenumber = true,
+		sidescrolloff = 7,
+		signcolumn = "no",
+		spell = true,
+		statuscolumn = "%s",
+		statusline = "dashboard",
+		winbar = "dashboard",
+		winhighlight = "Normal:ErrorMsg",
+		wrap = false,
+	}
+	local global_options = {}
+	for name, value in pairs(normalized_options) do
+		global_options[name] = vim.api.nvim_get_option_value(name, { scope = "global" })
+		vim.api.nvim_set_option_value(name, value, { scope = "local", win = 0 })
+	end
 
 	local new_file
 	for _, item in ipairs(require("plugins.snacks").opts.dashboard.preset.keys) do
@@ -350,6 +375,9 @@ test("dashboard new file reuses the home tab as an unnamed normal buffer", funct
 	equal(false, vim.bo[buf].modified, "new buffer is modified")
 	equal({ "" }, vim.api.nvim_buf_get_lines(buf, 0, -1, false), "new buffer is not empty")
 	equal("n", vim.api.nvim_get_mode().mode, "new file did not remain in Normal mode")
+	for name, value in pairs(global_options) do
+		equal(value, vim.api.nvim_get_option_value(name, { win = 0 }), name .. " was not normalized")
+	end
 	assert(not tabs.is_home(home), "new-file work tab retained its home marker")
 	equal(nil, tabs.find_home(), "new-file work tab is still discoverable as home")
 end)
@@ -569,7 +597,13 @@ test("bufferline exposes native safe close callbacks and dynamic selected highli
 			captured.options[option](987650 + index)
 		end
 		assert(type(captured.options.right_mouse_command) == "function", "right mouse is not a public callback")
-		captured.options.right_mouse_command(987653)
+		local origin = vim.api.nvim_get_current_tabpage()
+		vim.cmd("tabnew")
+		local target = vim.api.nvim_get_current_tabpage()
+		vim.api.nvim_set_current_tabpage(origin)
+		assert(captured.options.right_mouse_command(target), "right mouse rejected a valid target tab")
+		equal(target, vim.api.nvim_get_current_tabpage(), "right mouse did not focus its target tab")
+		assert(not captured.options.right_mouse_command(987653), "right mouse accepted an invalid tab handle")
 	end, debug.traceback)
 	tabs.request_close = original_request
 	assert(callback_ok, callback_error)

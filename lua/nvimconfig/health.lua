@@ -40,7 +40,14 @@ local function split_path(value)
 end
 
 local function local_path_set()
-	local configured = require("config.local_config").get("path", {}) or {}
+	local local_config = package.loaded["config.local_config"]
+	local observed
+	if type(local_config) == "table" and type(local_config.observation) == "function" then
+		local ok, value = pcall(local_config.observation)
+		observed = ok and type(value) == "table" and value or nil
+	end
+	local configured = observed and observed.evaluated and observed.config and observed.config.path or {}
+	configured = type(configured) == "table" and configured or {}
 	local result = {}
 	for _, path in ipairs(configured) do
 		result[normalized(path)] = true
@@ -127,16 +134,7 @@ local function check_external_tool(name, feature, install, configured)
 	return false
 end
 
-local function has_exact_line(output, expected)
-	for line in output:gmatch("[^\r\n]+") do
-		if line == expected then
-			return true
-		end
-	end
-	return false
-end
-
-local function check_validation_tool(name, args, expected_line, configured)
+local function check_validation_tool(name, expected_line, configured)
 	local path = vim.fn.exepath(name)
 	local install = "Run: scripts/install-ci-tools /absolute/path/to/bin"
 	if path == "" then
@@ -144,16 +142,34 @@ local function check_validation_tool(name, args, expected_line, configured)
 		return
 	end
 
-	local command = { path }
-	vim.list_extend(command, args)
-	local result = vim.system(command, { text = true }):wait(5000)
-	local output = (result.stdout or "") .. (result.stderr or "")
 	local origin = path_origin(path, configured)
-	if result.code == 0 and has_exact_line(output, expected_line) then
-		health.ok(("%s matches the validation pin (%s): %s"):format(name, origin, expected_line))
-	else
-		health.warn(("%s does not match required version %q. %s"):format(path, expected_line, install))
+	health.info(
+		("%s is present for validation (%s): %s; expected %q, version execution is reserved for scripts/check-config"):format(
+			name,
+			origin,
+			path,
+			expected_line
+		)
+	)
+end
+
+local function dynamic_tool_contract()
+	local result = {}
+	for _, name in ipairs(toolchain.dynamic_order or {}) do
+		local entry = toolchain.dynamic_entry(name)
+		if entry then
+			local targets = vim.tbl_keys(entry.node.assets or {})
+			table.sort(targets)
+			result[#result + 1] = {
+				name = name,
+				backend = entry.backend,
+				dist_tag = entry.dist_tag,
+				node_version = entry.node.version,
+				targets = targets,
+			}
+		end
 	end
+	return result
 end
 
 local function config_paths()
@@ -201,7 +217,7 @@ end
 local function check_profile()
 	if vim.g.vscode == 1 or vim.g.vscode == true then
 		health.ok("VSCode profile active; terminal IDE services are isolated")
-	elseif require("config.pager").active then
+	elseif vim.env.NVIM_APPNAME == "nvimpager" then
 		health.ok("nvimpager profile active; only the pager plugin allowlist is available")
 	else
 		health.ok("full terminal editor profile active")
@@ -211,10 +227,12 @@ end
 local function local_product_status()
 	local rows = {}
 	for _, product in ipairs(LOCAL_PRODUCTS) do
-		local loaded, plugin = pcall(require, product.module)
-		local row = { name = product.name, module = product.module, loaded = loaded }
-		if not loaded then
-			row.error = tostring(plugin)
+		local plugin = package.loaded[product.module]
+		local row = { name = product.name, module = product.module, loaded = type(plugin) == "table" }
+		if plugin == nil or plugin == false then
+			row.observational = true
+		elseif type(plugin) ~= "table" then
+			row.error = "loaded module is not a table"
 		else
 			if type(plugin.status) ~= "function" then
 				row.error = "missing status()"
@@ -245,6 +263,8 @@ local function check_local_products()
 	for _, row in ipairs(local_product_status()) do
 		if row.error then
 			health.error(row.name .. ": " .. row.error)
+		elseif not row.loaded then
+			health.info(row.name .. ": not loaded; health did not activate it")
 		else
 			local configured = row.status.configured
 			local suffix = configured == nil and "" or ("; configured=" .. tostring(configured))
@@ -262,40 +282,15 @@ local function joined_pins(order, entries)
 end
 
 local function state_summary()
-	local bootstrap = require("config.tool_bootstrap")
-	local grouped = {}
-	for _, record in ipairs(bootstrap.engine().records() or {}) do
-		local status = record.status
-		local identity = record.identity.backend .. ":" .. record.identity.name .. "@" .. record.identity.version
-		if record and type(record.detail) == "string" and record.detail ~= "" then
-			local detail = record.detail:gsub("[%c]", " "):sub(1, 160)
-			identity = identity .. " (" .. detail .. ")"
-		end
-		grouped[status] = grouped[status] or {}
-		grouped[status][#grouped[status] + 1] = identity
+	local engine = package.loaded.verified_tools
+	if type(engine) ~= "table" or type(engine.status) ~= "function" then
+		health.info("Verified tool runtime is not loaded; health did not scan or reconcile durable records")
+	else
+		local ok, status = pcall(engine.status)
+		local jobs = ok and type(status) == "table" and status.jobs or nil
+		health.info(("Verified tool runtime is loaded; active jobs=%d"):format(type(jobs) == "table" and #jobs or 0))
 	end
-	local parts = {}
-	for _, status in ipairs({
-		"succeeded",
-		"failed",
-		"drift",
-		"repair-required",
-		"running",
-		"queued",
-		"claimed",
-		"cancelled",
-	}) do
-		if grouped[status] then
-			parts[#parts + 1] = status .. "=[" .. table.concat(grouped[status], ", ") .. "]"
-		end
-	end
-	health.info("Verified tool state: " .. (#parts > 0 and table.concat(parts, "; ") or "no attempts"))
-	if grouped.failed then
-		health.warn("Tool failures never auto-retry; inspect the reason, then use :NvimConfigToolsInstall[!]")
-	end
-	if grouped.drift or grouped["repair-required"] then
-		health.warn("Drift and legacy failures require explicit :NvimConfigToolsInstall! repair")
-	end
+	health.info("Tool failures never auto-retry; inspect state through an explicit install or repair command")
 end
 
 local function safe_relative(value)
@@ -424,19 +419,19 @@ local function check_mason_receipts()
 end
 
 local function check_managed_release_eligibility()
-	local release = require("config.release_installer")
+	local uname = uv.os_uname()
 	local results = {}
 	for _, name in ipairs(toolchain.managed_order) do
 		local entry = toolchain.managed_tools[name]
-		local plan, reason = release.plan(name, { force = true })
-		results[#results + 1] = toolchain.identity(name, entry) .. "=" .. (plan and plan.target or reason)
+		local asset, target = toolchain.asset_for(entry, uname.sysname, uname.machine)
+		results[#results + 1] = toolchain.identity(name, entry) .. "=" .. (asset and target or "unsupported")
 	end
-	health.info("Managed release platform/prerequisites: " .. table.concat(results, ", "))
+	health.info("Managed release platform/prerequisites (manifest only; no planning): " .. table.concat(results, ", "))
 end
 
-local python_venv = {}
 local function missing_requirements(entry)
 	local missing = {}
+	local deferred = {}
 	for _, executable in ipairs(entry.requires_all or {}) do
 		if not tool_paths.external_executable(executable) then
 			missing[#missing + 1] = executable
@@ -457,26 +452,24 @@ local function missing_requirements(entry)
 	end
 
 	if entry.requires_python_venv and selected then
-		if python_venv[selected] == nil then
-			local result = vim.system({ selected, "-c", "import venv" }, { text = true }):wait(5000)
-			python_venv[selected] = result.code == 0
-		end
-		if not python_venv[selected] then
-			missing[#missing + 1] = "python-venv"
-		end
+		deferred[#deferred + 1] = "python-venv"
 	end
-	return missing
+	return missing, deferred
 end
 
 local function check_mason_inventory()
 	local managers = { prebuilt = {}, npm = {}, pypi = {} }
 	local blocked = {}
+	local deferred = {}
 	for _, name in ipairs(toolchain.mason_order) do
 		local entry = toolchain.mason_tools[name]
 		managers[entry.manager][#managers[entry.manager] + 1] = toolchain.identity(name, entry)
-		local missing = missing_requirements(entry)
+		local missing, unprobed = missing_requirements(entry)
 		if #missing > 0 then
 			blocked[#blocked + 1] = name .. " (" .. table.concat(missing, "+") .. ")"
+		end
+		if #unprobed > 0 then
+			deferred[#deferred + 1] = name .. " (" .. table.concat(unprobed, "+") .. ")"
 		end
 	end
 	for _, manager in ipairs({ "prebuilt", "npm", "pypi" }) do
@@ -486,6 +479,9 @@ local function check_mason_inventory()
 		health.ok("All declared Mason installer prerequisites are available")
 	else
 		health.warn("One-shot Mason skips tools blocked by host prerequisites: " .. table.concat(blocked, ", "))
+	end
+	if #deferred > 0 then
+		health.info("Prerequisites not executed by health: " .. table.concat(deferred, ", "))
 	end
 end
 
@@ -508,17 +504,14 @@ local function check_validation_contract(configured)
 	end
 	local provision = vim.fs.joinpath(root, "scripts", "provision-runtime")
 	if vim.fn.executable(provision) == 1 then
-		local result = vim.system({ provision, "--contract-version" }, { text = true }):wait(5000)
-		if result.code == 0 and vim.trim(result.stdout or "") == "1" then
-			health.ok("provision-runtime contract version: 1 (offline unless --allow-network is explicit)")
-		else
-			health.error("provision-runtime does not expose contract version 1")
-		end
+		health.info(
+			"provision-runtime is present; contract version 1 is executed only by scripts/check-config (offline unless --allow-network is explicit)"
+		)
 	end
-	check_validation_tool("stylua", { "--version" }, "stylua " .. toolchain.versions.stylua, configured)
-	check_validation_tool("shellcheck", { "--version" }, "version: " .. toolchain.versions.shellcheck, configured)
-	check_validation_tool("actionlint", { "-version" }, toolchain.versions.actionlint, configured)
-	check_validation_tool("tree-sitter", { "--version" }, "tree-sitter " .. toolchain.versions.tree_sitter, configured)
+	check_validation_tool("stylua", "stylua " .. toolchain.versions.stylua, configured)
+	check_validation_tool("shellcheck", "version: " .. toolchain.versions.shellcheck, configured)
+	check_validation_tool("actionlint", toolchain.versions.actionlint, configured)
+	check_validation_tool("tree-sitter", "tree-sitter " .. toolchain.versions.tree_sitter, configured)
 	check_tool("cc", "Tree-sitter parser compilation", "Install a host C compiler.", true, configured)
 end
 
@@ -583,7 +576,18 @@ function M.check()
 	health.start("Pinned tool bootstrap")
 	health.info("Managed release pins: " .. joined_pins(toolchain.managed_order, toolchain.managed_tools))
 	health.info("Mason exact pins: " .. joined_pins(toolchain.mason_order, toolchain.mason_tools))
-	health.ok("Startup leaves verified-tools unloaded; health and explicit commands own plan/probe/attest/install")
+	for _, entry in ipairs(dynamic_tool_contract()) do
+		health.info(
+			("Dynamic managed tool manifest only: %s backend=%s dist-tag=%s private Node=%s targets=%s"):format(
+				entry.name,
+				entry.backend,
+				entry.dist_tag,
+				entry.node_version,
+				table.concat(entry.targets, ",")
+			)
+		)
+	end
+	health.ok("Startup leaves verified-tools unloaded; only explicit commands own plan/probe/attest/install")
 	state_summary()
 	check_managed_release_eligibility()
 	check_mason_receipts()
@@ -599,12 +603,7 @@ function M.check()
 		"Install it with rustup or the host package manager; managed and Mason copies are intentionally ignored.",
 		configured
 	)
-	check_external_tool(
-		"rustfmt",
-		"Rust formatting (host/user only)",
-		"Install it with rustup or the host package manager; managed and Mason copies are intentionally ignored.",
-		configured
-	)
+	health.info("Rust formatting is disabled until rustfmt has an exact verified manifest contract")
 	check_tool(
 		"cmake-language-server",
 		"CMake language intelligence",
@@ -621,13 +620,6 @@ function M.check()
 	)
 	check_tool("nvimpager", "pager profile", "Install nvimpager with the host package manager.", false, configured)
 	check_tool("lazygit", "Git terminal UI", "Install lazygit with the host package manager.", false, configured)
-	check_tool(
-		"devcontainer",
-		"Dev Containers CLI editor lifecycle",
-		"Install @devcontainers/cli explicitly; startup never downloads or refreshes it.",
-		false,
-		configured
-	)
 	check_pager_profile()
 
 	health.start("Reproducible validation")
@@ -641,5 +633,6 @@ end
 M._path_origin = path_origin
 M._mason_receipt_status = mason_receipt_status
 M._local_product_status = local_product_status
+M._dynamic_tool_contract = dynamic_tool_contract
 
 return M

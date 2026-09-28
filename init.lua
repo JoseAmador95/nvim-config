@@ -23,6 +23,11 @@ vim.opt.runtimepath:prepend(config_root)
 -- plugins. Register every boundary before host configuration can require one.
 require("config.local_plugins").setup()
 
+-- Keep one stable notification owner from startup. UI providers such as Noice
+-- attach through generation-bound leases and can be removed without leaving a
+-- stale vim.notify wrapper behind.
+require("config.notify_broker").setup()
+
 -- Core Settings ------------------------------------------------------------
 
 -- Disable netrw
@@ -48,7 +53,8 @@ vim.opt.undodir = undodir .. "//"
 
 -- Apply per-host $PATH and environment overrides from ~/.nvim-local.lua early,
 -- before plugins and mason rely on them.
-require("config.local_config").apply_env()
+local local_config = require("config.local_config")
+local_config.apply_env()
 local redraw_profile = require("config.redraw_profile")
 local low_bandwidth_redraw = redraw_profile.low_bandwidth()
 
@@ -64,27 +70,14 @@ vim.g.loaded_ruby_provider = 0
 
 -- Clipboard -----------------------------------------------------------------
 
--- Enable system clipboard integration
-vim.opt.clipboard = "unnamedplus"
+-- Keep edits in native registers; the clipboard adapter mirrors only yanks.
+-- Paste from the system clipboard with the terminal's shortcut (Cmd+V).
+vim.opt.clipboard = ""
 
--- Over ssh the host clipboard is not the local machine's. OSC52 (built into
--- Neovim 0.10+) writes to the local clipboard through the terminal, so a yank
--- on the remote host lands in your local clipboard. Only enabled in remote
--- sessions; locally the native provider (pbcopy/wl-copy/xclip) is kept.
-if vim.env.SSH_TTY or vim.env.SSH_CONNECTION then
-	local osc52 = require("vim.ui.clipboard.osc52")
-	-- Copy goes through OSC52. Paste returns the last yank (unnamed register)
-	-- instead of querying the terminal, which most emulators refuse or lag on
-	-- for security.
-	local function paste()
-		return { vim.fn.split(vim.fn.getreg(""), "\n"), vim.fn.getregtype("") }
-	end
-	vim.g.clipboard = {
-		name = "OSC52",
-		copy = { ["+"] = osc52.copy("+"), ["*"] = osc52.copy("*") },
-		paste = { ["+"] = paste, ["*"] = paste },
-	}
-end
+-- Over SSH the host clipboard is not the local machine's. The adapter routes
+-- copies through OSC 52 with an exact pre-encoding byte bound; locally it leaves
+-- Neovim's native clipboard provider in charge.
+require("config.clipboard").setup(local_config.get("clipboard", {}))
 
 -- Interface and Display Options ---------------------------------------------
 
@@ -136,7 +129,7 @@ vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter" }, {
 -- Remove incidental trailing whitespace while preserving formats where it has
 -- meaning. Set `vim.b.trim_trailing_whitespace = false` for any other buffer
 -- that must retain it.
-require("config.whitespace").setup()
+require("config.whitespace").setup(local_config.get("whitespace", {}))
 
 -- Key Mappings -------------------------------------------------------------
 
@@ -168,19 +161,6 @@ vim.keymap.set("n", "H", "^", {
 	desc = "Beginning of indentation",
 })
 
--- Open file under cursor in new tab
-vim.keymap.set("n", "gf", require("config.editor_actions").open_file_under_cursor, {
-	desc = "Open file under cursor in new tab",
-})
-
--- Neovim 0.11+ ships gr-prefixed LSP maps (grr/grn/gri/gra/grt). This config
--- defines its own equivalents (gr, gi, <leader>lr, <leader>ca in lsp.lua);
--- the built-ins only add a timeoutlen delay to `gr`. Remove them.
-for _, lhs in ipairs({ "grr", "grn", "gri", "grt" }) do
-	pcall(vim.keymap.del, "n", lhs)
-end
-pcall(vim.keymap.del, { "n", "x" }, "gra")
-
 -- Terminal Configuration ----------------------------------------------------
 
 -- Enable mouse support in all modes
@@ -208,6 +188,9 @@ local is_editor = not is_vscode and not pager.active
 -- native buffer-cycle maps in VSCode and nvimpager, where this tab workflow
 -- does not own navigation.
 if is_editor then
+	vim.keymap.set("n", "gf", require("config.editor_actions").open_file_under_cursor, {
+		desc = "Open file under cursor in new tab",
+	})
 	for _, lhs in ipairs({ "[b", "]b" }) do
 		pcall(vim.keymap.del, "n", lhs)
 	end
@@ -217,13 +200,16 @@ end
 -- filetype detection see the first argv buffer. VSCode deliberately keeps only
 -- its action bridge; the pager gets viewer/diagram commands but no IDE tools.
 if is_editor then
+	redraw_profile.setup()
 	require("config.project_settings").setup()
+	require("config.execution").setup()
 	local devcontainer = require("config.devcontainer")
 	devcontainer.setup()
 	require("config.navigation_history").setup()
 	require("config.code_review").setup()
-	-- exact-editor registers the runtime-specific WorkspaceKey. Container roots
-	-- use their host repository identity and remain separate from host records.
+	-- exact-editor schedules its runtime-specific WorkspaceKey only after the UI
+	-- settles. Container roots keep their host repository identity and remain
+	-- separate from host records.
 	require("config.exact_editor").setup_deferred()
 	require("config.indent")
 	require("config.lsp_helpers")
@@ -238,7 +224,9 @@ elseif pager.active then
 end
 
 if not is_vscode then
-	require("config.theme").setup()
+	local theme = require("config.theme")
+	theme.setup()
+	redraw_profile.register_repaint("theme", theme.repaint)
 end
 require("config.lazy")
 

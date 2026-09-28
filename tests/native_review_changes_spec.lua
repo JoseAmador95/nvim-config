@@ -169,6 +169,129 @@ test("root commits compare against an empty tree without parser noise", function
 	equal("one\r\ntwo\r\nstable one\r\nstable two\r\n", entry.new_text)
 end)
 
+test("model limits are preflighted with structured OLD/NEW details before blob reads", function()
+	local scope = {
+		kind = "range",
+		root = vim.uv.fs_realpath(fixture),
+		from_oid = base,
+		to_oid = second,
+		backend_id = "native",
+	}
+	local commands = {}
+	local function runner(argv, input)
+		commands[#commands + 1] = vim.deepcopy(argv)
+		return vim.system(argv, { text = false, stdin = input }):wait()
+	end
+	local model, err = changes.build(fixture, scope, {
+		runner = runner,
+		max_file_bytes = 8,
+		max_model_bytes = 1024,
+	})
+	assert(not model and err.code == "review_limit_exceeded", vim.inspect(err))
+	equal("max_file_bytes", err.details.limit, "wrong limit was reported")
+	equal(8, err.details.maximum, "file maximum was omitted")
+	assert(err.details.actual > 8 and err.details.path == "a.txt", vim.inspect(err.details))
+	equal("history", err.details.layer, "historical layer was omitted")
+	equal("OLD", err.details.side, "oversized old side was mislabeled")
+	local blob_reads = vim.tbl_filter(function(argv)
+		return argv[4] == "cat-file" and argv[5] == "blob"
+	end, commands)
+	equal({}, blob_reads, "content was read before size preflight completed")
+	local batch_checks = vim.tbl_filter(function(argv)
+		return argv[4] == "cat-file" and argv[5]:find("--batch-check=", 1, true) == 1
+	end, commands)
+	equal(1, #batch_checks, "unique blobs were not batch-checked")
+
+	local old_size = #"one\r\ntwo\r\nstable one\r\nstable two\r\n"
+	local new_size = #"one\r\nchanged\r\nstable one\r\nstable two\r\nthree\r\n"
+	model, err = changes.build(fixture, scope, {
+		max_file_bytes = 1024,
+		max_model_bytes = old_size + new_size - 1,
+	})
+	assert(not model and err.code == "review_limit_exceeded", vim.inspect(err))
+	equal("max_model_bytes", err.details.limit, "aggregate limit was not enforced")
+	equal(old_size + new_size, err.details.actual, "aggregate represented-side size was incorrect")
+	equal("NEW", err.details.side, "aggregate overflow was attributed to the wrong side")
+end)
+
+test("file-count and cooperative cancellation stop the whole model before content reads", function()
+	local working = {
+		kind = "working",
+		root = vim.uv.fs_realpath(fixture),
+		head_oid = second,
+		backend_id = "native",
+	}
+	local model, err = changes.build(fixture, working, { max_files = 2 })
+	assert(not model and err.code == "review_limit_exceeded", vim.inspect(err))
+	equal("max_files", err.details.limit, "working layers escaped the file-count limit")
+	equal(3, err.details.actual, "layered entries were not counted as represented files")
+	assert(err.details.path and err.details.layer and err.details.side, "file-count error was not actionable")
+
+	local commands = {}
+	local phases = {}
+	local function runner(argv, input)
+		commands[#commands + 1] = vim.deepcopy(argv)
+		return vim.system(argv, { text = false, stdin = input }):wait()
+	end
+	model, err = changes.build(fixture, {
+		kind = "range",
+		root = vim.uv.fs_realpath(fixture),
+		from_oid = base,
+		to_oid = second,
+		backend_id = "native",
+	}, {
+		runner = runner,
+		control = {
+			checkpoint = function(phase)
+				phases[#phases + 1] = phase
+				if phase == "changes.file_read" then
+					return false, "superseded"
+				end
+			end,
+		},
+	})
+	assert(not model and err.code == "review_cancelled" and err.message == "superseded", vim.inspect(err))
+	assert(vim.tbl_contains(phases, "changes.blob_metadata_batch"), "blob batch exposed no checkpoint")
+	local blob_reads = vim.tbl_filter(function(argv)
+		return argv[4] == "cat-file" and argv[5] == "blob"
+	end, commands)
+	equal({}, blob_reads, "cancelled model read Git content")
+end)
+
+test("worktree reads reject same-size metadata ABA before publication", function()
+	local canonical = assert(vim.uv.fs_realpath(fixture))
+	local target = vim.fs.joinpath(canonical, "new.txt")
+	local changed = false
+	local model, err = changes.build(fixture, {
+		kind = "working",
+		root = canonical,
+		head_oid = second,
+		backend_id = "native",
+	}, {
+		lstat = function(path)
+			local stat, stat_err = vim.uv.fs_lstat(path)
+			if not stat then
+				return nil, stat_err
+			end
+			stat = vim.deepcopy(stat)
+			if changed and path == target then
+				stat.ctime = { sec = stat.ctime.sec + 1, nsec = stat.ctime.nsec }
+			end
+			return stat
+		end,
+		control = {
+			checkpoint = function(phase, progress)
+				if phase == "changes.file_read" and progress.path == "new.txt" then
+					changed = true
+				end
+			end,
+		},
+	})
+	assert(not model and err.code == "working_tree_changed", vim.inspect(err))
+	equal("new.txt", err.details.path, "metadata drift was attributed to the wrong file")
+	assert(err.message:find("metadata changed", 1, true), vim.inspect(err))
+end)
+
 vim.fn.delete(fixture, "rf")
 
 if #failures > 0 then

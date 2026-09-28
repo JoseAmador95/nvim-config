@@ -1,4 +1,50 @@
 -- snacks.picker: the single fuzzy finder for editor workflows.
+local function focus_buffer(bufnr)
+	for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
+		for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
+			if vim.api.nvim_win_get_buf(winid) == bufnr then
+				vim.api.nvim_set_current_tabpage(tabpage)
+				vim.api.nvim_set_current_win(winid)
+				return true
+			end
+		end
+	end
+	vim.api.nvim_set_current_buf(bufnr)
+	return true
+end
+
+local function review_confirm_number(picker, number)
+	if number > 0 then
+		if number > picker.list:count() then
+			return
+		end
+		picker.list:move(number, true)
+	end
+	picker:action("confirm")
+end
+
+local function review_picker_show(picker)
+	vim.cmd.stopinsert()
+	-- Select's static finder has collected every item before the window opens.
+	-- Larger menus retain native counts, so 12<Enter> selects item 12 unambiguously.
+	if picker:count() <= 9 then
+		for number = 1, 9 do
+			vim.keymap.set("n", tostring(number), function()
+				review_confirm_number(picker, number)
+			end, { buffer = picker.list.win.buf, nowait = true, desc = "Select review choice " .. number })
+		end
+	end
+end
+
+local function review_picker_noop() end
+
+local review_picker_keys = {
+	["<CR>"] = "review_confirm",
+}
+for _, key in ipairs({ "i", "I", "a", "A", "o", "O", "R", "<Insert>", "/", "<a-w>", "<Tab>", "<S-Tab>" }) do
+	review_picker_keys[key] = "review_noop"
+end
+
 return {
 	"folke/snacks.nvim",
 	cond = function()
@@ -47,12 +93,14 @@ return {
 	opts = {
 		terminal = { enabled = true },
 		notifier = {
-			enabled = not require("config.pager").active,
+			-- config.notify_broker owns vim.notify; Noice leases this notifier as
+			-- its visual backend in the full editor.
+			enabled = false,
 			timeout = 3000,
 		},
 		scratch = {
 			enabled = true,
-			root = vim.fs.joinpath(vim.fn.stdpath("state"), "nvim-config", "scratch"),
+			root = vim.fs.joinpath(vim.fn.stdpath("state"), "nvim-config", "snacks-scratch"),
 		},
 		image = {
 			-- Enable the image machinery (Kitty graphics protocol; Ghostty). The
@@ -82,9 +130,7 @@ return {
 						key = "n",
 						desc = "New file",
 						action = function()
-							local tabpage = vim.api.nvim_get_current_tabpage()
-							vim.api.nvim_cmd({ cmd = "enew" }, {})
-							require("config.tabs").unmark_home(tabpage)
+							require("config.tabs").new_file()
 						end,
 					},
 					{
@@ -139,6 +185,13 @@ return {
 					if not item then
 						return
 					end
+					if type(item.buf) == "number" and vim.api.nvim_buf_is_valid(item.buf) then
+						local name = vim.api.nvim_buf_get_name(item.buf)
+						if name == "" or vim.bo[item.buf].buftype ~= "" then
+							focus_buffer(item.buf)
+							return
+						end
+					end
 					local path = item.file
 					if (not path or path == "") and item.buf then
 						path = vim.api.nvim_buf_get_name(item.buf)
@@ -168,7 +221,27 @@ return {
 				-- (config.get re-applies the shortcut over actions.confirm), leaving
 				-- the choice dropped. Setting confirm = false disables the shortcut
 				-- for this source so its native confirm survives.
-				select = { confirm = false },
+				select = {
+					confirm = false,
+					kinds = {
+						native_review = {
+							focus = "list",
+							layout = { hidden = { "input", "preview" } },
+							matcher = { sort_empty = false },
+							on_show = review_picker_show,
+							actions = {
+								review_confirm = function(picker)
+									review_confirm_number(picker, vim.v.count)
+								end,
+								review_noop = review_picker_noop,
+								focus_input = review_picker_noop,
+								toggle_focus = review_picker_noop,
+								cycle_win = review_picker_noop,
+							},
+							win = { list = { keys = review_picker_keys } },
+						},
+					},
+				},
 			},
 			win = {
 				input = {

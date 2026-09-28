@@ -6,10 +6,17 @@ local comment_types = require("native_review.comment_types")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_editor")
 local FOOTER_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_editor_footer")
+local INPUT_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_editor_input")
 local INLINE_MAX_HEIGHT = 6
 local MODAL_MAX_HEIGHT = 18
 local MAX_WIDTH = 88
 local MIN_MODAL_WIDTH = 24
+local ESC_KEY = vim.keycode("<Esc>")
+local ENTER_KEY = vim.keycode("<CR>")
+local CONFIRMATION_PROMPTS = {
+	discard = "Press <Esc> again to discard",
+	save = "Press <Enter> again to save",
+}
 local active
 
 local EDITOR_HIGHLIGHT_LINKS = {
@@ -22,6 +29,11 @@ local EDITOR_HIGHLIGHT_LINKS = {
 local function apply_editor_highlights()
 	for name, link in pairs(EDITOR_HIGHLIGHT_LINKS) do
 		vim.api.nvim_set_hl(0, name, { default = true, link = link })
+	end
+	for _, definition in ipairs(comment_types.all()) do
+		if definition.highlight ~= definition.default_link then
+			vim.api.nvim_set_hl(0, definition.highlight, { default = true, link = definition.default_link })
+		end
 	end
 end
 
@@ -38,6 +50,21 @@ end
 
 local function valid_win(win)
 	return type(win) == "number" and vim.api.nvim_win_is_valid(win)
+end
+
+local function close_timer(timer)
+	if not timer then
+		return
+	end
+	pcall(timer.stop, timer)
+	local closing = false
+	if type(timer.is_closing) == "function" then
+		local ok, value = pcall(timer.is_closing, timer)
+		closing = ok and value == true
+	end
+	if not closing then
+		pcall(timer.close, timer)
+	end
 end
 
 local function scope_namespace(win, namespace)
@@ -129,8 +156,11 @@ local function screen_rows(buf, width, maximum)
 	return math.max(1, rows)
 end
 
-local function editor_title(options, selected_type)
+local function editor_title(options, selected_type, confirmation)
 	local title = options.title or "Review comment"
+	if confirmation then
+		title = title .. " (" .. confirmation .. ")"
+	end
 	if selected_type then
 		local definition = comment_types.get(selected_type)
 		local badge = definition and (definition.icon .. " " .. definition.id) or selected_type
@@ -145,8 +175,8 @@ end
 
 local function editor_hint(options, selected_type)
 	local title = editor_title(options, selected_type)
-	local type_hint = has_type_cycle(options) and "  ·  <Tab>/<S-Tab> type" or ""
-	return (" %s%s  ·  <C-s> / <CR><CR> save "):format(title, type_hint)
+	local type_hint = has_type_cycle(options) and "  ·  N:<Tab>/<S-Tab> type" or ""
+	return (" %s%s  ·  <C-s> / <CR><CR> save  ·  <Esc><Esc> discard "):format(title, type_hint)
 end
 
 local function fit_display(value, width)
@@ -182,6 +212,16 @@ local function fit_editor_title(options, selected_type, width)
 		return fit_display(badge, width)
 	end
 	return fit_display(title, width - suffix_width) .. suffix
+end
+
+local function fit_confirmation_title(options, confirmation, width)
+	local title = tostring(options.title or "Review comment")
+	local suffix = " (" .. confirmation .. ")"
+	local suffix_width = vim.fn.strdisplaywidth(suffix)
+	if suffix_width <= width then
+		return fit_display(title, width - suffix_width) .. suffix
+	end
+	return fit_display(confirmation, width)
 end
 
 local function composer_style(options)
@@ -230,8 +270,18 @@ local function chunks_width(chunks)
 	return width
 end
 
-local function card_title(options, selected_type, width)
+local function card_title(options, selected_type, width, confirmation)
 	local badge, badge_highlight = type_badge(selected_type)
+	if confirmation then
+		local title = tostring(options.title or "Review comment") .. " (" .. confirmation .. ")"
+		local first = badge and (" " .. badge .. " ") or ""
+		local rest = (badge and "· " or " ") .. title .. " "
+		if badge and vim.fn.strdisplaywidth(first .. rest) <= width then
+			return highlighted_chunks(first, badge_highlight, rest, "NvimReviewComposerTitle", width)
+		end
+		local fitted = fit_confirmation_title(options, confirmation, math.max(0, width - 2))
+		return { { fit_display(" " .. fitted .. " ", width), "NvimReviewComposerTitle" } }
+	end
 	local title = " " .. tostring(options.title or "Review comment") .. " "
 	if not badge then
 		return { { fit_display(title, width), "NvimReviewComposerTitle" } }
@@ -241,8 +291,8 @@ end
 
 local function card_footer(options, selected_type, width)
 	local badge, badge_highlight = type_badge(selected_type)
-	local controls = has_type_cycle(options) and " · <Tab>/<S-Tab> type · <C-s>/↵↵ save · q/Esc cancel "
-		or " · <C-s>/↵↵ save · q/Esc cancel "
+	local controls = has_type_cycle(options) and " · N:<Tab>/<S-Tab> type · <C-s>/↵↵ save · <Esc><Esc> discard "
+		or " · <C-s>/↵↵ save · <Esc><Esc> discard "
 	if not badge then
 		return { { fit_display(" " .. controls, width), "NvimReviewComposerMuted" } }
 	end
@@ -265,12 +315,21 @@ local function card_border(selected_type)
 end
 
 local function editor_controls(options, spacious)
-	local type_hint = has_type_cycle(options) and "<Tab>/<S-Tab> type" or nil
+	local type_hint = has_type_cycle(options) and "N:<Tab>/<S-Tab> type" or nil
 	local save_hint = spacious and "<C-s> / <CR><CR> save" or "<C-s>/<CR><CR> save"
 	return type_hint and (type_hint .. " · " .. save_hint) or save_hint
 end
 
-local function inline_footer_text(options, selected_type, width)
+local function inline_footer_text(options, selected_type, width, confirmation)
+	if confirmation then
+		local title = tostring(options.title or "Review comment") .. " (" .. confirmation .. ")"
+		local badge = type_badge(selected_type)
+		local full = badge and (title .. " " .. badge) or title
+		if vim.fn.strdisplaywidth(full) <= width then
+			return full
+		end
+		return fit_confirmation_title(options, confirmation, width)
+	end
 	local full = editor_hint(options, selected_type)
 	if vim.fn.strdisplaywidth(full) <= width then
 		return full
@@ -286,7 +345,7 @@ local function inline_footer_text(options, selected_type, width)
 	if title_width > 0 then
 		return fit_editor_title(options, selected_type, title_width) .. separator .. controls
 	end
-	local compact_controls = has_type_cycle(options) and "Tab/S-Tab:type · <C-s>/↵↵:save" or "<C-s>/↵↵:save"
+	local compact_controls = has_type_cycle(options) and "N:Tab/S-Tab:type · <C-s>/↵↵:save" or "<C-s>/↵↵:save"
 	local compact_title_width = width - vim.fn.strdisplaywidth(separator .. compact_controls)
 	if compact_title_width > 0 then
 		return fit_editor_title(options, selected_type, compact_title_width) .. separator .. compact_controls
@@ -298,7 +357,7 @@ local function inline_footer_text(options, selected_type, width)
 		essential = badge .. " · " .. essential
 	end
 	if has_type_cycle(options) then
-		essential = essential .. " · Tab:type"
+		essential = essential .. " · N:Tab:type"
 	end
 	return fit_display(essential, width)
 end
@@ -320,10 +379,11 @@ local function blank_virtual_lines(count)
 end
 
 ---Open a focused Markdown scratch buffer for a canonical review anchor.
----@param options? { title?: string, body?: string, recover?: fun(body: string, selected_type?: string): boolean, type_cycle?: boolean, selected_type?: string, style?: "card"|"minimal", source_win?: integer, source_window?: integer, anchor_line?: integer, anchor_range?: { first?: integer, last?: integer, start_line?: integer, end_line?: integer, [1]?: integer, [2]?: integer }, anchor?: { kind?: string, [string]: any } }
+---@param options? { title?: string, body?: string, recover?: fun(body: string, selected_type?: string): boolean, type_cycle?: boolean, selected_type?: string, start_in_insert?: boolean, style?: "card"|"minimal", source_win?: integer, source_window?: integer, anchor_line?: integer, anchor_range?: { first?: integer, last?: integer, start_line?: integer, end_line?: integer, [1]?: integer, [2]?: integer }, anchor?: { kind?: string, [string]: any } }
 ---@param callback fun(body: string?, interrupted?: boolean, selected_type?: string): boolean?
 function M.compose(options, callback)
 	options = options or {}
+	apply_editor_highlights()
 	if M.has_active() then
 		vim.notify(
 			"Finish the current review comment before opening another",
@@ -385,8 +445,8 @@ function M.compose(options, callback)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 
 	local selected_type = options.selected_type
-	if has_type_cycle(options) and not comment_types.contains(selected_type) then
-		selected_type = comment_types.ids()[1]
+	if has_type_cycle(options) and not selected_type then
+		selected_type = "issue"
 	end
 	local finished = false
 	local autocmds = {}
@@ -395,6 +455,8 @@ function M.compose(options, callback)
 	local footer_win
 	local reservation
 	local namespace_scoped = layout == "inline"
+	local pending_confirmation
+	local geometry_scheduled = false
 
 	local function clear_autocmds()
 		for _, id in ipairs(autocmds) do
@@ -426,7 +488,8 @@ function M.compose(options, callback)
 		if not valid_buf(footer_buf) then
 			return
 		end
-		local footer = inline_footer_text(options, selected_type, width)
+		local confirmation = pending_confirmation and pending_confirmation.prompt or nil
+		local footer = inline_footer_text(options, selected_type, width, confirmation)
 		vim.bo[footer_buf].modifiable = true
 		vim.api.nvim_buf_set_lines(footer_buf, 0, -1, false, { footer })
 		vim.bo[footer_buf].modifiable = false
@@ -482,7 +545,8 @@ function M.compose(options, callback)
 		}
 		if style == "card" then
 			window_config.border = card_border(selected_type)
-			window_config.title = card_title(options, selected_type, width)
+			window_config.title =
+				card_title(options, selected_type, width, pending_confirmation and pending_confirmation.prompt or nil)
 			window_config.title_pos = "left"
 			window_config.footer = card_footer(options, selected_type, width)
 			window_config.footer_pos = "left"
@@ -499,9 +563,18 @@ function M.compose(options, callback)
 		local desired_width = math.max(
 			MIN_MODAL_WIDTH,
 			content_width(buf),
-			vim.fn.strdisplaywidth(editor_title(options, selected_type)) + 2,
+			vim.fn.strdisplaywidth(
+				editor_title(options, selected_type, pending_confirmation and pending_confirmation.prompt or nil)
+			) + 2,
 			vim.fn.strdisplaywidth(editor_controls(options, true)) + 2,
-			chunks_width(card_title(options, selected_type, MAX_WIDTH)),
+			chunks_width(
+				card_title(
+					options,
+					selected_type,
+					MAX_WIDTH,
+					pending_confirmation and pending_confirmation.prompt or nil
+				)
+			),
 			chunks_width(card_footer(options, selected_type, MAX_WIDTH))
 		)
 		local width = math.min(width_limit, desired_width)
@@ -520,11 +593,13 @@ function M.compose(options, callback)
 		}
 		if style == "card" then
 			window_config.border = card_border(selected_type)
-			window_config.title = card_title(options, selected_type, width)
+			window_config.title =
+				card_title(options, selected_type, width, pending_confirmation and pending_confirmation.prompt or nil)
 			window_config.footer = card_footer(options, selected_type, width)
 		else
 			window_config.border = "rounded"
-			window_config.title = card_title(options, selected_type, width)
+			window_config.title =
+				card_title(options, selected_type, width, pending_confirmation and pending_confirmation.prompt or nil)
 			window_config.footer = card_footer(options, selected_type, width)
 		end
 		return window_config
@@ -602,11 +677,44 @@ function M.compose(options, callback)
 		"FloatFooter:NvimReviewComposerMuted",
 	}, ",")
 
+	local function schedule_geometry_update()
+		if finished or geometry_scheduled then
+			return
+		end
+		geometry_scheduled = true
+		vim.schedule(function()
+			geometry_scheduled = false
+			if not finished then
+				update_geometry()
+			end
+		end)
+	end
+
+	local function clear_confirmation(redraw, scheduled)
+		local pending = pending_confirmation
+		pending_confirmation = nil
+		if not pending then
+			return false
+		end
+		close_timer(pending.timer)
+		pending.timer = nil
+		if redraw and not finished then
+			if scheduled then
+				schedule_geometry_update()
+			else
+				update_geometry()
+			end
+		end
+		return true
+	end
+
 	local function close_editor()
 		if finished then
 			return false
 		end
 		finished = true
+		clear_confirmation(false)
+		pcall(vim.on_key, nil, INPUT_NAMESPACE)
 		clear_autocmds()
 		clear_reservation()
 		active = nil
@@ -627,6 +735,45 @@ function M.compose(options, callback)
 		return body ~= "" and body or nil
 	end
 
+	local function arm_confirmation(action, typed, scheduled)
+		clear_confirmation(false)
+		local pending = {
+			action = action,
+			changedtick = vim.api.nvim_buf_get_changedtick(buf),
+			prompt = CONFIRMATION_PROMPTS[action],
+			typed = typed,
+		}
+		pending_confirmation = pending
+		if scheduled then
+			schedule_geometry_update()
+		else
+			update_geometry()
+		end
+		local timeout = vim.o.timeoutlen
+		local created, timer = pcall(vim.defer_fn, function()
+			if finished or pending_confirmation ~= pending then
+				return
+			end
+			pending.timer = nil
+			pending_confirmation = nil
+			update_geometry()
+		end, timeout)
+		if not created or not timer then
+			if pending_confirmation == pending then
+				pending_confirmation = nil
+				if scheduled then
+					schedule_geometry_update()
+				else
+					update_geometry()
+				end
+			end
+			vim.notify("Could not start review confirmation timeout", vim.log.levels.ERROR, { title = "Review" })
+			return false
+		end
+		pending.timer = timer
+		return true
+	end
+
 	local function finish(body)
 		if close_editor() then
 			callback(body)
@@ -634,9 +781,13 @@ function M.compose(options, callback)
 	end
 
 	local function submit(interrupted)
+		local cleared = clear_confirmation(false)
 		local body = body_value()
 		if not body then
 			vim.notify("Review comment cannot be empty", vim.log.levels.WARN, { title = "Review" })
+			if cleared then
+				update_geometry()
+			end
 			return false
 		end
 		local accepted = callback(body, interrupted == true, selected_type)
@@ -647,7 +798,39 @@ function M.compose(options, callback)
 			close_editor()
 			return true
 		end
+		if cleared then
+			update_geometry()
+		end
 		return false
+	end
+
+	local function confirm_action(action, typed)
+		local body = body_value()
+		if action == "save" and not body then
+			submit(false)
+			return
+		elseif action == "discard" and not body then
+			clear_confirmation(false)
+			finish(nil)
+			return
+		end
+
+		local pending = pending_confirmation
+		if pending and pending.changedtick ~= vim.api.nvim_buf_get_changedtick(buf) then
+			clear_confirmation(false)
+			pending = nil
+		end
+
+		if pending and pending.action == action then
+			if action == "save" then
+				submit(false)
+			else
+				clear_confirmation(false)
+				finish(nil)
+			end
+			return
+		end
+		arm_confirmation(action, typed, false)
 	end
 
 	local function interrupt()
@@ -686,9 +869,57 @@ function M.compose(options, callback)
 		interrupt = interrupt,
 	}
 
+	pcall(vim.on_key, nil, INPUT_NAMESPACE)
+	vim.on_key(function(_, typed)
+		if finished or typed == "" then
+			return
+		end
+		local focused = valid_win(win)
+			and valid_buf(buf)
+			and vim.api.nvim_get_current_win() == win
+			and vim.api.nvim_get_current_buf() == buf
+		local pending = pending_confirmation
+		if
+			pending
+			and (not focused or typed ~= pending.typed or pending.changedtick ~= vim.api.nvim_buf_get_changedtick(buf))
+		then
+			clear_confirmation(true, true)
+		end
+		if
+			not pending_confirmation
+			and focused
+			and typed == ESC_KEY
+			and vim.api.nvim_get_mode().mode:sub(1, 1) == "i"
+			and body_value()
+		then
+			arm_confirmation("discard", ESC_KEY, true)
+		end
+	end, INPUT_NAMESPACE)
+
 	autocmds[#autocmds + 1] = vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
 		buffer = buf,
-		callback = update_geometry,
+		callback = function()
+			local pending = pending_confirmation
+			if not pending or pending.changedtick ~= vim.api.nvim_buf_get_changedtick(buf) then
+				clear_confirmation(false)
+			end
+			update_geometry()
+		end,
+	})
+	autocmds[#autocmds + 1] = vim.api.nvim_create_autocmd({ "WinLeave", "CompleteDone" }, {
+		buffer = buf,
+		callback = function()
+			if clear_confirmation(false) then
+				update_geometry()
+			end
+		end,
+	})
+	autocmds[#autocmds + 1] = vim.api.nvim_create_autocmd("FocusLost", {
+		callback = function()
+			if clear_confirmation(false) then
+				update_geometry()
+			end
+		end,
 	})
 	autocmds[#autocmds + 1] = vim.api.nvim_create_autocmd({ "VimResized", "WinResized" }, {
 		callback = update_geometry,
@@ -725,25 +956,31 @@ function M.compose(options, callback)
 	vim.keymap.set({ "n", "i" }, "<C-s>", function()
 		submit(false)
 	end, { buffer = buf, silent = true, desc = "Save review text" })
-	vim.keymap.set("n", "<CR><CR>", function()
-		submit(false)
-	end, { buffer = buf, silent = true, desc = "Save review text" })
-	for _, lhs in ipairs({ "q", "<Esc>" }) do
-		vim.keymap.set("n", lhs, function()
+	vim.keymap.set("n", "<CR>", function()
+		confirm_action("save", ENTER_KEY)
+	end, { buffer = buf, silent = true, desc = "Confirm and save review text" })
+	vim.keymap.set("n", "<Esc>", function()
+		confirm_action("discard", ESC_KEY)
+	end, { buffer = buf, silent = true, desc = "Confirm and discard review text" })
+	vim.keymap.set("n", "q", function()
+		local body = body_value()
+		clear_confirmation(false)
+		if not body then
 			finish(nil)
-		end, { buffer = buf, silent = true, desc = "Cancel review text" })
-	end
+			return
+		end
+		update_geometry()
+		vim.notify("Review comment has unsent text; press <Esc> twice to discard", vim.log.levels.WARN, {
+			title = "Review",
+		})
+	end, { buffer = buf, silent = true, desc = "Close empty review text" })
 	if has_type_cycle(options) then
 		for lhs, direction in pairs({ ["<Tab>"] = 1, ["<S-Tab>"] = -1 }) do
 			local delta = direction
-			vim.keymap.set({ "n", "i" }, lhs, function()
+			vim.keymap.set("n", lhs, function()
+				clear_confirmation(false)
 				selected_type = comment_types.cycle(selected_type, delta)
 				update_geometry()
-				vim.schedule(function()
-					if not finished and valid_win(win) and vim.api.nvim_get_current_win() == win then
-						vim.cmd("startinsert")
-					end
-				end)
 			end, {
 				buffer = buf,
 				silent = true,
@@ -752,7 +989,7 @@ function M.compose(options, callback)
 		end
 	end
 
-	vim.cmd("startinsert")
+	vim.cmd(options.start_in_insert == false and "stopinsert" or "startinsert")
 	return true
 end
 

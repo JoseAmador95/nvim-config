@@ -239,6 +239,77 @@ test("LogWatch reloads bounded content after rotation and delete/recreate", func
 	vim.fn.delete(rotated)
 end)
 
+test("follow_path opens one reusable right split with private viewer options and q teardown", function()
+	local path = vim.fn.tempname()
+	write_raw(path, "build starting\n")
+	vim.cmd("enew!")
+	local source = vim.api.nvim_get_current_buf()
+	local windows_before = #vim.api.nvim_tabpage_list_wins(0)
+	local descriptor, open_err = log_watch.follow_path(path, {
+		width = 72,
+		title = "Dev Container Log",
+		presenter = "devcontainer-log",
+	})
+	assert(descriptor, open_err)
+	local buf = descriptor.bufnr
+	local win = descriptor.winid
+	assert(vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf)
+	equal(windows_before + 1, #vim.api.nvim_tabpage_list_wins(0), "viewer did not open exactly one split")
+	equal("tail://" .. path, vim.api.nvim_buf_get_name(buf), "viewer did not use the follow buffer")
+	equal("nofile", vim.bo[buf].buftype, "viewer buffer became durable")
+	equal(false, vim.bo[buf].buflisted, "viewer buffer became listed")
+	equal(false, vim.bo[buf].swapfile, "viewer buffer gained swap")
+	equal(false, vim.bo[buf].undofile, "viewer buffer gained undo persistence")
+	equal(false, vim.wo[win].wrap, "viewer wrap changed")
+	equal(false, vim.wo[win].number, "viewer line numbers changed")
+	equal(false, vim.wo[win].relativenumber, "viewer relative numbers changed")
+	equal("no", vim.wo[win].signcolumn, "viewer sign column changed")
+	equal(true, vim.wo[win].winfixwidth, "viewer width was not fixed")
+	equal(" Dev Container Log", vim.wo[win].winbar, "viewer title changed")
+	equal(
+		math.max(20, math.min(72, math.floor(vim.o.columns / 2))),
+		vim.api.nvim_win_get_width(win),
+		"viewer width policy changed"
+	)
+	local status = assert(log_watch.status()[1])
+	equal("devcontainer-log", status.metadata.presenter, "viewer metadata lost its presenter")
+	equal(source, status.metadata.source_buf, "viewer did not retain its source buffer")
+
+	local window_count = #vim.api.nvim_tabpage_list_wins(0)
+	local reused, reuse_err = log_watch.follow_path(path, { width = 72, title = "Dev Container Log" })
+	assert(reused, reuse_err)
+	equal(buf, reused.bufnr, "viewer duplicated the follow session")
+	equal(win, reused.winid, "viewer did not focus its existing split")
+	equal(window_count, #vim.api.nvim_tabpage_list_wins(0), "viewer duplicated its split")
+	equal(win, vim.api.nvim_get_current_win(), "viewer did not focus its existing split")
+
+	local previous = vim.uv.fs_stat(path)
+	append_raw(path, "container running\n")
+	trigger(path, previous, vim.uv.fs_stat(path))
+	wait_for(function()
+		return buffer_lines(buf)[2] == "container running"
+	end, "dedicated viewer stopped following appended output")
+	vim.cmd("vsplit")
+	local moved_win = vim.api.nvim_get_current_win()
+	vim.api.nvim_win_set_buf(moved_win, buf)
+	vim.api.nvim_win_close(win, true)
+	assert(vim.api.nvim_win_get_buf(moved_win) == buf, "viewer buffer did not move for q mapping test")
+
+	local close_mapping
+	for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+		if mapping.lhs == "q" then
+			close_mapping = mapping.callback
+		end
+	end
+	assert(type(close_mapping) == "function", "viewer omitted its buffer-local q mapping")
+	close_mapping()
+	equal({}, log_watch.status(), "q left the follow session active")
+	assert(not vim.api.nvim_win_is_valid(moved_win), "q closed a stale captured window instead of the live viewer")
+
+	vim.api.nvim_buf_delete(source, { force = true })
+	vim.fn.delete(path)
+end)
+
 vim.uv.fs_read = original_fs_read
 vim.uv.new_fs_poll = original_new_fs_poll
 vim.notify = original_notify

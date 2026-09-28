@@ -84,6 +84,11 @@ test("comment rows expose old and current sides without inventing one for genera
 	assert(rendered[5]:find("[CURRENT] range lua/example.lua:3-5", 1, true))
 	assert(rendered[6]:find("[OLD] file lua/example.lua", 1, true))
 	assert(rendered[7]:find("[CURRENT] file lua/example.lua", 1, true))
+
+	comment_workspace.session.items[2].type = "retired"
+	local inactive_rows, _, inactive_decorations = panel._comment_lines({ workspace = comment_workspace })
+	assert(inactive_rows[4]:find("[· retired]", 1, true), "inactive type lost its historical label")
+	assert(inactive_decorations[4][1].group == "Comment", "inactive type did not use generic highlighting")
 end)
 
 local workspace = {
@@ -469,6 +474,16 @@ test("files render a colored stable tree and retain hidden selection state", fun
 	assert(rendered_file:find("◇", 1, true), "deterministic file icon fallback is missing")
 	assert(rendered_file:find("a.lua", 1, true) and rendered_file:find("+3", 1, true))
 	assert(rendered_file:find("-2", 1, true) and rendered_file:find("(1)", 1, true))
+	assert(panel.refresh(state, working, staged_identity))
+	local namespace = assert(vim.api.nvim_get_namespaces().nvim_review_panel_files)
+	local precommit_selected = false
+	for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(state.panes.files.buf, namespace, 0, -1, { details = true })) do
+		if mark[2] == file_line - 1 and mark[4].hl_group == "ReviewPanelFileSelected" then
+			precommit_selected = true
+			break
+		end
+	end
+	assert(precommit_selected, "pending presentation identity was not highlighted before controller commit")
 	local binary_line = assert(line_containing(state.panes.files.buf, "image.bin"))
 	local binary_text = lines(state.panes.files.buf)[binary_line]
 	assert(not binary_text:find("+0", 1, true) and not binary_text:find("-0", 1, true))
@@ -492,7 +507,6 @@ test("files render a colored stable tree and retain hidden selection state", fun
 	vim.fn.maparg("<leader>rA", "n", false, true).callback()
 	assert(file_comment == nil, "directory row invoked the file-only comment callback")
 
-	local namespace = assert(vim.api.nvim_get_namespaces().nvim_review_panel_files)
 	local marks = vim.api.nvim_buf_get_extmarks(state.panes.files.buf, namespace, 0, -1, { details = true })
 	local groups = {}
 	for _, mark in ipairs(marks) do

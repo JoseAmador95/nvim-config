@@ -39,6 +39,10 @@ local function same_path(left, right)
 	return canonical(left) == canonical(right)
 end
 
+local function is_module_or_child(name, prefix)
+	return name == prefix or name:sub(1, #prefix + 1) == prefix .. "."
+end
+
 local function assert_markdown_argument(label)
 	local buf = vim.api.nvim_get_current_buf()
 	assert(vim.bo[buf].filetype == "markdown", label .. " did not detect markdown")
@@ -46,7 +50,7 @@ local function assert_markdown_argument(label)
 		filetype_events[buf] == 1,
 		string.format("%s emitted FileType %d times (expected 1)", label, filetype_events[buf] or 0)
 	)
-	assert(require("render-markdown.core.manager").attached(buf), label .. " did not attach render-markdown")
+	assert(not vim.b[buf].md_render, label .. " source was rendered in place")
 end
 
 vim.api.nvim_create_autocmd("VimEnter", {
@@ -72,6 +76,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"NavigationBack",
 					"NavigationForward",
 					"NavigationHistory",
+					"MarkdownView",
 					"ReviewOpen",
 					"ReviewPanel",
 					"ReviewComment",
@@ -80,6 +85,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"ReviewClose",
 					"ClangdSwitchSourceHeader",
 					"ToggleInlineDiagnostics",
+					"NvimConfigExecutionAuthorize",
+					"NvimConfigExecutionRevoke",
+					"NvimConfigExecutionStatus",
 					"CoverageLoad",
 					"CoverageSummary",
 					"CoverageClear",
@@ -88,6 +96,25 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"Scratch",
 				}) do
 					assert(vim.fn.exists(":" .. command) == 2, "full editor " .. command .. " command is missing")
+				end
+				assert(type(package.loaded["config.code_review"]) == "table", "review host facade was not registered")
+				assert(
+					type(package.loaded["config.exact_editor"]) == "table",
+					"exact editor host adapter was not registered"
+				)
+				assert(package.loaded.exact_editor == nil, "exact-editor core loaded before delayed UI activation")
+				for _, name in ipairs({ "mason", "mason-registry", "mason-lspconfig" }) do
+					assert(package.loaded[name] == nil, name .. " loaded during ordinary file startup")
+				end
+				assert(
+					package.loaded["config.native_review"] == nil,
+					"native review host adapter loaded during startup"
+				)
+				for name in pairs(package.loaded) do
+					assert(
+						not is_module_or_child(name, "native_review"),
+						name .. " crossed the native review first-action boundary during startup"
+					)
 				end
 				for _, command in ipairs({
 					"ReviewRoundStart",
@@ -109,11 +136,20 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"debug-test mapping is missing"
 				)
 				local diagnostics = vim.diagnostic.config()
-				assert(diagnostics.virtual_text == false, "diagnostic virtual text is enabled")
+				local expected_inline = require("config.redraw_profile").inline_diagnostics()
 				assert(
-					type(diagnostics.virtual_lines) == "table" and diagnostics.virtual_lines.current_line == true,
-					"current-line diagnostic virtual lines are not enabled"
+					require("config.inline_diagnostics").status().mode == expected_inline,
+					"inline diagnostics did not use the frozen host policy"
 				)
+				assert(diagnostics.virtual_text == false, "diagnostic virtual text is enabled")
+				if expected_inline == "current-line" then
+					assert(
+						type(diagnostics.virtual_lines) == "table" and diagnostics.virtual_lines.current_line == true,
+						"current-line diagnostic virtual lines are not enabled"
+					)
+				else
+					assert(diagnostics.virtual_lines == false, "settled/off diagnostics remained globally enabled")
+				end
 				local inline_diagnostics_map = vim.fn.maparg("<leader>xi", "n", false, true)
 				assert(
 					inline_diagnostics_map.rhs == "<cmd>ToggleInlineDiagnostics<cr>",
@@ -135,10 +171,21 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				vim.cmd("ToggleInlineDiagnostics")
 				local diagnostics_enabled = vim.diagnostic.config()
 				assert(
-					type(diagnostics_enabled.virtual_lines) == "table"
-						and diagnostics_enabled.virtual_lines.current_line == true,
-					"inline diagnostics were not restored"
+					require("config.inline_diagnostics").status().mode == expected_inline,
+					"inline policy was not restored"
 				)
+				if expected_inline == "current-line" then
+					assert(
+						type(diagnostics_enabled.virtual_lines) == "table"
+							and diagnostics_enabled.virtual_lines.current_line == true,
+						"current-line diagnostics were not restored"
+					)
+				else
+					assert(
+						diagnostics_enabled.virtual_lines == false,
+						"settled diagnostics enabled the native cursor handler"
+					)
+				end
 				local close_map = vim.fn.maparg("<leader>q", "n", false, true)
 				assert(close_map.rhs == "<cmd>CloseTab<cr>", "full editor close mapping bypasses CloseTab")
 				local close_all_map = vim.fn.maparg("<leader>Q", "n", false, true)

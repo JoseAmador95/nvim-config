@@ -1,6 +1,7 @@
 -- Verified, explicit lifecycle for release and package-manager tools.
 local M = {}
 local contracts = require("local_plugins.contracts")
+local bit = require("bit")
 
 local uv = vim.uv
 local ffi_ok, ffi = pcall(require, "ffi")
@@ -8,8 +9,9 @@ if ffi_ok then
 	pcall(
 		ffi.cdef,
 		[[
-			int fcntl(int fd, int cmd, ...);
-			int mkdirat(int fd, const char *path, unsigned int mode);
+				int fcntl(int fd, int cmd, ...);
+				unsigned int geteuid(void);
+				int mkdirat(int fd, const char *path, unsigned int mode);
 			int openat(int fd, const char *path, int flags, ...);
 			int renameat2(int oldfd, const char *oldpath, int newfd, const char *newpath, unsigned int flags);
 			int renameatx_np(int oldfd, const char *oldpath, int newfd, const char *newpath, unsigned int flags);
@@ -63,6 +65,7 @@ local pinned_pid
 local pinned_state_root
 local state_root_guard
 local state_directory_guards = {}
+local runtime_authority = { external_schema = 1 }
 
 local RECORD_SCHEMA = 2
 local PLAN_SCHEMA = 1
@@ -75,10 +78,17 @@ local MAX_RECORD_TRANSACTION_BYTES = MAX_PRIVATE_BYTES * 5 + 64 * 1024
 local MAX_LEGACY_RECORDS = 512
 local PRIVATE_FILE_MODE = 384 -- 0600
 local PRIVATE_DIRECTORY_MODE = 448 -- 0700
+local UNSAFE_WRITE_MASK = tonumber("22", 8) -- group/world write
 local RECORD_TRANSACTION_SCHEMA = 1
+
+runtime_authority.max_bundle_entries = 4096
+runtime_authority.max_bundle_bytes = 512 * 1024 * 1024
 
 local process_alive
 local recover_record_transactions
+local acquire_prepared_lock
+local release_lock
+local resource_lock_base
 
 local STATUSES = {
 	planned = true,
@@ -134,7 +144,22 @@ local function pid()
 	return ok and finite_number(value) and value >= 1 and value % 1 == 0 and value or nil
 end
 
-local function notify(message, level)
+local function schedule_on_main(callback, ...)
+	if not vim.in_fast_event() then
+		return callback(...)
+	end
+	local arguments = { n = select("#", ...), ... }
+	vim.schedule(function()
+		callback(unpack(arguments, 1, arguments.n))
+	end)
+end
+
+local notify
+notify = function(message, level)
+	if vim.in_fast_event() then
+		schedule_on_main(notify, message, level)
+		return
+	end
 	if type(configured.notify) == "function" then
 		pcall(configured.notify, message, level)
 	end
@@ -199,43 +224,14 @@ local function validate_directory_guard(path, guard)
 	return stat
 end
 
-local function secure_directory(path, parent)
-	if not contained(path, root()) then
-		return nil, "state directory escapes pinned root"
-	end
-	if parent then
-		local parent_guard = state_directory_guards[parent]
-		local parent_ok, parent_err = validate_directory_guard(parent, parent_guard)
-		if not parent_ok then
-			return nil, parent_err
-		end
-	end
-	local before = uv.fs_lstat(path)
-	if not before then
-		local made, make_err = uv.fs_mkdir(path, tonumber("700", 8))
-		if not made then
-			return nil, "state directory is unavailable: " .. tostring(make_err)
-		end
-	elseif before.type ~= "directory" then
-		return nil, "state path is not a real directory"
-	end
-	local stat, inspect_err = validate_directory_guard(path, state_directory_guards[path])
-	if not stat then
-		return nil, inspect_err
-	end
-	local secured, secure_err = uv.fs_chmod(path, tonumber("700", 8))
-	local after = secured and uv.fs_lstat(path) or nil
-	if not secured or not after or after.type ~= "directory" or after.dev ~= stat.dev or after.ino ~= stat.ino then
-		return nil, "cannot secure state directory: " .. tostring(secure_err)
-	end
-	state_directory_guards[path] = state_directory_guards[path] or { dev = after.dev, ino = after.ino }
-	return true
-end
+local secure_directory
 
 local function prepare_state()
 	local paths = {
 		{ root(), vim.fs.dirname(root()) },
 		{ vim.fs.joinpath(root(), "records"), root() },
+		{ vim.fs.joinpath(root(), "external-records"), root() },
+		{ vim.fs.joinpath(root(), "active-slots"), root() },
 		{ vim.fs.joinpath(root(), "record-transactions"), root() },
 		{ vim.fs.joinpath(root(), "locks"), root() },
 		{ vim.fs.joinpath(root(), "locks", "resources"), vim.fs.joinpath(root(), "locks") },
@@ -256,7 +252,11 @@ local function prepare_state()
 				return nil, current_err
 			end
 		end
-		local ok, err = secure_directory(path, parent == state_root_guard.parent and nil or parent)
+		local expected_parent = parent
+		if parent == state_root_guard.parent then
+			expected_parent = nil
+		end
+		local ok, err = secure_directory(path, expected_parent)
 		if not ok then
 			return nil, err
 		end
@@ -292,7 +292,10 @@ local function validate_state_parent(path)
 		return nil, "state parent is not pinned"
 	end
 	local ok, err = validate_directory_guard(parent, guard)
-	return ok and true or nil, err
+	if not ok then
+		return nil, err
+	end
+	return true
 end
 
 local function resolve_state_root(value)
@@ -457,14 +460,14 @@ local function record_open_directory(path)
 	return fd, opened
 end
 
-local function record_open_directory_at(parent_fd, parent, name, secure)
+local function record_open_directory_at(parent_fd, parent, name, secure, expected_stat)
 	if not record_ffi_ready() then
 		return nil, "descriptor-relative record operations are unavailable"
 	end
 	local flags = RECORD_OPEN_FLAGS.directory + RECORD_OPEN_FLAGS.nonblock + RECORD_OPEN_FLAGS.no_follow
-	local fd, open_err = record_openat(parent_fd, name, flags)
+	local fd, open_err, open_errno = record_openat(parent_fd, name, flags)
 	if not fd then
-		return nil, open_err
+		return nil, open_err, open_errno
 	end
 	local expected = vim.fs.joinpath(parent, name)
 	local opened = uv.fs_fstat(fd)
@@ -472,6 +475,7 @@ local function record_open_directory_at(parent_fd, parent, name, secure)
 		not opened
 		or opened.type ~= "directory"
 		or not record_descriptor_bound(fd, expected)
+		or expected_stat and (opened.dev ~= expected_stat.dev or opened.ino ~= expected_stat.ino)
 		or secure and not uv.fs_fchmod(fd, PRIVATE_DIRECTORY_MODE)
 	then
 		uv.fs_close(fd)
@@ -489,6 +493,151 @@ local function record_open_directory_at(parent_fd, parent, name, secure)
 		return nil, "record child directory changed while it was secured"
 	end
 	return fd, after
+end
+
+M._sync_state_directory = function(fd)
+	return uv.fs_fsync(fd)
+end
+
+secure_directory = function(path, parent)
+	if not contained(path, root()) then
+		return nil, "state directory escapes pinned root"
+	end
+	local parent_path = vim.fs.dirname(path)
+	local name = vim.fs.basename(path)
+	if name == "" or name == "." or name == ".." or name:find("/", 1, true) or name:find("\0", 1, true) then
+		return nil, "state directory name is unsafe"
+	end
+	local expected_parent
+	if parent then
+		expected_parent = state_directory_guards[parent]
+		if not expected_parent then
+			return nil, "state parent is not pinned"
+		end
+	else
+		expected_parent = state_root_guard.parent_stat
+	end
+	local parent_current, parent_err = validate_directory_guard(parent_path, expected_parent)
+	if not parent_current then
+		return nil, parent_err
+	end
+	local parent_fd, parent_opened = record_open_directory(parent_path)
+	if
+		not parent_fd
+		or parent_opened.dev ~= parent_current.dev
+		or parent_opened.ino ~= parent_current.ino
+		or not record_descriptor_bound(parent_fd, parent_path)
+	then
+		if parent_fd then
+			uv.fs_close(parent_fd)
+		end
+		return nil, "state directory identity changed"
+	end
+	local before = uv.fs_lstat(path)
+	local created = false
+	if not before then
+		local hook_ok = run_interleave("before-state-directory-create", { parent = parent_path, path = path })
+		local parent_after_hook = uv.fs_fstat(parent_fd)
+		if
+			not hook_ok
+			or not parent_after_hook
+			or parent_after_hook.dev ~= parent_opened.dev
+			or parent_after_hook.ino ~= parent_opened.ino
+			or not record_descriptor_bound(parent_fd, parent_path)
+		then
+			uv.fs_close(parent_fd)
+			return nil, "state directory identity changed"
+		end
+		if ffi.C.mkdirat(parent_fd, name, PRIVATE_DIRECTORY_MODE) ~= 0 then
+			local errno = ffi.errno()
+			if errno ~= RECORD_FFI_ABI.eexist then
+				uv.fs_close(parent_fd)
+				return nil, "state directory is unavailable: errno " .. tostring(errno)
+			end
+		else
+			created = true
+		end
+	elseif before.type ~= "directory" then
+		uv.fs_close(parent_fd)
+		return nil, "state path is not a real directory"
+	end
+	local guard = state_directory_guards[path]
+	if not guard and path == root() and state_root_guard.state == "present" then
+		guard = state_root_guard
+	end
+	local needs_barrier = created
+		or not guard
+		or guard.durable ~= true
+		or not before
+		or before.mode % 512 ~= PRIVATE_DIRECTORY_MODE
+	if needs_barrier and guard then
+		state_directory_guards[path] = { dev = guard.dev, ino = guard.ino, durable = false }
+	end
+	local child_fd, child = record_open_directory_at(parent_fd, parent_path, name, true, guard)
+	if
+		not child_fd
+		or guard and (child.dev ~= guard.dev or child.ino ~= guard.ino)
+		or uv.getuid and child.uid ~= uv.getuid()
+	then
+		if child_fd then
+			uv.fs_close(child_fd)
+		end
+		uv.fs_close(parent_fd)
+		return nil, "cannot secure state directory: " .. tostring(child)
+	end
+	if needs_barrier then
+		state_directory_guards[path] = { dev = child.dev, ino = child.ino, durable = false }
+	end
+	local child_synced, child_sync_err = true, nil
+	if needs_barrier then
+		child_synced, child_sync_err = M._sync_state_directory(child_fd, path, "child", created)
+	end
+	local child_after = uv.fs_fstat(child_fd)
+	local parent_after_child = uv.fs_fstat(parent_fd)
+	if
+		not child_synced
+		or not child_after
+		or child_after.dev ~= child.dev
+		or child_after.ino ~= child.ino
+		or child_after.mode % 512 ~= PRIVATE_DIRECTORY_MODE
+		or not parent_after_child
+		or parent_after_child.dev ~= parent_opened.dev
+		or parent_after_child.ino ~= parent_opened.ino
+		or not record_descriptor_bound(child_fd, path)
+		or not record_descriptor_bound(parent_fd, parent_path)
+	then
+		uv.fs_close(child_fd)
+		uv.fs_close(parent_fd)
+		return nil, "state directory fsync failed: " .. tostring(child_sync_err or "identity changed")
+	end
+	local parent_synced, parent_sync_err = true, nil
+	if needs_barrier then
+		parent_synced, parent_sync_err = M._sync_state_directory(parent_fd, parent_path, "parent", created)
+	end
+	local child_final = uv.fs_fstat(child_fd)
+	local parent_final = uv.fs_fstat(parent_fd)
+	if
+		not parent_synced
+		or not child_final
+		or child_final.dev ~= child.dev
+		or child_final.ino ~= child.ino
+		or not parent_final
+		or parent_final.dev ~= parent_opened.dev
+		or parent_final.ino ~= parent_opened.ino
+		or not record_descriptor_bound(child_fd, path)
+		or not record_descriptor_bound(parent_fd, parent_path)
+	then
+		uv.fs_close(child_fd)
+		uv.fs_close(parent_fd)
+		return nil, "state directory parent fsync failed: " .. tostring(parent_sync_err or "identity changed")
+	end
+	local child_closed, child_close_err = uv.fs_close(child_fd)
+	local parent_closed, parent_close_err = uv.fs_close(parent_fd)
+	if not child_closed or not parent_closed then
+		return nil, "state directory close failed: " .. tostring(child_close_err or parent_close_err)
+	end
+	state_directory_guards[path] = { dev = child.dev, ino = child.ino, durable = true }
+	return true
 end
 
 local function record_rename_noreplace(source_fd, source, destination_fd, destination)
@@ -719,7 +868,10 @@ local function record_conditional_unlink(parent_fd, parent, name, label, expecte
 	local reserved = (".%s.remove.%d.%s.%d"):format(name, pid(), tostring(uv.hrtime()), temp_counter)
 	local moved, move_err, move_errno = record_rename_noreplace(parent_fd, name, parent_fd, reserved)
 	if not moved and move_errno == 2 then
-		return missing_ok and true or nil, missing_ok and nil or (label .. " disappeared before cleanup")
+		if missing_ok then
+			return true
+		end
+		return nil, label .. " disappeared before cleanup"
 	end
 	if not moved then
 		return nil, label .. " cleanup reservation failed: " .. tostring(move_err)
@@ -869,6 +1021,7 @@ local function create_record_transaction(path, data, original)
 		schema = RECORD_TRANSACTION_SCHEMA,
 		kind = "record-transaction",
 		target = vim.fs.basename(path),
+		target_namespace = vim.fs.basename(vim.fs.dirname(path)),
 		owner_pid = pid(),
 		owner_token = instance_token,
 		new_data = data,
@@ -1114,8 +1267,10 @@ local function publish_record_commit(transaction)
 		MAX_RECORD_TRANSACTION_BYTES
 	)
 	if existing then
-		return existing.data == transaction.commit_data or nil,
-			existing.data == transaction.commit_data and nil or "record transaction commit marker changed"
+		if existing.data == transaction.commit_data then
+			return true
+		end
+		return nil, "record transaction commit marker changed"
 	end
 	if existing == nil then
 		return nil, existing_err
@@ -1211,12 +1366,11 @@ local function atomic_write(path, data)
 	end
 	local record_parent = vim.fs.dirname(path)
 	local target = vim.fs.basename(path)
-	if
-		record_parent ~= vim.fs.joinpath(root(), "records")
-		or not target:match("^[0-9a-f]+%.json$")
-		or not validate_state_parent(path)
-	then
-		return nil, "record target is outside the pinned record directory"
+	local allowed_parent = record_parent == vim.fs.joinpath(root(), "records")
+		or record_parent == vim.fs.joinpath(root(), "external-records")
+		or record_parent == vim.fs.joinpath(root(), "active-slots")
+	if not allowed_parent or not target:match("^[0-9a-f]+%.json$") or not validate_state_parent(path) then
+		return nil, "record target is outside a pinned record directory"
 	end
 	local record_fd, record_err = record_open_directory(record_parent)
 	if not record_fd then
@@ -1359,6 +1513,7 @@ local function decode_record_transaction(transaction)
 			schema = true,
 			kind = true,
 			target = true,
+			target_namespace = true,
 			owner_pid = true,
 			owner_token = true,
 			new_data = true,
@@ -1368,6 +1523,7 @@ local function decode_record_transaction(transaction)
 		or manifest.kind ~= "record-transaction"
 		or type(manifest.target) ~= "string"
 		or not manifest.target:match("^[0-9a-f]+%.json$")
+		or (manifest.target_namespace ~= nil and manifest.target_namespace ~= "records" and manifest.target_namespace ~= "external-records" and manifest.target_namespace ~= "active-slots")
 		or not finite_number(manifest.owner_pid)
 		or manifest.owner_pid < 1
 		or manifest.owner_pid % 1 ~= 0
@@ -1460,7 +1616,10 @@ local function claim_record_transaction(transaction)
 		record_rename_noreplace(transaction.root_fd, transaction.name, transaction.root_fd, claimed_name)
 	if not moved then
 		close_record_transaction(transaction)
-		return move_errno == 2 and false or nil, move_errno == 2 and nil or move_err
+		if move_errno == 2 then
+			return false
+		end
+		return nil, move_err
 	end
 	local claimed, open_err = open_record_transaction(transaction.root_fd, transaction.root_path, claimed_name)
 	if not claimed or claimed.stat.dev ~= transaction.stat.dev or claimed.stat.ino ~= transaction.stat.ino then
@@ -1493,138 +1652,187 @@ local function recover_record_transaction(transaction)
 		close_record_transaction(transaction)
 		return true
 	end
-	local claimed, claim_err = claim_record_transaction(transaction)
-	if claimed == false then
-		return true
-	end
-	if not claimed then
-		return nil, "record recovery claim failed: " .. tostring(claim_err)
-	end
-	decoded, decode_err = decode_record_transaction(claimed)
-	if not decoded then
-		return preserve_recovery_transaction(claimed, "record recovery claim changed: " .. tostring(decode_err))
-	end
-	local record_parent = vim.fs.joinpath(root(), "records")
-	local record_fd, record_err = record_open_directory(record_parent)
-	if not record_fd then
-		close_record_transaction(decoded)
-		return nil, record_err
-	end
-	local target = record_read_exact(
-		record_fd,
-		record_parent,
-		decoded.manifest.target,
-		"record recovery target",
-		MAX_PRIVATE_BYTES
-	)
-	local stage = record_read_exact(decoded.fd, decoded.path, "stage", "record recovery staging", MAX_PRIVATE_BYTES)
-	local target_entry = record_generic_snapshot(record_parent, decoded.manifest.target)
-	local stage_entry = record_generic_snapshot(decoded.path, "stage")
-	local target_new = target and record_stored_matches(decoded.new, target)
-	local stage_new = stage and record_stored_matches(decoded.new, stage)
-	local old = decoded.manifest.old
-	local target_old = old ~= false and target and record_stored_matches(old, target)
-	local stage_old = old ~= false and stage and record_stored_matches(old, stage)
-	if decoded.committed then
-		if not target_new then
-			uv.fs_close(record_fd)
-			return preserve_recovery_transaction(decoded, "committed record recovery target drifted")
+	local recovery_lock
+	if decoded.manifest.target_namespace == "active-slots" then
+		local target_digest = decoded.manifest.target:match("^([0-9a-f]+)%.json$")
+		if not target_digest or #target_digest ~= 64 then
+			return preserve_recovery_transaction(transaction, "active-slot recovery target is invalid")
 		end
-		if (old == false and stage_entry ~= false) or (old ~= false and not stage_old) then
-			uv.fs_close(record_fd)
-			return preserve_recovery_transaction(decoded, "committed record recovery cleanup side changed")
-		end
-		local cleaned, cleanup_err = cleanup_record_transaction(decoded, old ~= false and old or nil)
-		uv.fs_close(record_fd)
-		if not cleaned then
-			return preserve_recovery_transaction(
-				decoded,
-				"committed record cleanup deferred: " .. tostring(cleanup_err)
-			)
-		end
-		return true
-	end
-	if old == false then
-		if target_new and stage_entry == false then
-			local marked, marker_err = publish_record_commit(decoded)
-			if not marked then
-				uv.fs_close(record_fd)
-				return preserve_recovery_transaction(
-					decoded,
-					"initial record commit recovery deferred: " .. tostring(marker_err)
-				)
+		local resource = "active-slot:" .. target_digest
+		local lock_err
+		recovery_lock, lock_err = acquire_prepared_lock(resource_lock_base(resource), resource, 0)
+		if not recovery_lock then
+			close_record_transaction(transaction)
+			if lock_err == "locked" or lock_err == "lock-owner-unverifiable" then
+				return true
 			end
-			local cleaned, cleanup_err = cleanup_record_transaction(decoded, nil)
+			return nil, "active-slot recovery lock failed: " .. tostring(lock_err)
+		end
+	end
+	local function continue_recovery()
+		local claimed, claim_err = claim_record_transaction(transaction)
+		if claimed == false then
+			return true
+		end
+		if not claimed then
+			return nil, "record recovery claim failed: " .. tostring(claim_err)
+		end
+		decoded, decode_err = decode_record_transaction(claimed)
+		if not decoded then
+			return preserve_recovery_transaction(claimed, "record recovery claim changed: " .. tostring(decode_err))
+		end
+		-- Transactions created before external certifications existed omitted the
+		-- namespace and continue to recover against the managed records directory.
+		local record_parent = vim.fs.joinpath(root(), decoded.manifest.target_namespace or "records")
+		local record_fd, record_err = record_open_directory(record_parent)
+		if not record_fd then
+			close_record_transaction(decoded)
+			return nil, record_err
+		end
+		local target = record_read_exact(
+			record_fd,
+			record_parent,
+			decoded.manifest.target,
+			"record recovery target",
+			MAX_PRIVATE_BYTES
+		)
+		local stage = record_read_exact(decoded.fd, decoded.path, "stage", "record recovery staging", MAX_PRIVATE_BYTES)
+		local target_entry = record_generic_snapshot(record_parent, decoded.manifest.target)
+		local stage_entry = record_generic_snapshot(decoded.path, "stage")
+		local target_new = target and record_stored_matches(decoded.new, target)
+		local stage_new = stage and record_stored_matches(decoded.new, stage)
+		local old = decoded.manifest.old
+		local target_old = old ~= false and target and record_stored_matches(old, target)
+		local stage_old = old ~= false and stage and record_stored_matches(old, stage)
+		if decoded.committed then
+			if not target_new then
+				uv.fs_close(record_fd)
+				return preserve_recovery_transaction(decoded, "committed record recovery target drifted")
+			end
+			if (old == false and stage_entry ~= false) or (old ~= false and not stage_old) then
+				uv.fs_close(record_fd)
+				return preserve_recovery_transaction(decoded, "committed record recovery cleanup side changed")
+			end
+			local cleaned, cleanup_err = cleanup_record_transaction(decoded, old ~= false and old or nil)
 			uv.fs_close(record_fd)
 			if not cleaned then
 				return preserve_recovery_transaction(
 					decoded,
-					"initial record cleanup deferred: " .. tostring(cleanup_err)
+					"committed record cleanup deferred: " .. tostring(cleanup_err)
 				)
 			end
 			return true
 		end
-		if stage_new and not target_new then
+		if old == false then
+			if target_new and stage_entry == false then
+				local marked, marker_err = publish_record_commit(decoded)
+				if not marked then
+					uv.fs_close(record_fd)
+					return preserve_recovery_transaction(
+						decoded,
+						"initial record commit recovery deferred: " .. tostring(marker_err)
+					)
+				end
+				local cleaned, cleanup_err = cleanup_record_transaction(decoded, nil)
+				uv.fs_close(record_fd)
+				if not cleaned then
+					return preserve_recovery_transaction(
+						decoded,
+						"initial record cleanup deferred: " .. tostring(cleanup_err)
+					)
+				end
+				return true
+			end
+			if stage_new and not target_new then
+				local cleaned, cleanup_err = cleanup_record_transaction(decoded, decoded.new)
+				uv.fs_close(record_fd)
+				if not cleaned then
+					return preserve_recovery_transaction(
+						decoded,
+						"aborted initial record cleanup deferred: " .. tostring(cleanup_err)
+					)
+				end
+				return true
+			end
+			uv.fs_close(record_fd)
+			return preserve_recovery_transaction(decoded, "initial record recovery state is ambiguous")
+		end
+		if target_old and stage_new then
 			local cleaned, cleanup_err = cleanup_record_transaction(decoded, decoded.new)
 			uv.fs_close(record_fd)
 			if not cleaned then
 				return preserve_recovery_transaction(
 					decoded,
-					"aborted initial record cleanup deferred: " .. tostring(cleanup_err)
+					"prepared record cleanup deferred: " .. tostring(cleanup_err)
+				)
+			end
+			return true
+		end
+		if target_new and stage_old then
+			local marked, marker_err = publish_record_commit(decoded)
+			if not marked then
+				uv.fs_close(record_fd)
+				return preserve_recovery_transaction(
+					decoded,
+					"record commit recovery deferred: " .. tostring(marker_err)
+				)
+			end
+			local cleaned, cleanup_err = cleanup_record_transaction(decoded, old)
+			uv.fs_close(record_fd)
+			if not cleaned then
+				return preserve_recovery_transaction(decoded, "record cleanup deferred: " .. tostring(cleanup_err))
+			end
+			return true
+		end
+		if target_new and stage_entry then
+			local _, rollback_err = rollback_record_exchange(
+				decoded,
+				record_fd,
+				record_parent,
+				decoded.manifest.target,
+				target,
+				stage_entry,
+				"recovering interrupted conflicting exchange"
+			)
+			notify("record recovery restored an exchanged rival: " .. tostring(rollback_err), vim.log.levels.WARN)
+			return true
+		end
+		if stage_new and target_entry then
+			local cleaned, cleanup_err = cleanup_record_transaction(decoded, decoded.new)
+			uv.fs_close(record_fd)
+			if not cleaned then
+				return preserve_recovery_transaction(
+					decoded,
+					"competing record cleanup deferred: " .. tostring(cleanup_err)
 				)
 			end
 			return true
 		end
 		uv.fs_close(record_fd)
-		return preserve_recovery_transaction(decoded, "initial record recovery state is ambiguous")
+		return preserve_recovery_transaction(decoded, "record recovery state is ambiguous")
 	end
-	if target_old and stage_new then
-		local cleaned, cleanup_err = cleanup_record_transaction(decoded, decoded.new)
-		uv.fs_close(record_fd)
-		if not cleaned then
-			return preserve_recovery_transaction(decoded, "prepared record cleanup deferred: " .. tostring(cleanup_err))
-		end
-		return true
+	if not recovery_lock then
+		return continue_recovery()
 	end
-	if target_new and stage_old then
-		local marked, marker_err = publish_record_commit(decoded)
-		if not marked then
-			uv.fs_close(record_fd)
-			return preserve_recovery_transaction(decoded, "record commit recovery deferred: " .. tostring(marker_err))
-		end
-		local cleaned, cleanup_err = cleanup_record_transaction(decoded, old)
-		uv.fs_close(record_fd)
-		if not cleaned then
-			return preserve_recovery_transaction(decoded, "record cleanup deferred: " .. tostring(cleanup_err))
-		end
-		return true
-	end
-	if target_new and stage_entry then
-		local _, rollback_err = rollback_record_exchange(
-			decoded,
-			record_fd,
-			record_parent,
-			decoded.manifest.target,
-			target,
-			stage_entry,
-			"recovering interrupted conflicting exchange"
-		)
-		notify("record recovery restored an exchanged rival: " .. tostring(rollback_err), vim.log.levels.WARN)
-		return true
-	end
-	if stage_new and target_entry then
-		local cleaned, cleanup_err = cleanup_record_transaction(decoded, decoded.new)
-		uv.fs_close(record_fd)
-		if not cleaned then
-			return preserve_recovery_transaction(
-				decoded,
-				"competing record cleanup deferred: " .. tostring(cleanup_err)
+	local call_ok, recovered, recovery_err = pcall(continue_recovery)
+	local released, release_err = release_lock(recovery_lock)
+	if not released then
+		if call_ok and recovered then
+			notify(
+				"active-slot recovery committed but lock release retained evidence: " .. tostring(release_err),
+				vim.log.levels.WARN
 			)
+			return true
 		end
-		return true
+		return nil,
+			"active-slot recovery lock release failed: " .. tostring(release_err) .. (call_ok and "; " .. tostring(
+				recovery_err
+			) or "")
 	end
-	uv.fs_close(record_fd)
-	return preserve_recovery_transaction(decoded, "record recovery state is ambiguous")
+	if not call_ok then
+		return nil, "active-slot recovery crashed: " .. tostring(recovered)
+	end
+	return recovered, recovery_err
 end
 
 recover_record_transactions = function()
@@ -1822,21 +2030,205 @@ local function same_stat(left, right)
 	local right_ctime = right and right.ctime or {}
 	return left
 		and right
+		and left.type == "file"
+		and right.type == "file"
 		and left.dev == right.dev
 		and left.ino == right.ino
 		and left.size == right.size
 		and left.mode == right.mode
+		and left.uid == right.uid
+		and left.gid == right.gid
+		and left.nlink == right.nlink
 		and left_mtime.sec == right_mtime.sec
 		and left_mtime.nsec == right_mtime.nsec
 		and left_ctime.sec == right_ctime.sec
 		and left_ctime.nsec == right_ctime.nsec
 end
 
+local fingerprint_file
+
+local function safe_tool_stat(stat)
+	return stat
+		and stat.type == "file"
+		and stat.nlink == 1
+		and type(stat.mode) == "number"
+		and bit.band(stat.mode, UNSAFE_WRITE_MASK) == 0
+end
+
+function runtime_authority.effective_uid()
+	if ffi_ok then
+		local ok, value = pcall(function()
+			return tonumber(ffi.C.geteuid())
+		end)
+		if ok and finite_number(value) and value >= 0 and value % 1 == 0 then
+			return value
+		end
+	end
+	local ok, value = pcall(uv.getuid)
+	return ok and finite_number(value) and value >= 0 and value % 1 == 0 and value or nil
+end
+
+function runtime_authority.trusted_external_owner(owner, euid)
+	return type(owner) == "number" and (owner == 0 or owner == euid)
+end
+
+function runtime_authority.validate_external_ancestor_chain(path, euid)
+	local cursor = vim.fs.dirname(path)
+	while true do
+		local stat = uv.fs_lstat(cursor)
+		if
+			not stat
+			or (stat.type ~= "directory" and stat.type ~= "link")
+			or not runtime_authority.trusted_external_owner(stat.uid, euid)
+			or (stat.type == "directory" and bit.band(stat.mode, UNSAFE_WRITE_MASK) ~= 0)
+		then
+			return nil, "external executable has an untrusted or writable ancestor: " .. cursor
+		end
+		if cursor == "/" then
+			return true
+		end
+		local parent = vim.fs.dirname(cursor)
+		if parent == cursor then
+			return nil, "external executable ancestor chain is invalid"
+		end
+		cursor = parent
+	end
+end
+
+function runtime_authority.validate_external_path_authority(lexical, expected_canonical)
+	local euid = runtime_authority.effective_uid()
+	if not euid then
+		return nil, "effective UID is unavailable"
+	end
+	local normalized = type(lexical) == "string" and vim.fs.normalize(lexical) or nil
+	local lexical_stat = normalized and uv.fs_lstat(normalized) or nil
+	if
+		not normalized
+		or normalized:sub(1, 1) ~= "/"
+		or not lexical_stat
+		or not runtime_authority.trusted_external_owner(lexical_stat.uid, euid)
+	then
+		return nil, "external executable path owner is not root or the effective user"
+	end
+	local lexical_ok, lexical_err = runtime_authority.validate_external_ancestor_chain(normalized, euid)
+	if not lexical_ok then
+		return nil, lexical_err
+	end
+	local canonical = uv.fs_realpath(normalized)
+	if
+		not canonical
+		or (expected_canonical ~= nil and vim.fs.normalize(canonical) ~= vim.fs.normalize(expected_canonical))
+	then
+		return nil, "external executable canonical path changed"
+	end
+	canonical = vim.fs.normalize(canonical)
+	local canonical_stat = uv.fs_lstat(canonical)
+	if not safe_tool_stat(canonical_stat) or not runtime_authority.trusted_external_owner(canonical_stat.uid, euid) then
+		return nil, "external executable owner is not root or the effective user"
+	end
+	local canonical_ok, canonical_err = runtime_authority.validate_external_ancestor_chain(canonical, euid)
+	if not canonical_ok then
+		return nil, canonical_err
+	end
+	return canonical
+end
+
+function runtime_authority.validate_prerequisite_path_authority(lexical)
+	local canonical = runtime_authority.validate_external_path_authority(lexical)
+	if canonical then
+		return canonical
+	end
+	local normalized = type(lexical) == "string" and vim.fs.normalize(lexical) or nil
+	local euid = runtime_authority.effective_uid()
+	local lexical_stat = normalized and uv.fs_lstat(normalized) or nil
+	if
+		not euid
+		or not normalized
+		or normalized:sub(1, 1) ~= "/"
+		or not lexical_stat
+		or lexical_stat.type ~= "file"
+		or lexical_stat.uid ~= 0
+		or type(lexical_stat.nlink) ~= "number"
+		or lexical_stat.nlink <= 1
+		or type(lexical_stat.mode) ~= "number"
+		or bit.band(lexical_stat.mode, UNSAFE_WRITE_MASK) ~= 0
+	then
+		return nil, "system prerequisite is not one root-owned safe hardlinked executable"
+	end
+	local cursor = vim.fs.dirname(normalized)
+	while true do
+		local stat = uv.fs_lstat(cursor)
+		if
+			not stat
+			or stat.type ~= "directory"
+			or stat.uid ~= 0
+			or type(stat.mode) ~= "number"
+			or bit.band(stat.mode, UNSAFE_WRITE_MASK) ~= 0
+		then
+			return nil, "system prerequisite has a non-root-owned or writable ancestor: " .. cursor
+		end
+		if cursor == "/" then
+			break
+		end
+		local parent = vim.fs.dirname(cursor)
+		if parent == cursor then
+			return nil, "system prerequisite ancestor chain is invalid"
+		end
+		cursor = parent
+	end
+	local resolved = uv.fs_realpath(normalized)
+	local rechecked = resolved and uv.fs_lstat(normalized) or nil
+	if resolved ~= normalized or not same_stat(lexical_stat, rechecked) then
+		return nil, "system prerequisite canonical path changed"
+	end
+	return normalized
+end
+
+function runtime_authority.fingerprint_external_file(path)
+	local canonical, authority_err = runtime_authority.validate_external_path_authority(path)
+	if not canonical then
+		return nil, authority_err
+	end
+	local fingerprint, fingerprint_err = fingerprint_file(path, true)
+	if not fingerprint then
+		return nil, fingerprint_err
+	end
+	local rechecked, recheck_err = runtime_authority.validate_external_path_authority(path, fingerprint.path)
+	if not rechecked or rechecked ~= canonical then
+		return nil, recheck_err or "external executable authority changed while hashing"
+	end
+	return fingerprint
+end
+
+local function fingerprint_from_stat(path, stat, digest)
+	local mtime = stat.mtime or {}
+	local ctime = stat.ctime or {}
+	return {
+		path = vim.fs.normalize(path),
+		dev = stat.dev,
+		ino = stat.ino,
+		size = stat.size,
+		mode = stat.mode,
+		uid = stat.uid,
+		gid = stat.gid,
+		mtime_sec = mtime.sec or 0,
+		mtime_nsec = mtime.nsec or 0,
+		ctime_sec = ctime.sec or 0,
+		ctime_nsec = ctime.nsec or 0,
+		sha256 = digest,
+	}
+end
+
+local function fingerprint_metadata_matches(expected, path, stat)
+	local current = safe_tool_stat(stat) and fingerprint_from_stat(path, stat, expected.sha256) or nil
+	return current and vim.deep_equal(current, expected) or false
+end
+
 local function valid_sha256(value)
 	return type(value) == "string" and #value == 64 and value:match("^[0-9a-f]+$") ~= nil
 end
 
-local function fingerprint_file(path, executable)
+fingerprint_file = function(path, executable)
 	if type(path) ~= "string" or path == "" or path:sub(1, 1) ~= "/" then
 		return nil, "path must be absolute"
 	end
@@ -1845,13 +2237,13 @@ local function fingerprint_file(path, executable)
 	local before = canonical and uv.fs_lstat(canonical) or nil
 	if
 		not canonical
-		or not before
-		or before.type ~= "file"
-		or before.nlink ~= 1
+		or not safe_tool_stat(before)
 		or before.size > MAX_EXECUTABLE_BYTES
 		or (executable and vim.fn.executable(canonical) ~= 1)
 	then
-		return nil, executable and "path is not a safe executable" or "path is not a safe regular file"
+		return nil,
+			executable and "path is not a safe non-writable executable"
+				or "path is not a safe non-writable regular file"
 	end
 	local fd, open_err = uv.fs_open(canonical, "r", 0)
 	if not fd then
@@ -1887,16 +2279,41 @@ local function fingerprint_file(path, executable)
 	if not valid_sha256(digest) then
 		return nil, "file hashing failed"
 	end
-	local mtime = opened.mtime or {}
-	return {
-		path = vim.fs.normalize(canonical),
-		dev = opened.dev,
-		ino = opened.ino,
-		size = opened.size,
-		mtime_sec = mtime.sec or 0,
-		mtime_nsec = mtime.nsec or 0,
-		sha256 = digest,
-	}
+	return fingerprint_from_stat(canonical, opened, digest)
+end
+
+local function validate_fingerprint_metadata(expected, executable)
+	local canonical = uv.fs_realpath(expected.path)
+	local before = canonical and uv.fs_lstat(expected.path) or nil
+	if
+		not canonical
+		or vim.fs.normalize(canonical) ~= expected.path
+		or not safe_tool_stat(before)
+		or before.size > MAX_EXECUTABLE_BYTES
+		or (executable and vim.fn.executable(expected.path) ~= 1)
+	then
+		return nil,
+			executable and "path is not a safe non-writable executable"
+				or "path is not a safe non-writable regular file"
+	end
+	if not fingerprint_metadata_matches(expected, canonical, before) then
+		return nil, "file metadata changed"
+	end
+	local fd, open_err = uv.fs_open(expected.path, "r", 0)
+	if not fd then
+		return nil, "cannot open file: " .. tostring(open_err)
+	end
+	local opened = uv.fs_fstat(fd)
+	local closed, close_err = uv.fs_close(fd)
+	local after = uv.fs_lstat(expected.path)
+	if
+		not fingerprint_metadata_matches(expected, canonical, opened)
+		or not fingerprint_metadata_matches(expected, canonical, after)
+		or not closed
+	then
+		return nil, "file metadata changed while validating: " .. tostring(close_err or "drift")
+	end
+	return expected.path
 end
 
 local function identity_key(identity)
@@ -2061,7 +2478,10 @@ local function canonical_encode(value, seen)
 	end
 	if kind == "nil" or kind == "boolean" or kind == "number" or kind == "string" then
 		local ok, encoded = pcall(vim.json.encode, value)
-		return ok and encoded or nil, ok and nil or "plan contains an unencodable scalar"
+		if not ok then
+			return nil, "plan contains an unencodable scalar"
+		end
+		return encoded
 	end
 	if kind ~= "table" then
 		return nil, "plan contains a non-data value"
@@ -2137,8 +2557,14 @@ local function plan_digest(plan)
 	return encoded and hash(encoded) or nil, err
 end
 
-local function plan_shims(executables)
+local function plan_shims(identity, executables)
 	local result = {}
+	-- Dynamic npm bundles are selected by an active-slot pointer and resolved
+	-- directly. Publishing a global shim before activation could make PATH select
+	-- a failed upgrade while the durable pointer still names the prior bundle.
+	if identity.backend == "npm-release" then
+		return result
+	end
 	for _, command in ipairs(sorted_keys(executables)) do
 		result[command] = shim_path(command)
 	end
@@ -2159,6 +2585,10 @@ end
 
 local function record_path(identity)
 	return vim.fs.joinpath(root(), "records", identity_key(identity) .. ".json")
+end
+
+function runtime_authority.external_record_path(identity)
+	return vim.fs.joinpath(root(), "external-records", identity_key(identity) .. ".json")
 end
 
 local function record_value(identity, status, fields)
@@ -2392,7 +2822,10 @@ local function find_legacy_record(identity)
 	if #candidates > 1 then
 		return nil, "duplicate legacy records"
 	end
-	return candidates[1], candidates[1] and nil or "absent"
+	if not candidates[1] then
+		return nil, "absent"
+	end
+	return candidates[1]
 end
 
 local function decode_record(identity)
@@ -2484,7 +2917,10 @@ process_alive = function(owner, token)
 	if result ~= nil then
 		return nil
 	end
-	return code == "ESRCH" and false or nil
+	if code == "ESRCH" then
+		return false
+	end
+	return nil
 end
 
 local function missing(err)
@@ -2913,7 +3349,7 @@ local function live_lock_claims(base, resource)
 	return live
 end
 
-local function release_lock(lock)
+release_lock = function(lock)
 	local claim, err, claim_stat = read_lock_claim(lock.path, "ticket", lock.token, lock.number, lock.resource)
 	if
 		not claim
@@ -2926,11 +3362,7 @@ local function release_lock(lock)
 	return remove_unique_claim(lock)
 end
 
-local function acquire_lock(base, resource, requested_wait_ms)
-	local prepared, prepare_err = prepare_state()
-	if not prepared then
-		return nil, prepare_err
-	end
+acquire_prepared_lock = function(base, resource, requested_wait_ms)
 	temp_counter = temp_counter + 1
 	local owner_pid = pid()
 	local token = hash(table.concat({
@@ -3047,7 +3479,15 @@ local function acquire_lock(base, resource, requested_wait_ms)
 	end
 end
 
-local function resource_lock_base(resource)
+local function acquire_lock(base, resource, requested_wait_ms)
+	local prepared, prepare_err = prepare_state()
+	if not prepared then
+		return nil, prepare_err
+	end
+	return acquire_prepared_lock(base, resource, requested_wait_ms)
+end
+
+resource_lock_base = function(resource)
 	return vim.fs.joinpath(root(), "locks", "resources", hash(resource) .. ".lock")
 end
 
@@ -3126,6 +3566,23 @@ local function acquire_identity_lock(identity)
 	end
 	local resource = "identity:" .. identity_key(identity)
 	return acquire_lock(resource_lock_base(resource), resource)
+end
+
+function runtime_authority.acquire_plan_locks(plan)
+	local prepared, prepare_err = prepare_state()
+	if not prepared then
+		return nil, prepare_err
+	end
+	local holder = { locks = {}, resources = copy(plan.resources) }
+	for _, resource in ipairs(holder.resources) do
+		local lock, lock_err = acquire_lock(resource_lock_base(resource), resource)
+		if not lock then
+			local released, release_err = release_locks(holder)
+			return nil, released and lock_err or release_err
+		end
+		holder.locks[#holder.locks + 1] = lock
+	end
+	return holder
 end
 
 function M.setup(opts)
@@ -3287,6 +3744,27 @@ function M.identity(value)
 	return copy(identity)
 end
 
+---Validate an external executable's lexical and canonical authority before a
+---host adapter executes it for an explicit compatibility probe. Certification
+---still performs the full fingerprint and locked revalidation.
+---@param path string
+---@return string? canonical_path
+---@return string? error_message
+function M.validate_external_candidate(path)
+	return runtime_authority.validate_external_path_authority(path)
+end
+
+---Validate a process prerequisite. Certified tool candidates retain the
+---single-link rule; this separate boundary additionally accepts an immutable,
+---root-owned hardlinked system executable below an entirely root-owned,
+---non-writable canonical ancestor chain.
+---@param path string
+---@return string? canonical_path
+---@return string? error_message
+function M.validate_prerequisite_candidate(path)
+	return runtime_authority.validate_prerequisite_path_authority(path)
+end
+
 function M.shim_bin()
 	return vim.fs.joinpath(root(), "shims", "bin")
 end
@@ -3368,7 +3846,7 @@ local function normalize_probe(identity, spec, executables)
 		if type(observed.paths[command]) ~= "string" then
 			return nil, "compatible probe is missing command " .. command
 		end
-		local _, path_err, fingerprint = verified_executable(observed.paths[command], true)
+		local fingerprint, path_err = runtime_authority.fingerprint_external_file(observed.paths[command])
 		if not fingerprint then
 			return nil, "compatible probe path is invalid for " .. command .. ": " .. tostring(path_err)
 		end
@@ -3403,6 +3881,47 @@ local function normalize_relative(value, label)
 		return nil, label .. " must be normalized"
 	end
 	return normalized
+end
+
+function runtime_authority.normalize_bundle_receipt_header(identity, value)
+	if
+		type(value) ~= "table"
+		or not exact_keys(value, {
+			schema = true,
+			kind = true,
+			name = true,
+			package = true,
+			version = true,
+			target = true,
+			source_tarball = true,
+			source_integrity = true,
+			source_sha256 = true,
+			node_version = true,
+			node_archive_sha256 = true,
+			bin = true,
+		})
+		or value.schema ~= 1
+		or value.kind ~= "verified-npm-bundle-receipt"
+		or value.name ~= identity.name
+		or value.version ~= identity.version
+		or value.target ~= identity.target
+		or type(value.package) ~= "string"
+		or value.package == ""
+		or type(value.source_tarball) ~= "string"
+		or not value.source_tarball:match("^https://registry%.npmjs%.org/")
+		or type(value.source_integrity) ~= "string"
+		or not value.source_integrity:match("^sha512%-%S+$")
+		or not valid_sha256(value.source_sha256)
+		or identity.digest ~= "sha256:" .. value.source_sha256
+		or type(value.node_version) ~= "string"
+		or not value.node_version:match("^%d+%.%d+%.%d+$")
+		or not valid_sha256(value.node_archive_sha256)
+		or not exact_keys(value.bin, { devcontainer = true })
+		or value.bin.devcontainer ~= "devcontainer.js"
+	then
+		return nil, "npm bundle receipt header is invalid"
+	end
+	return copy(value)
 end
 
 local function normalize_integrity(identity, manifest, executables)
@@ -3476,6 +3995,43 @@ local function normalize_integrity(identity, manifest, executables)
 			archive_sha256 = integrity.archive_sha256,
 			commands = commands,
 			artifacts = sorted_keys(artifacts),
+		}
+	end
+	if identity.backend == "npm-release" then
+		if
+			not exact_keys(integrity, {
+				kind = true,
+				source_sha256 = true,
+				receipt_path = true,
+				receipt = true,
+				commands = true,
+			})
+			or integrity.kind ~= "bundle-sha256"
+			or not valid_sha256(integrity.source_sha256)
+			or identity.digest ~= "sha256:" .. integrity.source_sha256
+		then
+			return nil, "npm bundle integrity manifest is invalid"
+		end
+		local receipt = runtime_authority.normalize_bundle_receipt_header(identity, integrity.receipt)
+		local receipt_path = type(integrity.receipt_path) == "string" and vim.fs.normalize(integrity.receipt_path)
+			or nil
+		if
+			not receipt
+			or receipt.source_sha256 ~= integrity.source_sha256
+			or not receipt_path
+			or receipt_path:sub(1, 1) ~= "/"
+			or receipt_path ~= integrity.receipt_path
+			or vim.fs.basename(receipt_path) ~= integrity.source_sha256 .. ".json"
+			or contained(receipt_path, identity.install_root)
+		then
+			return nil, "npm bundle receipt authority is invalid"
+		end
+		return {
+			kind = "bundle-sha256",
+			source_sha256 = integrity.source_sha256,
+			receipt_path = receipt_path,
+			receipt = receipt,
+			commands = commands,
 		}
 	end
 	if identity.backend == "mason" then
@@ -3554,7 +4110,7 @@ function M.plan(spec)
 		return nil, integrity_err
 	end
 	manifest.integrity = integrity
-	local shims = plan_shims(executables)
+	local shims = plan_shims(identity, executables)
 	local probe, probe_err = normalize_probe(identity, spec, executables)
 	if not probe then
 		return nil, probe_err
@@ -3632,7 +4188,7 @@ local function validate_plan_probe(probe, identity, executables, revalidate)
 			return nil, "normalized compatible probe entry is invalid for " .. command
 		end
 		if revalidate then
-			local current = fingerprint_file(entry.lexical, true)
+			local current = runtime_authority.fingerprint_external_file(entry.lexical)
 			if not current or not vim.deep_equal(current, entry.fingerprint) then
 				return nil, "external plan executable changed for " .. command
 			end
@@ -3776,7 +4332,7 @@ normalize_supplied_plan = function(plan, options)
 	if not executables then
 		return nil, executable_err
 	end
-	local shims = plan_shims(executables)
+	local shims = plan_shims(identity, executables)
 	local resources = plan_resources(identity, shims)
 	local integrity, integrity_err = normalize_integrity(identity, plan.manifest, executables)
 	if not integrity or not vim.deep_equal(integrity, plan.manifest.integrity) then
@@ -3810,8 +4366,8 @@ normalize_supplied_plan = function(plan, options)
 	if not digest or digest ~= plan.plan_digest then
 		return nil, digest_err or "normalized plan was modified"
 	end
-	local probe_ok, probe_err =
-		validate_plan_probe(normalized.probe, identity, executables, normalized.strategy == "external")
+	local revalidate_external = normalized.strategy == "external" and options.skip_external_revalidation ~= true
+	local probe_ok, probe_err = validate_plan_probe(normalized.probe, identity, executables, revalidate_external)
 	if not probe_ok then
 		return nil, probe_err
 	end
@@ -3840,6 +4396,1097 @@ local function normalize_identity_request(request, label)
 		source = request.identity
 	end
 	return normalize_identity(source)
+end
+
+local function normalize_resolve_request(request)
+	if type(request) ~= "table" then
+		return nil, "resolve requires a ToolIdentity, tool spec, or normalized plan"
+	end
+	if request.schema ~= nil or request.plan_digest ~= nil then
+		local plan, plan_err = normalize_supplied_plan(request, {
+			installed = request.strategy == "managed",
+			skip_external_revalidation = request.strategy == "external",
+		})
+		if not plan then
+			return nil, plan_err
+		end
+		return { kind = "plan", identity = plan.identity, plan = plan }
+	end
+	if
+		request.manifest ~= nil
+		or request.executables ~= nil
+		or request.requires_network ~= nil
+		or request.force_managed ~= nil
+	then
+		if
+			not exact_keys(request, {
+				identity = true,
+				manifest = true,
+				executables = true,
+				requires_network = true,
+				force_managed = true,
+			})
+		then
+			return nil, "tool spec contains an unknown field"
+		end
+		local identity, identity_err = normalize_identity(request.identity)
+		if not identity then
+			return nil, identity_err
+		end
+		if request.requires_network ~= nil and type(request.requires_network) ~= "boolean" then
+			return nil, "spec.requires_network must be a boolean"
+		end
+		if request.force_managed ~= nil and type(request.force_managed) ~= "boolean" then
+			return nil, "spec.force_managed must be a boolean"
+		end
+		local destination, destination_err = canonical_destination(identity.install_root)
+		if not destination then
+			return nil, destination_err
+		end
+		identity.install_root = destination
+		local executables, executable_err = normalize_executables(request.executables)
+		if not executables then
+			return nil, executable_err
+		end
+		local copied, manifest = pcall(copy, request.manifest or {})
+		if not copied or type(manifest) ~= "table" then
+			return nil, "spec.manifest is not safely copyable"
+		end
+		local integrity, integrity_err = normalize_integrity(identity, manifest, executables)
+		if not integrity then
+			return nil, integrity_err
+		end
+		manifest.integrity = integrity
+		return {
+			kind = "spec",
+			identity = identity,
+			manifest = manifest,
+			executables = executables,
+			requires_network = request.requires_network ~= false,
+			force_managed = request.force_managed == true,
+		}
+	end
+	local identity, identity_err = normalize_identity_request(request, "resolve")
+	if not identity then
+		return nil, identity_err
+	end
+	return { kind = "identity", identity = identity }
+end
+
+local function resolve_spec_matches_plan(request, plan)
+	local manifest_matches = vim.deep_equal(request.manifest, plan.manifest)
+	if
+		not manifest_matches
+		and request.identity.backend == "release"
+		and exact_keys(request.manifest, { entry = true, integrity = true })
+		and exact_keys(plan.manifest, { entry = true, integrity = true, release_plan = true })
+	then
+		-- Release prerequisite selection is install-only and may depend on PATH.
+		-- Runtime supplies the immutable entry/integrity projection instead.
+		manifest_matches = vim.deep_equal(request.manifest.entry, plan.manifest.entry)
+			and vim.deep_equal(request.manifest.integrity, plan.manifest.integrity)
+	end
+	return identity_json(request.identity) == identity_json(plan.identity)
+		and manifest_matches
+		and vim.deep_equal(request.executables, plan.executables)
+		and request.requires_network == plan.requires_network
+end
+
+function runtime_authority.normalize_external_certification(value)
+	if
+		type(value) ~= "table"
+		or not exact_keys(value, {
+			schema = true,
+			kind = true,
+			identity = true,
+			identity_key = true,
+			plan = true,
+		})
+		or value.schema ~= runtime_authority.external_schema
+		or value.kind ~= "external-executable-certification"
+	then
+		return nil, "external certification schema is invalid"
+	end
+	local identity, identity_err = normalize_identity(value.identity)
+	if not identity then
+		return nil, identity_err
+	end
+	local plan, plan_err = normalize_supplied_plan(value.plan, {
+		skip_destination_state = true,
+		skip_external_revalidation = true,
+	})
+	if
+		not plan
+		or plan.strategy ~= "external"
+		or plan.force_managed
+		or identity_json(plan.identity) ~= identity_json(identity)
+		or value.identity_key ~= identity_key(identity)
+	then
+		return nil, plan_err or "external certification does not contain an exact external plan"
+	end
+	return {
+		schema = runtime_authority.external_schema,
+		kind = "external-executable-certification",
+		identity = identity,
+		identity_key = value.identity_key,
+		plan = plan,
+	}
+end
+
+function runtime_authority.validate_external_live_proof(plan)
+	local commands = {}
+	for _, command in ipairs(sorted_keys(plan.executables)) do
+		local entry = plan.probe.paths[command]
+		local canonical, authority_err
+		if entry then
+			canonical, authority_err =
+				runtime_authority.validate_external_path_authority(entry.lexical, entry.fingerprint.path)
+		end
+		if not canonical then
+			return nil,
+				"external executable authority changed for " .. command .. ": " .. tostring(authority_err or "drift")
+		end
+		local current, current_err = validate_fingerprint_metadata(entry.fingerprint, true)
+		if not current then
+			return nil, "external executable changed for " .. command .. ": " .. tostring(current_err or "drift")
+		end
+		local rechecked, recheck_err =
+			runtime_authority.validate_external_path_authority(entry.lexical, entry.fingerprint.path)
+		if not rechecked then
+			return nil,
+				"external executable authority changed for " .. command .. ": " .. tostring(recheck_err or "drift")
+		end
+		commands[command] = current
+	end
+	return commands
+end
+
+function runtime_authority.bundle_entry_path(value)
+	local normalized = normalize_relative(value, "bundle receipt entry path")
+	if not normalized or #normalized > 512 or not normalized:match("^[%w%._%+%@%-%/]+$") then
+		return nil, "bundle receipt entry path is unsafe"
+	end
+	return normalized
+end
+
+function runtime_authority.normalize_bundle_entries(value)
+	if type(value) ~= "table" or not vim.islist(value) or #value > runtime_authority.max_bundle_entries then
+		return nil, "bundle receipt entries are invalid"
+	end
+	local entries = {}
+	local previous
+	local total = 0
+	for index, entry in ipairs(value) do
+		local path, path_err = runtime_authority.bundle_entry_path(type(entry) == "table" and entry.path or nil)
+		if not path then
+			return nil, path_err
+		end
+		if previous and path <= previous then
+			return nil, "bundle receipt entries are not uniquely sorted"
+		end
+		previous = path
+		if entry.kind == "directory" then
+			if
+				not exact_keys(entry, { kind = true, mode = true, path = true })
+				or entry.mode ~= PRIVATE_DIRECTORY_MODE
+			then
+				return nil, "bundle receipt directory entry is invalid"
+			end
+			entries[#entries + 1] = { kind = "directory", mode = PRIVATE_DIRECTORY_MODE, path = path }
+		elseif entry.kind == "file" then
+			if
+				not exact_keys(entry, { kind = true, mode = true, path = true, sha256 = true, size = true })
+				or (entry.mode ~= PRIVATE_FILE_MODE and entry.mode ~= PRIVATE_DIRECTORY_MODE)
+				or not finite_number(entry.size)
+				or entry.size < 0
+				or entry.size % 1 ~= 0
+				or entry.size > MAX_EXECUTABLE_BYTES
+				or not valid_sha256(entry.sha256)
+			then
+				return nil, "bundle receipt file entry is invalid"
+			end
+			total = total + entry.size
+			if total > runtime_authority.max_bundle_bytes then
+				return nil, "bundle receipt exceeds its byte limit"
+			end
+			entries[#entries + 1] = {
+				kind = "file",
+				mode = entry.mode,
+				path = path,
+				sha256 = entry.sha256,
+				size = entry.size,
+			}
+		else
+			return nil, "bundle receipt entry kind is invalid"
+		end
+	end
+	return entries, total
+end
+
+function runtime_authority.normalize_bundle_receipt(plan, value)
+	if
+		type(value) ~= "table"
+		or not exact_keys(value, {
+			schema = true,
+			kind = true,
+			name = true,
+			package = true,
+			version = true,
+			target = true,
+			source_tarball = true,
+			source_integrity = true,
+			source_sha256 = true,
+			node_version = true,
+			node_archive_sha256 = true,
+			bin = true,
+			bytes = true,
+			entries = true,
+			closure_sha256 = true,
+		})
+	then
+		return nil, "bundle receipt envelope is invalid"
+	end
+	local header = copy(value)
+	header.bytes = nil
+	header.entries = nil
+	header.closure_sha256 = nil
+	if not vim.deep_equal(header, plan.manifest.integrity.receipt) then
+		return nil, "bundle receipt header differs from the manifest"
+	end
+	local entries, total = runtime_authority.normalize_bundle_entries(value.entries)
+	if
+		not entries
+		or not finite_number(value.bytes)
+		or value.bytes < 0
+		or value.bytes % 1 ~= 0
+		or value.bytes ~= total
+		or not valid_sha256(value.closure_sha256)
+	then
+		return nil, entries and "bundle receipt aggregate is invalid" or total
+	end
+	local encoded = canonical_encode(entries)
+	if not encoded or hash(encoded) ~= value.closure_sha256 then
+		return nil, "bundle receipt closure digest is invalid"
+	end
+	return { bytes = total, entries = entries, sha256 = value.closure_sha256 }
+end
+
+function runtime_authority.private_bundle_directory(path, expected)
+	local stat = uv.fs_lstat(path)
+	local canonical = stat and stat.type == "directory" and uv.fs_realpath(path) or nil
+	local euid = runtime_authority.effective_uid()
+	if
+		not stat
+		or not canonical
+		or vim.fs.normalize(canonical) ~= vim.fs.normalize(path)
+		or stat.mode % 512 ~= PRIVATE_DIRECTORY_MODE
+		or not euid
+		or stat.uid ~= euid
+		or expected and not same_generic_stat(expected, stat, false)
+	then
+		return nil, "bundle directory is unsafe or changed"
+	end
+	return stat
+end
+
+function runtime_authority.scan_bundle_directory(root, relative, entries, aggregate, depth)
+	if depth > 64 then
+		return nil, "bundle directory nesting exceeds its limit"
+	end
+	local directory = relative == "" and root or vim.fs.joinpath(root, relative)
+	local before, before_err = runtime_authority.private_bundle_directory(directory)
+	if not before then
+		return nil, before_err
+	end
+	local request, scan_err = uv.fs_scandir(directory)
+	if not request then
+		return nil, "bundle directory cannot be read: " .. tostring(scan_err)
+	end
+	local names = {}
+	while true do
+		local name = uv.fs_scandir_next(request)
+		if not name then
+			break
+		end
+		names[#names + 1] = name
+	end
+	table.sort(names)
+	for _, name in ipairs(names) do
+		local child_relative = relative == "" and name or relative .. "/" .. name
+		local safe, safe_err = runtime_authority.bundle_entry_path(child_relative)
+		if not safe then
+			return nil, safe_err
+		end
+		local child = vim.fs.joinpath(root, safe)
+		local stat = uv.fs_lstat(child)
+		if stat and stat.type == "directory" then
+			local child_stat, child_err = runtime_authority.private_bundle_directory(child)
+			if not child_stat then
+				return nil, child_err
+			end
+			entries[#entries + 1] = { kind = "directory", mode = PRIVATE_DIRECTORY_MODE, path = safe }
+			if #entries > runtime_authority.max_bundle_entries then
+				return nil, "bundle contains too many entries"
+			end
+			local scanned, scanned_err =
+				runtime_authority.scan_bundle_directory(root, safe, entries, aggregate, depth + 1)
+			if not scanned then
+				return nil, scanned_err
+			end
+			local rechecked, recheck_err = runtime_authority.private_bundle_directory(child, child_stat)
+			if not rechecked then
+				return nil, recheck_err
+			end
+		elseif stat and stat.type == "file" then
+			local mode = stat.mode % 512
+			local fingerprint, fingerprint_err = fingerprint_file(child, mode == PRIVATE_DIRECTORY_MODE)
+			local euid = runtime_authority.effective_uid()
+			if
+				(mode ~= PRIVATE_FILE_MODE and mode ~= PRIVATE_DIRECTORY_MODE)
+				or not fingerprint
+				or fingerprint.path ~= vim.fs.normalize(child)
+				or not euid
+				or fingerprint.uid ~= euid
+			then
+				return nil, "bundle file is unsafe: " .. tostring(fingerprint_err or safe)
+			end
+			aggregate.bytes = aggregate.bytes + fingerprint.size
+			if aggregate.bytes > runtime_authority.max_bundle_bytes then
+				return nil, "bundle exceeds its byte limit"
+			end
+			entries[#entries + 1] = {
+				kind = "file",
+				mode = mode,
+				path = safe,
+				sha256 = fingerprint.sha256,
+				size = fingerprint.size,
+			}
+			if #entries > runtime_authority.max_bundle_entries then
+				return nil, "bundle contains too many entries"
+			end
+		else
+			return nil, "bundle contains a link or special entry"
+		end
+	end
+	local after, after_err = runtime_authority.private_bundle_directory(directory, before)
+	return after and true or nil, after_err
+end
+
+function runtime_authority.fingerprint_bundle(root)
+	local root_stat, root_err = runtime_authority.private_bundle_directory(root)
+	if not root_stat then
+		return nil, root_err
+	end
+	local entries = {}
+	local aggregate = { bytes = 0 }
+	local scanned, scan_err = runtime_authority.scan_bundle_directory(root, "", entries, aggregate, 0)
+	if not scanned then
+		return nil, scan_err
+	end
+	table.sort(entries, function(left, right)
+		return left.path < right.path
+	end)
+	local encoded, encode_err = canonical_encode(entries)
+	if not encoded then
+		return nil, encode_err
+	end
+	local rechecked, recheck_err = runtime_authority.private_bundle_directory(root, root_stat)
+	if not rechecked then
+		return nil, recheck_err
+	end
+	return { bytes = aggregate.bytes, entries = entries, sha256 = hash(encoded) }
+end
+
+function runtime_authority.validate_bundle_receipt(plan, expected_receipt_sha256)
+	local path = plan.manifest.integrity.receipt_path
+	local data, read_err = read_private(path)
+	if not data then
+		return nil, "verified bundle receipt is unsafe: " .. tostring(read_err)
+	end
+	local decoded_ok, decoded = pcall(vim.json.decode, data)
+	local receipt, receipt_err
+	if decoded_ok then
+		receipt, receipt_err = runtime_authority.normalize_bundle_receipt(plan, decoded)
+	end
+	if not receipt then
+		return nil, receipt_err or "verified bundle receipt is invalid JSON"
+	end
+	local fingerprint, fingerprint_err = fingerprint_file(path, false)
+	if
+		not fingerprint
+		or fingerprint.path ~= path
+		or expected_receipt_sha256 and fingerprint.sha256 ~= expected_receipt_sha256
+	then
+		return nil, "verified bundle receipt changed: " .. tostring(fingerprint_err or "digest mismatch")
+	end
+	local closure, closure_err = runtime_authority.fingerprint_bundle(plan.identity.install_root)
+	if not closure or not vim.deep_equal(closure, receipt) then
+		return nil, "verified bundle closure changed: " .. tostring(closure_err or "receipt mismatch")
+	end
+	return { closure = closure, fingerprint = fingerprint }
+end
+
+local function validate_live_proof(plan, proof)
+	local commands = {}
+	for _, command in ipairs(sorted_keys(plan.executables)) do
+		local expected = proof.commands[command]
+		local current, current_err = validate_fingerprint_metadata(expected, true)
+		if not current or not contained(current, plan.identity.install_root) then
+			return nil, "verified command changed for " .. command .. ": " .. tostring(current_err or "drift")
+		end
+		commands[command] = current
+	end
+	if proof.kind == "release-sha256" then
+		for _, relative in ipairs(plan.manifest.integrity.artifacts) do
+			local expected = proof.artifacts[relative]
+			local current, current_err = validate_fingerprint_metadata(expected, false)
+			if not current or not contained(current, plan.identity.install_root) then
+				return nil, "verified artifact changed for " .. relative .. ": " .. tostring(current_err or "drift")
+			end
+		end
+	elseif proof.kind == "bundle-sha256" then
+		local validated, bundle_err = runtime_authority.validate_bundle_receipt(plan, proof.receipt.fingerprint.sha256)
+		if
+			not validated
+			or validated.closure.sha256 ~= proof.closure_sha256
+			or not vim.deep_equal(validated.fingerprint, proof.receipt.fingerprint)
+		then
+			return nil, bundle_err or "verified bundle proof changed"
+		end
+	elseif proof.kind == "mason-local-integrity" then
+		local receipt_data, receipt_err = read_private(proof.receipt.path)
+		if not receipt_data then
+			return nil, "verified Mason receipt is unsafe: " .. tostring(receipt_err)
+		end
+		local decoded_ok, receipt = pcall(vim.json.decode, receipt_data)
+		if
+			not decoded_ok
+			or not exact_keys(receipt, { package = true, version = true, source_version = true })
+			or not vim.deep_equal(receipt, plan.manifest.integrity.receipt)
+		then
+			return nil, "verified Mason receipt content changed"
+		end
+		local current, fingerprint_err = validate_fingerprint_metadata(proof.receipt.fingerprint, false)
+		if not current or not contained(current, plan.identity.install_root) then
+			return nil, "verified Mason receipt changed: " .. tostring(fingerprint_err or "drift")
+		end
+	else
+		return nil, "verified proof kind is unsupported"
+	end
+	local destination_ok, destination_err = validate_destination_guard(plan.destination_guard, true)
+	if not destination_ok then
+		return nil, destination_err
+	end
+	return commands
+end
+
+local function close_resolve_directories(records_fd, root_fd)
+	local records_closed, records_close_err = true, nil
+	if records_fd then
+		records_closed, records_close_err = uv.fs_close(records_fd)
+	end
+	local root_closed, root_close_err = true, nil
+	if root_fd then
+		root_closed, root_close_err = uv.fs_close(root_fd)
+	end
+	if not records_closed or not root_closed then
+		return nil, "could not close verified state: " .. tostring(records_close_err or root_close_err)
+	end
+	return true
+end
+
+local function open_resolve_record(identity, namespace, label, key)
+	namespace = namespace or "records"
+	label = label or "tool record"
+	if namespace ~= "records" and namespace ~= "external-records" and namespace ~= "active-slots" then
+		return nil, "verified record namespace is invalid"
+	end
+	if key ~= nil and (type(key) ~= "string" or not key:match("^[0-9a-f]+$") or #key ~= 64) then
+		return nil, "verified record key is invalid"
+	end
+	local parent_ok, parent_err = validate_directory_guard(state_root_guard.parent, state_root_guard.parent_stat)
+	if not parent_ok then
+		return nil, parent_err
+	end
+	local root_path = root()
+	local root_stat, root_err = uv.fs_lstat(root_path)
+	if not root_stat then
+		if root_err and not tostring(root_err):find("ENOENT", 1, true) then
+			return nil, "could not inspect verified state root: " .. tostring(root_err)
+		end
+		if state_root_guard.state == "present" then
+			return nil, "verified state root was removed after setup"
+		end
+		return false, "absent"
+	end
+	if root_stat.type ~= "directory" then
+		return nil, "verified state root is not a real directory"
+	end
+	if
+		state_root_guard.state == "present"
+		and (root_stat.dev ~= state_root_guard.dev or root_stat.ino ~= state_root_guard.ino)
+	then
+		return nil, "verified state root identity changed"
+	end
+	local root_fd, root_opened_or_err = record_open_directory(root_path)
+	if not root_fd then
+		return nil, root_opened_or_err
+	end
+	local root_opened = root_opened_or_err
+	if root_opened.mode % 512 ~= PRIVATE_DIRECTORY_MODE then
+		close_resolve_directories(nil, root_fd)
+		return nil, "verified state root permissions must already be 0700"
+	end
+	local records_path = vim.fs.joinpath(root_path, namespace)
+	local records_fd, records_opened_or_err, records_errno =
+		record_open_directory_at(root_fd, root_path, namespace, false)
+	if not records_fd then
+		local closed, close_err = close_resolve_directories(nil, root_fd)
+		if not closed then
+			return nil, close_err
+		end
+		if records_errno == 2 and not state_directory_guards[records_path] then
+			return false, "absent"
+		end
+		return nil, records_opened_or_err
+	end
+	local records_opened = records_opened_or_err
+	local records_guard = state_directory_guards[records_path]
+	if records_guard and (records_opened.dev ~= records_guard.dev or records_opened.ino ~= records_guard.ino) then
+		close_resolve_directories(records_fd, root_fd)
+		return nil, "verified " .. namespace .. " directory identity changed"
+	end
+	local filename = (key or identity_key(identity)) .. ".json"
+	local record, record_err = record_read_exact(records_fd, records_path, filename, label, MAX_PRIVATE_BYTES)
+	if record == false then
+		local closed, close_err = close_resolve_directories(records_fd, root_fd)
+		if not closed then
+			return nil, close_err
+		end
+		return false, "absent"
+	end
+	if not record then
+		close_resolve_directories(records_fd, root_fd)
+		return nil, record_err
+	end
+	return {
+		root_fd = root_fd,
+		root_path = root_path,
+		root_stat = root_opened,
+		records_fd = records_fd,
+		records_path = records_path,
+		records_stat = records_opened,
+		filename = filename,
+		record = record,
+		label = label,
+		namespace = namespace,
+	}
+end
+
+local function finish_resolve_record(opened)
+	local final_record, record_err =
+		record_read_exact(opened.records_fd, opened.records_path, opened.filename, opened.label, MAX_PRIVATE_BYTES)
+	local root_current = uv.fs_fstat(opened.root_fd)
+	local records_current = uv.fs_fstat(opened.records_fd)
+	local root_guard_ok = validate_directory_guard(opened.root_path, {
+		dev = opened.root_stat.dev,
+		ino = opened.root_stat.ino,
+	})
+	local records_guard_ok = validate_directory_guard(opened.records_path, {
+		dev = opened.records_stat.dev,
+		ino = opened.records_stat.ino,
+	})
+	local parent_ok, parent_err = validate_directory_guard(state_root_guard.parent, state_root_guard.parent_stat)
+	local closed, close_err = close_resolve_directories(opened.records_fd, opened.root_fd)
+	if not final_record or not record_exact_matches(opened.record, final_record, false) then
+		return nil, opened.label .. " changed while it was resolved: " .. tostring(record_err or "snapshot mismatch")
+	end
+	if
+		not root_current
+		or not records_current
+		or root_current.mode % 512 ~= PRIVATE_DIRECTORY_MODE
+		or records_current.mode % 512 ~= PRIVATE_DIRECTORY_MODE
+		or not same_generic_stat(opened.root_stat, root_current, false)
+		or not same_generic_stat(opened.records_stat, records_current, false)
+		or not root_guard_ok
+		or not records_guard_ok
+	then
+		return nil, "verified state directories changed while the record was resolved"
+	end
+	if not parent_ok then
+		return nil, parent_err
+	end
+	if not closed then
+		return nil, close_err
+	end
+	return true
+end
+
+function runtime_authority.resolve_managed_record(request, opened)
+	local decoded_ok, record = pcall(vim.json.decode, opened.record.data)
+	local identity = decoded_ok and type(record) == "table" and normalize_identity(record.identity) or nil
+	if
+		not decoded_ok
+		or not schema2_record_shape(record)
+		or record.status ~= "succeeded"
+		or not identity
+		or identity_json(identity) ~= identity_json(request.identity)
+		or record.identity_key ~= identity_key(identity)
+	then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, "tool record is not an exact succeeded schema-2 record"
+	end
+	local plan, plan_err = normalize_supplied_plan(record.plan, { installed = true })
+	if not plan or plan.strategy ~= "managed" then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, plan_err or "tool record does not contain a managed plan"
+	end
+	if request.kind == "plan" and not vim.deep_equal(request.plan, plan) then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, "tool record does not match the requested plan"
+	end
+	if request.kind == "spec" and not resolve_spec_matches_plan(request, plan) then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, "tool record does not match the requested spec"
+	end
+	if not valid_stored_proof(plan, record.proof, identity) then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, "tool record proof is invalid"
+	end
+	local commands, proof_err = validate_live_proof(plan, record.proof)
+	if not commands then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, proof_err
+	end
+	local finished, finish_err = finish_resolve_record(opened)
+	if not finished then
+		return nil, finish_err
+	end
+	return commands
+end
+
+function runtime_authority.resolve_external_record(request, opened)
+	local decoded_ok, decoded = pcall(vim.json.decode, opened.record.data)
+	local certification, certification_err
+	if decoded_ok then
+		certification, certification_err = runtime_authority.normalize_external_certification(decoded)
+	else
+		certification_err = "external certification is not valid JSON"
+	end
+	if not certification or identity_json(certification.identity) ~= identity_json(request.identity) then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, certification_err or "external certification is corrupt"
+	end
+	local plan = certification.plan
+	if request.kind == "plan" and not vim.deep_equal(request.plan, plan) then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, "external certification does not match the requested plan"
+	end
+	if request.kind == "spec" and not resolve_spec_matches_plan(request, plan) then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, "external certification does not match the requested spec"
+	end
+	local commands, proof_err = runtime_authority.validate_external_live_proof(plan)
+	if not commands then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, proof_err
+	end
+	local finished, finish_err = finish_resolve_record(opened)
+	if not finished then
+		return nil, finish_err
+	end
+	return commands
+end
+
+---Persist an explicitly probed external plan as private runtime authority.
+---This is an explicit lifecycle action: it re-hashes the candidate executables,
+---takes the plan's identity/destination/shim locks, and atomically replaces only
+---the external receipt.
+---@param plan table
+---@return table? certification
+---@return string? error_message
+function M.certify_external(plan)
+	if not pinned_state_root then
+		return nil, "verified_tools.setup must be called first"
+	end
+	if type(plan) ~= "table" or plan.strategy ~= "external" then
+		return nil, "external certification requires a compatible external plan"
+	end
+	local requested_identity, identity_err = normalize_identity(plan.identity)
+	if not requested_identity then
+		return nil, identity_err
+	end
+	local preliminary, preliminary_err = normalize_supplied_plan(plan, { skip_external_revalidation = true })
+	if
+		not preliminary
+		or preliminary.strategy ~= "external"
+		or identity_json(preliminary.identity) ~= identity_json(requested_identity)
+	then
+		return nil, preliminary_err or "external certification requires an exact compatible external plan"
+	end
+	local certification_locks, lock_err = runtime_authority.acquire_plan_locks(preliminary)
+	if not certification_locks then
+		return nil, lock_err
+	end
+	local function finish(value, err)
+		local released, release_err = release_locks(certification_locks)
+		if not released then
+			return nil, release_err
+		end
+		return value, err
+	end
+	-- The executable hash belongs inside the complete resource lock set. A
+	-- fingerprint made during planning is never published without a locked fresh
+	-- revalidation.
+	local normalized, normalize_err = normalize_supplied_plan(plan)
+	if not normalized then
+		return finish(nil, normalize_err)
+	end
+	if normalized.strategy ~= "external" or identity_json(normalized.identity) ~= identity_json(requested_identity) then
+		return finish(nil, "external certification requires an exact compatible external plan")
+	end
+	for command, path in pairs(normalized.shims) do
+		local shim, shim_err = uv.fs_lstat(path)
+		if shim or (shim_err and not missing(shim_err)) then
+			return finish(
+				nil,
+				"verified shim could not be ruled out before external certification for "
+					.. command
+					.. (shim and "" or ": " .. tostring(shim_err))
+			)
+		end
+	end
+	local managed, managed_err = decode_record(normalized.identity)
+	if managed or managed_err ~= "absent" then
+		return finish(
+			nil,
+			managed and "managed authority already exists; use an explicit managed repair"
+				or "managed authority could not be ruled out: " .. tostring(managed_err)
+		)
+	end
+	local certification = {
+		schema = runtime_authority.external_schema,
+		kind = "external-executable-certification",
+		identity = copy(normalized.identity),
+		identity_key = normalized.identity_key,
+		plan = copy(normalized),
+	}
+	local encoded_ok, encoded = pcall(vim.json.encode, certification)
+	if not encoded_ok or type(encoded) ~= "string" then
+		return finish(nil, "external certification is not JSON encodable")
+	end
+	local persisted, persist_err =
+		atomic_write(runtime_authority.external_record_path(normalized.identity), encoded .. "\n")
+	if not persisted then
+		return finish(nil, persist_err)
+	end
+	local live, live_err = runtime_authority.validate_external_live_proof(normalized)
+	if not live then
+		return finish(nil, "external executable changed while certification was published: " .. tostring(live_err))
+	end
+	for command, path in pairs(normalized.shims) do
+		local shim, shim_err = uv.fs_lstat(path)
+		if shim or (shim_err and not missing(shim_err)) then
+			return finish(
+				nil,
+				"verified shim could not be ruled out while the external certification was published for "
+					.. command
+					.. (shim and "" or ": " .. tostring(shim_err))
+			)
+		end
+	end
+	managed, managed_err = decode_record(normalized.identity)
+	if managed or managed_err ~= "absent" then
+		return finish(
+			nil,
+			managed and "managed authority appeared while the external certification was published"
+				or "managed authority could not be rechecked: " .. tostring(managed_err)
+		)
+	end
+	return finish(copy(certification))
+end
+
+function M.resolve(spec_or_identity)
+	if not pinned_state_root then
+		return nil, "verified_tools.setup must be called first"
+	end
+	local request, request_err = normalize_resolve_request(spec_or_identity)
+	if not request then
+		return nil, request_err
+	end
+	local managed, managed_err = open_resolve_record(request.identity, "records", "managed tool record")
+	if managed then
+		local commands, resolve_err = runtime_authority.resolve_managed_record(request, managed)
+		if not commands then
+			return nil, "managed authority: " .. tostring(resolve_err)
+		end
+		return copy(commands)
+	end
+	if managed == nil or managed_err ~= "absent" then
+		return nil, "managed authority: " .. tostring(managed_err)
+	end
+	if request.kind == "spec" and request.force_managed then
+		return nil, "absent"
+	end
+	local external, external_err = open_resolve_record(request.identity, "external-records", "external certification")
+	if not external then
+		return nil, external == false and external_err or "external certification: " .. tostring(external_err)
+	end
+	local commands, resolve_err = runtime_authority.resolve_external_record(request, external)
+	if not commands then
+		return nil, "external certification: " .. tostring(resolve_err)
+	end
+	-- Managed state is authoritative even when it appears while an external
+	-- receipt is being observed. This second descriptor-relative read closes the
+	-- useful race without acquiring or mutating a runtime lock.
+	local competing, competing_err = open_resolve_record(request.identity, "records", "managed tool record")
+	if competing then
+		close_resolve_directories(competing.records_fd, competing.root_fd)
+		return nil, "managed authority appeared while external certification was resolved"
+	end
+	if competing == nil or competing_err ~= "absent" then
+		return nil, "managed authority: " .. tostring(competing_err)
+	end
+	return copy(commands)
+end
+
+function runtime_authority.normalize_active_slot(value)
+	if type(value) ~= "string" or #value > 64 or not value:match("^[a-z0-9][a-z0-9._%-]*$") then
+		return nil, "active slot must be a safe lowercase name"
+	end
+	return value
+end
+
+function runtime_authority.active_pointer_path(slot)
+	return vim.fs.joinpath(root(), "active-slots", hash(slot) .. ".json")
+end
+
+function runtime_authority.digest_data(value, label)
+	local encoded, encode_err = canonical_encode(value)
+	if not encoded then
+		return nil, label .. " is not canonically encodable: " .. tostring(encode_err)
+	end
+	return hash(encoded)
+end
+
+function runtime_authority.normalize_active_pointer(slot, value)
+	if
+		type(value) ~= "table"
+		or not exact_keys(value, {
+			schema = true,
+			kind = true,
+			slot = true,
+			identity = true,
+			identity_key = true,
+			plan_digest = true,
+			proof_sha256 = true,
+		})
+		or value.schema ~= 1
+		or value.kind ~= "verified-tool-active-slot"
+		or value.slot ~= slot
+		or not valid_sha256(value.identity_key)
+		or not valid_sha256(value.plan_digest)
+		or not valid_sha256(value.proof_sha256)
+	then
+		return nil, "active slot pointer is invalid"
+	end
+	local identity = normalize_identity(value.identity)
+	if
+		not identity
+		or identity.backend ~= "npm-release"
+		or identity.name ~= slot
+		or identity_key(identity) ~= value.identity_key
+	then
+		return nil, "active slot identity is invalid"
+	end
+	local normalized = copy(value)
+	normalized.identity = identity
+	return normalized
+end
+
+function runtime_authority.active_record_matches(pointer)
+	local record, record_err = decode_record(pointer.identity)
+	if
+		not record
+		or record.status ~= "succeeded"
+		or type(record.plan) ~= "table"
+		or record.plan.plan_digest ~= pointer.plan_digest
+		or type(record.proof) ~= "table"
+	then
+		return nil,
+			"active managed record is unavailable: " .. tostring(record_err or record and record.status or "invalid")
+	end
+	local proof_sha256, proof_err = runtime_authority.digest_data(record.proof, "active proof")
+	if not proof_sha256 or proof_sha256 ~= pointer.proof_sha256 then
+		return nil, proof_err or "active managed proof changed"
+	end
+	return record
+end
+
+---Resolve one explicitly activated immutable managed identity. This path is
+---read-only: it never creates state, plans, probes, discovers, or falls back.
+---@param slot string
+---@return table? result
+---@return string? error_message
+function M.resolve_active(slot)
+	if not pinned_state_root then
+		return nil, "verified_tools.setup must be called first"
+	end
+	slot = runtime_authority.normalize_active_slot(slot)
+	if not slot then
+		return nil, "active slot must be a safe lowercase name"
+	end
+	local opened, open_err = open_resolve_record(nil, "active-slots", "active slot pointer", hash(slot))
+	if not opened then
+		return nil, opened == false and "absent" or tostring(open_err)
+	end
+	local decoded_ok, decoded = pcall(vim.json.decode, opened.record.data)
+	local pointer, pointer_err
+	if decoded_ok then
+		pointer, pointer_err = runtime_authority.normalize_active_pointer(slot, decoded)
+	end
+	if not pointer then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, pointer_err or "active slot pointer is not valid JSON"
+	end
+	local record, record_err = runtime_authority.active_record_matches(pointer)
+	if not record then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, record_err
+	end
+	local commands, resolve_err = M.resolve(pointer.identity)
+	if not commands then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, resolve_err
+	end
+	local rechecked, recheck_err = runtime_authority.active_record_matches(pointer)
+	if not rechecked then
+		close_resolve_directories(opened.records_fd, opened.root_fd)
+		return nil, recheck_err
+	end
+	local finished, finish_err = finish_resolve_record(opened)
+	if not finished then
+		return nil, finish_err
+	end
+	return { identity = copy(pointer.identity), commands = copy(commands) }
+end
+
+---Atomically select one already-succeeded, live npm bundle for a logical slot.
+---The previous pointer remains byte-for-byte intact on every validation or CAS
+---failure, and immutable historical bundle roots are never pruned.
+---@param slot string
+---@param identity table
+---@return table? pointer
+---@return string? error_message
+function M.activate(slot, identity)
+	if not pinned_state_root then
+		return nil, "verified_tools.setup must be called first"
+	end
+	local normalized_slot, slot_err = runtime_authority.normalize_active_slot(slot)
+	local normalized_identity, identity_err = normalize_identity(identity)
+	if not normalized_slot then
+		return nil, slot_err
+	end
+	if not normalized_identity or normalized_identity.backend ~= "npm-release" then
+		return nil, identity_err or "active identities must use the npm-release backend"
+	end
+	if normalized_slot ~= normalized_identity.name then
+		return nil, "active slot must exactly match the npm-release identity name"
+	end
+	local prepared, prepare_err = prepare_state()
+	if not prepared then
+		return nil, prepare_err
+	end
+	local initial, initial_err = decode_record(normalized_identity)
+	if
+		not initial
+		or initial.status ~= "succeeded"
+		or type(initial.plan) ~= "table"
+		or type(initial.plan.resources) ~= "table"
+	then
+		return nil,
+			"active identity is not succeeded: " .. tostring(initial_err or initial and initial.status or "invalid")
+	end
+	local resources = copy(initial.plan.resources)
+	resources[#resources + 1] = "active-slot:" .. hash(normalized_slot)
+	table.sort(resources)
+	local holder = { locks = {} }
+	local previous
+	for _, resource in ipairs(resources) do
+		if resource ~= previous then
+			local lock, lock_err = acquire_lock(resource_lock_base(resource), resource)
+			if not lock then
+				local released, release_err = release_locks(holder)
+				return nil, released and lock_err or release_err
+			end
+			holder.locks[#holder.locks + 1] = lock
+			previous = resource
+		end
+	end
+	local function finish(value, err)
+		local released, release_err = release_locks(holder)
+		if not released then
+			return nil, release_err
+		end
+		return value, err
+	end
+	local record, record_err = decode_record(normalized_identity)
+	if not record or record.status ~= "succeeded" or type(record.plan) ~= "table" or type(record.proof) ~= "table" then
+		return finish(
+			nil,
+			"active identity is not succeeded: " .. tostring(record_err or record and record.status or "invalid")
+		)
+	end
+	if record.plan.plan_digest ~= initial.plan.plan_digest then
+		return finish(nil, "active identity changed before its resources were locked")
+	end
+	local commands, resolve_err = M.resolve(normalized_identity)
+	if not commands then
+		return finish(nil, resolve_err)
+	end
+	local stable, stable_err = decode_record(normalized_identity)
+	if
+		not stable
+		or stable.status ~= "succeeded"
+		or type(stable.plan) ~= "table"
+		or type(stable.proof) ~= "table"
+		or stable.plan.plan_digest ~= record.plan.plan_digest
+		or not vim.deep_equal(stable.proof, record.proof)
+	then
+		return finish(nil, "active identity changed while it was validated: " .. tostring(stable_err or "drift"))
+	end
+	local proof_sha256, proof_err = runtime_authority.digest_data(stable.proof, "active proof")
+	if not proof_sha256 then
+		return finish(nil, proof_err)
+	end
+	local pointer = {
+		schema = 1,
+		kind = "verified-tool-active-slot",
+		slot = normalized_slot,
+		identity = copy(normalized_identity),
+		identity_key = identity_key(normalized_identity),
+		plan_digest = stable.plan.plan_digest,
+		proof_sha256 = proof_sha256,
+	}
+	local encoded, encode_err = canonical_encode(pointer)
+	if not encoded then
+		return finish(nil, encode_err)
+	end
+	local persisted, persist_err = atomic_write(runtime_authority.active_pointer_path(normalized_slot), encoded .. "\n")
+	if not persisted then
+		return finish(nil, persist_err)
+	end
+	local released, release_err = release_locks(holder)
+	if not released then
+		-- The atomic pointer publication is already committed. Reporting failure
+		-- here would invite a retry even though the requested identity is active.
+		notify(
+			"active slot was committed but lock release retained evidence: "
+				.. bounded_reason(release_err, "lock release failed"),
+			vim.log.levels.WARN
+		)
+	end
+	return copy(pointer)
 end
 
 function M.status(identity)
@@ -3933,7 +5580,7 @@ function M.claim(plan, options)
 		return nil, err
 	end
 	if normalized.strategy == "external" then
-		return { plan = normalized, external = true, status = "succeeded" }
+		return nil, "external plans must be persisted with certify_external()"
 	end
 	if not network_allowed(normalized) then
 		return nil, "blocked/offline", copy(vim.tbl_extend("force", normalized, { status = "blocked" }))
@@ -3958,7 +5605,7 @@ function M.claim(plan, options)
 			return nil, "consumed"
 		end
 		local allowed = mode == "repair"
-				and vim.tbl_contains({ "failed", "drift", "cancelled", "repair-required" }, current.status)
+				and vim.tbl_contains({ "succeeded", "failed", "drift", "cancelled", "repair-required" }, current.status)
 			or mode == "retry" and current.status == "failed"
 		if not allowed then
 			release_claim_lock()
@@ -4016,8 +5663,41 @@ local function normalize_install_warnings(value)
 end
 
 local function normalize_install_evidence(plan, evidence)
-	if plan.manifest.integrity.kind ~= "release-sha256" then
-		return evidence == nil and true or nil, evidence == nil and nil or "Mason install evidence must be absent"
+	local integrity = plan.manifest.integrity
+	if integrity.kind == "mason-local-integrity" then
+		if evidence ~= nil then
+			return nil, "Mason install evidence must be absent"
+		end
+		return true
+	end
+	if integrity.kind == "bundle-sha256" then
+		if
+			type(evidence) ~= "table"
+			or not exact_keys(evidence, {
+				kind = true,
+				source_sha256 = true,
+				receipt_sha256 = true,
+				warnings = true,
+			})
+			or evidence.kind ~= "bundle-install-evidence"
+			or evidence.source_sha256 ~= integrity.source_sha256
+			or not valid_sha256(evidence.receipt_sha256)
+		then
+			return nil, "bundle install evidence is missing or invalid"
+		end
+		local warnings, warnings_err = normalize_install_warnings(evidence.warnings)
+		if not warnings then
+			return nil, warnings_err
+		end
+		return {
+			kind = "bundle-install-evidence",
+			source_sha256 = evidence.source_sha256,
+			receipt_sha256 = evidence.receipt_sha256,
+			warnings = warnings,
+		}
+	end
+	if integrity.kind ~= "release-sha256" then
+		return nil, "install evidence integrity kind is unsupported"
 	end
 	if
 		type(evidence) ~= "table"
@@ -4142,6 +5822,40 @@ local function normalize_attestation(job, observed, install_evidence)
 			artifacts = artifacts,
 		}
 	end
+	if integrity.kind == "bundle-sha256" then
+		if
+			type(observed) ~= "table"
+			or not exact_keys(observed, {
+				kind = true,
+				source_sha256 = true,
+				bundle_root = true,
+				receipt_path = true,
+				commands = true,
+			})
+			or observed.kind ~= "bundle-sha256"
+			or observed.source_sha256 ~= integrity.source_sha256
+			or observed.bundle_root ~= job.identity.install_root
+			or observed.receipt_path ~= integrity.receipt_path
+		then
+			return nil, "bundle attestation observation is invalid"
+		end
+		local commands, command_err = exact_observed_paths(observed.commands, command_expected, "bundle commands")
+		if not commands then
+			return nil, command_err
+		end
+		local validated, receipt_err = runtime_authority.validate_bundle_receipt(job.plan, evidence.receipt_sha256)
+		if not validated then
+			return nil, receipt_err
+		end
+		return {
+			version = 1,
+			kind = "bundle-sha256",
+			source_sha256 = integrity.source_sha256,
+			closure_sha256 = validated.closure.sha256,
+			receipt = { path = integrity.receipt_path, fingerprint = validated.fingerprint },
+			commands = commands,
+		}
+	end
 	if
 		type(observed) ~= "table"
 		or not exact_keys(observed, { kind = true, receipt_path = true, commands = true })
@@ -4195,8 +5909,13 @@ valid_fingerprint_shape = function(fingerprint, install_root)
 			dev = true,
 			ino = true,
 			size = true,
+			mode = true,
+			uid = true,
+			gid = true,
 			mtime_sec = true,
 			mtime_nsec = true,
+			ctime_sec = true,
+			ctime_nsec = true,
 			sha256 = true,
 		})
 		or type(fingerprint.path) ~= "string"
@@ -4212,10 +5931,25 @@ valid_fingerprint_shape = function(fingerprint, install_root)
 		or type(fingerprint.size) ~= "number"
 		or fingerprint.size < 0
 		or fingerprint.size % 1 ~= 0
+		or fingerprint.size > MAX_EXECUTABLE_BYTES
+		or type(fingerprint.mode) ~= "number"
+		or fingerprint.mode < 0
+		or fingerprint.mode % 1 ~= 0
+		or bit.band(fingerprint.mode, UNSAFE_WRITE_MASK) ~= 0
+		or type(fingerprint.uid) ~= "number"
+		or fingerprint.uid < 0
+		or fingerprint.uid % 1 ~= 0
+		or type(fingerprint.gid) ~= "number"
+		or fingerprint.gid < 0
+		or fingerprint.gid % 1 ~= 0
 		or type(fingerprint.mtime_sec) ~= "number"
 		or fingerprint.mtime_sec % 1 ~= 0
 		or type(fingerprint.mtime_nsec) ~= "number"
 		or fingerprint.mtime_nsec % 1 ~= 0
+		or type(fingerprint.ctime_sec) ~= "number"
+		or fingerprint.ctime_sec % 1 ~= 0
+		or type(fingerprint.ctime_nsec) ~= "number"
+		or fingerprint.ctime_nsec % 1 ~= 0
 		or not valid_sha256(fingerprint.sha256)
 	then
 		return false
@@ -4294,6 +6028,28 @@ valid_stored_proof = function(plan, proof, identity)
 		end
 		return true
 	end
+	if proof.kind == "bundle-sha256" then
+		if
+			not exact_keys(proof, {
+				version = true,
+				kind = true,
+				source_sha256 = true,
+				closure_sha256 = true,
+				receipt = true,
+				commands = true,
+			})
+			or proof.source_sha256 ~= integrity.source_sha256
+			or not valid_sha256(proof.closure_sha256)
+			or type(proof.receipt) ~= "table"
+			or not exact_keys(proof.receipt, { path = true, fingerprint = true })
+			or proof.receipt.path ~= integrity.receipt_path
+			or not valid_fingerprint_shape(proof.receipt.fingerprint, vim.fs.dirname(integrity.receipt_path))
+			or proof.receipt.fingerprint.path ~= integrity.receipt_path
+		then
+			return false
+		end
+		return true
+	end
 	if
 		proof.kind ~= "mason-local-integrity"
 		or not exact_keys(proof, { version = true, kind = true, receipt = true, commands = true })
@@ -4365,7 +6121,10 @@ run_interleave = function(stage, context)
 		return true
 	end
 	local ok, err = pcall(configured.interleave, stage, copy(context or {}))
-	return ok and true or nil, ok and nil or "interleave-crashed: " .. tostring(err)
+	if not ok then
+		return nil, "interleave-crashed: " .. tostring(err)
+	end
+	return true
 end
 
 local function restore_quarantined(handle)
@@ -4414,8 +6173,9 @@ local function restore_quarantined(handle)
 	local removed_directory, directory_err = uv.fs_rmdir(handle.quarantine_dir)
 	if removed_directory then
 		state_directory_guards[handle.quarantine_dir] = nil
+		return true
 	end
-	return removed_directory and true or nil, removed_directory and nil or tostring(directory_err)
+	return nil, tostring(directory_err)
 end
 
 local function quarantine_exact(path, expected, label)
@@ -4495,8 +6255,9 @@ local function discard_quarantined(handle)
 	local removed_directory, directory_err = uv.fs_rmdir(handle.quarantine_dir)
 	if removed_directory then
 		state_directory_guards[handle.quarantine_dir] = nil
+		return true
 	end
-	return removed_directory and true or nil, removed_directory and nil or tostring(directory_err)
+	return nil, tostring(directory_err)
 end
 
 local function write_exclusive_private(path, data)
@@ -4597,8 +6358,8 @@ end
 local function validate_proof_targets(job, proof)
 	for _, command in ipairs(sorted_keys(job.plan.executables)) do
 		local expected = proof.commands[command]
-		local current, err = fingerprint_file(expected.path, true)
-		if not current or not vim.deep_equal(current, expected) then
+		local current, err = validate_fingerprint_metadata(expected, true)
+		if not current or current ~= expected.path then
 			return nil, "attested executable changed before promotion: " .. command .. ": " .. tostring(err)
 		end
 	end
@@ -4706,7 +6467,7 @@ local function promote_shims(job, proof)
 	end
 	local transaction = { old_entries = {}, new_entries = {} }
 	local entries = {}
-	for _, command in ipairs(sorted_keys(job.plan.executables)) do
+	for _, command in ipairs(sorted_keys(job.plan.shims)) do
 		local entry, err, repair_required = prepare_shim_entry(job, command)
 		if not entry then
 			return nil, err, repair_required
@@ -4781,7 +6542,7 @@ local function remove_owned_shims(job, fail_closed)
 		local _, rollback_reason, rollback_repair = rollback_or_reason(transaction, reason)
 		return nil, rollback_reason, repair_required or rollback_repair
 	end
-	for _, command in ipairs(sorted_keys(job.plan.executables)) do
+	for _, command in ipairs(sorted_keys(job.plan.shims)) do
 		local path = job.plan.shims[command]
 		local owner_path = shim_owner_path(command)
 		local shim_remnant, shim_remnant_err = quarantine_remnant(path, "owned-shim")
@@ -4941,8 +6702,19 @@ local function settle(job, ok, reason, attestation)
 	M._drain()
 end
 
-local function release_evidence_from_baseline(plan, baseline)
-	if type(baseline) ~= "table" or baseline.kind ~= "release-sha256" then
+local function install_evidence_from_baseline(plan, baseline)
+	if type(baseline) ~= "table" then
+		return nil
+	end
+	if baseline.kind == "bundle-sha256" and plan.manifest.integrity.kind == "bundle-sha256" then
+		return {
+			kind = "bundle-install-evidence",
+			source_sha256 = baseline.source_sha256,
+			receipt_sha256 = baseline.receipt and baseline.receipt.fingerprint.sha256 or nil,
+			warnings = {},
+		}
+	end
+	if baseline.kind ~= "release-sha256" or plan.manifest.integrity.kind ~= "release-sha256" then
 		return nil
 	end
 	local artifacts = {}
@@ -4967,6 +6739,10 @@ local function attest_job(job, callback)
 	end
 	local called = false
 	local function done(ok, value)
+		if vim.in_fast_event() then
+			schedule_on_main(done, ok, value)
+			return
+		end
 		if called then
 			return
 		end
@@ -4976,8 +6752,8 @@ local function attest_job(job, callback)
 			return
 		end
 		local evidence = job.install_evidence
-		if job.baseline and job.plan.manifest.integrity.kind == "release-sha256" then
-			evidence = release_evidence_from_baseline(job.plan, job.baseline)
+		if job.baseline and job.plan.manifest.integrity.kind ~= "mason-local-integrity" then
+			evidence = install_evidence_from_baseline(job.plan, job.baseline)
 		end
 		local normalize_call_ok, normalized, normalize_err = pcall(normalize_attestation, job, value, evidence)
 		if not normalize_call_ok then
@@ -4990,7 +6766,10 @@ local function attest_job(job, callback)
 		end
 		callback(normalized ~= nil, normalized or normalize_err)
 	end
-	local ok, result, reason = pcall(backend.attest, copy(job.plan), done, copy(job.install_evidence))
+	local ok, result, reason = pcall(backend.attest, copy(job.plan), done, copy(job.install_evidence), {
+		legacy_import = job.legacy_import == true,
+		local_mason_adoption = job.local_mason_adoption == true,
+	})
 	if not ok then
 		done(false, "attest-crashed")
 	elseif type(result) == "boolean" then
@@ -5214,7 +6993,7 @@ local function start_job(job)
 			vim.log.levels.WARN
 		)
 	end
-	for _, command in ipairs(sorted_keys(job.plan.executables)) do
+	for _, command in ipairs(sorted_keys(job.plan.shims)) do
 		if uv.fs_lstat(job.plan.shims[command]) or uv.fs_lstat(shim_owner_path(command)) then
 			return fail_before_start(job, "pre-backend-shim-invalidation-drift: " .. command, true)
 		end
@@ -5276,6 +7055,10 @@ local function start_job(job)
 	end
 	local called = false
 	local function done(ok, value)
+		if vim.in_fast_event() then
+			schedule_on_main(done, ok, value)
+			return
+		end
 		if called or job.settled then
 			return
 		end
@@ -5319,16 +7102,19 @@ local function start_job(job)
 			end
 		end)
 	end
-	local ok, result, result_value = pcall(backend.run, copy(job.plan), done, {
-		set_cancel = function(cancel)
-			if type(cancel) == "function" then
-				job.cancel_primitive = cancel
-				if job.cancel_requested then
-					request_cancel(job, job.cancel_reason)
-				end
+	local function set_cancel(cancel)
+		if vim.in_fast_event() then
+			schedule_on_main(set_cancel, cancel)
+			return
+		end
+		if type(cancel) == "function" then
+			job.cancel_primitive = cancel
+			if job.cancel_requested then
+				request_cancel(job, job.cancel_reason)
 			end
-		end,
-	})
+		end
+	end
+	local ok, result, result_value = pcall(backend.run, copy(job.plan), done, { set_cancel = set_cancel })
 	if not ok then
 		done(false, "backend-crashed")
 	elseif type(result) == "boolean" then
@@ -5626,12 +7412,22 @@ function M.import_legacy(spec, legacy, callback)
 	if not plan then
 		return nil, err
 	end
+	local raw_mason = plan.identity.backend == "mason"
+		and type(legacy) == "table"
+		and exact_keys(legacy, { status = true, origin = true })
+		and legacy.status == "present"
+		and legacy.origin == "observed-raw-mason-state-v1"
 	local holder, lock_err = acquire_operation_locks(plan)
 	if not holder then
 		return nil, lock_err
 	end
 	local existing, existing_err = decode_record(plan.identity)
-	if existing or existing_err ~= "absent" then
+	local resumable_raw = raw_mason
+		and existing
+		and existing.status == "repair-required"
+		and type(existing.plan) == "table"
+		and existing.plan.plan_digest == plan.plan_digest
+	if (existing and not resumable_raw) or (not existing and existing_err ~= "absent") then
 		local released, release_err = release_locks(holder)
 		return nil, released and (existing and "consumed" or existing_err) or release_err
 	end
@@ -5659,7 +7455,7 @@ function M.import_legacy(spec, legacy, callback)
 		end
 		return record
 	end
-	if type(legacy) ~= "table" or legacy.status ~= "succeeded" then
+	if not raw_mason and (type(legacy) ~= "table" or legacy.status ~= "succeeded") then
 		return record_repair("legacy-repair-required")
 	end
 	local evidence
@@ -5675,19 +7471,27 @@ function M.import_legacy(spec, legacy, callback)
 		if not evidence_ok or not evidence then
 			return record_repair("legacy-release-evidence-invalid: " .. tostring(evidence_ok and err or evidence))
 		end
+	elseif plan.manifest.integrity.kind == "bundle-sha256" then
+		return record_repair("legacy-bundle-provenance-unsupported")
 	elseif
-		not exact_keys(legacy, { status = true, origin = true })
-		or legacy.origin ~= "verified-private-mason-receipt-v1"
+		not raw_mason
+		and (
+			not exact_keys(legacy, { status = true, origin = true })
+			or legacy.origin ~= "verified-private-mason-receipt-v1"
+		)
 	then
 		return record_repair("legacy-Mason-evidence-origin-invalid")
 	end
+	local attempt = existing and existing.attempt or 0
 	local job = {
 		key = identity_key(plan.identity),
 		identity = plan.identity,
 		plan = plan,
 		install_evidence = copy(evidence),
-		claim = { record = { attempt = 0 } },
+		claim = { record = { attempt = attempt } },
 		failure_status = "repair-required",
+		legacy_import = true,
+		local_mason_adoption = raw_mason,
 		locks = holder.locks,
 		resources = holder.resources,
 		resource_set = {},
@@ -5701,7 +7505,7 @@ function M.import_legacy(spec, legacy, callback)
 		job.resource_set[resource] = true
 	end
 	local running_record, running_err = persist(plan.identity, "running", {
-		attempt = 0,
+		attempt = attempt,
 		attempt_consumed = false,
 		legacy = true,
 		legacy_origin = legacy.origin,

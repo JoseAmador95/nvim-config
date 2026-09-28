@@ -4,6 +4,29 @@ local M = {}
 
 local runtime = require("treesitter_runtime")
 local parsers = {}
+local policy_observers = {}
+local policy_snapshots = {}
+
+local function dispatch_policy(event)
+	if event.kind == "buffer_deleted" then
+		policy_snapshots[event.buf] = nil
+		return
+	end
+	if event.kind ~= "buffer" or type(event.buf) ~= "number" then
+		return
+	end
+	local current = runtime.policy(event.buf)
+	local previous = policy_snapshots[event.buf]
+	policy_snapshots[event.buf] = vim.deepcopy(current)
+	if previous == nil or previous.eligible == current.eligible then
+		return
+	end
+	local names = vim.tbl_keys(policy_observers)
+	table.sort(names)
+	for _, name in ipairs(names) do
+		pcall(policy_observers[name], vim.deepcopy(current), vim.deepcopy(previous))
+	end
+end
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.ERROR, { title = "Tree-sitter" })
@@ -40,11 +63,32 @@ end
 ---@param buf? integer
 ---@return boolean
 function M.teardown(buf)
-	return runtime.teardown(buf)
+	local ok = runtime.teardown(buf)
+	if ok and buf == nil then
+		policy_snapshots = {}
+	end
+	return ok
 end
 
 function M.status(buf)
 	return runtime.status(buf)
+end
+
+---Return the live, caller-owned policy for a buffer.
+---@param buf? integer
+---@return table
+function M.policy(buf)
+	return runtime.policy(buf)
+end
+
+---Observe eligibility edges without replaying the current state.
+---Registering the same name replaces the prior host observer.
+---@param name string
+---@param callback? fun(current: table, previous: table)
+function M.observe_policy(name, callback)
+	assert(type(name) == "string" and name ~= "", "policy observer name must be a non-empty string")
+	assert(callback == nil or type(callback) == "function", "policy observer callback must be a function or nil")
+	policy_observers[name] = callback
 end
 
 function M.effective_config()
@@ -267,6 +311,7 @@ function M.setup(opts)
 		highlight = opts.highlight == true,
 		indent = opts.indent == true,
 		installed = installed_parsers,
+		on_state_change = dispatch_policy,
 	})
 
 	vim.api.nvim_create_user_command("NvimConfigParsersInstall", function(command)

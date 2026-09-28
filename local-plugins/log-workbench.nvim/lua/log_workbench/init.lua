@@ -5,6 +5,16 @@ local M = {
 
 local configured = false
 
+local function validate_positive_integer(value, path)
+	if
+		value ~= nil
+		and (type(value) ~= "number" or value % 1 ~= 0 or value < 1 or value ~= value or value == math.huge)
+	then
+		return nil, path .. " must be a positive integer"
+	end
+	return true
+end
+
 local function validate_follow(opts)
 	if opts == nil then
 		opts = {}
@@ -22,6 +32,7 @@ local function validate_follow(opts)
 		poll_interval_ms = true,
 		max_lines = true,
 		max_bytes = true,
+		continuity_bytes = true,
 	}
 	for key in pairs(opts) do
 		if not allowed[key] then
@@ -36,6 +47,12 @@ local function validate_follow(opts)
 	if opts.uv ~= nil and type(opts.uv) ~= "table" then
 		return nil, "log_workbench.setup.follow.uv must be a table"
 	end
+	for _, key in ipairs({ "poll_interval_ms", "max_lines", "max_bytes", "continuity_bytes" }) do
+		local valid, err = validate_positive_integer(opts[key], "log_workbench.setup.follow." .. key)
+		if not valid then
+			return nil, err
+		end
+	end
 	return true
 end
 
@@ -47,13 +64,19 @@ local function validate_matches(opts)
 		return nil, "log_workbench.setup.matches must be an object"
 	end
 	for key in pairs(opts) do
-		if key ~= "schedule" and key ~= "event" then
+		if key ~= "schedule" and key ~= "event" and key ~= "max_matches" and key ~= "scan_lines_per_tick" then
 			return nil, "log_workbench.setup.matches contains an unknown option: " .. tostring(key)
 		end
 	end
 	for _, key in ipairs({ "schedule", "event" }) do
 		if opts[key] ~= nil and type(opts[key]) ~= "function" then
 			return nil, "log_workbench.setup.matches." .. key .. " must be a function"
+		end
+	end
+	for _, key in ipairs({ "max_matches", "scan_lines_per_tick" }) do
+		local valid, err = validate_positive_integer(opts[key], "log_workbench.setup.matches." .. key)
+		if not valid then
+			return nil, err
 		end
 	end
 	return true
@@ -103,7 +126,11 @@ function M.setup(opts)
 end
 
 function M.effective_config()
-	return vim.deepcopy(M.follow.effective_config())
+	local result = M.follow.effective_config()
+	for key, value in pairs(M.matches.effective_config()) do
+		result[key] = value
+	end
+	return vim.deepcopy(result)
 end
 
 function M.status()

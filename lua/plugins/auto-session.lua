@@ -42,8 +42,8 @@ local function notify_review_hook_failure(action, error_message)
 end
 
 local function suspend_code_review_for_session()
-	local loaded, code_review = pcall(require, "config.code_review")
-	if not loaded or type(code_review) ~= "table" or type(code_review.suspend_for_session) ~= "function" then
+	local code_review = package.loaded["config.code_review"]
+	if type(code_review) ~= "table" or type(code_review.suspend_for_session) ~= "function" then
 		return true
 	end
 
@@ -57,13 +57,8 @@ local function suspend_code_review_for_session()
 end
 
 local function restore_code_review_after_manual_save()
-	local loaded, code_review = pcall(require, "config.code_review")
-	if
-		exiting
-		or not loaded
-		or type(code_review) ~= "table"
-		or type(code_review.restore_after_session) ~= "function"
-	then
+	local code_review = package.loaded["config.code_review"]
+	if exiting or type(code_review) ~= "table" or type(code_review.restore_after_session) ~= "function" then
 		return
 	end
 	vim.schedule(function()

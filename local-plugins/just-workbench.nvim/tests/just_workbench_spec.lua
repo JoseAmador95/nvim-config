@@ -66,6 +66,36 @@ local dump = {
 	}),
 }
 
+local function binding_dump()
+	return {
+		code = 0,
+		stderr = "",
+		stdout = vim.json.encode({
+			recipes = {
+				repeat_flags = {
+					parameters = {
+						{ name = "alpha", kind = "singular", flag = true, long = "alpha", multiple = true },
+						{ name = "beta", kind = "singular", flag = true, long = "beta", multiple = true },
+						{ name = "define", kind = "star", long = "define", multiple = true },
+					},
+				},
+				invoke = {
+					parameters = {
+						{ name = "verbose", kind = "singular", flag = true, long = "verbose" },
+						{ name = "quiet", kind = "singular", flag = true, short = "q", multiple = true, max = 2 },
+						{ name = "define", kind = "plus", long = "define", multiple = true, min = 1, max = 2 },
+						{ name = "output", kind = "singular", short = "o", default = "build" },
+						{ name = "target", kind = "singular" },
+						{ name = "items", kind = "star", max = 2 },
+					},
+				},
+			},
+			aliases = {},
+			modules = {},
+		}),
+	}
+end
+
 local trusted = {}
 local calls = {}
 local states = {}
@@ -218,6 +248,108 @@ test("empty recipe values remain exact terminal argv entries", function()
 	local result = assert(workbench.run(catalog, "build", { "" }))
 	assert(result.outcome == "started")
 	assert(opened[1].launch.argv[#opened[1].launch.argv] == "", "empty recipe value was dropped")
+end)
+
+test("structured bindings emit deterministic flags options and positionals", function()
+	local ordinary_dump = dump
+	dump = binding_dump()
+	setup()
+	local catalog = catalog_sync()
+	dump = ordinary_dump
+	local bindings = {
+		items = { "one literal", "two" },
+		target = "prod",
+		quiet = 2,
+		define = { "A=1", "B=2" },
+		verbose = true,
+	}
+	local result, err = workbench.run(catalog, "invoke", bindings)
+	assert(result, err)
+	assert(
+		vim.deep_equal(opened[1].launch.argv, {
+			just_bin,
+			"--justfile",
+			justfile,
+			"--working-directory",
+			root,
+			"invoke",
+			"--verbose",
+			"-q",
+			"-q",
+			"--define",
+			"A=1",
+			"--define",
+			"B=2",
+			"prod",
+			"one literal",
+			"two",
+		}),
+		vim.inspect(opened[1].launch.argv)
+	)
+	assert(bindings.output == nil and bindings.items[1] == "one literal", "run mutated caller bindings")
+end)
+
+test("structured bindings enforce names types defaults and per-parameter cardinality", function()
+	local ordinary_dump = dump
+	dump = binding_dump()
+	setup()
+	local catalog = catalog_sync()
+	dump = ordinary_dump
+	for _, case in ipairs({
+		{ values = { define = {}, target = "prod" }, message = "define requires at least 1" },
+		{ values = { define = { "a", "b", "c" }, target = "prod" }, message = "define accepts at most 2" },
+		{ values = { define = "a", target = {} }, message = "target requires at least 1" },
+		{ values = { define = "a", target = "prod", quiet = 3 }, message = "quiet accepts at most 2" },
+		{ values = { define = "a", target = "prod", missing = "x" }, message = "unknown parameter" },
+		{ values = { define = "a", target = "prod", verbose = "yes" }, message = "flag binding" },
+		{ values = { define = "bad\0value", target = "prod" }, message = "without NUL bytes" },
+	}) do
+		local result, err = workbench.run(catalog, "invoke", case.values)
+		assert(result == nil and tostring(err):find(case.message, 1, true), tostring(err))
+	end
+	assert(#opened == 0, "invalid structured bindings opened a terminal")
+	local result, err = workbench.run(catalog, "invoke", { define = "a", target = "prod" })
+	assert(result, err)
+	assert(not vim.tbl_contains(opened[1].launch.argv, "-o"), "omitted default option was emitted")
+end)
+
+test("recipe argv cap rejects numeric amplification and aggregate overflow before allocation", function()
+	local ordinary_dump = dump
+	dump = binding_dump()
+	setup()
+	local catalog = catalog_sync()
+	dump = ordinary_dump
+	local limits = workbench.limits()
+	local limit = limits.max_recipe_argv_entries
+	assert(limit == 4096, "unexpected recipe argv hard limit")
+	limits.max_recipe_argv_entries = 1
+	assert(workbench.limits().max_recipe_argv_entries == limit, "limits leaked mutable state")
+
+	for _, bindings in ipairs({
+		{ alpha = limit + 1 },
+		{ alpha = limit, beta = 1 },
+		{ alpha = limit - 1, define = "A=1" },
+		{ alpha = 1e100 },
+	}) do
+		local result, err = workbench.run(catalog, "repeat_flags", bindings)
+		assert(result == nil and tostring(err):find("hard limit of 4096 argv entries", 1, true), tostring(err))
+	end
+	assert(#opened == 0, "oversized structured bindings reached the terminal")
+
+	local legacy = {}
+	for index = 1, limit + 1 do
+		legacy[index] = "value-" .. index
+	end
+	local legacy_result, legacy_err = workbench.run(catalog, "repeat_flags", legacy)
+	assert(
+		legacy_result == nil and tostring(legacy_err):find("hard limit of 4096 argv entries", 1, true),
+		tostring(legacy_err)
+	)
+	assert(#opened == 0, "oversized legacy argv reached the terminal")
+
+	local result, err = workbench.run(catalog, "repeat_flags", { alpha = limit })
+	assert(result, err)
+	assert(#opened[1].launch.argv == limit + 6, "exact hard-limit binding was not materialized exactly")
 end)
 
 test("closure drift permits conflict focus and cancel but blocks replace", function()

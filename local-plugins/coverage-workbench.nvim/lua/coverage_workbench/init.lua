@@ -6,9 +6,26 @@ if ffi_ok then
 	pcall(ffi.cdef, "int fcntl(int fd, int cmd, ...);")
 end
 
-local DEFAULT_CONFIG = { max_report_bytes = 50 * 1024 * 1024, signs = "all", stale = "hide" }
+local MEBIBYTE = 1024 * 1024
+local MAX_REPORT_BYTES = 256 * MEBIBYTE
+local MAX_SOURCE_BYTES = 16 * MEBIBYTE
+local MAX_MODEL_BYTES = 64 * MEBIBYTE
+local MAX_SIGN_LINE = 2147483647
+local MODEL_FILE_BASE_BYTES = 512
+local MODEL_LINE_BYTES = 64
+local DEFAULT_CONFIG = {
+	max_report_bytes = 50 * MEBIBYTE,
+	max_source_bytes = MAX_SOURCE_BYTES,
+	max_model_bytes = MAX_MODEL_BYTES,
+	signs = "all",
+	stale = "hide",
+}
 local config = vim.deepcopy(DEFAULT_CONFIG)
 local registry = {}
+local roots_by_path = {}
+local buffer_paths = {}
+local render_states = {}
+local sign_groups = {}
 local generation = 0
 local event_callback
 local configured = false
@@ -74,7 +91,7 @@ end
 local path_snapshot_matches
 local descriptor_path_is_bound
 
-local function source_identity(root, path)
+local function source_identity(root, path, bound_source_bytes)
 	local before = uv.fs_lstat(path)
 	if not before or before.type ~= "file" then
 		return nil, "source changed while binding coverage: " .. path
@@ -93,6 +110,14 @@ local function source_identity(root, path)
 		uv.fs_close(handle)
 		return nil, "source changed while binding coverage: " .. path
 	end
+	if opened.size > config.max_source_bytes then
+		uv.fs_close(handle)
+		return nil, ("source exceeds %d bytes: %s"):format(config.max_source_bytes, path)
+	end
+	if bound_source_bytes ~= nil and opened.size > config.max_model_bytes - bound_source_bytes then
+		uv.fs_close(handle)
+		return nil, ("coverage sources exceed %d bytes"):format(config.max_model_bytes)
+	end
 	local data, read_err = uv.fs_read(handle, opened.size, 0)
 	local after = uv.fs_fstat(handle)
 	local bound = after and descriptor_path_is_bound(root, path, handle) and path_snapshot_matches(root, path, after)
@@ -110,15 +135,12 @@ local function source_identity(root, path)
 	}
 end
 
-local function source_matches(root, path, expected)
-	local actual = source_identity(root, path)
-	return actual ~= nil
-		and actual.dev == expected.dev
-		and actual.ino == expected.ino
-		and actual.size == expected.size
-		and same_time(actual.mtime, expected.mtime)
-		and same_time(actual.ctime, expected.ctime)
-		and actual.digest == expected.digest
+local function consume_model_budget(budget, amount)
+	if amount > config.max_model_bytes - budget.model_bytes then
+		return nil, ("coverage model exceeds %d bytes"):format(config.max_model_bytes)
+	end
+	budget.model_bytes = budget.model_bytes + amount
+	return true
 end
 
 local function emit(kind, payload)
@@ -172,19 +194,27 @@ local function source_path(root, name)
 	return resolved
 end
 
-local function source_entry(root, name)
+local function source_entry(root, name, files, budget, duplicate_error)
 	local path, path_err = source_path(root, name)
 	if not path then
 		return nil, path_err
 	end
-	local identity, identity_err = source_identity(root, path)
+	if files[path] then
+		return nil, duplicate_error .. name
+	end
+	local identity, identity_err = source_identity(root, path, budget.source_bytes)
 	if not identity then
 		return nil, identity_err
 	end
+	local budgeted, budget_err = consume_model_budget(budget, MODEL_FILE_BASE_BYTES + #path + #name)
+	if not budgeted then
+		return nil, budget_err
+	end
+	budget.source_bytes = budget.source_bytes + identity.size
 	return path, identity
 end
 
-local function integer_list(value, field, name)
+local function integer_list(value, field, name, budget)
 	if value == nil then
 		return {}
 	end
@@ -194,16 +224,35 @@ local function integer_list(value, field, name)
 	local result = {}
 	local seen = {}
 	for _, line in ipairs(value) do
-		if type(line) ~= "number" or line < 1 or line % 1 ~= 0 then
+		if type(line) ~= "number" or line < 1 or line > MAX_SIGN_LINE or line % 1 ~= 0 then
 			return nil, ("%s contains an invalid line for %s"):format(field, name)
 		end
 		if not seen[line] then
+			local budgeted, budget_err = consume_model_budget(budget, MODEL_LINE_BYTES)
+			if not budgeted then
+				return nil, budget_err
+			end
 			seen[line] = true
 			result[#result + 1] = line
 		end
 	end
 	table.sort(result)
 	return result
+end
+
+local function disjoint_lines(name, lists)
+	local seen = {}
+	for _, item in ipairs(lists) do
+		for _, line in ipairs(item.lines) do
+			local previous = seen[line]
+			if previous then
+				return nil,
+					("coverage line %d appears in both %s and %s for %s"):format(line, previous, item.field, name)
+			end
+			seen[line] = item.field
+		end
+	end
+	return true
 end
 
 local function totals(files)
@@ -243,28 +292,34 @@ function M.parse_coverage_json(root, raw)
 		return nil, "unsupported coverage.py JSON format: " .. tostring(format)
 	end
 	local files = {}
+	local budget = { model_bytes = 0, source_bytes = 0 }
 	for name, entry in pairs(decoded.files) do
 		if type(entry) ~= "table" then
 			return nil, "invalid coverage.py file entry: " .. tostring(name)
 		end
-		local path, identity_or_err = source_entry(root, name)
+		local path, identity_or_err = source_entry(root, name, files, budget, "duplicate canonical source: ")
 		if not path then
 			return nil, identity_or_err
 		end
-		if files[path] then
-			return nil, "duplicate canonical source: " .. name
-		end
-		local executed, executed_err = integer_list(entry.executed_lines, "executed_lines", name)
+		local executed, executed_err = integer_list(entry.executed_lines, "executed_lines", name, budget)
 		if not executed then
 			return nil, executed_err
 		end
-		local missing, missing_err = integer_list(entry.missing_lines, "missing_lines", name)
+		local missing, missing_err = integer_list(entry.missing_lines, "missing_lines", name, budget)
 		if not missing then
 			return nil, missing_err
 		end
-		local excluded, excluded_err = integer_list(entry.excluded_lines, "excluded_lines", name)
+		local excluded, excluded_err = integer_list(entry.excluded_lines, "excluded_lines", name, budget)
 		if not excluded then
 			return nil, excluded_err
+		end
+		local disjoint, disjoint_err = disjoint_lines(name, {
+			{ field = "executed_lines", lines = executed },
+			{ field = "missing_lines", lines = missing },
+			{ field = "excluded_lines", lines = excluded },
+		})
+		if not disjoint then
+			return nil, disjoint_err
 		end
 		files[path] = {
 			executed_lines = executed,
@@ -282,16 +337,13 @@ function M.parse_coverage_json(root, raw)
 	}
 end
 
-local function finish_lcov_record(root, record, files)
+local function finish_lcov_record(root, record, files, budget)
 	if not record then
 		return true
 	end
-	local path, identity_or_err = source_entry(root, record.source)
+	local path, identity_or_err = source_entry(root, record.source, files, budget, "duplicate LCOV source record: ")
 	if not path then
 		return nil, identity_or_err
-	end
-	if files[path] then
-		return nil, "duplicate LCOV source record: " .. record.source
 	end
 	local executed, missing = {}, {}
 	for line, count in pairs(record.lines) do
@@ -313,6 +365,7 @@ function M.parse_lcov(root, raw)
 		return nil, "invalid LCOV data"
 	end
 	local files = {}
+	local budget = { model_bytes = 0, source_bytes = 0 }
 	local record
 	for line in (raw .. "\n"):gmatch("([^\r\n]*)\r?\n") do
 		if line:sub(1, 3) == "SF:" then
@@ -326,12 +379,18 @@ function M.parse_lcov(root, raw)
 			end
 			local number, count = line:match("^DA:(%d+),([%-]?%d+)")
 			number, count = tonumber(number), tonumber(count)
-			if not number or number < 1 or not count or count < 0 then
+			if not number or number < 1 or number > MAX_SIGN_LINE or not count or count < 0 then
 				return nil, "invalid LCOV line record: " .. line
+			end
+			if record.lines[number] == nil then
+				local budgeted, budget_err = consume_model_budget(budget, MODEL_LINE_BYTES)
+				if not budgeted then
+					return nil, budget_err
+				end
 			end
 			record.lines[number] = (record.lines[number] or 0) + count
 		elseif line == "end_of_record" then
-			local ok, err = finish_lcov_record(root, record, files)
+			local ok, err = finish_lcov_record(root, record, files, budget)
 			if not ok then
 				return nil, err
 			end
@@ -410,28 +469,94 @@ local function read_report(root, path)
 end
 
 local function sign_group(root)
-	return SIGN_GROUP_PREFIX .. vim.fn.sha256(root):sub(1, 16)
+	local group = sign_groups[root]
+	if not group then
+		group = SIGN_GROUP_PREFIX .. vim.fn.sha256(root):sub(1, 16)
+		sign_groups[root] = group
+	end
+	return group
 end
 
-local function render_buffer(buf, model)
-	if not vim.api.nvim_buf_is_valid(buf) then
+local function buffer_path(buf, refresh)
+	local name = vim.api.nvim_buf_get_name(buf)
+	local cached = buffer_paths[buf]
+	if not refresh and cached and cached.name == name then
+		return cached.path, false
+	end
+	local path = canonical(name)
+	local changed = cached ~= nil and (cached.name ~= name or cached.path ~= path)
+	buffer_paths[buf] = { name = name, path = path }
+	return path, changed
+end
+
+local function state_table(buf)
+	local states = render_states[buf]
+	if not states then
+		states = {}
+		render_states[buf] = states
+	end
+	return states
+end
+
+local function forget_root_state(root)
+	for buf, states in pairs(render_states) do
+		states[root] = nil
+		if not next(states) then
+			render_states[buf] = nil
+		end
+	end
+end
+
+local function unindex_model(root, model)
+	if not model then
 		return
 	end
-	local group = sign_group(model.root)
-	vim.fn.sign_unplace(group, { buffer = buf })
-	local name = canonical(vim.api.nvim_buf_get_name(buf))
-	local entry = name and model.files[name] or nil
-	if not entry then
-		return
+	for path in pairs(model.files) do
+		local roots = roots_by_path[path]
+		if roots then
+			roots[root] = nil
+			if not next(roots) then
+				roots_by_path[path] = nil
+			end
+		end
 	end
-	local stale = vim.bo[buf].modified or not source_matches(model.root, name, entry.source)
-	entry.stale = stale
-	if stale and config.stale == "hide" then
-		emit("stale", { root = model.root, path = name, bufnr = buf })
-		return
+end
+
+local function index_model(root, model)
+	for path in pairs(model.files) do
+		local roots = roots_by_path[path]
+		if not roots then
+			roots = {}
+			roots_by_path[path] = roots
+		end
+		roots[root] = true
 	end
+end
+
+local function source_metadata_matches(root, path, expected)
+	local before = uv.fs_lstat(path)
+	local function matches(stat)
+		return stat
+			and stat.type == "file"
+			and stat.dev == expected.dev
+			and stat.ino == expected.ino
+			and stat.size == expected.size
+			and same_time(stat.mtime, expected.mtime)
+			and same_time(stat.ctime, expected.ctime)
+	end
+	if not matches(before) then
+		return false
+	end
+	local resolved = uv.fs_realpath(path)
+	if not resolved or resolved ~= path or (resolved ~= root and vim.fs.relpath(root, resolved) == nil) then
+		return false
+	end
+	return same_file_snapshot(before, uv.fs_lstat(path))
+end
+
+local function place_signs(buf, group, entry)
 	if config.signs == "none" then
-		return
+		return false
 	end
 	local id = 1
 	if config.signs == "all" or config.signs == "covered" then
@@ -446,11 +571,141 @@ local function render_buffer(buf, model)
 			id = id + 1
 		end
 	end
+	return id > 1
 end
 
-local function render(model)
+local function has_configured_signs(entry)
+	return (config.signs == "all" and (#entry.executed_lines > 0 or #entry.missing_lines > 0))
+		or (config.signs == "covered" and #entry.executed_lines > 0)
+		or (config.signs == "missing" and #entry.missing_lines > 0)
+end
+
+local function render_buffer(buf, current, options)
+	if not vim.api.nvim_buf_is_valid(buf) then
+		return
+	end
+	options = options or {}
+	local model = current.model
+	local root = model.root
+	local group = sign_group(root)
+	local states = state_table(buf)
+	local previous = states[root]
+	local path = buffer_path(buf, options.refresh_path == true)
+	local entry = path and model.files[path] or nil
+	if not entry then
+		if options.force or (previous and previous.placed) then
+			vim.fn.sign_unplace(group, { buffer = buf })
+		end
+		states[root] = nil
+		if not next(states) then
+			render_states[buf] = nil
+		end
+		return
+	end
+	local modified = vim.bo[buf].modified
+	local changedtick = vim.api.nvim_buf_get_changedtick(buf)
+	local same_generation = previous
+		and previous.generation == current.generation
+		and previous.path == path
+		and previous.signs == config.signs
+		and previous.stale_policy == config.stale
+	if not options.force and modified and same_generation and previous.modified then
+		-- TextChanged/TextChangedI remain O(1) after the first dirty transition:
+		-- no canonicalization, source I/O, hashing, sign churn, or repeated event.
+		previous.changedtick = changedtick
+		return
+	end
+	if
+		not options.force
+		and not modified
+		and same_generation
+		and not previous.modified
+		and options.revalidate == false
+	then
+		previous.changedtick = changedtick
+		return
+	end
+
+	local stale = modified or not source_metadata_matches(root, path, entry.source)
+	entry.stale = stale
+	local should_hide = stale and config.stale == "hide"
+	local should_place = not should_hide and has_configured_signs(entry)
+	local stable_display = same_generation
+		and previous.stale == stale
+		and previous.placed == should_place
+		and not options.force
+	if stable_display then
+		previous.modified = modified
+		previous.changedtick = changedtick
+		return
+	end
+
+	if options.force or (previous and previous.placed) then
+		vim.fn.sign_unplace(group, { buffer = buf })
+	end
+	local placed = false
+	if stale and config.stale == "hide" then
+		if not previous or not previous.stale then
+			emit("stale", { root = root, path = path, bufnr = buf })
+		end
+	else
+		placed = place_signs(buf, group, entry)
+	end
+	states[root] = {
+		changedtick = changedtick,
+		generation = current.generation,
+		modified = modified,
+		path = path,
+		placed = placed,
+		signs = config.signs,
+		stale = stale,
+		stale_policy = config.stale,
+	}
+end
+
+local function render(current, force)
 	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		render_buffer(buf, model)
+		render_buffer(buf, current, { force = force == true, revalidate = true })
+	end
+end
+
+local function release_buffer(buf, unplace)
+	local states = render_states[buf]
+	if unplace and states then
+		for root, state in pairs(states) do
+			if state.placed then
+				vim.fn.sign_unplace(sign_group(root), { buffer = buf })
+			end
+		end
+	end
+	render_states[buf] = nil
+	buffer_paths[buf] = nil
+end
+
+local function render_event(args)
+	if not vim.api.nvim_buf_is_valid(args.buf) then
+		return
+	end
+	local hot = args.event == "TextChanged" or args.event == "TextChangedI"
+	local refresh_path = not hot
+	local path, path_changed = buffer_path(args.buf, refresh_path)
+	if args.event == "BufFilePost" or path_changed then
+		local resolved = buffer_paths[args.buf]
+		release_buffer(args.buf, true)
+		-- Keep the newly resolved identity after releasing the old buffer state.
+		-- BufReadPost after a symlink retarget can now index only the new target.
+		buffer_paths[args.buf] = resolved
+	end
+	local roots = path and roots_by_path[path] or nil
+	if not roots then
+		return
+	end
+	local revalidate = not hot
+	for root in pairs(roots) do
+		local current = registry[root]
+		if current then
+			render_buffer(args.buf, current, { revalidate = revalidate })
+		end
 	end
 end
 
@@ -492,9 +747,25 @@ function M.load(options)
 	if not model then
 		return nil, parse_err
 	end
-	generation = generation + 1
-	registry[root] = { generation = generation, path = resolved, model = model }
-	render(model)
+	local previous = registry[root]
+	local next_generation = generation + 1
+	local candidate = { generation = next_generation, path = resolved, model = model }
+	local rendered, render_err = xpcall(function()
+		render(candidate, true)
+	end, debug.traceback)
+	if not rendered then
+		if previous then
+			pcall(render, previous, true)
+		else
+			pcall(vim.fn.sign_unplace, sign_group(root))
+			forget_root_state(root)
+		end
+		return nil, "coverage render failed: " .. tostring(render_err)
+	end
+	generation = next_generation
+	unindex_model(root, previous and previous.model or nil)
+	registry[root] = candidate
+	index_model(root, model)
 	emit("loaded", { root = root, path = resolved, generation = generation })
 	return M.snapshot(root)
 end
@@ -507,7 +778,7 @@ function M.refresh(root)
 	end
 	local loaded, load_err = M.load({ root = root, path = current.path, format = current.model.kind })
 	if not loaded then
-		render(current.model)
+		render(current, true)
 		emit("refresh_failed", { root = root, path = current.path, error = tostring(load_err) })
 	end
 	return loaded, load_err
@@ -530,7 +801,11 @@ function M.clear(root)
 		return false
 	end
 	vim.fn.sign_unplace(sign_group(root))
+	local current = registry[root]
+	unindex_model(root, current and current.model or nil)
 	registry[root] = nil
+	forget_root_state(root)
+	sign_groups[root] = nil
 	emit("cleared", { root = root })
 	return true
 end
@@ -543,7 +818,14 @@ function M.setup(options)
 		return nil, "setup options must be an object"
 	end
 	for key in pairs(options) do
-		if key ~= "max_report_bytes" and key ~= "signs" and key ~= "stale" and key ~= "event" then
+		if
+			key ~= "max_report_bytes"
+			and key ~= "max_source_bytes"
+			and key ~= "max_model_bytes"
+			and key ~= "signs"
+			and key ~= "stale"
+			and key ~= "event"
+		then
 			return nil, "setup contains an unknown option: " .. tostring(key)
 		end
 	end
@@ -551,8 +833,37 @@ function M.setup(options)
 	if max_report_bytes == nil then
 		max_report_bytes = DEFAULT_CONFIG.max_report_bytes
 	end
-	if type(max_report_bytes) ~= "number" or max_report_bytes % 1 ~= 0 or max_report_bytes < 1 then
-		return nil, "setup.max_report_bytes must be a positive integer"
+	if
+		type(max_report_bytes) ~= "number"
+		or max_report_bytes % 1 ~= 0
+		or max_report_bytes < 1
+		or max_report_bytes > MAX_REPORT_BYTES
+	then
+		return nil, ("setup.max_report_bytes must be an integer between 1 and %d"):format(MAX_REPORT_BYTES)
+	end
+	local max_source_bytes = options.max_source_bytes
+	if max_source_bytes == nil then
+		max_source_bytes = DEFAULT_CONFIG.max_source_bytes
+	end
+	if
+		type(max_source_bytes) ~= "number"
+		or max_source_bytes % 1 ~= 0
+		or max_source_bytes < 1
+		or max_source_bytes > MAX_SOURCE_BYTES
+	then
+		return nil, ("setup.max_source_bytes must be an integer between 1 and %d"):format(MAX_SOURCE_BYTES)
+	end
+	local max_model_bytes = options.max_model_bytes
+	if max_model_bytes == nil then
+		max_model_bytes = DEFAULT_CONFIG.max_model_bytes
+	end
+	if
+		type(max_model_bytes) ~= "number"
+		or max_model_bytes % 1 ~= 0
+		or max_model_bytes < 1
+		or max_model_bytes > MAX_MODEL_BYTES
+	then
+		return nil, ("setup.max_model_bytes must be an integer between 1 and %d"):format(MAX_MODEL_BYTES)
 	end
 	local signs = options.signs
 	if signs == nil then
@@ -571,7 +882,13 @@ function M.setup(options)
 	if options.event ~= nil and type(options.event) ~= "function" then
 		return nil, "setup.event must be a function"
 	end
-	config = { max_report_bytes = max_report_bytes, signs = signs, stale = stale }
+	config = {
+		max_report_bytes = max_report_bytes,
+		max_source_bytes = max_source_bytes,
+		max_model_bytes = max_model_bytes,
+		signs = signs,
+		stale = stale,
+	}
 	event_callback = options.event
 	configured = true
 	vim.fn.sign_define(SIGN_COVERED, { text = "▎", texthl = "DiagnosticOk" })
@@ -581,13 +898,15 @@ function M.setup(options)
 		{ "BufReadPost", "BufEnter", "BufModifiedSet", "TextChanged", "TextChangedI", "BufWritePost", "BufFilePost" },
 		{
 			group = group,
-			callback = function(args)
-				for _, current in pairs(registry) do
-					render_buffer(args.buf, current.model)
-				end
-			end,
+			callback = render_event,
 		}
 	)
+	vim.api.nvim_create_autocmd("BufWipeout", {
+		group = group,
+		callback = function(args)
+			release_buffer(args.buf, false)
+		end,
+	})
 	return true
 end
 
@@ -612,6 +931,10 @@ function M.teardown()
 	end
 	pcall(vim.api.nvim_del_augroup_by_name, "coverage_workbench")
 	config = vim.deepcopy(DEFAULT_CONFIG)
+	roots_by_path = {}
+	buffer_paths = {}
+	render_states = {}
+	sign_groups = {}
 	event_callback = nil
 	configured = false
 	return true

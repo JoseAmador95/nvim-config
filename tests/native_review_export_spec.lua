@@ -33,7 +33,7 @@ local function session()
 		items = {
 			{
 				id = "root",
-				type = "rationale",
+				type = "objection!",
 				resolution = "open",
 				deliveries = {},
 				body = "Why use a tuple instead of the enum directly?",
@@ -52,7 +52,7 @@ local function session()
 			},
 			{
 				id = "reply",
-				type = "rationale",
+				type = "objection!",
 				resolution = "open",
 				deliveries = {},
 				body = "The enum can remain the source of truth.",
@@ -66,14 +66,14 @@ end
 test("Markdown includes exact scope, compact anchors, status, and replies", function()
 	local markdown, ids = assert(exporter.render(session()))
 	assert(markdown:find("Commit: `" .. oid .. "`", 1, true))
-	assert(markdown:find("## RATIONALE — lua/config/example.lua:8 [NEW]", 1, true))
+	assert(markdown:find("## OBJECTION! — lua/config/example.lua:8 [NEW]", 1, true))
 	assert(not markdown:find("lua/config/example.lua:8-8", 1, true))
 	assert(markdown:find("_draft_", 1, true))
 	assert(not markdown:find("Context (`", 1, true))
 	assert(not markdown:find("local values = tuple(enum)", 1, true))
 	assert(not markdown:find(session().items[1].anchor.context_hash, 1, true))
 	assert(not markdown:find("right, historical", 1, true))
-	assert(markdown:find("### Reply: RATIONALE — lua/config/example.lua:8 [NEW]", 1, true))
+	assert(markdown:find("### Reply: OBJECTION! — lua/config/example.lua:8 [NEW]", 1, true))
 	assert(vim.deep_equal(ids, { "root", "reply" }))
 end)
 
@@ -87,7 +87,7 @@ test("Markdown renders old multiline anchors without source context", function()
 	value.items[1].anchor.context_hash = vim.fn.sha256(value.items[1].anchor.context)
 	value.items[2] = nil
 	local markdown = assert(exporter.render(value))
-	assert(markdown:find("## RATIONALE — lua/config/old.lua:3-5 [OLD]", 1, true))
+	assert(markdown:find("## OBJECTION! — lua/config/old.lua:3-5 [OLD]", 1, true))
 	assert(not markdown:find("private old source", 1, true))
 	assert(not markdown:find(value.items[1].anchor.context_hash, 1, true))
 end)

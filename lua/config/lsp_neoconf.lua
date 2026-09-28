@@ -9,26 +9,30 @@ local function warn_once(message)
 	vim.notify_once(message, vim.log.levels.WARN, { title = "LSP" })
 end
 
-local function setting_value(key, default, file)
-	local success, value = pcall(project_settings.get, key, default, file)
+local function setting_values(defaults, file)
+	local success, values = pcall(project_settings.get_many, defaults, file)
 	if not success then
-		warn_once("approved project LSP settings could not be read: " .. tostring(value))
-		return false, default
+		warn_once("approved project LSP settings could not be read: " .. tostring(values))
+		return false, vim.deepcopy(defaults)
 	end
-	return true, value
+	return true, values
 end
 
 function M.is_enabled(name, file)
-	local ok, server = setting_value("lspconfig." .. name, {}, file)
+	local key = "lspconfig." .. name
+	local ok, values = setting_values({ [key] = {} }, file)
+	local server = values[key]
 	return not ok or server ~= false
 end
 
 local function merge_settings(name, config, file)
-	local ok_vscode, vscode = setting_value("vscode", {}, file or config.root_dir)
-	local ok_server, server = setting_value("lspconfig." .. name, {}, file or config.root_dir)
-	if not ok_vscode or not ok_server then
+	local server_key = "lspconfig." .. name
+	local ok, values = setting_values({ vscode = {}, [server_key] = {} }, file or config.root_dir)
+	if not ok then
 		return false
 	end
+	local vscode = values.vscode
+	local server = values[server_key]
 
 	if config.original_settings == nil then
 		config.original_settings = vim.deepcopy(config.settings or {})

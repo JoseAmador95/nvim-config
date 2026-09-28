@@ -111,7 +111,14 @@ test("decoder replaces an invalid available continuation without hiding followin
 end)
 
 test("top-level setup configures both modules with an exact option object", function()
-	equal({ poll_interval_ms = 500, max_lines = 100000, max_bytes = 64 * 1024 * 1024 }, workbench.effective_config())
+	equal({
+		poll_interval_ms = 500,
+		max_lines = 100000,
+		max_bytes = 64 * 1024 * 1024,
+		continuity_bytes = 64 * 1024,
+		max_matches = 20000,
+		scan_lines_per_tick = 1000,
+	}, workbench.effective_config())
 	assert(workbench.status().configured == false)
 	local defaults = workbench.effective_config()
 	defaults.max_lines = 1
@@ -125,6 +132,15 @@ test("top-level setup configures both modules with an exact option object", func
 	local coerced, coerced_err = workbench.setup({ follow = { max_lines = "bogus" } })
 	assert(not coerced and coerced_err:find("positive integer", 1, true), "invalid follow limit was coerced")
 	equal(before, workbench.status(), "invalid numeric setup mutated state")
+	coerced, coerced_err = workbench.setup({ follow = { continuity_bytes = 0 } })
+	assert(not coerced and coerced_err:find("positive integer", 1, true), "zero continuity budget was accepted")
+	equal(before, workbench.status(), "invalid continuity budget mutated state")
+	coerced, coerced_err = workbench.setup({ matches = { max_matches = 0 } })
+	assert(not coerced and coerced_err:find("positive integer", 1, true), "zero match limit was accepted")
+	equal(before, workbench.status(), "invalid match limit mutated state")
+	coerced, coerced_err = workbench.setup({ matches = { scan_lines_per_tick = 1.5 } })
+	assert(not coerced and coerced_err:find("positive integer", 1, true), "fractional scan budget was accepted")
+	equal(before, workbench.status(), "invalid scan budget mutated state")
 	local nested, nested_err = workbench.setup({ follow = { injected = true }, matches = {} })
 	assert(not nested and nested_err:find("unknown option", 1, true), nested_err)
 	equal(before, workbench.status(), "rejected nested setup mutated state")
@@ -143,6 +159,7 @@ local function setup_follow(opts)
 		uv = opts.uv,
 		max_lines = opts.max_lines or 100,
 		max_bytes = opts.max_bytes or 1024,
+		continuity_bytes = opts.continuity_bytes or 64 * 1024,
 		new_fs_poll = observed.new_fs_poll,
 		new_fs_event = observed.new_fs_event,
 		schedule = opts.schedule or vim.schedule,
@@ -270,8 +287,26 @@ test("change event detects copytruncate after the replacement regrows beyond the
 	session:stop()
 end)
 
+test("same-size rewrites reload instead of being mistaken for idle files", function()
+	local observed = setup_follow()
+	local path = temporary_file("old-a\nold-b\n")
+	local session = assert(follow.open(path))
+	wait_for(function()
+		return vim.deep_equal(lines(session:buffer()), { "old-a", "old-b" })
+	end, "initial same-size fixture did not settle")
+	local previous = assert(vim.uv.fs_stat(path))
+	write_raw(path, "new-a\nnew-b\n")
+	assert(vim.uv.fs_utime(path, previous.atime.sec + 2, previous.mtime.sec + 2))
+	equal(previous.size, vim.uv.fs_stat(path).size, "rewrite fixture changed size")
+	observed.events[1].callback(nil, vim.fs.basename(path), { change = true })
+	wait_for(function()
+		return vim.deep_equal(lines(session:buffer()), { "new-a", "new-b" })
+	end, "same-size rewrite was not reloaded")
+	session:stop()
+end)
+
 test("copytruncate cannot collide only on a short continuity suffix", function()
-	local observed = setup_follow({ max_bytes = 200000 })
+	local observed = setup_follow({ max_bytes = 200000, continuity_bytes = 64 * 1024 })
 	local shared = string.rep("x", 65536)
 	local path = temporary_file("OLD\n" .. shared)
 	local session = assert(follow.open(path))
@@ -289,12 +324,64 @@ test("copytruncate cannot collide only on a short continuity suffix", function()
 	session:stop()
 end)
 
+test("continuity verification is distributed and independently byte bounded", function()
+	local reads = {}
+	local uv = setmetatable({
+		fs_read = function(fd, length, offset, callback)
+			reads[#reads + 1] = { length = length, offset = offset }
+			return vim.uv.fs_read(fd, length, offset, callback)
+		end,
+	}, { __index = vim.uv })
+	local observed = setup_follow({ uv = uv, max_bytes = 4096, continuity_bytes = 16 })
+	local path = temporary_file(string.rep("a", 4096))
+	local session = assert(follow.open(path))
+	wait_for(function()
+		return session:status().state == "following"
+	end, "initial sampled tail did not settle")
+	equal(16, session:status().continuity_bytes)
+
+	reads = {}
+	local previous = vim.uv.fs_stat(path)
+	local old_offset = session:status().offset
+	append_raw(path, "!")
+	observed.events[1].callback(nil, vim.fs.basename(path), { change = true })
+	wait_for(function()
+		return lines(session:buffer())[1]:sub(-1) == "!"
+	end, "sampled continuity append did not settle")
+
+	local append_index
+	for index, item in ipairs(reads) do
+		if item.offset == old_offset and item.length == 1 then
+			append_index = index
+			break
+		end
+	end
+	assert(append_index, "append read was not separated from continuity probes")
+	local function assert_sample(first_index, last_index, expected_start, expected_end)
+		local total = 0
+		for index = first_index, last_index do
+			total = total + reads[index].length
+		end
+		assert(last_index - first_index + 1 <= 8, "continuity used more than eight spans")
+		assert(total <= 16, "continuity exceeded its byte budget")
+		equal(expected_start, reads[first_index].offset, "continuity omitted the retention-window start")
+		local final = reads[last_index]
+		equal(expected_end, final.offset + final.length, "continuity omitted the retention-window end")
+		assert(reads[first_index + 1].offset > reads[first_index].offset + reads[first_index].length)
+	end
+	assert_sample(1, append_index - 1, 0, old_offset)
+	assert_sample(append_index + 1, #reads, 1, old_offset + 1)
+	session:stop()
+end)
+
 test("invalid per-session bounds fail before publishing a buffer or identity", function()
 	setup_follow()
 	local path = temporary_file("bounded\n")
 	local before = #follow.status()
 	local session, err = follow.open(path, { max_lines = "bad" })
 	assert(not session and err:find("positive integer", 1, true))
+	session, err = follow.open(path, { continuity_bytes = 1024 })
+	assert(not session and err:find("unknown option", 1, true), "per-session continuity override was accepted")
 	equal(before, #follow.status(), "invalid open published a follow session")
 	assert(follow.find(path) == nil, "invalid open claimed the source path")
 end)
@@ -428,6 +515,160 @@ test("stop closes both watcher types and a delayed read cannot mutate after tear
 	equal({}, follow.status())
 end)
 
+local function manual_scheduler()
+	local pending = {}
+	return pending,
+		function(callback)
+			pending[#pending + 1] = callback
+		end,
+		function()
+			local callback = assert(table.remove(pending, 1), "no match scan was scheduled")
+			callback()
+		end
+end
+
+test("matches scan bounded suffix chunks, coalesce edits, and preserve prefix extmarks", function()
+	local pending, schedule, tick = manual_scheduler()
+	local events = {}
+	assert(matches.setup({
+		max_matches = 100,
+		scan_lines_per_tick = 2,
+		schedule = schedule,
+		event = function(event)
+			events[#events + 1] = vim.deepcopy(event)
+		end,
+	}))
+	local buf = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(buf)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+		"hit zero",
+		"hit one",
+		"hit two",
+		"hit three",
+		"hit four",
+		"hit five",
+	})
+	assert(matches.add(buf, { kind = "exact", text = "hit", hl_group = "Search" }))
+	equal(1, #pending, "initial match scan was scheduled more than once")
+	local _, progress_err = matches.next(buf)
+	assert(progress_err and progress_err:find("still in progress", 1, true), "incomplete navigation wrapped")
+
+	tick()
+	equal(2, #matches.locations(buf), "one tick exceeded the configured line budget")
+	vim.api.nvim_win_set_cursor(0, { 2, 3 })
+	_, progress_err = matches.next(buf)
+	assert(progress_err and progress_err:find("still in progress", 1, true), "partial scan wrapped")
+	tick()
+	equal(4, #matches.locations(buf), "second tick exceeded the configured line budget")
+	tick()
+	equal(6, #matches.locations(buf), "final tick did not complete the index")
+	equal(0, #pending)
+	local completed = events[#events]
+	equal("refreshed", completed.kind)
+	equal(6, completed.count)
+	equal(false, completed.truncated)
+
+	local before = vim.api.nvim_buf_get_extmarks(buf, matches.namespace(), 0, -1, {})
+	local prefix_ids = { before[1][1], before[2][1], before[3][1] }
+	vim.api.nvim_buf_set_lines(buf, 4, 5, false, { "hit four changed" })
+	vim.api.nvim_buf_set_lines(buf, 3, 4, false, { "hit three changed" })
+	equal(1, #pending, "adjacent edit events did not coalesce")
+	tick()
+	local after_tick = vim.api.nvim_buf_get_extmarks(buf, matches.namespace(), 0, -1, {})
+	equal(prefix_ids[1], after_tick[1][1], "row-zero extmark ID changed during suffix rescan")
+	equal(prefix_ids[2], after_tick[2][1], "row-one extmark ID changed during suffix rescan")
+	equal(prefix_ids[3], after_tick[3][1], "row-two extmark ID changed during suffix rescan")
+	equal(5, #matches.locations(buf), "suffix scan did not stop after two changed rows")
+	tick()
+	equal(6, #matches.locations(buf))
+
+	assert(matches.add(buf, { kind = "exact", text = "absent", hl_group = "Search" }))
+	equal(1, #pending)
+	equal(2, matches.clear(buf), "clear-all did not remove both patterns")
+	equal({}, matches.locations(buf), "clear-all was not immediate")
+	local event_count = #events
+	tick()
+	equal(event_count, #events, "a stale scan callback published after clear-all")
+	equal({}, matches.locations(buf))
+	matches.teardown()
+	vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("match caps select deterministic pattern-order results and refill after prefix edits", function()
+	local pending, schedule, tick = manual_scheduler()
+	local events = {}
+	assert(matches.setup({
+		max_matches = 2,
+		scan_lines_per_tick = 10,
+		schedule = schedule,
+		event = function(event)
+			events[#events + 1] = vim.deepcopy(event)
+		end,
+	}))
+	local buf = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(buf)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "z A", "B A", "A" })
+	assert(matches.add(buf, { id = "a", kind = "exact", text = "A", hl_group = "Search" }))
+	assert(matches.add(buf, { id = "b", kind = "exact", text = "B", hl_group = "Search" }))
+	equal(1, #pending, "pattern additions did not coalesce their full rescans")
+	tick()
+	equal({
+		{ pattern_id = "a", row = 1, col = 3, end_col = 4 },
+		{ pattern_id = "a", row = 2, col = 3, end_col = 4 },
+	}, matches.locations(buf), "cap selection was not row-major and pattern ordered")
+	equal(true, events[#events].truncated)
+	equal(2, events[#events].count)
+
+	vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "none" })
+	tick()
+	equal({
+		{ pattern_id = "b", row = 2, col = 1, end_col = 2 },
+		{ pattern_id = "a", row = 2, col = 3, end_col = 4 },
+	}, matches.locations(buf), "editing before the cutoff did not refill the cap")
+	equal(true, events[#events].truncated)
+
+	local event_count = #events
+	vim.api.nvim_buf_set_lines(buf, 2, 3, false, { "A changed after cutoff" })
+	equal(0, #pending, "edit strictly after the capped row scheduled a scan")
+	equal(event_count, #events)
+	matches.teardown()
+	vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("regex scans use match_line offsets, advance zero-width matches, and honor the cap", function()
+	local original_regex = vim.regex
+	local ok, err = xpcall(function()
+		local offsets = {}
+		vim.regex = function()
+			return {
+				match_line = function(_, _, _, offset, finish)
+					offsets[#offsets + 1] = offset
+					for _, absolute in ipairs({ 0, 2, 4 }) do
+						if absolute >= offset and absolute <= finish then
+							return absolute - offset, absolute - offset
+						end
+					end
+				end,
+				match_str = function()
+					error("regex scanning must not allocate line substrings")
+				end,
+			}
+		end
+		local _, schedule, tick = manual_scheduler()
+		assert(matches.setup({ max_matches = 2, scan_lines_per_tick = 1, schedule = schedule }))
+		local buf = vim.api.nvim_create_buf(true, false)
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "abcde" })
+		assert(matches.add(buf, { kind = "regex", text = "fake", hl_group = "Search" }))
+		tick()
+		equal({ 0, 1 }, offsets, "zero-width regex offsets did not advance monotonically")
+		equal(2, #matches.locations(buf), "regex scan exceeded or underfilled the remaining cap")
+		matches.teardown()
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end, debug.traceback)
+	vim.regex = original_regex
+	assert(ok, err)
+end)
+
 test("matches use stable IDs and extmarks with automatic refresh and navigation", function()
 	assert(matches.setup())
 	local buf = vim.api.nvim_create_buf(true, false)
@@ -436,6 +677,9 @@ test("matches use stable IDs and extmarks with automatic refresh and navigation"
 	assert(matches.add(buf, { id = "errors", kind = "exact", text = "ERROR", hl_group = "ErrorMsg" }))
 	local warning = assert(matches.add(buf, { kind = "regex", text = "W.RN", hl_group = "WarningMsg" }))
 	equal(1, warning.id)
+	wait_for(function()
+		return #matches.locations(buf) == 3
+	end, "initial match scan did not complete")
 	equal(3, #matches.locations(buf))
 	local extmarks = vim.api.nvim_buf_get_extmarks(buf, matches.namespace(), 0, -1, { details = true })
 	equal(3, #extmarks, "match extmark count")
@@ -450,6 +694,9 @@ test("matches use stable IDs and extmarks with automatic refresh and navigation"
 	equal({ pattern_id = "errors", row = 3, col = 6, end_col = 11 }, assert(matches.previous(buf)))
 
 	assert(matches.remove(buf, "errors"))
+	wait_for(function()
+		return #matches.locations(buf) == 1
+	end, "pattern removal did not complete its rescan")
 	equal(1, #matches.locations(buf))
 	vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "WARN again" })
 	wait_for(function()

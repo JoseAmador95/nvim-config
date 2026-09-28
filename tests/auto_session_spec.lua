@@ -51,14 +51,17 @@ end
 
 test("pre-save remains harmless without code review and preserves skip-empty", function()
 	reset_editor()
+	local attempted_loads = 0
 	package.loaded["config.code_review"] = nil
 	package.preload["config.code_review"] = function()
+		attempted_loads = attempted_loads + 1
 		error("fixture module unavailable")
 	end
 	equal(false, pre_save(), "empty editor was no longer skipped")
 
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-session-normal.lua")
 	equal(true, pre_save(), "normal file window was unexpectedly skipped")
+	equal(0, attempted_loads, "session save activated an unloaded review adapter")
 end)
 
 test("automatic pre-save suspends synchronously and never restores review UI", function()

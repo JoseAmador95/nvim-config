@@ -5,10 +5,10 @@ vim.api.nvim_create_user_command("CodeActions", function()
 	H.CodeActions()
 end, { desc = "Show LSP code actions" })
 
--- Toggle current-line inline diagnostics
+-- Toggle the host-selected inline diagnostics presenter.
 vim.api.nvim_create_user_command("ToggleInlineDiagnostics", function()
 	H.ToggleInlineDiagnostics()
-end, { desc = "Toggle current-line inline diagnostics" })
+end, { desc = "Toggle inline diagnostics" })
 
 vim.keymap.set("n", "<leader>xi", "<cmd>ToggleInlineDiagnostics<cr>", {
 	desc = "Toggle inline diagnostics",

@@ -188,6 +188,16 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			local server
 			local ok, err = xpcall(function()
 				assert(vim.env.NVIM_DAP_UI == "dap-view", "fixture must exercise dap-view")
+				package.loaded["config.workflow_execution"] = {
+					grant = function(capability)
+						assert(capability == "debug")
+						return true, { runtime = "host" }
+					end,
+					tool = function()
+						error("fixture adapters must replace managed adapters before execution")
+					end,
+					notify = function() end,
+				}
 				require("lazy").load({ plugins = { "nvim-dap" } })
 				local dap = require("dap")
 				local dap_view = require("dap-view")

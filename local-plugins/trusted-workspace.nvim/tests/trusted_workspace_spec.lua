@@ -86,6 +86,25 @@ local function with_uv_override(name, replacement, callback)
 	return first, second, third
 end
 
+local function with_observational_filesystem(callback)
+	local names = { "fs_chmod", "fs_fchmod", "fs_fsync", "fs_mkdir", "fs_rename", "fs_unlink", "fs_write" }
+	local originals = {}
+	for _, name in ipairs(names) do
+		originals[name] = assert(vim.uv[name], "missing uv function " .. name)
+		vim.uv[name] = function()
+			error("observational read called " .. name)
+		end
+	end
+	local ok, first, second, third = xpcall(callback, debug.traceback)
+	for _, name in ipairs(names) do
+		vim.uv[name] = originals[name]
+	end
+	if not ok then
+		error(first)
+	end
+	return first, second, third
+end
+
 local function test(name, callback)
 	count = count + 1
 	local ok, err = xpcall(callback, debug.traceback)
@@ -336,7 +355,8 @@ end)
 
 test("approval is limited to the exact currently registered project candidate", function()
 	local parent = temp_dir()
-	setup(state_root(parent))
+	local root = state_root(parent)
+	setup(root)
 	local missing, missing_err = trusted_workspace.approve("/repo", "project", "fingerprint")
 	assert(not missing and missing_err:find("currently registered", 1, true), "missing source was approved")
 	assert(trusted_workspace.register_source({
@@ -350,6 +370,25 @@ test("approval is limited to the exact currently registered project candidate", 
 	local wrong_fingerprint = trusted_workspace.approve("/repo", "project", "different")
 	assert(not wrong_repo and not wrong_fingerprint, "mismatched candidate was approved")
 	assert(trusted_workspace.approve("/repo", "project", "fingerprint"))
+	local workspace = { runtime = "host", root = "/repo", repo_identity = "/repo" }
+	assert(trusted_workspace.has_approval({
+		workspace = workspace,
+		source = "project",
+		fingerprint = "fingerprint",
+	}))
+	assert(trusted_workspace.has_approval("/repo", "project", "different") == false)
+
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local persistent = vim.json.decode(table.concat(vim.fn.readfile(path), "\n"))
+	persistent.approvals["/repo"].project = nil
+	assert(vim.fn.writefile({ vim.json.encode(persistent) }, path) == 0)
+	assert(trusted_workspace.has_approval("/repo", "project", "fingerprint") == false)
+	equal("fingerprint", trusted_workspace.approvals("/repo").project, "durable approval read changed cached state")
+
+	assert(vim.fn.writefile({ "{" }, path) == 0)
+	local approved, approval_err = trusted_workspace.has_approval("/repo", "project", "fingerprint")
+	assert(approved == nil and tostring(approval_err):find("corrupt", 1, true), tostring(approval_err))
+	equal("{", vim.fn.readfile(path)[1], "approval observation replaced corrupt state")
 	vim.fn.delete(parent, "rf")
 end)
 
@@ -359,9 +398,13 @@ test("capability grants are exact, persistent, copied, and revocable", function(
 	setup(root)
 	for _, capability in ipairs({ "lint-format", "test", "build", "debug" }) do
 		assert(trusted_workspace.authorize("/repo", capability))
+		local granted, grant_err = trusted_workspace.has_grant("/repo", capability)
+		assert(granted == true, tostring(grant_err))
 	end
 	local invalid, invalid_err = trusted_workspace.authorize("/repo", "network")
 	assert(not invalid and invalid_err:find("lint%-format"), "unknown capability was accepted")
+	local invalid_read, invalid_read_err = trusted_workspace.has_grant("/repo", "network")
+	assert(not invalid_read and invalid_read_err:find("lint%-format"), "unknown capability was queried")
 	local status = trusted_workspace.status("/repo")
 	equal(true, status.repo_grants.debug, "grant is missing")
 	status.repo_grants.debug = false
@@ -370,10 +413,112 @@ test("capability grants are exact, persistent, copied, and revocable", function(
 	setup(root)
 	equal(true, trusted_workspace.status("/repo").repo_grants.build, "grant did not survive reload")
 	assert(trusted_workspace.revoke("/repo", "build"))
+	assert(trusted_workspace.has_grant("/repo", "build") == false)
 	assert(trusted_workspace.status("/repo").repo_grants.build == nil, "revoked grant remains active")
 	setup(root)
 	assert(trusted_workspace.status("/repo").repo_grants.build == nil, "revocation did not survive reload")
 	vim.fn.delete(parent, "rf")
+end)
+
+test("has_grant rereads durable state without updating cached status", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	setup(root)
+	assert(trusted_workspace.authorize("/repo", "test"))
+	local path = vim.fs.joinpath(root, "trusted-workspace.json")
+	local persistent = vim.json.decode(table.concat(vim.fn.readfile(path), "\n"))
+	persistent.grants["/repo"].build = true
+	assert(vim.fn.writefile({ vim.json.encode(persistent) }, path) == 0)
+	local granted, grant_err = trusted_workspace.has_grant("/repo", "build")
+	assert(granted == true, tostring(grant_err))
+	assert(trusted_workspace.status("/repo").repo_grants.build == nil, "durable read changed cached status")
+
+	persistent.grants["/repo"].test = nil
+	assert(vim.fn.writefile({ vim.json.encode(persistent) }, path) == 0)
+	assert(trusted_workspace.has_grant({ repo = "/repo", capability = "test" }) == false)
+	equal(true, trusted_workspace.status("/repo").repo_grants.test, "durable read rewrote cached grants")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("has_grant keeps absent durable state observational", function()
+	local parent = temp_dir()
+	local root = state_root(parent)
+	local events = 0
+	assert(trusted_workspace.setup({
+		state_root = root,
+		reset = true,
+		on_state_change = function()
+			events = events + 1
+		end,
+	}))
+	local granted, grant_err = with_observational_filesystem(function()
+		return trusted_workspace.has_grant("/repo", "test")
+	end)
+	assert(granted == false and grant_err == nil)
+	assert(vim.uv.fs_lstat(root) == nil, "grant observation created the state root")
+	equal(0, events, "grant observation emitted an event")
+	vim.fn.delete(parent, "rf")
+end)
+
+test("has_grant rejects unsafe durable state without repairing it", function()
+	local function granted_fixture()
+		local parent = temp_dir()
+		local root = state_root(parent)
+		setup(root)
+		assert(trusted_workspace.authorize("/repo", "test"))
+		return parent, root, vim.fs.joinpath(root, "trusted-workspace.json")
+	end
+
+	do
+		local parent, root = granted_fixture()
+		assert(vim.uv.fs_chmod(root, 493)) -- 0755
+		local granted, err = trusted_workspace.has_grant("/repo", "test")
+		assert(granted == nil and tostring(err):find("0700", 1, true), tostring(err))
+		equal("rwxr-xr-x", vim.fn.getfperm(root), "grant observation repaired root permissions")
+		vim.fn.delete(parent, "rf")
+	end
+
+	do
+		local parent, _, path = granted_fixture()
+		assert(vim.uv.fs_chmod(path, 420)) -- 0644
+		local granted, err = trusted_workspace.has_grant("/repo", "test")
+		assert(granted == nil and tostring(err):find("0600", 1, true))
+		equal("rw-r--r--", vim.fn.getfperm(path), "grant observation repaired file permissions")
+		vim.fn.delete(parent, "rf")
+	end
+
+	do
+		local parent, _, path = granted_fixture()
+		assert(vim.fn.writefile({ "{" }, path) == 0)
+		local before = table.concat(vim.fn.readfile(path), "\n")
+		local granted, err = trusted_workspace.has_grant("/repo", "test")
+		assert(granted == nil and tostring(err):find("corrupt", 1, true))
+		equal(before, table.concat(vim.fn.readfile(path), "\n"), "grant observation replaced corrupt state")
+		vim.fn.delete(parent, "rf")
+	end
+
+	do
+		local parent, _, path = granted_fixture()
+		local target = vim.fs.joinpath(parent, "target.json")
+		assert(vim.uv.fs_rename(path, target))
+		assert(vim.uv.fs_symlink(target, path))
+		local before = table.concat(vim.fn.readfile(target), "\n")
+		local granted, err = trusted_workspace.has_grant("/repo", "test")
+		assert(granted == nil and tostring(err):find("symlinks are rejected", 1, true))
+		equal(target, vim.uv.fs_readlink(path), "grant observation replaced the state symlink")
+		equal(before, table.concat(vim.fn.readfile(target), "\n"), "grant observation changed the symlink target")
+		vim.fn.delete(parent, "rf")
+	end
+
+	do
+		local parent, _, path = granted_fixture()
+		local alias = vim.fs.joinpath(parent, "state-hardlink.json")
+		assert(vim.uv.fs_link(path, alias))
+		local granted, err = trusted_workspace.has_grant("/repo", "test")
+		assert(granted == nil and tostring(err):find("hard links are rejected", 1, true))
+		assert(vim.uv.fs_lstat(path).nlink == 2, "grant observation replaced hard-linked state")
+		vim.fn.delete(parent, "rf")
+	end
 end)
 
 test("pre-commit file fsync and close failures do not create grants", function()

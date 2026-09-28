@@ -1,5 +1,6 @@
 local editor = require("config.editor")
 local pager = require("config.pager")
+local clipboard = require("config.clipboard")
 
 local M = {}
 
@@ -342,9 +343,9 @@ local function open_external(value)
 	local ssh_tty = vim.env.SSH_TTY
 	local ssh_connection = vim.env.SSH_CONNECTION
 	if (type(ssh_tty) == "string" and ssh_tty ~= "") or (type(ssh_connection) == "string" and ssh_connection ~= "") then
-		local ok, err = pcall(vim.fn.setreg, "+", value, "v")
+		local ok, err = clipboard.copy_text(value, "+")
 		if not ok then
-			notify("Could not copy link through OSC52: " .. tostring(err), vim.log.levels.ERROR)
+			notify("Could not copy link through OSC 52: " .. tostring(err), vim.log.levels.ERROR)
 			return false
 		end
 		notify("Copied link to the local clipboard", vim.log.levels.INFO)

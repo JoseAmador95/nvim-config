@@ -7,8 +7,8 @@ local visual_modes = {
 }
 
 ---Build the immutable context used to filter menu descriptors.
----@param values? { filetype?: string, mode?: string, visual?: boolean, buftype?: string, modifiable?: boolean, target?: table, selection?: table }
----@return { filetype: string, mode: string, visual: boolean, buftype: string, modifiable: boolean, target: table?, selection: table? }
+---@param values? { filetype?: string, mode?: string, visual?: boolean, buftype?: string, modifiable?: boolean, target?: table, selection?: table, path?: string, cwd?: string, git_root?: string }
+---@return { filetype: string, mode: string, visual: boolean, buftype: string, modifiable: boolean, target: table?, selection: table?, path: string?, cwd: string?, git_root: string? }
 function M.new(values)
 	values = values or {}
 	local mode = values.mode or "n"
@@ -17,7 +17,7 @@ function M.new(values)
 		visual = visual_modes[mode] == true
 	end
 
-	return {
+	local context = {
 		filetype = values.filetype or "",
 		mode = mode,
 		visual = visual,
@@ -26,6 +26,29 @@ function M.new(values)
 		target = values.target and vim.deepcopy(values.target) or nil,
 		selection = values.selection and vim.deepcopy(values.selection) or nil,
 	}
+	for _, name in ipairs({ "path", "cwd", "git_root" }) do
+		if type(values[name]) == "string" and values[name] ~= "" then
+			context[name] = values[name]
+		end
+	end
+	return context
+end
+
+local function file_metadata(bufnr)
+	local buftype = vim.bo[bufnr].buftype
+	if buftype ~= "" then
+		return buftype
+	end
+	local path = vim.api.nvim_buf_get_name(bufnr)
+	if path == "" then
+		return buftype
+	end
+	return buftype, path, vim.fs.root(path, ".git")
+end
+
+local function window_cwd(winid)
+	local ok, cwd = pcall(vim.fn.getcwd, winid)
+	return ok and cwd or nil
 end
 
 ---Capture the editor target before a picker or menu takes focus.
@@ -36,6 +59,7 @@ function M.capture()
 	local mode = vim.fn.mode()
 	local visual = visual_modes[mode] == true
 	local selection
+	local buftype, path, git_root = file_metadata(bufnr)
 
 	if visual then
 		local anchor = vim.fn.getpos("v")
@@ -50,10 +74,13 @@ function M.capture()
 		filetype = vim.bo[bufnr].filetype,
 		mode = mode,
 		visual = visual,
-		buftype = vim.bo[bufnr].buftype,
+		buftype = buftype,
 		modifiable = vim.bo[bufnr].modifiable,
 		target = target,
 		selection = selection,
+		path = path,
+		cwd = window_cwd(target.winid),
+		git_root = git_root,
 	})
 end
 
@@ -63,14 +90,18 @@ end
 ---@param target table
 ---@return table
 function M.refresh(context, target)
+	local buftype, path, git_root = file_metadata(target.bufnr)
 	return M.new({
 		filetype = vim.bo[target.bufnr].filetype,
 		mode = context.mode,
 		visual = context.visual,
-		buftype = vim.bo[target.bufnr].buftype,
+		buftype = buftype,
 		modifiable = vim.bo[target.bufnr].modifiable,
 		target = target,
 		selection = context.selection,
+		path = path,
+		cwd = context.cwd or window_cwd(target.winid),
+		git_root = git_root,
 	})
 end
 

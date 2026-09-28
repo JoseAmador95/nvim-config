@@ -31,8 +31,17 @@ sources.
   fingerprint only when it matches the currently registered, enabled project
   candidate. `approvals([workspace_or_repo])` returns copied approvals and
   `revoke_approval(workspace_or_repo, source)` removes one.
+- `has_approval({ workspace, source, fingerprint })` rereads durable state for
+  an exact fingerprint decision without locks, repair, cache updates, writes, or
+  events. Unsafe or corrupt state returns `nil, error`; absence or mismatch
+  returns `false`.
 - `authorize(repo, capability)` and `revoke(repo, capability)` manage revocable
   grants. Capabilities are exactly `lint-format`, `test`, `build`, and `debug`.
+- `has_grant(repo, capability)` rereads durable state for every decision. It
+  returns `false` only when the state file or grant is absent, and returns
+  `nil, error` for unconfigured, corrupt, replaced, linked, or incorrectly
+  permissioned state. This observation never creates or repairs state, takes a
+  lock, runs recovery, updates the process cache, or emits an event.
 - `status([workspace])` returns copied candidate/applied/pending/LKG state and
   grants; zero-argument status also contains a deterministic aggregate of all
   scopes and is safe before setup. `diff([workspace])` returns the

@@ -91,8 +91,13 @@ Neovim owns a repository/session review controller in `config.code_review`:
   and separate instruction row while still coloring the selected type.
   File and review-level create/edit/reply flows use a centered rounded modal
   capped at 88 by 18 rows and reserve no source rows. Tab/Shift-Tab cycle new or
-  edited comment types in Normal and Insert mode and return to Insert; replies do
-  not cycle. Normal-mode double Enter and `<C-s>` share one save path.
+  edited comment types only in Normal mode; Insert-mode Tab remains ordinary and
+  replies do not cycle. `<C-s>` saves immediately. Normal-mode Enter then Enter
+  within `timeoutlen` saves, while Esc then Esc discards a non-empty draft; a
+  physical Esc used to leave Insert counts as the first Esc. A transient title
+  prompt lasts only for that one-shot timeout and is cleared by intervening input,
+  text changes, focus/completion boundaries, or teardown. `q` closes only an
+  empty composer.
 - `ReviewExport` renders all comments every time and copies complete Markdown or
   uses a temporary float. The header retains the frozen scope and exact
   revisions. Comment headings contain only file, line/range, and `[OLD]` or

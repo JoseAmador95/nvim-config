@@ -9,6 +9,7 @@ local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not 
 source = uv.fs_realpath(source) or fn.fnamemodify(source, ":p")
 local repo_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
 local lazy_lock = require("config.lazy_lock")
+local lazy_attestation = require("config.lazy_attestation")
 local locked_lazy, locked_lazy_err = lazy_lock.plugin(repo_root, "lazy.nvim")
 if not locked_lazy then
 	error("Cannot resolve the locked lazy.nvim bootstrap: " .. tostring(locked_lazy_err))
@@ -25,7 +26,7 @@ local function git_environment()
 	return environment
 end
 
-local function run_git(arguments)
+local function start_git(arguments)
 	assert(arguments[1] == "git", "run_git expects a git command")
 	local command = {
 		"git",
@@ -40,7 +41,11 @@ local function run_git(arguments)
 		"core.attributesFile=/dev/null",
 	}
 	vim.list_extend(command, vim.list_slice(arguments, 2))
-	local result = vim.system(command, { text = true, env = git_environment(), clear_env = true }):wait()
+	return vim.system(command, { text = true, env = git_environment(), clear_env = true })
+end
+
+local function finish_git(process)
+	local result = process:wait()
 	local stdout = vim.trim(result.stdout or "")
 	local detail = vim.trim(table.concat({ result.stdout or "", result.stderr or "" }, "\n"))
 	if detail == "" then
@@ -49,9 +54,15 @@ local function run_git(arguments)
 	return result.code, stdout, detail
 end
 
+local function run_git(arguments)
+	return finish_git(start_git(arguments))
+end
+
 local function remove_bootstrap(path)
 	pcall(fn.delete, path, "rf")
 end
+
+local validate_lazy_checkout
 
 local function bootstrap_lazy()
 	local parent = vim.fs.dirname(lazypath)
@@ -98,16 +109,6 @@ local function bootstrap_lazy()
 		)
 	end
 
-	local head_code, head, head_detail = run_git({ "git", "-C", staging, "rev-parse", "HEAD" })
-	if head_code ~= 0 or head ~= locked_lazy.commit then
-		remove_bootstrap(staging)
-		error(
-			("Locked lazy.nvim checkout mismatch: expected %s, got %s"):format(
-				locked_lazy.commit,
-				head_code == 0 and head or head_detail
-			)
-		)
-	end
 	local branch_code, _, branch_detail = run_git({
 		"git",
 		"-C",
@@ -119,6 +120,11 @@ local function bootstrap_lazy()
 	if branch_code ~= 0 then
 		remove_bootstrap(staging)
 		error("Could not record lazy.nvim's locked branch: " .. branch_detail)
+	end
+	local staged_ok, staged_err = validate_lazy_checkout(staging, { allow_cache = false })
+	if not staged_ok then
+		remove_bootstrap(staging)
+		error("Refusing to promote an invalid lazy.nvim bootstrap: " .. tostring(staged_err))
 	end
 
 	local renamed, rename_err = uv.fs_rename(staging, lazypath)
@@ -135,84 +141,116 @@ local function remediation()
 	):format(repo_root)
 end
 
-local function validate_lazy_checkout()
-	local checkout_real = uv.fs_realpath(lazypath)
+validate_lazy_checkout = function(path, options)
+	options = options or {}
+	local suffix = options.remediation == true and "\n" .. remediation() or ""
+	local checkout_real = uv.fs_realpath(path)
 	if not checkout_real then
-		error(("Cannot resolve lazy.nvim checkout at %s.\n%s"):format(lazypath, remediation()))
+		return nil, ("Cannot resolve lazy.nvim checkout at %s.%s"):format(path, suffix)
 	end
 	checkout_real = vim.fs.normalize(checkout_real)
-
-	local identity_code, identity, identity_detail =
-		run_git({ "git", "-C", lazypath, "rev-parse", "--show-toplevel", "--verify", "HEAD^{commit}" })
-	local top, head = identity:match("^(.-)\n([0-9a-f]+)$")
-	local top_real = identity_code == 0 and top and uv.fs_realpath(top) or nil
-	if not top_real or vim.fs.normalize(top_real) ~= checkout_real then
-		error(
-			("Refusing lazy.nvim repository redirection at %s (git top-level: %s).\n%s"):format(
-				lazypath,
-				identity_code == 0 and tostring(top) or identity_detail,
-				remediation()
-			)
-		)
+	local cache_allowed = options.allow_cache ~= false
+	local cache_hit, cache_status = lazy_attestation.checkout_begin({
+		root = checkout_real,
+		head = locked_lazy.commit,
+		allow_cache = cache_allowed,
+	})
+	if cache_allowed and cache_hit then
+		return true
 	end
+	local checkout_before = cache_status.snapshot
 
-	if head ~= locked_lazy.commit then
-		error(
-			("Refusing to load lazy.nvim from %s: expected locked commit %s, got %s.\n%s"):format(
-				lazypath,
-				locked_lazy.commit,
-				head,
-				remediation()
-			)
-		)
-	end
-
-	local flags_code, flags, flags_detail = run_git({ "git", "-C", lazypath, "ls-files", "-v", "-z" })
-	if flags_code ~= 0 then
-		error(
-			("Cannot inspect lazy.nvim index flags at %s (git exit %s): %s\n%s"):format(
-				lazypath,
-				tostring(flags_code),
-				flags_detail,
-				remediation()
-			)
-		)
-	end
-	for entry in flags:gmatch("[^%z]+") do
-		local tag = entry:sub(1, 1)
-		if tag == "S" or tag:match("%l") then
-			error(
-				("Refusing lazy.nvim checkout with hidden index flags at %s (%s).\n%s"):format(
-					lazypath,
-					entry,
-					remediation()
-				)
-			)
-		end
-	end
-
-	local status_code, changes, status_detail = run_git({
+	-- These two read-only inspections are independent. Starting both before
+	-- waiting preserves the exact fail-closed checks while avoiding serial Git
+	-- process and filesystem latency on remote HOME directories.
+	local identity_process =
+		start_git({ "git", "-C", path, "rev-parse", "--show-toplevel", "--verify", "HEAD^{commit}" })
+	local status_process = start_git({
 		"git",
 		"-C",
-		lazypath,
+		path,
 		"status",
 		"--porcelain=v1",
 		"-z",
 		"--untracked-files=all",
 		"--ignored=matching",
 	})
+	local identity_code, identity, identity_detail = finish_git(identity_process)
+	local status_code, changes, status_detail = finish_git(status_process)
+	local top, head = identity:match("^(.-)\n([0-9a-f]+)$")
+	local top_real = identity_code == 0 and top and uv.fs_realpath(top) or nil
+	if not top_real or vim.fs.normalize(top_real) ~= checkout_real then
+		return nil,
+			("Refusing lazy.nvim repository redirection at %s (git top-level: %s).%s"):format(
+				path,
+				identity_code == 0 and tostring(top) or identity_detail,
+				suffix
+			)
+	end
+
+	if head ~= locked_lazy.commit then
+		return nil,
+			("Refusing to load lazy.nvim from %s: expected locked commit %s, got %s.%s"):format(
+				path,
+				locked_lazy.commit,
+				head,
+				suffix
+			)
+	end
+
 	if status_code ~= 0 then
-		error(("Cannot inspect lazy.nvim worktree at %s: %s.\n%s"):format(lazypath, status_detail, remediation()))
+		return nil, ("Cannot inspect lazy.nvim worktree at %s: %s.%s"):format(path, status_detail, suffix)
 	end
 	if changes ~= "" then
 		for change in changes:gmatch("[^%z]+") do
 			-- Neovim's helptags generation creates this ignored, non-executable
 			-- index file during normal plugin startup.
 			if change ~= "!! doc/tags" then
-				error(("Refusing modified lazy.nvim checkout at %s (%s).\n%s"):format(lazypath, change, remediation()))
+				return nil, ("Refusing modified lazy.nvim checkout at %s (%s).%s"):format(path, change, suffix)
 			end
 		end
 	end
+
+	local flags_ok, flags_err = lazy_attestation.verify({
+		root = checkout_real,
+		head = head,
+		run_git = run_git,
+		allow_cache = options.allow_cache ~= false,
+	})
+	if not flags_ok then
+		if flags_err.kind == "hidden-index-flags" then
+			return nil,
+				("Refusing lazy.nvim checkout with hidden index flags at %s (%s).%s"):format(
+					path,
+					flags_err.entry,
+					suffix
+				)
+		elseif flags_err.kind == "inspect-failed" then
+			return nil,
+				("Cannot inspect lazy.nvim index flags at %s (git exit %s): %s%s"):format(
+					path,
+					tostring(flags_err.code),
+					flags_err.detail,
+					suffix
+				)
+		end
+		return nil, ("lazy.nvim index changed while inspecting hidden flags at %s.%s"):format(path, suffix)
+	end
+	local cached_ok, cached_err = lazy_attestation.checkout_commit({
+		root = checkout_real,
+		head = head,
+		before = checkout_before,
+		allow_cache = cache_allowed,
+	})
+	if not cached_ok then
+		return nil,
+			("lazy.nvim checkout changed while establishing startup authority at %s (%s).%s"):format(
+				path,
+				tostring(cached_err and cached_err.detail or "unknown metadata race"),
+				suffix
+			)
+	end
+	return true
 end
 
 local lazy_stat = uv.fs_stat(lazypath)
@@ -230,7 +268,10 @@ end
 if lazy_stat.type ~= "directory" then
 	error("Cannot use lazy.nvim path " .. lazypath .. ": destination is not a directory")
 end
-validate_lazy_checkout()
+local checkout_ok, checkout_err = validate_lazy_checkout(lazypath, { remediation = true })
+if not checkout_ok then
+	error(checkout_err)
+end
 vim.opt.rtp:prepend(lazypath)
 
 local pager = require("config.pager")

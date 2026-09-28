@@ -75,20 +75,76 @@ verified-tool lifecycle and local plugin remain unloaded until the first
 explicit install or repair request. Neither startup nor Mason readiness plans,
 probes versions, attests, or accesses the registry/network. An explicit named
 install plans only that target, while `all` is the explicit aggregate path.
+The host queue bounds complete discovery-to-activation chains to two per
+Neovim process and serializes chains sharing the managed release or Mason root;
+verified-tools separately enforces its two global backend mutation slots and
+cross-process resource locks.
+Every valid named or `all` invocation has request-local progress and completion
+accounting layered around that queue. When Snacks is already available, one
+persistent non-history spinner uses a distinct ID for the invocation; no visual
+backend is loaded just to show it. The timer stops only after all of that
+request's guarded item callbacks settle, then one normal history-bearing
+aggregate notification replaces the same ID (three-second success, persistent
+warning on any failure). Per-tool result notifications are unchanged, and
+overlapping requests—including identical targets—remain independent.
 The same explicit request imports only that tool's legacy record before it is
 claimed; startup never scans the legacy catalog.
+Runtime resolution uses only durable managed proof or an explicit external
+certification. It does not plan, inspect `PATH`, run version processes, or write
+state. Release, Mason, and external authorities recheck metadata without
+hashing executable payloads; active npm bundle resolution deliberately rehashes
+the exact private closure and receipt on every use. A compatible candidate from
+a non-bang request is re-hashed while the identity/destination/shim resources
+are locked and published as a private `0600` certification; rerun the same
+command to recertify metadata drift. The executable, lexical path, canonical
+path, and ancestor chain must remain owned by root or the effective user, with
+no group/world-writable ancestor directory. Any managed
+record takes precedence and fails closed without external fallback.
+`markdown-preview` is managed-only. Missing and drifted state reports the exact
+recertify or `!` managed-repair action. An unsafe private external receipt is
+not overwritten; inspect/remove its exact entry or choose managed `!` repair.
 Explicit work is claimed once in persistent state; a failure, interruption, or
 corrupt claim is never retried automatically. A manual repair can reclaim an
 interrupted attempt only after its owner exits; live or unverifiable owners
-remain locked.
+remain locked, including for a bang repair. If an older Neovim still owns an
+unfinished request, close that editor and rerun the explicit install or repair
+from a fresh Neovim. Do not delete its verified-tools records or lock tickets.
+The Mason adapter always leaves registry/install callback context before it
+observes or acknowledges the result, and every terminal callback path reports
+exactly once so a post-install observation error cannot strand a live lock.
 
-- `:NvimConfigToolsInstall [all|name]` installs or retries the exact release or
-  Mason identity. `!` explicitly selects the managed strategy when a compatible
-  external candidate exists; failed, drifted, cancelled and interrupted state
-  still uses the core's explicit retry/repair claim mode.
+`devcontainers-cli` is the managed-only dynamic exception to the exact-version
+catalog. Only `:NvimConfigToolsInstall devcontainers-cli` or explicit `all`
+fetches the npm `latest` metadata; startup, health, resolution, and
+`provision-runtime` never do. The selected stable version is materialized as an
+immutable `bundle-sha256` closure containing exactly `@devcontainers/cli` and
+the pinned private Node 24.20.0 binary for the current supported target. It
+never executes host node/npm or Homebrew. Activation occurs only after live
+attestation succeeds; runtime reads the active slot offline, failed upgrades
+leave its previous pointer and bytes usable, and historical bundles are not
+pruned. Its `curl` and Python prerequisites are considered in declared `PATH`
+order, but an unsafe earlier candidate does not hide a later safe one: each is
+authority-checked and only the first validated canonical absolute path is ever
+executed. Python still runs with `-I -B`, and curl still ignores ambient config
+with `--disable`.
+The pinned Node digests come from the matching `.tar.gz` rows in the official
+per-release
+[`SHASUMS256.txt`](https://nodejs.org/dist/v24.20.0/SHASUMS256.txt); archive
+names and checksums must be updated together. A failed bundle-helper phase keeps
+its stable error category and appends only a whitespace-normalized, control-free
+diagnostic bounded to 160 bytes. This preserves actionable checksum or archive
+errors without persisting unbounded child-process output.
 
-Mason's UI is inspection-only: install, update, uninstall and registry-refresh
-commands and mappings are disabled.
+- `:NvimConfigToolsInstall [all|name]` certifies an exact compatible external
+  tool, otherwise installs or retries the exact release, Mason identity, or
+  explicitly selected npm `latest` bundle. `!` always selects the managed
+  strategy; failed, drifted, cancelled, interrupted, and stale succeeded state
+  uses the core's explicit retry/repair claim mode.
+
+Mason's UI is inspection-only and command-lazy: install, update, uninstall and
+registry-refresh commands and mappings are disabled. It and the dormant
+`mason-lspconfig` bridge stay outside normal file/LSP startup; native
+`nvim-lspconfig` registers and enables servers independently.
 
 `PATH` precedence is verified shims, `local_config.path` (declared order),
 `~/.local/bin`, the inherited host path, managed release binaries, then Mason.
@@ -98,12 +154,27 @@ exact raw source version and full link map to a normalized private `0600`
 receipt. Health receipt inspection and explicit attestation are local-only and
 never refresh the registry. Attestation of an existing successful identity
 occurs only on an explicit install/repair request.
+The current Mason proof validates the raw receipt and declared executable-link
+map during explicit install/attestation, then durably closes over the normalized
+receipt and each canonical launcher target. It does not prove transitive package
+files or the host interpreter. This is a documented schema limitation,
+especially for Node launchers, and must be fixed by a versioned closure proof
+plus mutation tests rather than an implicit runtime probe.
+The Mason `ToolIdentity` digest covers the complete immutable entry, integrity,
+and executable maps. Records produced by the older partial digest remain on disk
+as recovery evidence but are not runtime authority for the new identity; an
+explicit managed install/repair creates and attests the current record.
 
 | Mason backend | Host dependency |
 | --- | --- |
 | Prebuilt | None |
 | npm | `node` and `npm` |
 | PyPI | Python with working `venv` support |
+
+The npm-release installer itself needs only trusted system `curl` and Python
+to download and construct the verified bundle. The helper and its hostile
+archive fixtures are covered by `npm_release_installer_spec.lua` and
+`verified_npm_bundle_spec.py`, both listed explicitly in `scripts/check-config`.
 
 Mason skips a pin whose required backend is unavailable; health reports the
 blocked packages. `mmdflux` and PlantUML use the separate prebuilt release
@@ -122,6 +193,7 @@ table; and that environment changes restart only exact-root ty clients.
 | --- | --- | --- |
 | Terminal editor | Startup, argv lifecycle, commands, LSP config, plugin API contracts, and cache-only statusline render sentinel | Interactive completion and long editing sessions |
 | Redraw profiles | Schema/default, host/project trust boundary, full/low functional matrix, explicit SSH non-selection, and pager/VSCode full-profile guards | Subjective latency and bandwidth on a real remote terminal |
+| Markdown reading view | Exact v3.10.3 checkout and media guard, raw editable source, right read-only split, unsaved live updates, pager source recovery and filetype changes | Visual layout and scroll behavior in Ghostty and the real `nvimpager` executable |
 | nvimpager | Allowlist, source-lock SHA parity, parser set, argv/stdin filetype behavior, mappings and absence of editor-only services | Rendering in the real `nvimpager` executable |
 | VSCode Neovim | Stubbed profile and action mappings; terminal-only commands/plugins stay absent | A live VS Code extension host |
 | Themes | VSCode default, Catppuccin Latte/Mocha switching, local persistence, editor/pager availability and VSCode exclusion | Visual judgement in the real terminal and pager |
@@ -132,7 +204,7 @@ table; and that environment changes restart only exact-root ty clients.
 | Lint/format | Save-only lint routing, formatter chains, no-LSP fallback and missing-tool behavior | Project-specific linter configuration |
 | Diagrams | Scanner, renderer generations, atomic cache writes, corruption and pruning | Kitty image display, browser opening and visual layout |
 | LogWatch | Append, partial lines, truncation, rotation, deletion/recreation and retention limits | Sustained observation of a high-volume production log |
-| Dev Container editor | CLI/spool schemas and HMAC vector, no-clobber/filename binding, explicit pane/claim argv, detached claim handshake/timeout, checked respawn/quick-exit/handoff and ACK failure, private auth state, real flock contention/stale inode reuse, mount injection, offline propagation and absence-only fallback | A real Dev Container runtime, image lifecycle hooks and host SSH-agent forwarding |
+| Dev Container editor | CLI/spool schemas and HMAC vector, no-clobber/filename binding, explicit pane/claim argv, detached claim handshake/timeout, checked respawn/quick-exit/handoff and ACK failure, private auth state, real flock contention/stale inode reuse, official 0.89.0 bind-mount grammar, read-only doctor probes for the used `up`/`run-user-commands`/`exec` surfaces, positional cwd trampoline, frozen per-claim config closure with bounded files/directories/entries, whole-closure revalidation, host-only sidecar schema/mode/corruption checks, exact-identity cleanup under owner-directory replacement, legacy v4/v5 recovery, snapshot-without-sidecar fail-closed behavior, remote marker-probe ordering/failure, Podman Machine metadata cross-checking, v6 connection/fingerprint validation, exact endpoint propagation despite ambient/default drift, descriptor-backed durable immutable host-key pins, owner-private authenticated Unix gate, stdin-only 256-bit token that never enters TCP, per-connection domain-separated mutual HMAC, Python `-I -S` isolation, unpredictable owner-only proxy directories, executable good/bad-ACK proxy canaries, exact socket/directory retirement and supervised cleanup exit status, Python 3.9 `socket.timeout` polling, startup-only exact VM-loopback listener attestation, repeated Machine/host-agent/gate/process checks, full container-ID plus exact `devcontainer.local_folder`/`devcontainer.config_file` labels, running-state and host-network attestations before and after proxy readiness, configured-remote-user `exec`, proxy self-owner/mode checks, canonical user-owned host `SSH_AUTH_SOCK` with full ancestor identity/mode attestation and the exact macOS launchd runtime exception, host `/usr/bin/ssh`, VM `/bin/sh` and `/usr/bin/ss`, and container `/usr/bin/test`, executable `/usr/bin/python3`, `/bin/sh`, and `/usr/bin/ssh-add` prerequisites, `up --skip-post-create` ordering, supervised container-owned Unix proxy and SSH-agent protocol probes before and after exact-ID `run-user-commands` with the verified `SSH_AUTH_SOCK`, compatible-container reuse without an agent mount, BaseException cleanup, offline propagation and absence-only fallback | A real Podman Machine/Dev Container canary proving SELinux remains enforcing and the proxy process has the expected `container_t` domain, the authenticated gate-to-loopback-to-proxy handshake, host-agent identity and empty/non-empty agent behavior, hooks run only after agent verification, deterministic relay teardown, same-UID/root/daemon-system-principal adversarial mutation, and fail-closed rejection when any host, VM, CLI, network, or container prerequisite is absent |
 
 GitHub Actions runs the same bootstrap and check on `ubuntu-24.04` and
 `macos-15`. Hosted success is delivery evidence only after the branch has been

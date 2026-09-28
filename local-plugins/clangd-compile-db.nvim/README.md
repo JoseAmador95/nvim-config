@@ -40,6 +40,10 @@ callback-free projection. `status()` returns a copied aggregate with
 `status(root)` keeps the contextual view. Neither status form probes the
 filesystem; use `refresh(root)` for explicit revalidation. `teardown()` clears
 roots, providers, and pending restart tickets.
-The restart transaction stops every clangd for the root, waits up to the
-configured timeout (5000 ms by default), starts one replacement client, and
-reattaches the remaining valid buffers in order.
+The restart transaction includes uninitialized clients when it stops every
+clangd for the root, waits up to the configured timeout (5000 ms by default),
+starts one owned replacement, and reattaches every remaining valid buffer in
+order. It publishes the target as applied only after that owned client confirms
+its LSP initialization handshake. A failed or timed-out handshake discards the
+owned client before rollback, and the rollback is subject to the same attach
+and initialization contract.

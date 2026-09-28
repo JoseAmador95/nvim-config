@@ -1,5 +1,7 @@
 local pager = require("config.pager")
 local deferred = require("config.deferred")
+local jqx_commands = require("config.jqx_commands")
+local markdown_view = require("config.markdown_view")
 
 local function notify(msg, level)
 	vim.notify(msg, level or vim.log.levels.INFO, { title = "Viewer" })
@@ -48,11 +50,12 @@ local function next_scratch_name(ft)
 	return string.format("scratch-%d.%s", max_num + 1, suffix)
 end
 
-local function try_lsp_start()
-	-- Trigger FileType so Neovim 0.11+ native LSP handlers re-evaluate the buffer.
-	vim.api.nvim_exec_autocmds("FileType", { buffer = 0 })
+local function warn_if_no_lsp(bufnr)
 	vim.defer_fn(function()
-		local clients = vim.lsp.get_clients({ bufnr = 0 })
+		if not vim.api.nvim_buf_is_valid(bufnr) then
+			return
+		end
+		local clients = vim.lsp.get_clients({ bufnr = bufnr })
 		if not clients or #clients == 0 then
 			notify("No LSP client started for this buffer", vim.log.levels.WARN)
 		end
@@ -65,6 +68,10 @@ local function set_filetype_with_scratch(ft)
 	-- of showing the raw sequences as garbage. Guarded to pager mode so we never
 	-- rewrite a real file buffer in normal nvim.
 	if pager.active then
+		if not markdown_view.pager_show_source(vim.api.nvim_get_current_win()) then
+			notify("Could not access the pager source buffer", vim.log.levels.ERROR)
+			return nil, "pager source buffer unavailable"
+		end
 		local stripped, strip_err = pager.strip_ansi(0)
 		if not stripped then
 			notify("Could not set filetype: " .. tostring(strip_err), vim.log.levels.ERROR)
@@ -72,34 +79,42 @@ local function set_filetype_with_scratch(ft)
 		end
 	end
 
-	local name = vim.api.nvim_buf_get_name(0)
+	local bufnr = vim.api.nvim_get_current_buf()
+	local name = vim.api.nvim_buf_get_name(bufnr)
 	if name == "" then
 		local scratch = next_scratch_name(ft)
 		vim.api.nvim_cmd({ cmd = "file", args = { scratch } }, {})
 	end
 
-	vim.api.nvim_cmd({ cmd = "setfiletype", args = { ft } }, {})
+	if pager.active then
+		-- :setfiletype does nothing once Markdown has already been detected.
+		-- The pager picker and :SetFileType must both be able to reclassify
+		-- the original source after leaving its rendered view.
+		vim.bo[bufnr].filetype = ft
+		-- FileType handlers may make paged content editable again.
+		vim.bo[bufnr].modifiable = false
+		vim.bo[bufnr].modified = false
+	else
+		vim.api.nvim_cmd({ cmd = "setfiletype", args = { ft } }, {})
+	end
 
-	-- No LSP in pager mode; setfiletype already fired FileType so render-markdown
-	-- attaches. Skip the LSP-start probe (and its "no client" warning) there.
+	-- No LSP in pager mode. The new filetype also decides whether the hidden
+	-- source should gain a read-only rendered view.
 	if not pager.active then
-		try_lsp_start()
+		warn_if_no_lsp(bufnr)
+	else
+		markdown_view.pager_filetype_changed(bufnr)
 	end
 	return true
 end
 
 if not pager.active then
+	jqx_commands.setup()
 	vim.api.nvim_create_user_command("JsonTree", function()
 		if not ensure_filetype({ "json" }) then
 			return
 		end
-
-		if vim.fn.executable("jq") ~= 1 then
-			notify("jq not found in PATH", vim.log.levels.ERROR)
-			return
-		end
-
-		vim.cmd("JqxList")
+		deferred.load("config.jqx").list()
 	end, { desc = "JSON tree view" })
 end
 
@@ -151,50 +166,18 @@ end, {
 })
 
 vim.api.nvim_create_user_command("LogWatchCurrentFile", function(opts)
-	require("config.log_watch").command(opts)
+	deferred.load("config.log_watch").command(opts)
 end, {
 	nargs = "?",
 	complete = function()
-		return require("config.log_watch").complete()
+		return deferred.load("config.log_watch").complete()
 	end,
 	desc = "Follow current log file live (read-only, toggles without argument)",
 })
 
--- Markdown render toggle (<leader>mr -> :MarkdownRender; skipped in VS Code). The
--- diagram viewer keymap (<leader>md -> :DiagramShow) lives in config.diagram;
--- <leader>mp (markdown-preview.nvim, whole doc) in lua/plugins/markdown-preview.lua.
-if not vim.g.vscode then
-	local function toggle_markdown_render()
-		if vim.fn.exists(":MarkdownRender") == 2 then
-			vim.cmd("MarkdownRender")
-		else
-			notify("render-markdown isn't active here (not a markdown buffer)", vim.log.levels.WARN)
-		end
-	end
-	if require("config.pager").active then
-		-- Pager: bind globally so <leader>mr is available on whatever is viewed
-		-- (render-markdown only exists on markdown; the wrapper degrades gracefully).
-		vim.keymap.set("n", "<leader>mr", toggle_markdown_render, { desc = "Toggle markdown render" })
-	else
-		local function map_markdown_keys(buf)
-			vim.keymap.set("n", "<leader>mr", toggle_markdown_render, { buffer = buf, desc = "Toggle markdown render" })
-		end
-		vim.api.nvim_create_autocmd("FileType", {
-			pattern = "markdown",
-			group = vim.api.nvim_create_augroup("MarkdownRenderKeymap", { clear = true }),
-			callback = function(args)
-				map_markdown_keys(args.buf)
-			end,
-		})
-		-- Cover markdown buffers already loaded before this ran (e.g. the file passed
-		-- as a nvim argument, whose FileType may have fired first).
-		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-			if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].filetype == "markdown" then
-				map_markdown_keys(buf)
-			end
-		end
-	end
-end
+-- The terminal editor maps this only on Markdown sources; nvimpager maps it
+-- globally because its rendered buffer has its own non-Markdown filetype.
+markdown_view.setup()
 
 vim.api.nvim_create_user_command("FoldOpenAll", function()
 	local ok, ufo = pcall(require, "ufo")

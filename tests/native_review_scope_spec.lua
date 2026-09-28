@@ -52,7 +52,7 @@ local function dependencies(outputs, calls, filesystem)
 		end,
 		lstat = function(path)
 			assert(path == root .. "/new file.lua")
-			return filesystem.stat or { type = "file", mode = tonumber("644", 8) }
+			return filesystem.stat or { type = "file", mode = tonumber("644", 8), size = 8 }
 		end,
 		readlink = function(path)
 			assert(path == root .. "/new file.lua")
@@ -247,7 +247,9 @@ test("working drift detects changes in HEAD and every content layer", function()
 		{ untracked_mode = tonumber("755", 8) },
 	}) do
 		local calls = {}
-		local filesystem = changed.untracked_mode and { stat = { type = "file", mode = changed.untracked_mode } } or nil
+		local filesystem = changed.untracked_mode
+				and { stat = { type = "file", mode = changed.untracked_mode, size = 8 } }
+			or nil
 		local drift = assert(scope.detect_drift(baseline, dependencies(working_outputs(changed), calls, filesystem)))
 		assert(drift.stale and drift.current.fingerprint ~= baseline.fingerprint)
 		assert_read_only_git(calls)
@@ -267,7 +269,7 @@ test("working fingerprint hashes symlink targets and rejects special untracked f
 			dependencies(
 				working_outputs(),
 				calls,
-				{ stat = { type = "link", mode = tonumber("777", 8) }, target = "a.lua" }
+				{ stat = { type = "link", mode = tonumber("777", 8), size = 5 }, target = "a.lua" }
 			)
 		)
 	)
@@ -279,10 +281,120 @@ test("working fingerprint hashes symlink targets and rejects special untracked f
 	local invalid, err = scope.resolve(
 		root,
 		{ kind = "working" },
-		dependencies(working_outputs(), {}, { stat = { type = "fifo", mode = tonumber("644", 8) } })
+		dependencies(working_outputs(), {}, { stat = { type = "fifo", mode = tonumber("644", 8), size = 0 } })
 	)
 	assert(not invalid and err.code == "working_tree_unavailable")
 	assert(err.message:find("unsupported untracked file type", 1, true))
+end)
+
+test("untracked hashing is NUL-safe, ordered, and uses bounded multi-path batches", function()
+	local paths = {}
+	for index = 1, 2000 do
+		paths[#paths + 1] = ("dir/%04d-%s.lua"):format(index, string.rep("x", 70))
+	end
+	paths[3] = "line\nbreak.lua"
+	paths[4] = "tab\tname.lua"
+	paths[5] = "space name.lua"
+	paths[#paths + 1] = "linked.lua"
+	table.sort(paths)
+	local hash_calls = {}
+	local checkpoints = {}
+	local outputs = working_outputs()
+	outputs[key({ "ls-files", "--others", "--exclude-standard", "-z" })] = table.concat(paths, "\0") .. "\0"
+	local resolved, err = scope.resolve(root, { kind = "working" }, {
+		root = function()
+			return root
+		end,
+		git = function(_, arguments)
+			if arguments[1] == "hash-object" then
+				assert(arguments[2] == "--no-filters" and arguments[3] == "--")
+				assert(not vim.tbl_contains(arguments, "--stdin-paths"))
+				local bytes = #"git" + 1 + #"-C" + 1 + #root + 1
+				for _, argument in ipairs(arguments) do
+					bytes = bytes + #argument + 1
+				end
+				assert(bytes <= 128 * 1024, "hash-object argv exceeded its private cap")
+				hash_calls[#hash_calls + 1] = vim.list_slice(arguments, 4)
+				return table.concat(
+					vim.tbl_map(function()
+						return oid_d
+					end, hash_calls[#hash_calls]),
+					"\n"
+				) .. "\n"
+			end
+			return outputs[key(arguments)]
+		end,
+		lstat = function(path)
+			if path == root .. "/linked.lua" then
+				return { type = "link", mode = tonumber("777", 8), size = 11 }
+			end
+			return { type = "file", mode = tonumber("644", 8), size = 1 }
+		end,
+		readlink = function(path)
+			assert(path == root .. "/linked.lua")
+			return "target name"
+		end,
+		max_files = #paths,
+		max_file_bytes = 16,
+		max_model_bytes = #paths + 16,
+		control = {
+			checkpoint = function(phase)
+				checkpoints[#checkpoints + 1] = phase
+			end,
+		},
+	})
+	assert(resolved, vim.inspect(err))
+	assert(#hash_calls > 1, "large untracked sets retained one unbounded Git argv")
+	local hashed = {}
+	for _, batch in ipairs(hash_calls) do
+		vim.list_extend(hashed, batch)
+	end
+	local expected = vim.tbl_filter(function(path)
+		return path ~= "linked.lua"
+	end, paths)
+	assert(vim.deep_equal(expected, hashed), "batched paths lost ordering or control bytes")
+	assert(vim.tbl_contains(checkpoints, "scope.untracked_hash_batch"), "hash batches exposed no checkpoint")
+end)
+
+test("untracked limits fail before regular file hashing", function()
+	local paths = { "one.lua", "two.lua" }
+	local function limited(overrides)
+		local hash_calls = 0
+		local stat_calls = 0
+		local outputs = working_outputs()
+		outputs[key({ "ls-files", "--others", "--exclude-standard", "-z" })] = table.concat(paths, "\0") .. "\0"
+		local options = vim.tbl_extend("force", {
+			root = function()
+				return root
+			end,
+			git = function(_, arguments)
+				if arguments[1] == "hash-object" then
+					hash_calls = hash_calls + 1
+					return oid_d .. "\n" .. oid_c .. "\n"
+				end
+				return outputs[key(arguments)]
+			end,
+			lstat = function(path)
+				stat_calls = stat_calls + 1
+				return { type = "file", mode = tonumber("644", 8), size = path:find("one", 1, true) and 4 or 5 }
+			end,
+		}, overrides)
+		local value, err = scope.resolve(root, { kind = "working" }, options)
+		return value, err, hash_calls, stat_calls
+	end
+
+	local value, err, hash_calls, stat_calls = limited({ max_files = 1 })
+	assert(not value and err.code == "review_limit_exceeded" and err.details.limit == "max_files")
+	assert(err.details.actual == 2 and err.details.maximum == 1 and err.details.side == "NEW")
+	assert(hash_calls == 0 and stat_calls == 0, "file-count rejection inspected or hashed content")
+
+	value, err, hash_calls = limited({ max_files = 2, max_file_bytes = 3 })
+	assert(not value and err.details.limit == "max_file_bytes" and err.details.path == "one.lua")
+	assert(err.details.actual == 4 and err.details.layer == "untracked" and hash_calls == 0)
+
+	value, err, hash_calls = limited({ max_files = 2, max_file_bytes = 5, max_model_bytes = 8 })
+	assert(not value and err.details.limit == "max_model_bytes" and err.details.path == "two.lua")
+	assert(err.details.actual == 9 and hash_calls == 0, "aggregate rejection ran hash-object")
 end)
 
 test("invalid requests fail before Git execution", function()

@@ -11,13 +11,22 @@ require("config.local_plugins").setup()
 local failures = {}
 local count = 0
 local state
+local comment_types
+local host_comment_types
 local function test(name, callback)
 	count = count + 1
 	if state then
 		vim.fn.delete(state, "rf")
 		assert(vim.fn.mkdir(state, "p") == 1)
 	end
-	local ok, err = xpcall(callback, debug.traceback)
+	local ok, err = xpcall(function()
+		comment_types.configure({})
+		callback()
+	end, debug.traceback)
+	local restored, restore_err = pcall(comment_types.configure, host_comment_types)
+	if not restored then
+		failures[#failures + 1] = name .. "\nCould not restore host comment types: " .. tostring(restore_err)
+	end
 	if ok then
 		print("ok - " .. name)
 	else
@@ -27,6 +36,8 @@ end
 
 local config_fs = require("config.fs")
 local native_review = require("config.native_review")
+comment_types = native_review.comment_types
+host_comment_types = native_review.effective_config().comment_types or {}
 local exporter = native_review.export
 local scope_module = native_review.scope
 local store = native_review.store
@@ -204,7 +215,7 @@ end)
 test("file-level anchors survive save and load without invented line metadata", function()
 	local anchor = { kind = "file", path = "src/file.lua", side = "right", layer = "working", stale = false }
 	local session = assert(store.add(fresh(), {
-		type = "rationale",
+		type = "issue",
 		body = "This applies to the whole file",
 		anchor = anchor,
 	}, deps))
@@ -214,14 +225,97 @@ test("file-level anchors survive save and load without invented line metadata", 
 	assert(loaded.items[1].anchor.start_line == nil and loaded.items[1].anchor.end_line == nil)
 end)
 
-test("six types, normalized anchors, replies, and resolution lifecycle are strict", function()
+test("saved v2 rationale comments load as objection! and save canonically", function()
+	local session = add_root(fresh())
+	local saved, path = assert(store.save(root, session, deps))
+	local legacy = vim.deepcopy(saved)
+	legacy.items[1].type = "rationale"
+	local encoded = vim.json.encode(legacy) .. "\n"
+	assert(config_fs.write_binary_atomic(path, encoded))
+	assert(vim.uv.fs_chmod(path, 384))
+
+	local loaded = assert(store.load(root, saved.id, deps))
+	assert(loaded.items[1].type == "objection!")
+	assert(config_fs.read_binary(path) == encoded, "read-only load rewrote v2 state")
+	local updated = assert(store.save(root, loaded, deps))
+	assert(updated.items[1].type == "objection!")
+	local persisted = assert(vim.json.decode(assert(config_fs.read_binary(path))))
+	assert(persisted.items[1].type == "objection!")
+end)
+
+test("retired and removed types survive load, edit, reply, and save without becoming selectable", function()
+	local types = { "issue", "suggestion", "objection!", "question", "pedantic", "praise", "archived" }
 	local session = fresh()
-	for _, item_type in ipairs({ "issue", "suggestion", "rationale", "question", "pedantic", "praise" }) do
-		session = add_root(session, item_type)
+	for _ = 1, #types do
+		session = add_root(session)
 	end
-	assert(#session.items == 6 and session.items[1].anchor.path == "src/main.lua")
+	local saved, path = assert(store.save(root, session, deps))
+	local archived = vim.deepcopy(saved)
+	for index, item_type in ipairs(types) do
+		archived.items[index].type = item_type
+	end
+	assert(config_fs.write_binary_atomic(path, vim.json.encode(archived) .. "\n"))
+	assert(vim.uv.fs_chmod(path, 384))
+
+	local loaded = assert(store.load(root, saved.id, deps))
+	for index, item_type in ipairs(types) do
+		assert(loaded.items[index].type == item_type)
+	end
+	local archived_id = loaded.items[#types].id
+	local edited =
+		assert(store.edit(loaded, archived_id, { body = "Updated archived finding", type = "archived" }, deps))
+	assert(edited.items[#types].type == "archived" and edited.items[#types].body == "Updated archived finding")
+	local changed, change_err = store.edit(edited, archived_id, { type = "suggestion" }, deps)
+	assert(not changed and change_err:find("active configured", 1, true))
+	local inactive_reply, reply_err = store.reply(edited, archived_id, { type = "archived", body = "Old type" }, deps)
+	assert(not inactive_reply and reply_err:find("active configured", 1, true))
+	local replied = assert(store.reply(edited, archived_id, { body = "New answer" }, deps))
+	assert(replied.items[#replied.items].type == "issue")
+	local persisted = assert(store.save(root, replied, deps))
+	assert(persisted.items[#types].type == "archived")
+	assert(assert(store.load(root, saved.id, deps)).items[#types].type == "archived")
+end)
+
+test("configured additional types are selectable and remain readable after removal", function()
+	comment_types.configure({
+		{
+			id = "note",
+			icon = "N",
+			highlight = "NvimReviewCommentNote",
+			default_link = "DiagnosticSignInfo",
+			rail_rank = 2,
+		},
+	})
+	local session = assert(store.add(fresh(), { type = "note", body = "Custom finding", anchor = {} }, deps))
+	local saved = assert(store.save(root, session, deps))
+	comment_types.configure({})
+	local loaded = assert(store.load(root, saved.id, deps))
+	assert(loaded.items[1].type == "note" and not comment_types.contains("note"))
+	local edited = assert(store.edit(loaded, loaded.items[1].id, { body = "Still readable" }, deps))
+	assert(assert(store.save(root, edited, deps)).items[1].type == "note")
+	local added, add_err = store.add(edited, { type = "note", body = "No new custom finding", anchor = {} }, deps)
+	assert(not added and add_err:find("active configured", 1, true))
+end)
+
+test("stored type identifiers cannot inject UI or Markdown lines", function()
+	local saved, path = assert(store.save(root, add_root(fresh()), deps))
+	for _, item_type in ipairs({ "bad\n# heading", "../../outside", string.rep("x", 128), "" }) do
+		local unsafe = vim.deepcopy(saved)
+		unsafe.items[1].type = item_type
+		assert(config_fs.write_binary_atomic(path, vim.json.encode(unsafe) .. "\n"))
+		assert(vim.uv.fs_chmod(path, 384))
+		local loaded, err = store.load(root, saved.id, deps)
+		assert(not loaded and err:find("valid review type identifier", 1, true), tostring(err))
+	end
+end)
+
+test("active types, normalized anchors, replies, and resolution lifecycle are strict", function()
+	local session = add_root(fresh())
+	assert(#session.items == 1 and session.items[1].anchor.path == "src/main.lua")
 	local invalid, invalid_err = store.add(session, { type = "note", body = "no", anchor = {} }, deps)
-	assert(not invalid and invalid_err:find("six supported", 1, true))
+	assert(not invalid and invalid_err:find("active configured", 1, true))
+	local retired, retired_err = store.add(session, { type = "suggestion", body = "old", anchor = {} }, deps)
+	assert(not retired and retired_err:find("active configured", 1, true))
 	local traversal, traversal_err = store.add(session, {
 		type = "issue",
 		body = "unsafe",
@@ -245,23 +339,25 @@ test("six types, normalized anchors, replies, and resolution lifecycle are stric
 	assert(not deleted and delete_err:find("has replies", 1, true))
 end)
 
-test("type changes preserve resolved lifecycle metadata", function()
+test("type changes from retired types preserve resolved lifecycle metadata", function()
 	local session = add_root(fresh())
+	session.items[1].type = "objection!"
 	local id = session.items[1].id
 	session = assert(store.set_status(session, id, "resolved", deps))
 	local before = vim.deepcopy(session.items[1])
-	session = assert(store.set_type(session, id, "rationale", deps))
+	session = assert(store.set_type(session, id, "issue", deps))
 	local changed = session.items[1]
 	local expected = vim.deepcopy(before)
-	expected.type = "rationale"
+	expected.type = "issue"
 	expected.updated_at = changed.updated_at
 	assert(vim.deep_equal(changed, expected), "type mutation changed review lifecycle metadata")
 	assert(changed.resolution == "resolved" and changed.updated_at ~= before.updated_at)
 
 	local invalid, invalid_err = store.set_type(session, id, "note", deps)
-	assert(not invalid and invalid_err:find("six supported", 1, true))
-	session = assert(store.set_type(session, id, "question", deps))
-	assert(session.items[1].type == "question" and session.items[1].resolution == "resolved")
+	assert(not invalid and invalid_err:find("active configured", 1, true))
+	local retired, retired_err = store.set_type(session, id, "question", deps)
+	assert(not retired and retired_err:find("active configured", 1, true))
+	assert(session.items[1].type == "issue" and session.items[1].resolution == "resolved")
 end)
 
 test("anchor metadata is strictly typed and bounded", function()
@@ -337,9 +433,9 @@ end)
 test("v1 loads without writes and materializes safely only on explicit save", function()
 	local source = add_root(fresh())
 	source = assert(store.reply(source, source.items[1].id, { body = "Legacy reply" }, deps))
-	source = add_root(source, "rationale")
-	source = add_root(source, "question")
-	source = add_root(source, "praise")
+	source = add_root(source)
+	source = add_root(source)
+	source = add_root(source)
 	source.bridge = {
 		backend = "tuicr",
 		round = "123e4567-e89b-12d3-a456-426614174000",
@@ -351,6 +447,9 @@ test("v1 loads without writes and materializes safely only on explicit save", fu
 		[4] = "clipboard:old-copy",
 		[5] = "tuicr:remote-5",
 	})
+	legacy.items[3].type = "rationale"
+	legacy.items[4].type = "question"
+	legacy.items[5].type = "praise"
 	local legacy_path, encoded = write_legacy(legacy)
 
 	local migrated, path = assert(store.load(root, legacy.id, deps))
@@ -361,6 +460,7 @@ test("v1 loads without writes and materializes safely only on explicit save", fu
 	assert(migrated.items[1].resolution == "open" and migrated.items[2].resolution == "open")
 	assert(migrated.items[2].reply_to == legacy.items[2].reply_to)
 	assert(migrated.items[3].resolution == "resolved")
+	assert(migrated.items[3].type == "objection!")
 	assert(migrated.items[4].resolution == "legacy_unknown" and #migrated.items[4].deliveries == 0)
 	assert(migrated.items[5].resolution == "legacy_unknown")
 	assert(migrated.items[5].deliveries[1].receipt == "remote-5")
@@ -389,6 +489,7 @@ test("v1 loads without writes and materializes safely only on explicit save", fu
 
 	local saved, saved_path = assert(store.save(root, migrated, deps))
 	assert(saved_path == target and saved.revision == migrated.revision + 1)
+	assert(saved.items[3].type == "objection!")
 	assert(not backup:match("%.json$") and config_fs.read_binary(backup) == encoded)
 	assert(assert(vim.uv.fs_lstat(backup)).mode % 512 == 384)
 	assert(assert(vim.uv.fs_lstat(saved_path)).mode % 512 == 384)

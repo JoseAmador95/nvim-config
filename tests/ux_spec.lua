@@ -111,7 +111,7 @@ assert(projects and projects.session == false and projects.icon == " ", "dash
 assert(recent and recent.icon == " ", "dashboard recent-files icon is missing")
 assert(snacks_opts.scroll == nil, "smooth scrolling was enabled")
 assert(snacks_opts.terminal.enabled == true, "Snacks terminal is disabled")
-assert(snacks_opts.notifier.enabled == true, "Snacks notifier is disabled in the editor")
+assert(snacks_opts.notifier.enabled == false, "Snacks still replaces broker-owned vim.notify")
 assert(snacks_opts.scratch.enabled == true, "Snacks scratch is disabled")
 
 local context_spec

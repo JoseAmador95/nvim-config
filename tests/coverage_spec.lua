@@ -56,6 +56,16 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			local ok, err = xpcall(function()
 				local coverage = require("config.coverage")
 				assert(coverage.load(json_report), "Coverage.py JSON report was not loaded")
+				assert(
+					vim.deep_equal(coverage._workbench.effective_config(), {
+						max_report_bytes = 50 * 1024 * 1024,
+						max_source_bytes = 16 * 1024 * 1024,
+						max_model_bytes = 64 * 1024 * 1024,
+						signs = "all",
+						stale = "hide",
+					}),
+					"host coverage limits did not reach the core"
+				)
 				local snapshot = coverage._workbench.snapshot(fixture)
 				assert(snapshot and snapshot.model.files[source], "JSON paths were not canonicalized")
 				assert(snapshot.model.kind == "coverage.py-json")

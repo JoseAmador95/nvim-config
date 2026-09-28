@@ -8,6 +8,10 @@ local MARKER_CONTENTS = "version: 1\n"
 local LOCK_FILE = ".theme-router.lock"
 local LOCK_WAIT_MILLISECONDS = 250
 local LOCK_POLL_MILLISECONDS = 5
+local DURABLE_COMMITTED = "committed"
+local DURABLE_UNCHANGED = "unchanged"
+local DURABLE_UNKNOWN = "unknown"
+local DURABLE_PARTIAL = "partial"
 
 local uv = vim.uv
 local ffi_ok, ffi = pcall(require, "ffi")
@@ -64,6 +68,12 @@ local state = {
 	active = nil,
 	last_known_good = nil,
 	last_successful_request = nil,
+	last_visual_snapshot = nil,
+	generation = 0,
+	operation = nil,
+	phase = "idle",
+	last_transaction = nil,
+	last_error = nil,
 }
 local test_hook
 
@@ -81,6 +91,64 @@ local SETUP_KEYS = {
 
 local function copy(value)
 	return vim.deepcopy(value)
+end
+
+local function begin_operation(name)
+	if state.operation then
+		return nil, ("theme router operation '%s' is already in progress"):format(state.operation)
+	end
+	state.generation = state.generation + 1
+	state.operation = name
+	state.phase = "starting"
+	return { generation = state.generation, operation = name }
+end
+
+local function set_phase(transaction, phase)
+	if state.operation == transaction.operation and state.generation == transaction.generation then
+		state.phase = phase
+	end
+end
+
+local function result(ok, durable, detail, fields)
+	local value = fields and copy(fields) or {}
+	value.ok = ok == true
+	value.durable = durable or (value.ok and DURABLE_UNCHANGED or DURABLE_UNKNOWN)
+	if value.ok then
+		value.warning = detail
+	else
+		value.error = detail or "theme operation failed"
+	end
+	return value
+end
+
+local function finish_operation(transaction, outcome)
+	local record = copy(outcome)
+	record.generation = transaction.generation
+	record.operation = transaction.operation
+	record.phase = outcome.ok and "complete" or "failed"
+	state.last_transaction = record
+	state.last_error = outcome.ok and nil or tostring(outcome.error)
+	state.operation = nil
+	state.phase = "idle"
+end
+
+local function run_operation(name, callback)
+	local transaction, active_err = begin_operation(name)
+	if not transaction then
+		return false, active_err, DURABLE_UNCHANGED
+	end
+	local called, outcome = xpcall(function()
+		return callback(transaction)
+	end, debug.traceback)
+	if not called then
+		outcome = result(false, DURABLE_UNKNOWN, tostring(outcome))
+	elseif type(outcome) ~= "table" or type(outcome.ok) ~= "boolean" then
+		outcome = result(false, DURABLE_UNKNOWN, "theme operation returned an invalid outcome")
+	end
+	finish_operation(transaction, outcome)
+	local detail = outcome.ok and (outcome.return_value ~= nil and outcome.return_value or outcome.warning)
+		or outcome.error
+	return outcome.ok, detail, outcome.durable
 end
 
 local function exact_options(value, allowed, label)
@@ -1336,9 +1404,15 @@ local function atomic_write_contents(path, contents, label)
 			return nil,
 				label .. " was published, but commit validation detected drift; no rollback is claimed: " .. tostring(
 					final_err or "identity mismatch"
-				)
+				),
+				DURABLE_UNKNOWN
 		end
-		return true, commit_warning
+		if publish_sync_err then
+			return nil,
+				append_warning(label .. " was published, but parent-directory durability is unknown", commit_warning),
+				DURABLE_UNKNOWN
+		end
+		return true, commit_warning, DURABLE_COMMITTED
 	end
 
 	local exchanged, exchange_err = renameat_exchange(parent_fd, basename, temporary)
@@ -1378,7 +1452,9 @@ local function atomic_write_contents(path, contents, label)
 				commit_warning,
 				"displaced entry retained at " .. temporary_path .. " because exchange durability is uncertain"
 			)
-			return true, commit_warning
+			return nil,
+				append_warning(label .. " was exchanged, but parent-directory durability is unknown", commit_warning),
+				DURABLE_UNKNOWN
 		end
 		local cleaned, cleanup_err = conditional_unlink_exact(
 			parent_fd,
@@ -1401,9 +1477,9 @@ local function atomic_write_contents(path, contents, label)
 				.. " committed; deferred cleanup preserved the displaced entry: "
 				.. tostring(cleanup_err)
 			warning = append_warning(warning, commit_warning)
-			return true, warning
+			return true, warning, DURABLE_COMMITTED
 		end
-		return true, commit_warning
+		return true, commit_warning, DURABLE_COMMITTED
 	end
 
 	local detail = exchange_hook_err or final_err or displaced_err or displaced_any_err or "snapshot mismatch"
@@ -1414,7 +1490,8 @@ local function atomic_write_contents(path, contents, label)
 				.. " was exchanged, but commit validation detected drift; no rollback is claimed; displaced entry retained at "
 				.. temporary_path
 				.. ": "
-				.. tostring(detail)
+				.. tostring(detail),
+			DURABLE_UNKNOWN
 	end
 
 	local rollback_hook_ok, rollback_hook_err = run_test_hook("before_exchange_rollback", {
@@ -1435,12 +1512,15 @@ local function atomic_write_contents(path, contents, label)
 		return nil,
 			label .. " conflict could not be rolled back safely; both entries were preserved: " .. tostring(
 				rollback_hook_err or "snapshot mismatch"
-			)
+			),
+			DURABLE_UNKNOWN
 	end
 	local rolled_back, rollback_err = renameat_exchange(parent_fd, basename, temporary)
 	if not rolled_back then
 		close_fd(parent_fd)
-		return nil, label .. " conflict rollback failed; both entries were preserved: " .. tostring(rollback_err)
+		return nil,
+			label .. " conflict rollback failed; both entries were preserved: " .. tostring(rollback_err),
+			DURABLE_UNKNOWN
 	end
 	local _, rollback_sync_err = sync_directory_fd(parent_fd, parent, label .. " conflict rollback")
 	local restored = any_entry_snapshot(parent_fd, parent, path, label)
@@ -1452,7 +1532,7 @@ local function atomic_write_contents(path, contents, label)
 		or not exact_snapshot_matches(final_rechecked, own_staging, true)
 	then
 		close_fd(parent_fd)
-		return nil, label .. " conflict rollback drifted; no cleanup is claimed"
+		return nil, label .. " conflict rollback drifted; no cleanup is claimed", DURABLE_UNKNOWN
 	end
 	local cleaned, cleanup_err =
 		conditional_unlink_exact(parent_fd, parent, temporary, "Rolled-back " .. label, own_staging)
@@ -1462,11 +1542,20 @@ local function atomic_write_contents(path, contents, label)
 			cleanup_err
 		)) .. (rollback_sync_err and "; " .. tostring(rollback_sync_err) or "") .. (parent_closed and "" or "; " .. tostring(
 			parent_close_err
-		))
+		)),
+		rollback_sync_err and DURABLE_UNKNOWN or DURABLE_UNCHANGED
 end
 
-local function atomic_write(name)
-	return atomic_write_contents(state.opts.state_path, yaml_contents(name), "Theme state")
+local function atomic_write_outcome(path, contents, label)
+	local written, detail, durable = atomic_write_contents(path, contents, label)
+	if written then
+		return result(true, durable or DURABLE_COMMITTED, detail)
+	end
+	return result(false, durable or DURABLE_UNCHANGED, detail)
+end
+
+local function write_selection_outcome(name)
+	return atomic_write_outcome(state.opts.state_path, yaml_contents(name), "Theme state")
 end
 
 local function marker_path()
@@ -1513,8 +1602,10 @@ local function delete_file(path, label)
 	local candidate, candidate_err = exact_entry_snapshot(parent_fd, parent, quarantine_path, "Reserved " .. label)
 	if not candidate or not exact_snapshot_matches(expected, candidate, true) then
 		local restored, restore_err = renameat_noreplace(parent_fd, quarantine, basename)
+		local restore_sync_err
 		if restored then
-			local _, restore_sync_err = sync_directory_fd(parent_fd, parent, label .. " deletion restoration")
+			local synced
+			synced, restore_sync_err = sync_directory_fd(parent_fd, parent, label .. " deletion restoration")
 			warning = append_warning(warning, restore_sync_err)
 		end
 		local retained = restored and path or quarantine_path
@@ -1522,7 +1613,8 @@ local function delete_file(path, label)
 		return nil,
 			label .. " changed before conditional deletion; replacement preserved at " .. retained .. ": " .. tostring(
 				candidate_err or restore_err or "snapshot mismatch"
-			) .. (warning and "; " .. warning or "")
+			) .. (warning and "; " .. warning or ""),
+			(not restored or reserve_sync_err or restore_sync_err) and DURABLE_UNKNOWN or DURABLE_UNCHANGED
 	end
 	local deleted, delete_warning_or_err = conditional_unlink_exact(
 		parent_fd,
@@ -1547,7 +1639,8 @@ local function delete_file(path, label)
 				.. "; entry preserved at "
 				.. retained
 				.. ": "
-				.. tostring(delete_warning_or_err or restore_err)
+				.. tostring(delete_warning_or_err or restore_err),
+			DURABLE_UNKNOWN
 	end
 	warning = append_warning(warning, delete_warning_or_err)
 	local current, current_err = exact_entry_snapshot(parent_fd, parent, path, label)
@@ -1563,9 +1656,23 @@ local function delete_file(path, label)
 		return nil,
 			label .. " was deleted, but a competing target was preserved; no rollback is claimed: " .. tostring(
 				current_err or "identity mismatch"
-			)
+			),
+			DURABLE_UNKNOWN
 	end
-	return true, warning
+	if reserve_sync_err or delete_warning_or_err then
+		return nil,
+			append_warning(label .. " was deleted, but parent-directory durability is unknown", warning),
+			DURABLE_UNKNOWN
+	end
+	return true, warning, DURABLE_COMMITTED
+end
+
+local function delete_outcome(path, label)
+	local deleted, detail, durable = delete_file(path, label)
+	if deleted then
+		return result(true, durable or DURABLE_COMMITTED, detail)
+	end
+	return result(false, durable or DURABLE_UNCHANGED, detail)
 end
 
 local function read_marker()
@@ -1685,25 +1792,24 @@ local function load_selection()
 
 	local legacy, legacy_err = read_legacy()
 	if legacy then
-		local migrated, migration_warning_or_err = atomic_write(legacy)
-		if migrated then
+		local migration = write_selection_outcome(legacy)
+		if migration.ok then
 			emit("migrated", { colorscheme = legacy, legacy_path = state.opts.legacy_path })
-			if migration_warning_or_err then
+			if migration.warning then
 				notify(
-					"Legacy theme state migration committed with a durability warning: "
-						.. tostring(migration_warning_or_err),
+					"Legacy theme state migration committed with a durability warning: " .. tostring(migration.warning),
 					vim.log.levels.WARN
 				)
 				emit("warning", {
 					colorscheme = legacy,
 					operation = "migrate",
-					warning = tostring(migration_warning_or_err),
+					warning = tostring(migration.warning),
 				})
 			end
 			return { colorscheme = legacy, source = "local", validity = { valid = true, migrated = true } }
 		end
-		notify("Could not migrate legacy theme state: " .. tostring(migration_warning_or_err), vim.log.levels.ERROR)
-		return default_selection({ valid = false, error = migration_warning_or_err })
+		notify("Could not migrate legacy theme state: " .. tostring(migration.error), vim.log.levels.ERROR)
+		return default_selection({ valid = false, error = migration.error, durable = migration.durable })
 	end
 	if legacy_err ~= "absent" then
 		notify(legacy_err, vim.log.levels.WARN)
@@ -1767,70 +1873,238 @@ local function snapshot_context(name)
 	return true, context_copy
 end
 
-local function successful_request(context)
+local function successful_request(colorscheme, context)
 	local copied, request_or_error = pcall(copy, {
-		selection = { colorscheme = state.selection.colorscheme },
+		selection = { colorscheme = colorscheme },
 		context = context,
 	})
 	if not copied then
 		local message = "Theme repaint request could not be copied: " .. tostring(request_or_error)
 		notify(message, vim.log.levels.WARN)
-		emit("error", { colorscheme = state.selection.colorscheme, error = message })
+		emit("error", { colorscheme = colorscheme, error = message })
 		return nil, message
 	end
 	return request_or_error
 end
 
-local function paint(name, source, context)
-	local painter = state.painters[name] or state.opts.paint
+-- Invoke a painter without publishing active/LKG state. Composite operations
+-- use this effect boundary before a durable commit and publish only afterward.
+local function invoke_painter(name, context, exact_painter)
+	local painter = exact_painter or state.painters[name] or state.opts.paint
 	local copy_ok, context_copy = pcall(copy, context)
 	if not copy_ok then
 		local message = "Theme context could not be copied: " .. tostring(context_copy)
-		notify(message, vim.log.levels.WARN)
-		emit("error", { colorscheme = name, error = message })
-		return false
+		return false, message
 	end
 	local ok, result, detail = pcall(painter, name, context_copy)
 	if not ok then
-		local message = ("Painter for '%s' failed: %s"):format(name, tostring(result))
-		notify(message, vim.log.levels.WARN)
-		emit("error", { colorscheme = name, error = message })
-		return false
+		return false, ("Painter for '%s' failed: %s"):format(name, tostring(result))
 	end
 	if result == false then
-		local message = ("Painter for '%s' failed: %s"):format(name, tostring(detail or "rejected"))
-		notify(message, vim.log.levels.WARN)
-		emit("error", { colorscheme = name, error = message })
-		return false
+		return false, ("Painter for '%s' failed: %s"):format(name, tostring(detail or "rejected"))
 	end
-	state.active = { colorscheme = name, source = source or "direct" }
-	state.last_known_good = copy(state.active)
-	emit("applied", { colorscheme = name, source = state.active.source })
-	return true
+	return true, nil, painter
 end
 
-local function repaint_with_context(context, request)
-	state.last_successful_request = nil
-	local selected = state.selection.colorscheme
-	if paint(selected, "selected", context) then
-		state.last_successful_request = request
-		return true, selected
+local function report_painter_failure(name, message)
+	notify(message, vim.log.levels.WARN)
+	emit("error", { colorscheme = name, error = message })
+end
+
+local function direct_effect(name, source, context)
+	local painted, paint_err, painter = invoke_painter(name, context)
+	if not painted then
+		report_painter_failure(name, paint_err)
+		return nil, paint_err
 	end
-	if selected ~= state.opts.default and paint(state.opts.default, "default", context) then
-		state.last_successful_request = request
-		emit("fallback", { colorscheme = state.opts.default, failed = selected, source = "default" })
-		return true, state.opts.default
+	-- `snapshot_context` already produced a private copy, while
+	-- `invoke_painter` handed the callback a second copy. Reuse the untouched
+	-- private snapshot so no fallible copy remains after the paint effect.
+	return { colorscheme = name, source = source, context = context, painter = painter }
+end
+
+local function selection_effect(selected, context)
+	local candidates = {
+		{ colorscheme = selected, source = "selected" },
+		{ colorscheme = state.opts.default, source = "default" },
+		{ colorscheme = state.opts.fallback, source = "fallback" },
+	}
+	local attempted = {}
+	local last_error
+	for _, candidate in ipairs(candidates) do
+		if not attempted[candidate.colorscheme] then
+			attempted[candidate.colorscheme] = true
+			local effect, effect_err = direct_effect(candidate.colorscheme, candidate.source, context)
+			if effect then
+				if candidate.colorscheme ~= selected then
+					effect.failed = selected
+				end
+				return effect
+			end
+			last_error = effect_err
+		end
 	end
-	if
-		state.opts.fallback ~= selected
-		and state.opts.fallback ~= state.opts.default
-		and paint(state.opts.fallback, "fallback", context)
-	then
-		state.last_successful_request = request
-		emit("fallback", { colorscheme = state.opts.fallback, failed = selected, source = "fallback" })
-		return true, state.opts.fallback
+	return nil, last_error or "theme could not be applied"
+end
+
+local function publish_visual(effect, request)
+	state.active = { colorscheme = effect.colorscheme, source = effect.source }
+	state.last_known_good = copy(state.active)
+	state.last_successful_request = copy(request)
+	state.last_visual_snapshot = copy({
+		active = state.active,
+		context = effect.context,
+		painter = effect.painter,
+		request = request,
+	})
+	emit("applied", { colorscheme = effect.colorscheme, source = effect.source })
+	if effect.failed then
+		emit("fallback", { colorscheme = effect.colorscheme, failed = effect.failed, source = effect.source })
 	end
-	return false
+end
+
+local function restore_visual(transaction, previous, cause)
+	if not previous then
+		state.active = nil
+		state.last_visual_snapshot = nil
+		state.last_successful_request = nil
+		return false, append_warning(cause, "no previous visual snapshot was available")
+	end
+	set_phase(transaction, "compensating")
+	local restored, restore_err = invoke_painter(previous.active.colorscheme, previous.context, previous.painter)
+	if not restored then
+		report_painter_failure(previous.active.colorscheme, restore_err)
+		state.active = nil
+		state.last_visual_snapshot = nil
+		state.last_successful_request = nil
+		local combined = append_warning(cause, "visual compensation failed: " .. tostring(restore_err))
+		emit("compensation-failed", { colorscheme = previous.active.colorscheme, error = combined })
+		return false, combined
+	end
+	state.active = copy(previous.active)
+	state.last_visual_snapshot = copy(previous)
+	state.last_successful_request = copy(previous.request)
+	emit("compensated", { colorscheme = previous.active.colorscheme, cause = cause })
+	return true, cause
+end
+
+local function ensure_visual_baseline(transaction, context)
+	if state.last_visual_snapshot then
+		return copy(state.last_visual_snapshot)
+	end
+	set_phase(transaction, "baseline")
+	local requested = state.selection.colorscheme
+	local request, request_err = successful_request(requested, context)
+	if not request then
+		return nil, request_err
+	end
+	local effect, effect_err = selection_effect(requested, context)
+	if not effect then
+		return nil, "could not establish a visual rollback point: " .. tostring(effect_err)
+	end
+	publish_visual(effect, request)
+	return copy(state.last_visual_snapshot)
+end
+
+local function persist_locked(name)
+	local lock, lock_err = acquire_namespace_lock()
+	if not lock then
+		return result(false, DURABLE_UNCHANGED, lock_err, { lock_error = true })
+	end
+	local called, outcome = pcall(write_selection_outcome, name)
+	local _, lock_warning = release_namespace_lock(lock)
+	if not called then
+		return result(false, DURABLE_UNKNOWN, append_warning(tostring(outcome), lock_warning), {
+			lock_warning = lock_warning,
+		})
+	end
+	if outcome.ok then
+		outcome.warning = append_warning(outcome.warning, lock_warning)
+	else
+		outcome.error = append_warning(outcome.error, lock_warning)
+	end
+	outcome.lock_warning = lock_warning
+	return outcome
+end
+
+local function reset_locked()
+	local lock, lock_err = acquire_namespace_lock()
+	if not lock then
+		return result(false, DURABLE_UNCHANGED, lock_err, { lock_error = true })
+	end
+	local marker
+	local called, outcome = pcall(function()
+		marker = atomic_write_outcome(marker_path(), MARKER_CONTENTS, "Theme migration marker")
+		if not marker.ok then
+			return result(false, marker.durable, marker.error, { marker = marker })
+		end
+		local deleted = delete_outcome(state.opts.state_path, "Theme state")
+		if not deleted.ok then
+			return result(false, DURABLE_PARTIAL, append_warning(deleted.error, marker.warning), {
+				marker = marker,
+				deletion = deleted,
+			})
+		end
+		return result(true, DURABLE_COMMITTED, append_warning(marker.warning, deleted.warning), {
+			marker = marker,
+			deletion = deleted,
+		})
+	end)
+	local _, lock_warning = release_namespace_lock(lock)
+	if not called then
+		local durable = marker and marker.ok and DURABLE_PARTIAL or DURABLE_UNKNOWN
+		return result(false, durable, append_warning(tostring(outcome), lock_warning), {
+			lock_warning = lock_warning,
+			marker = marker,
+		})
+	end
+	if outcome.ok then
+		outcome.warning = append_warning(outcome.warning, lock_warning)
+	else
+		outcome.error = append_warning(outcome.error, lock_warning)
+	end
+	outcome.lock_warning = lock_warning
+	return outcome
+end
+
+local function report_durable_outcome(operation, colorscheme, outcome)
+	if outcome.lock_warning then
+		report_lock_warning(operation, outcome.lock_warning, colorscheme)
+	end
+	if not outcome.ok then
+		notify(outcome.error, vim.log.levels.ERROR)
+		emit("error", {
+			colorscheme = colorscheme,
+			durable = outcome.durable,
+			error = outcome.error,
+			operation = operation,
+		})
+		return
+	end
+	if outcome.warning then
+		notify(
+			("Theme %s committed with a warning: %s"):format(operation, tostring(outcome.warning)),
+			vim.log.levels.WARN
+		)
+		emit("warning", {
+			colorscheme = colorscheme,
+			durable = outcome.durable,
+			operation = operation,
+			warning = tostring(outcome.warning),
+		})
+	end
+end
+
+local function compensate_failure(transaction, previous, durable, message, fields)
+	local _, combined = restore_visual(transaction, previous, message)
+	notify(combined, vim.log.levels.ERROR)
+	emit("error", {
+		colorscheme = fields and fields.colorscheme or nil,
+		durable = durable,
+		error = combined,
+		operation = transaction.operation,
+	})
+	return result(false, durable, combined, fields)
 end
 
 function M.setup(opts)
@@ -1880,6 +2154,10 @@ function M.setup(opts)
 	if opts.context ~= nil and type(opts.context) ~= "function" then
 		return nil, "setup.context must be a function"
 	end
+	local transaction, active_err = begin_operation("setup")
+	if not transaction then
+		return nil, active_err
+	end
 	state.opts = {
 		state_path = path,
 		legacy_path = opts.legacy_path and vim.fs.normalize(opts.legacy_path) or nil,
@@ -1893,17 +2171,31 @@ function M.setup(opts)
 	}
 	state.painters = {}
 	state.configured = true
-	state.selection = load_selection_locked()
+	state.selection = nil
 	state.active = nil
 	state.last_known_good = nil
 	state.last_successful_request = nil
+	state.last_visual_snapshot = nil
+	set_phase(transaction, "loading")
+	local called, selection_or_err = xpcall(load_selection_locked, debug.traceback)
+	if not called then
+		local outcome = result(false, DURABLE_UNKNOWN, tostring(selection_or_err))
+		finish_operation(transaction, outcome)
+		return nil, outcome.error
+	end
+	state.selection = selection_or_err
+	set_phase(transaction, "publishing")
 	emit("setup", { selected = state.selection })
-	return M.selection()
+	finish_operation(transaction, result(true, DURABLE_UNCHANGED, nil, { colorscheme = state.selection.colorscheme }))
+	return copy(state.selection)
 end
 
 function M.register(name, painter)
 	if not state.configured then
 		return nil, "setup must be called first"
+	end
+	if state.operation then
+		return false, ("theme router operation '%s' is already in progress"):format(state.operation)
 	end
 	local normalized, err = colorscheme_name(name, "painter name")
 	if not normalized then
@@ -1939,10 +2231,15 @@ end
 function M.status()
 	return copy({
 		configured = state.configured,
+		generation = state.generation,
+		operation = state.operation,
+		phase = state.phase,
 		selected = state.selection,
 		active = state.active,
 		validity = state.selection and state.selection.validity or nil,
 		last_known_good = state.last_known_good,
+		last_transaction = state.last_transaction,
+		last_error = state.last_error,
 	})
 end
 
@@ -1950,218 +2247,291 @@ function M.apply(name)
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	local requested = name or state.selection.colorscheme
-	local normalized, err = colorscheme_name(requested, "colorscheme")
-	if not normalized then
-		notify(err, vim.log.levels.WARN)
-		return false
-	end
-	local context_ok, context_or_error = snapshot_context(normalized)
-	if not context_ok then
-		return false, context_or_error
-	end
-	state.last_successful_request = nil
-	local painted = paint(normalized, "direct", context_or_error)
-	return painted
+	return run_operation("apply", function(transaction)
+		local requested = name or state.selection.colorscheme
+		local normalized, err = colorscheme_name(requested, "colorscheme")
+		if not normalized then
+			notify(err, vim.log.levels.WARN)
+			return result(false, DURABLE_UNCHANGED, err)
+		end
+		set_phase(transaction, "context")
+		local context_ok, context_or_error = snapshot_context(normalized)
+		if not context_ok then
+			return result(false, DURABLE_UNCHANGED, context_or_error, { colorscheme = normalized })
+		end
+		local previous = state.last_visual_snapshot and copy(state.last_visual_snapshot) or nil
+		set_phase(transaction, "painting")
+		local effect, effect_err = direct_effect(normalized, "direct", context_or_error)
+		if not effect then
+			return compensate_failure(transaction, previous, DURABLE_UNCHANGED, effect_err, {
+				colorscheme = normalized,
+			})
+		end
+		local request, request_err = successful_request(normalized, context_or_error)
+		if not request then
+			return compensate_failure(transaction, previous, DURABLE_UNCHANGED, request_err, {
+				colorscheme = normalized,
+			})
+		end
+		set_phase(transaction, "publishing")
+		publish_visual(effect, request)
+		return result(true, DURABLE_UNCHANGED, nil, { colorscheme = normalized })
+	end)
 end
 
 function M.repaint()
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	local context_ok, context_or_error = snapshot_context(state.selection.colorscheme)
-	if not context_ok then
-		return false, context_or_error
-	end
-	local request, request_err = successful_request(context_or_error)
-	if not request then
-		return false, request_err
-	end
-	return repaint_with_context(context_or_error, request)
+	return run_operation("repaint", function(transaction)
+		local selected = state.selection.colorscheme
+		set_phase(transaction, "context")
+		local context_ok, context_or_error = snapshot_context(selected)
+		if not context_ok then
+			return result(false, DURABLE_UNCHANGED, context_or_error, { colorscheme = selected })
+		end
+		local request, request_err = successful_request(selected, context_or_error)
+		if not request then
+			return result(false, DURABLE_UNCHANGED, request_err, { colorscheme = selected })
+		end
+		local previous = state.last_visual_snapshot and copy(state.last_visual_snapshot) or nil
+		set_phase(transaction, "painting")
+		local effect, effect_err = selection_effect(selected, context_or_error)
+		if not effect then
+			return compensate_failure(transaction, previous, DURABLE_UNCHANGED, effect_err, {
+				colorscheme = selected,
+			})
+		end
+		set_phase(transaction, "publishing")
+		publish_visual(effect, request)
+		return result(true, DURABLE_UNCHANGED, nil, {
+			colorscheme = effect.colorscheme,
+			return_value = effect.colorscheme,
+		})
+	end)
 end
 
 ---Paint and persist one selection through the plugin-owned composite lifecycle.
 ---@param name string
 ---@return boolean
 ---@return string|nil
+---@return "committed"|"unchanged"|"unknown"|"partial"
 function M.select(name)
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	local normalized, err = colorscheme_name(name, "colorscheme")
-	if not normalized then
-		notify(err, vim.log.levels.ERROR)
-		return false, err
-	end
-	local context_ok, context_or_error = snapshot_context(normalized)
-	if not context_ok then
-		return false, context_or_error
-	end
-	state.last_successful_request = nil
-	if not paint(normalized, "selected", context_or_error) then
-		return false, "theme could not be applied"
-	end
-	local persisted, warning = M.persist(normalized)
-	if not persisted then
-		return false, "theme could not be persisted"
-	end
-	local request, request_err = successful_request(context_or_error)
-	if not request then
-		return false, request_err
-	end
-	state.last_successful_request = request
-	emit("selected", { colorscheme = normalized })
-	return true, warning
+	return run_operation("select", function(transaction)
+		local normalized, err = colorscheme_name(name, "colorscheme")
+		if not normalized then
+			notify(err, vim.log.levels.ERROR)
+			return result(false, DURABLE_UNCHANGED, err)
+		end
+		set_phase(transaction, "context")
+		local context_ok, context_or_error = snapshot_context(normalized)
+		if not context_ok then
+			return result(false, DURABLE_UNCHANGED, context_or_error, { colorscheme = normalized })
+		end
+		local request, request_err = successful_request(normalized, context_or_error)
+		if not request then
+			return result(false, DURABLE_UNCHANGED, request_err, { colorscheme = normalized })
+		end
+		local previous, baseline_err = ensure_visual_baseline(transaction, context_or_error)
+		if not previous then
+			return result(false, DURABLE_UNCHANGED, baseline_err, { colorscheme = normalized })
+		end
+		set_phase(transaction, "painting")
+		local effect, effect_err = direct_effect(normalized, "selected", context_or_error)
+		if not effect then
+			return compensate_failure(transaction, previous, DURABLE_UNCHANGED, effect_err, {
+				colorscheme = normalized,
+			})
+		end
+		set_phase(transaction, "committing")
+		local persisted = persist_locked(normalized)
+		if not persisted.ok then
+			if persisted.lock_warning then
+				report_lock_warning("select", persisted.lock_warning, normalized)
+			end
+			return compensate_failure(
+				transaction,
+				previous,
+				persisted.durable,
+				"theme selection was not committed: " .. tostring(persisted.error),
+				{ colorscheme = normalized }
+			)
+		end
+		state.selection = { colorscheme = normalized, source = "local", validity = { valid = true } }
+		set_phase(transaction, "publishing")
+		publish_visual(effect, request)
+		emit("persisted", { colorscheme = normalized, durable = persisted.durable })
+		report_durable_outcome("select", normalized, persisted)
+		emit("selected", { colorscheme = normalized })
+		return result(true, persisted.durable, persisted.warning, { colorscheme = normalized })
+	end)
 end
 
 ---Reload the durable selection and repaint only a valid candidate.
 ---Invalid state updates validity while preserving selected, active, and LKG.
 ---@return boolean
 ---@return string|nil
+---@return "committed"|"unchanged"|"unknown"|"partial"
 function M.reload()
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	local loaded = load_selection_locked()
-	if not loaded.validity.valid then
-		local previous = state.selection or default_selection()
-		state.selection = {
-			colorscheme = previous.colorscheme,
-			source = previous.source,
-			validity = copy(loaded.validity),
-		}
-		emit("reload-rejected", { selected = state.selection, active = state.active })
-		return false, loaded.validity.error
-	end
-	state.selection = loaded
-	local context_ok, context_or_error = snapshot_context(state.selection.colorscheme)
-	if not context_ok then
-		emit("reload-failed", { selected = state.selection, active = state.active })
-		return false, context_or_error
-	end
-	local request, request_err = successful_request(context_or_error)
-	if not request then
-		emit("reload-failed", { selected = state.selection, active = state.active })
-		return false, request_err
-	end
-	if state.active and state.last_successful_request and vim.deep_equal(request, state.last_successful_request) then
-		emit("reloaded", { selected = state.selection, active = state.active, unchanged = true })
-		return true, state.active.colorscheme
-	end
-	local repainted, active_or_err = repaint_with_context(context_or_error, request)
-	if not repainted then
-		emit("reload-failed", { selected = state.selection, active = state.active })
-		return false, tostring(active_or_err or "theme could not be applied")
-	end
-	emit("reloaded", { selected = state.selection, active = state.active })
-	return true, active_or_err
+	return run_operation("reload", function(transaction)
+		set_phase(transaction, "loading")
+		local loaded = load_selection_locked()
+		if not loaded.validity.valid then
+			local previous = state.selection or default_selection()
+			state.selection = {
+				colorscheme = previous.colorscheme,
+				source = previous.source,
+				validity = copy(loaded.validity),
+			}
+			set_phase(transaction, "publishing")
+			emit("reload-rejected", { selected = state.selection, active = state.active })
+			return result(false, DURABLE_UNCHANGED, loaded.validity.error, {
+				colorscheme = state.selection.colorscheme,
+			})
+		end
+		state.selection = loaded
+		local selected = loaded.colorscheme
+		set_phase(transaction, "context")
+		local context_ok, context_or_error = snapshot_context(selected)
+		if not context_ok then
+			emit("reload-failed", { selected = state.selection, active = state.active })
+			return result(false, DURABLE_UNCHANGED, context_or_error, { colorscheme = selected })
+		end
+		local request, request_err = successful_request(selected, context_or_error)
+		if not request then
+			emit("reload-failed", { selected = state.selection, active = state.active })
+			return result(false, DURABLE_UNCHANGED, request_err, { colorscheme = selected })
+		end
+		if
+			state.active
+			and state.last_successful_request
+			and vim.deep_equal(request, state.last_successful_request)
+		then
+			emit("reloaded", { selected = state.selection, active = state.active, unchanged = true })
+			return result(true, DURABLE_UNCHANGED, nil, {
+				colorscheme = state.active.colorscheme,
+				return_value = state.active.colorscheme,
+			})
+		end
+		local previous = state.last_visual_snapshot and copy(state.last_visual_snapshot) or nil
+		set_phase(transaction, "painting")
+		local effect, effect_err = selection_effect(selected, context_or_error)
+		if not effect then
+			emit("reload-failed", { selected = state.selection, active = state.active })
+			return compensate_failure(transaction, previous, DURABLE_UNCHANGED, effect_err, {
+				colorscheme = selected,
+			})
+		end
+		set_phase(transaction, "publishing")
+		publish_visual(effect, request)
+		emit("reloaded", { selected = state.selection, active = state.active })
+		return result(true, DURABLE_UNCHANGED, nil, {
+			colorscheme = effect.colorscheme,
+			return_value = effect.colorscheme,
+		})
+	end)
 end
 
 function M.persist(name)
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	local normalized, err = colorscheme_name(name, "colorscheme")
-	if not normalized then
-		notify(err, vim.log.levels.ERROR)
-		return false
-	end
-	local lock, lock_err = acquire_namespace_lock()
-	if not lock then
-		notify(lock_err, vim.log.levels.ERROR)
-		emit("error", { colorscheme = normalized, error = lock_err })
-		return false
-	end
-	local called, written, write_err = pcall(atomic_write, normalized)
-	local _, lock_warning = release_namespace_lock(lock)
-	if not called then
-		write_err = tostring(written)
-		written = nil
-	end
-	if not written then
-		local failure = append_warning(write_err, lock_warning)
-		notify(failure, vim.log.levels.ERROR)
-		emit("error", { colorscheme = normalized, error = failure })
-		report_lock_warning("persist", lock_warning, normalized)
-		return false
-	end
-	local warning = append_warning(write_err, lock_warning)
-	state.selection = { colorscheme = normalized, source = "local", validity = { valid = true } }
-	state.last_successful_request = nil
-	emit("persisted", { colorscheme = normalized })
-	if warning then
-		notify("Theme state committed with a durability warning: " .. tostring(warning), vim.log.levels.WARN)
-		emit("warning", { colorscheme = normalized, operation = "persist", warning = tostring(warning) })
-	end
-	return true, warning
+	return run_operation("persist", function(transaction)
+		local normalized, err = colorscheme_name(name, "colorscheme")
+		if not normalized then
+			notify(err, vim.log.levels.ERROR)
+			return result(false, DURABLE_UNCHANGED, err)
+		end
+		set_phase(transaction, "committing")
+		local persisted = persist_locked(normalized)
+		report_durable_outcome("persist", normalized, persisted)
+		if not persisted.ok then
+			return result(false, persisted.durable, persisted.error, { colorscheme = normalized })
+		end
+		state.selection = { colorscheme = normalized, source = "local", validity = { valid = true } }
+		state.last_successful_request = nil
+		set_phase(transaction, "publishing")
+		emit("persisted", { colorscheme = normalized, durable = persisted.durable })
+		return result(true, persisted.durable, persisted.warning, { colorscheme = normalized })
+	end)
 end
 
 function M.reset()
 	if not state.configured then
 		return nil, "setup must be called first"
 	end
-	local lock, lock_err = acquire_namespace_lock()
-	if not lock then
-		notify(lock_err, vim.log.levels.ERROR)
-		emit("error", { colorscheme = state.opts.default, error = lock_err })
-		return false
-	end
-	local called, reset_ok, reset_warning_or_err, marker_committed, marker_warning = pcall(function()
-		local written, marker_warning_or_err =
-			atomic_write_contents(marker_path(), MARKER_CONTENTS, "Theme migration marker")
-		if not written then
-			return false, marker_warning_or_err, false
+	return run_operation("reset", function(transaction)
+		local target = state.opts.default
+		set_phase(transaction, "context")
+		local context_ok, context_or_error = snapshot_context(target)
+		if not context_ok then
+			return result(false, DURABLE_UNCHANGED, context_or_error, { colorscheme = target })
 		end
-		local deleted, delete_warning_or_err = delete_file(state.opts.state_path, "Theme state")
-		if not deleted then
-			return false, delete_warning_or_err, true, marker_warning_or_err
+		local request, request_err = successful_request(target, context_or_error)
+		if not request then
+			return result(false, DURABLE_UNCHANGED, request_err, { colorscheme = target })
 		end
-		return true, append_warning(marker_warning_or_err, delete_warning_or_err), true, marker_warning_or_err
-	end)
-	local _, lock_warning = release_namespace_lock(lock)
-	if not called then
-		reset_warning_or_err = tostring(reset_ok)
-		reset_ok = false
-	end
-	if not reset_ok then
-		if marker_committed and marker_warning then
-			notify(
-				"Theme reset marker committed with a durability warning: " .. tostring(marker_warning),
-				vim.log.levels.WARN
-			)
-			emit("warning", {
-				colorscheme = state.opts.default,
-				operation = "reset-marker",
-				warning = tostring(marker_warning),
+		local previous, baseline_err = ensure_visual_baseline(transaction, context_or_error)
+		if not previous then
+			return result(false, DURABLE_UNCHANGED, baseline_err, { colorscheme = target })
+		end
+		set_phase(transaction, "painting")
+		local effect, effect_err = selection_effect(target, context_or_error)
+		if not effect then
+			return compensate_failure(transaction, previous, DURABLE_UNCHANGED, effect_err, {
+				colorscheme = target,
 			})
 		end
-		report_lock_warning("reset", lock_warning, state.opts.default)
-		local failure = append_warning(reset_warning_or_err, lock_warning)
-		notify(failure, vim.log.levels.ERROR)
-		emit("error", { colorscheme = state.opts.default, error = failure })
-		return false
-	end
-	local warning = append_warning(reset_warning_or_err, lock_warning)
-	if warning then
-		notify("Theme reset committed with a durability warning: " .. warning, vim.log.levels.WARN)
-		emit("warning", { colorscheme = state.opts.default, operation = "reset", warning = warning })
-	end
-	state.selection = { colorscheme = state.opts.default, source = "default", validity = { valid = true } }
-	emit("reset", { colorscheme = state.opts.default })
-	local repainted, repaint_result = M.repaint()
-	return repainted, warning or repaint_result
+		set_phase(transaction, "committing")
+		local reset_outcome = reset_locked()
+		if not reset_outcome.ok then
+			if reset_outcome.lock_warning then
+				report_lock_warning("reset", reset_outcome.lock_warning, target)
+			end
+			return compensate_failure(
+				transaction,
+				previous,
+				reset_outcome.durable,
+				"theme reset was not committed: " .. tostring(reset_outcome.error),
+				{
+					colorscheme = target,
+					deletion = reset_outcome.deletion,
+					marker = reset_outcome.marker,
+				}
+			)
+		end
+		state.selection = { colorscheme = target, source = "default", validity = { valid = true } }
+		set_phase(transaction, "publishing")
+		publish_visual(effect, request)
+		report_durable_outcome("reset", target, reset_outcome)
+		emit("reset", { colorscheme = target, durable = reset_outcome.durable })
+		return result(true, reset_outcome.durable, reset_outcome.warning, {
+			colorscheme = effect.colorscheme,
+			return_value = reset_outcome.warning or effect.colorscheme,
+		})
+	end)
 end
 
 function M.teardown()
-	state.configured = false
-	state.opts = nil
-	state.painters = {}
-	state.selection = nil
-	state.active = nil
-	state.last_known_good = nil
-	state.last_successful_request = nil
-	test_hook = nil
-	return true
+	return run_operation("teardown", function(transaction)
+		set_phase(transaction, "clearing")
+		state.configured = false
+		state.opts = nil
+		state.painters = {}
+		state.selection = nil
+		state.active = nil
+		state.last_known_good = nil
+		state.last_successful_request = nil
+		state.last_visual_snapshot = nil
+		test_hook = nil
+		return result(true, DURABLE_UNCHANGED)
+	end)
 end
 
 function M._set_test_hook(callback)

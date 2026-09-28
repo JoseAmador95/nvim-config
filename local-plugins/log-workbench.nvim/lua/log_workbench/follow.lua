@@ -5,6 +5,8 @@ local M = {}
 local DEFAULT_POLL_INTERVAL_MS = 500
 local DEFAULT_MAX_LINES = 100000
 local DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+local DEFAULT_CONTINUITY_BYTES = 64 * 1024
+local MAX_CONTINUITY_SPANS = 8
 
 local state = {
 	configured = false,
@@ -292,17 +294,80 @@ local function append_data(session, raw)
 	end)
 end
 
-local function update_continuity(session, raw, reload)
-	local existing = reload and "" or session.continuity
-	local combined = (existing or "") .. raw
-	local limit = session.max_bytes
-	if #combined > limit then
-		combined = combined:sub(#combined - limit + 1)
+local function continuity_layout(session, offset)
+	local window_start = math.max(0, offset - session.max_bytes)
+	local window_bytes = offset - window_start
+	local sample_bytes = math.min(window_bytes, session.continuity_bytes)
+	if sample_bytes == 0 then
+		return {}
 	end
-	session.continuity = combined
+	if sample_bytes == window_bytes then
+		return { { offset = window_start, length = sample_bytes } }
+	end
+
+	local gap_bytes = window_bytes - sample_bytes
+	local span_count = math.min(MAX_CONTINUITY_SPANS, sample_bytes, gap_bytes + 1)
+	if span_count == 1 then
+		return { { offset = offset - sample_bytes, length = sample_bytes } }
+	end
+
+	local base_length = math.floor(sample_bytes / span_count)
+	local extra_lengths = sample_bytes % span_count
+	local base_gap = math.floor(gap_bytes / (span_count - 1))
+	local extra_gaps = gap_bytes % (span_count - 1)
+	local layout = {}
+	local next_offset = window_start
+	for index = 1, span_count do
+		local length = base_length + (index <= extra_lengths and 1 or 0)
+		layout[index] = { offset = next_offset, length = length }
+		if index < span_count then
+			local gap = base_gap + (index <= extra_gaps and 1 or 0)
+			next_offset = next_offset + length + gap
+		end
+	end
+	return layout
+end
+
+local function read_continuity(session, layout, callback)
+	local spans = {}
+	local function read_span(index)
+		local item = layout[index]
+		if not item then
+			callback(nil, spans)
+			return
+		end
+		local ok, request, request_err = pcall(
+			session.options.uv.fs_read,
+			session.fd,
+			item.length,
+			item.offset,
+			schedule_call(session, function(err, raw)
+				if not live(session) then
+					close_fd(session)
+					return
+				end
+				if err then
+					callback(err)
+					return
+				end
+				raw = raw or ""
+				if #raw ~= item.length then
+					callback(nil, nil, true)
+					return
+				end
+				spans[index] = { offset = item.offset, bytes = raw }
+				read_span(index + 1)
+			end)
+		)
+		if not ok or request == nil then
+			callback(ok and request_err or request)
+		end
+	end
+	read_span(1)
 end
 
 local request_refresh
+local read_file
 
 local function finish_refresh(session)
 	close_fd(session)
@@ -318,22 +383,113 @@ local function finish_refresh(session)
 	end
 end
 
-local function read_file(session, stat, reload)
+local function retry_with_reload(session)
+	session.pending = true
+	session.pending_force = true
+	finish_refresh(session)
+end
+
+local function commit_read(session, stat, reload, logical_start, read_start, raw, length)
+	if #raw ~= length then
+		retry_with_reload(session)
+		return
+	end
+	local target_size = read_start + #raw
+	local layout = continuity_layout(session, target_size)
+	read_continuity(session, layout, function(continuity_err, spans, short_read)
+		if continuity_err then
+			session_error(
+				session,
+				"Could not capture followed-file continuity: " .. tostring(continuity_err),
+				vim.log.levels.ERROR
+			)
+			finish_refresh(session)
+			return
+		end
+		if short_read then
+			retry_with_reload(session)
+			return
+		end
+		local ok, request, request_err = pcall(
+			session.options.uv.fs_fstat,
+			session.fd,
+			schedule_call(session, function(err, current_stat)
+				if not live(session) then
+					close_fd(session)
+					return
+				end
+				if err or not current_stat or current_stat.type ~= "file" then
+					session_error(
+						session,
+						"Could not re-inspect followed file: " .. tostring(err or "not a regular file"),
+						vim.log.levels.ERROR
+					)
+					finish_refresh(session)
+					return
+				end
+				local current_size = current_stat.size or 0
+				local snapshot_changed = file_identity(current_stat) ~= file_identity(stat)
+					or current_size < target_size
+					or (current_size == target_size and mtime_identity(current_stat) ~= mtime_identity(stat))
+				if snapshot_changed then
+					retry_with_reload(session)
+					return
+				end
+
+				local applied
+				if reload then
+					local content = raw
+					if logical_start > 0 then
+						local preceding = content:sub(1, 1)
+						content = content:sub(2)
+						if preceding ~= "\n" then
+							local newline = content:find("\n", 1, true)
+							if newline then
+								content = content:sub(newline + 1)
+							end
+						end
+					end
+					applied = apply_reload(session, content)
+				else
+					applied = append_data(session, raw)
+				end
+				if applied then
+					session.continuity = spans
+					session.offset = target_size
+					session.identity = file_identity(current_stat)
+					session.mtime = mtime_identity(current_stat)
+					session.missing = false
+					session.state = "following"
+					session.error = nil
+					session.health = session.watcher_error and "degraded" or "healthy"
+					emit(reload and "reload" or "append", session, { bytes = #raw })
+					if current_size > target_size then
+						session.pending = true
+						session.pending_force = session.pending_force or current_size - target_size > session.max_bytes
+					end
+				end
+				finish_refresh(session)
+			end)
+		)
+		if not ok or request == nil then
+			local reason = ok and request_err or request
+			session_error(
+				session,
+				"Could not start followed-file re-inspection: " .. tostring(reason),
+				vim.log.levels.ERROR
+			)
+			finish_refresh(session)
+		end
+	end)
+end
+
+read_file = function(session, stat, reload)
 	local target_size = stat.size or 0
 	local logical_start = reload and math.max(0, target_size - session.max_bytes) or session.offset
 	local read_start = reload and logical_start > 0 and logical_start - 1 or logical_start
 	local length = math.max(0, target_size - read_start)
 	if length == 0 then
-		if reload then
-			apply_reload(session, "")
-		end
-		session.offset = 0
-		session.continuity = ""
-		session.identity = file_identity(stat)
-		session.mtime = mtime_identity(stat)
-		session.missing = false
-		session.state = "following"
-		finish_refresh(session)
+		commit_read(session, stat, reload, logical_start, read_start, "", 0)
 		return
 	end
 
@@ -352,40 +508,7 @@ local function read_file(session, stat, reload)
 				finish_refresh(session)
 				return
 			end
-			raw = raw or ""
-			local applied
-			if reload then
-				local content = raw
-				if logical_start > 0 then
-					local preceding = content:sub(1, 1)
-					content = content:sub(2)
-					if preceding ~= "\n" then
-						local newline = content:find("\n", 1, true)
-						if newline then
-							content = content:sub(newline + 1)
-						end
-					end
-				end
-				applied = apply_reload(session, content)
-			else
-				applied = append_data(session, raw)
-			end
-			if applied then
-				update_continuity(session, raw, reload)
-				session.offset = read_start + #raw
-				session.identity = file_identity(stat)
-				session.mtime = mtime_identity(stat)
-				session.missing = false
-				session.state = "following"
-				session.error = nil
-				session.health = session.watcher_error and "degraded" or "healthy"
-				emit(reload and "reload" or "append", session, { bytes = #raw })
-			end
-			if #raw < length then
-				session.pending = true
-				session.pending_force = true
-			end
-			finish_refresh(session)
+			commit_read(session, stat, reload, logical_start, read_start, raw or "", length)
 		end)
 	)
 	if not ok or request == nil then
@@ -395,51 +518,112 @@ local function read_file(session, stat, reload)
 	end
 end
 
-local function verify_append_continuity(session, stat)
-	local expected = session.continuity or ""
-	if session.offset == 0 then
-		read_file(session, stat, false)
-		return
-	end
-	if expected == "" then
-		read_file(session, stat, true)
-		return
-	end
-
-	local length = math.min(#expected, session.offset)
-	local expected_suffix = expected:sub(#expected - length + 1)
-	local read_start = session.offset - length
+local function read_append_after_verification(session)
 	local ok, request, request_err = pcall(
-		session.options.uv.fs_read,
+		session.options.uv.fs_fstat,
 		session.fd,
-		length,
-		read_start,
-		schedule_call(session, function(err, raw)
+		schedule_call(session, function(err, stat)
 			if not live(session) then
 				close_fd(session)
 				return
 			end
-			if err then
+			if err or not stat or stat.type ~= "file" then
 				session_error(
 					session,
-					"Could not verify followed-file continuity: " .. tostring(err),
+					"Could not re-inspect followed file: " .. tostring(err or "not a regular file"),
 					vim.log.levels.ERROR
 				)
 				finish_refresh(session)
 				return
 			end
-			read_file(session, stat, (raw or "") ~= expected_suffix)
+			local size = stat.size or 0
+			local reload = session.identity ~= file_identity(stat)
+				or size < session.offset
+				or (size == session.offset and session.mtime ~= nil and session.mtime ~= mtime_identity(stat))
+				or size - session.offset > session.max_bytes
+			if reload then
+				read_file(session, stat, true)
+			elseif size == session.offset then
+				session.mtime = mtime_identity(stat)
+				session.missing = false
+				session.state = "following"
+				finish_refresh(session)
+			else
+				read_file(session, stat, false)
+			end
 		end)
 	)
 	if not ok or request == nil then
 		local reason = ok and request_err or request
 		session_error(
 			session,
-			"Could not start followed-file continuity check: " .. tostring(reason),
+			"Could not start followed-file re-inspection: " .. tostring(reason),
 			vim.log.levels.ERROR
 		)
 		finish_refresh(session)
 	end
+end
+
+local function verify_append_continuity(session, stat)
+	local expected = session.continuity or {}
+	if session.offset == 0 then
+		read_file(session, stat, false)
+		return
+	end
+	if #expected == 0 then
+		read_file(session, stat, true)
+		return
+	end
+
+	local function verify_span(index)
+		local span = expected[index]
+		if not span then
+			read_append_after_verification(session)
+			return
+		end
+		local bytes = type(span.bytes) == "string" and span.bytes or ""
+		if type(span.offset) ~= "number" or bytes == "" or span.offset < 0 or span.offset + #bytes > session.offset then
+			read_file(session, stat, true)
+			return
+		end
+		local ok, request, request_err = pcall(
+			session.options.uv.fs_read,
+			session.fd,
+			#bytes,
+			span.offset,
+			schedule_call(session, function(err, raw)
+				if not live(session) then
+					close_fd(session)
+					return
+				end
+				if err then
+					session_error(
+						session,
+						"Could not verify followed-file continuity: " .. tostring(err),
+						vim.log.levels.ERROR
+					)
+					finish_refresh(session)
+					return
+				end
+				raw = raw or ""
+				if #raw ~= #bytes or raw ~= bytes then
+					read_file(session, stat, true)
+					return
+				end
+				verify_span(index + 1)
+			end)
+		)
+		if not ok or request == nil then
+			local reason = ok and request_err or request
+			session_error(
+				session,
+				"Could not start followed-file continuity check: " .. tostring(reason),
+				vim.log.levels.ERROR
+			)
+			finish_refresh(session)
+		end
+	end
+	verify_span(1)
 end
 
 local function inspect_open_file(session, force_reload)
@@ -630,6 +814,7 @@ function Session:status()
 		buffer_bytes = self.buffer_bytes,
 		max_lines = self.max_lines,
 		max_bytes = self.max_bytes,
+		continuity_bytes = self.continuity_bytes,
 		missing = self.missing,
 		paused = self.paused,
 		health = self.paused and "paused" or self.health,
@@ -745,6 +930,7 @@ function M.setup(opts)
 		poll_interval_ms = true,
 		max_lines = true,
 		max_bytes = true,
+		continuity_bytes = true,
 	}
 	for key in pairs(opts) do
 		if not allowed[key] then
@@ -783,6 +969,11 @@ function M.setup(opts)
 	if not max_bytes then
 		return nil, bytes_err
 	end
+	local continuity_bytes, continuity_err =
+		positive_integer(opts.continuity_bytes, DEFAULT_CONTINUITY_BYTES, "setup.continuity_bytes")
+	if not continuity_bytes then
+		return nil, continuity_err
+	end
 	local sessions = {}
 	for _, session in pairs(state.sessions_by_buf) do
 		sessions[#sessions + 1] = session
@@ -800,6 +991,7 @@ function M.setup(opts)
 		poll_interval_ms = poll_interval_ms,
 		max_lines = max_lines,
 		max_bytes = max_bytes,
+		continuity_bytes = continuity_bytes,
 	}
 	state.sessions_by_buf = {}
 	state.sessions_by_source = {}
@@ -813,11 +1005,13 @@ function M.effective_config()
 				poll_interval_ms = state.options.poll_interval_ms,
 				max_lines = state.options.max_lines,
 				max_bytes = state.options.max_bytes,
+				continuity_bytes = state.options.continuity_bytes,
 			}
 		or {
 			poll_interval_ms = DEFAULT_POLL_INTERVAL_MS,
 			max_lines = DEFAULT_MAX_LINES,
 			max_bytes = DEFAULT_MAX_BYTES,
+			continuity_bytes = DEFAULT_CONTINUITY_BYTES,
 		}
 end
 
@@ -878,11 +1072,12 @@ function M.open(path, opts)
 		options = state.options,
 		max_lines = max_lines,
 		max_bytes = max_bytes,
+		continuity_bytes = state.options.continuity_bytes,
 		offset = 0,
 		sizes = {},
 		buffer_bytes = 0,
 		decode_carry = "",
-		continuity = "",
+		continuity = {},
 		partial_text = nil,
 		busy = false,
 		pending = false,

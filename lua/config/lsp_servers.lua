@@ -1,50 +1,55 @@
 local M = {}
 
-local review_lsp = require("config.native_review").lsp
+local catalog = require("config.lsp_catalog")
 local deferred = require("config.lsp_deferred")
+local runtime = require("config.lsp_runtime")
+local review = require("config.code_review")
+local bridge = require("config.lsp_neoconf")
+local rust_tools = require("config.rust_tools")
+local tombi = require("config.tombi")
 
 local function register(name, config)
 	vim.lsp.config(name, config)
 	local resolved = vim.lsp.config[name]
-	local bridge = require("config.lsp_neoconf")
+	local rooted = review.wrap_lsp_root_dir(
+		bridge.wrap_root_dir(name, resolved and resolved.root_dir or nil, resolved and resolved.root_markers or nil)
+	)
 	vim.lsp.config(name, {
 		before_init = bridge.wrap_before_init(name, resolved and resolved.before_init or nil),
-		root_dir = review_lsp.wrap_root_dir(
-			bridge.wrap_root_dir(name, resolved and resolved.root_dir or nil, resolved and resolved.root_markers or nil)
-		),
+		root_dir = runtime.wrap_root_dir(assert(catalog.server(name)), rooted),
 		on_new_config = bridge.wrap_on_new_config(name, resolved and resolved.on_new_config or nil),
 	})
 end
 
 local function capabilities()
-	local ok, blink = pcall(require, "blink.cmp")
-	return ok and blink.get_lsp_capabilities() or vim.lsp.protocol.make_client_capabilities()
+	local blink = package.loaded["blink.cmp"]
+	return type(blink) == "table" and blink.get_lsp_capabilities() or vim.lsp.protocol.make_client_capabilities()
 end
 
 function M.setup(context)
-	context = context or {}
-	review_lsp.setup()
+	assert(context == nil or next(context) == nil, "LSP setup no longer accepts eager executable paths")
 	local client_capabilities = capabilities()
-	local has_schemastore, schemastore = pcall(require, "schemastore")
+	local schemastore = package.loaded.schemastore
+	local has_schemastore = type(schemastore) == "table"
+	local function managed(name, config)
+		config.cmd = deferred.managed_command(name)
+		register(name, config)
+	end
 
 	register("clangd", {
 		capabilities = client_capabilities,
 		cmd = deferred.clangd_command(),
-		on_new_config = deferred.clangd_on_new_config,
 	})
-	register("ty", {
+	managed("ty", {
 		capabilities = client_capabilities,
 		settings = { ty = { configuration = {} } },
 		root_dir = deferred.ty_root_dir,
 		before_init = deferred.ty_before_init,
 		on_new_config = deferred.ty_on_new_config,
 	})
-	register("ruff", { capabilities = client_capabilities })
-	register("cmake", {
-		capabilities = client_capabilities,
-		cmd = context.cmake_language_server_path ~= "" and { context.cmake_language_server_path } or nil,
-	})
-	register("yamlls", {
+	managed("ruff", { capabilities = client_capabilities })
+	managed("cmake", { capabilities = client_capabilities })
+	managed("yamlls", {
 		capabilities = client_capabilities,
 		settings = {
 			yaml = {
@@ -54,7 +59,7 @@ function M.setup(context)
 			},
 		},
 	})
-	register("jsonls", {
+	managed("jsonls", {
 		capabilities = client_capabilities,
 		settings = {
 			json = {
@@ -63,14 +68,14 @@ function M.setup(context)
 			},
 		},
 	})
-	register("tombi", {
+	managed("tombi", {
 		capabilities = client_capabilities,
-		cmd_env = require("config.tombi").env(),
-		settings = require("config.tombi").settings(),
+		cmd_env = tombi.env(),
+		settings = tombi.settings(),
 	})
-	register("bashls", { capabilities = client_capabilities })
-	register("marksman", { capabilities = client_capabilities })
-	register("lua_ls", {
+	managed("bashls", { capabilities = client_capabilities })
+	managed("marksman", { capabilities = client_capabilities })
+	managed("lua_ls", {
 		capabilities = client_capabilities,
 		settings = {
 			Lua = {
@@ -84,22 +89,28 @@ function M.setup(context)
 			},
 		},
 	})
-	register("lemminx", { capabilities = client_capabilities })
-	if context.rust_analyzer_path then
-		register("rust_analyzer", {
-			capabilities = client_capabilities,
-			cmd = { context.rust_analyzer_path },
-			settings = {
-				["rust-analyzer"] = {
-					check = { command = "clippy" },
-					cargo = { allFeatures = true },
-				},
+	managed("lemminx", { capabilities = client_capabilities })
+	register("rust_analyzer", {
+		capabilities = client_capabilities,
+		cmd = deferred.rust_analyzer_command(),
+		settings = {
+			["rust-analyzer"] = {
+				check = { command = "clippy" },
+				cargo = { allFeatures = true },
 			},
-		})
+		},
+	})
+	managed("vtsls", { capabilities = client_capabilities })
+	managed("docker_language_server", { capabilities = client_capabilities })
+	rust_tools.setup_missing_analyzer_notice(nil)
+
+	for _, server in ipairs(catalog.servers) do
+		local config = vim.lsp.config[server.name]
+		assert(
+			type(config) == "table" and type(config.cmd) == "function",
+			"LSP lacks runtime boundary: " .. server.name
+		)
 	end
-	register("vtsls", { capabilities = client_capabilities })
-	register("docker_language_server", { capabilities = client_capabilities })
-	require("config.rust_tools").setup_missing_analyzer_notice(context.rust_analyzer_path)
 end
 
 return M

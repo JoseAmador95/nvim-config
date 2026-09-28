@@ -28,7 +28,8 @@ is allowlisted, the parser is reported by `installed()`, highlighting is enabled
 and the current in-memory contents fit `max_bytes`. File size on disk is never
 used, so unsaved growth and shrinkage are handled by buffer lifecycle events.
 Text changes are coalesced with a 50 ms debounce. `languages` can override
-`max_bytes` and indentation independently for a mapped Tree-sitter language.
+`max_bytes` and indentation independently for a mapped Tree-sitter language;
+an absent override inherits the corresponding global value.
 
 `setup()` also accepts replaceable `start(buf, language)`, `stop(buf, language)`,
 `is_started(buf, language)`, `language(buf)`, and `buffer_bytes(buf)` callbacks.
@@ -40,16 +41,20 @@ buffers. Hosts call it after an explicit parser installation. This plugin never
 installs or downloads parsers itself.
 
 `teardown([buf])` stops every parser managed by the runtime, including one that
-was already active when an eligible buffer was first observed. The same parser
-is stopped when the buffer becomes ineligible and is started again on eligible
-re-entry. An attachment whose parser was stopped externally is recovered by the
-next lifecycle evaluation or explicit `retry()`. When indentation is enabled,
-the exact previous `indentexpr` is restored only while the plugin still owns the
-value it wrote; a pre-existing value or later external change is left untouched.
-After complete teardown, a later `setup()` creates a fresh runtime profile.
+was already active when an eligible buffer was first observed. An active
+highlighter in an initially oversized buffer is also stopped, even when an
+ftplugin started it before this runtime. The same parser is stopped on later
+growth and is started again on eligible re-entry. An attachment whose parser was
+stopped externally is recovered by the next lifecycle evaluation or explicit
+`retry()`. When indentation is enabled, the exact previous `indentexpr` is
+restored only while the plugin still owns the value it wrote; a pre-existing
+value or later external change is left untouched. After complete teardown, a
+later `setup()` creates a fresh runtime profile.
 
-`status([buf])` is a side-effect-free, caller-owned snapshot with a stable
-eligibility `reason`; it is available before setup. `effective_config()` returns
-only copied, non-callback policy, and `on_state_change(event)` observes copied
-state events. Observer failures are isolated. Setup rejects unknown options
-before replacing the active profile.
+`policy([buf])` recomputes a side-effect-free, caller-owned snapshot from the
+current buffer contents. It reports `eligible`, `reason`, `language`, `bytes`,
+`max_bytes`, and `indent` without starting or stopping anything. `status([buf])`
+reports the last lifecycle evaluation. Both are available before setup.
+`effective_config()` returns only copied, non-callback policy, and
+`on_state_change(event)` observes copied state events. Observer failures are
+isolated. Setup rejects unknown options before replacing the active profile.

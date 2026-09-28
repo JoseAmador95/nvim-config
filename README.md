@@ -9,10 +9,24 @@ This is a Neovim 0.12+ configuration with a full editor profile and a small
 
 Clone the repository as `~/.config/nvim` and start Neovim. Lazy restores locked
 plugins; startup only registers a lightweight verified-tool command facade. The
-tool lifecycle and its local plugin are loaded on the first explicit
-`:NvimConfigToolsInstall[!]` request. Startup performs no tool planning, version
-probes, attestation, registry access, or network work, and offline startup never
-consumes an attempt.
+tool lifecycle and its local plugin are loaded on the first runtime tool use or
+explicit `:NvimConfigToolsInstall[!]` lifecycle request. Startup performs no
+managed-tool planning, version probes, attestation, registry access, or network
+work, and offline startup never consumes an attempt.
+
+An existing `lazy.nvim` checkout is still validated fail-closed. After one
+authoritative Git identity/status/hidden-index scan, startup may use a private
+`0600` metadata attestation under a private `0700` cache directory. A fast hit
+requires the locked resolved HEAD/ref material, index and shared-index set,
+checkout root, and every non-`.git` entry to retain the same owner-controlled
+identity. It reads the receipt first and validates its unique safe paths in two
+bounded asynchronous `lstat` rounds around HEAD/ref inspection, without a
+directory traversal; cached directory identities detect additions, removals,
+and renames. A miss enumerates tracked, ignored, and untracked paths once before
+Git authority and once afterward, then revalidates the accepted paths without
+`readdir`. The only normalized exception is Neovim's safe regular `doc/tags`
+file; unsafe metadata, corruption, ambiguity, or a race discards fast authority
+and falls back to Git or fails startup without loading the checkout.
 
 For a reproducible install or validation run, download the four pinned,
 precompiled validators and restore the committed plugin/parser pins into an
@@ -76,33 +90,94 @@ set `plugins = { native_review = { hunk_context = 0 } }` to change that
 review-local context. Split view keeps one structural context line when
 configured to zero so native old/new filler stays aligned.
 
+Native review also bounds frozen-model construction to 2,000 changed entries,
+4 MiB for each represented OLD or NEW side, and 64 MiB across all represented
+sides. Hosts may change `max_files`, `max_file_bytes`, and `max_model_bytes`
+under `plugins.native_review`; project configuration remains restricted to
+`hunk_context`. Interactive open and refresh are cooperative scheduled jobs, so
+newer operations, close, and teardown supersede stale completion while the old
+review remains visible until its replacement is complete.
+
+The native review plugin itself offers only `issue` by default. This editor
+configuration adds `suggestion`, `objection!`, `question`, `pedantic`, and
+`praise` through its host schema. Set `plugins.native_review.comment_types = {}`
+in `~/.nvim-local.lua` for issue-only, or replace the list with your own type
+definitions. Existing comments of removed types still load and display.
+
+Log workbench limits also live in the host file under
+`plugins.log_workbench`. `continuity_bytes`, `max_matches`, and
+`scan_lines_per_tick` bound host-side verification and indexing work; project
+configuration cannot replace them. A trusted project may only reduce
+`max_lines` and `max_bytes` for its displayed log retention.
+
 The terminal editor starts with `ui = { redraw_profile = "full" }`. Set
 `redraw_profile = "low-bandwidth"` explicitly in the per-host file to reduce
 redraw traffic; it is never inferred from SSH. Project-local `ui` is forbidden:
 the complete project source is rejected before approval rather than partially
 merged. VSCode Neovim and `nvimpager` always keep `full`.
 
-| Surface | `full` | `low-bandwidth` |
-| --- | --- | --- |
-| Core UI | `cursorline`, `showmatch`, `scrolloff=10` | no cursor line/match flash, `scrolloff=0` |
-| Diagnostics | virtual lines on the current line | virtual lines off |
-| Navic / Illuminate | immediate navic; Illuminate 100 ms with LSP, Tree-sitter, regex | lazy navic; Illuminate 300 ms with LSP only |
-| Indent / context | indent scope on at 200 ms; Tree-sitter Context on | scope off at 500 ms; Tree-sitter Context off |
-| Markdown | all configured render modes with normal anti-conceal | normal mode only; anti-conceal off |
-| Noice / Lualine | existing 33 ms LSP progress and 16 ms event refresh | both throttled to 100 ms |
+Inline diagnostics are a separate host-only policy under
+`ui.inline_diagnostics`: `current-line`, `settled-line`, or `off`. Without an
+explicit override, a local full editor uses `current-line`, a full editor over
+SSH uses `settled-line`, and low-bandwidth, VSCode, and pager profiles use
+`off`. Settled mode renders only after `CursorHold`, clears when the row or
+active view changes, and does not repaint for column-only cursor movement.
+
+| Surface | `full` locally | `full` over SSH | `low-bandwidth` |
+| --- | --- | --- | --- |
+| Core UI | `cursorline`, `showmatch`, `scrolloff=10` | same full behavior | no cursor line/match flash, `scrolloff=0` |
+| Diagnostics | current-line virtual lines by default | settled-line virtual lines by default | virtual lines off by default |
+| Bufferline | diagnostics and hover enabled | diagnostics and hover disabled | diagnostics and hover disabled |
+| Navic / Illuminate | immediate navic; Illuminate 100 ms with LSP, Tree-sitter, regex | same full behavior | lazy navic; Illuminate 300 ms with LSP only |
+| Indent / context | indent scope on at 200 ms; Tree-sitter Context on | same full behavior | scope off at 500 ms; Tree-sitter Context off |
+| Markdown | raw editable source; reading view on demand | same Markdown behavior | same Markdown behavior |
+| Noice / Lualine | about 33 ms / 16 ms | 100 ms / 50 ms | 100 ms / 100 ms |
 
 The choice is fixed at startup; restart Neovim after changing it. `full`
 preserves the existing interactive behavior and remains the default.
+The host file may tune the full-profile redraw costs independently with
+`ui.full_refresh_ms`, `ui.noice_progress_throttle_ms`,
+`ui.bufferline_diagnostics`, and `ui.bufferline_hover`; these options never
+come from project-local configuration.
 
-Markdown rendering has three host-only palette presets under
-`plugins.render_markdown.preset`: `subtle` (the default), `minimal` (no code or
-heading backgrounds), and `semantic` (level-colored headings). For example,
-`plugins = { render_markdown = { preset = "semantic" } }` belongs in
-`~/.nvim-local.lua`; project-local configuration cannot override it. In the
-full terminal editor, buffer-local `gd` opens existing regular-file links
+Ordinary yanks (`y`, `yy`, and visual yanks) also copy to the system clipboard.
+Deletes and changes (`d`, `c`, `x`) only update Neovim's internal registers, so
+the terminal's paste shortcut (`Cmd+V` on macOS) still inserts the last copied
+text after further edits. `p` and `P` retain native register behavior, including
+moving a line with `dd` then `p`. Explicit register prefixes keep their native
+destination. Over SSH, clipboard copies use the bounded OSC 52 provider.
+
+Two additional host-only bounds protect interactive work over slow terminals.
+`clipboard.osc52_max_bytes` limits the exact raw payload sent through OSC 52
+(1 MiB by default; copies are rejected, never truncated). `whitespace.max_bytes`
+and `whitespace.max_lines` cap write-time trailing-space cleanup (4 MiB and
+100,000 lines by default). Configure them in `~/.nvim-local.lua`; project-local
+files cannot increase or replace these host policies. Cleanup also skips
+Markdown-like formats, special/binary/hex buffers, and buffers with
+`vim.b.trim_trailing_whitespace = false`.
+
+The full-editor action palette offers palette-only commands to copy the current
+file's absolute path, its lexical path relative to the originating window's
+working directory (including `:lcd`), or its path relative to the nearest Git
+root. Unnamed and special buffers hide all three; the Git-relative command is
+also hidden outside a repository. The five most recently executed palette
+actions stay pinned at the top for the current Neovim session. Configure or
+disable that in `~/.nvim-local.lua` with
+`plugins = { action_palette = { recent_limit = 5 } }` (`0..20`).
+
+Markdown stays raw and editable in the full editor, including native review.
+`:MarkdownView` or `<leader>mv` toggles a right-hand, read-only reading view.
+It follows unsaved source changes and keeps the source window focused. The
+viewer uses the exact `md-render.nvim` v3.10.3 pin; automatic media is disabled,
+so Mermaid and PlantUML fences stay code blocks and render only through
+`:DiagramShow`/`<leader>md`. `<leader>mp` still opens the browser preview.
+In `nvimpager`, Markdown renders automatically, and `<leader>mv` toggles back
+to the original source. `:SetFileType` and the diagram viewer operate on that
+source even while the reading view is displayed.
+In the full terminal editor, buffer-local `gd` opens existing regular-file links
 through the tab-aware editor adapter, sends headings, fragments, and reference
 links to Marksman, and opens HTTP(S)/email targets through the host UI. Under
-SSH, external targets are copied through the configured clipboard provider
+SSH, external targets are copied through the bounded clipboard adapter
 instead of launching a remote browser. Plain Markdown text falls back to the
 ordinary LSP/native definition path. This mapping is absent from `nvimpager`
 and VSCode Neovim and remains fail-closed in historical review buffers.
@@ -113,14 +188,24 @@ surfaces without refreshing state, starting processes, installing tools, or
 downloading parsers. Workflow commands remain in the host configuration rather
 than inside the plugins.
 
+Workspace execution is opt-in per canonical repository and capability. Use
+`:NvimConfigExecutionAuthorize lint-format`, `test`, `build`, or `debug` to
+grant one capability, `:NvimConfigExecutionRevoke <capability>` to revoke it,
+and `:NvimConfigExecutionStatus [capability]` to inspect the durable state.
+There is no implicit prompt: an unauthorized action stops before its runner is
+started. Grants express trust in that repository; they are not a sandbox and do
+not replace Just's stricter content-based closure checks. Tool installation and
+network access remain separate, explicit decisions.
+
 All 17 local plugin directories stay on `runtimepath`; none is registered as a
-Lazy plugin. The startup-owned foundations are `trusted-workspace`,
-`exact-editor`, `tab-first`, `treesitter-runtime`, `theme-router`, and
-`native-review` (VSCode and pager use their smaller profile-specific subsets).
-The devcontainer, terminal, Python, action palette, diagram, log, scratch,
-coverage, Just, clangd compile-database, and verified-tools cores load only at
-their documented first-use boundary. Their host commands and mappings remain
-available from startup through lightweight adapters.
+Lazy plugin. The startup-owned foundations are `trusted-workspace`, `tab-first`,
+`treesitter-runtime`, and `theme-router` (VSCode and pager use their smaller
+profile-specific subsets). Exact-editor loads only after a stable interactive
+UI, and native-review plus the devcontainer, terminal, Python, action palette,
+diagram, log, scratch, coverage, Just, clangd compile-database, and
+verified-tools cores load only at their documented first-use boundary. Their
+host commands and mappings remain available from startup through lightweight
+adapters.
 
 The debug UI defaults to `dap-ui`. Select the pinned `nvim-dap-view`
 alternative with `dap = { ui = "dap-view" }` in local config, or for one
@@ -146,37 +231,76 @@ The effective executable order is deliberate:
 6. Mason's `bin` directory.
 
 External candidates are probed only while planning an explicit install request,
-before a managed claim. Once an exact pin is installed its content-attested shim
-wins consistently in the editor and `nvimpager`. `:checkhealth nvimconfig`
-prints the effective origin and order.
+before a managed claim. A compatible candidate from a non-bang request is
+re-hashed while holding its identity, destination, and shim resources and
+persisted as a private explicit
+external certification. Runtime resolution reads only durable managed proof or
+that certification: it never inspects `PATH`, runs a version process, or writes
+state. Non-bundle authorities recheck canonical path and complete fingerprint
+metadata without hashing executable contents. Active npm bundle resolution is
+the deliberate exception: it rehashes the exact private closure and receipt on
+every use. Drift asks for the same non-bang command to recertify.
+`:NvimConfigToolsInstall! <name>` bypasses external probing and
+selects managed installation/repair. Any managed record has precedence and an
+unhealthy one fails closed without external fallback. `markdown-preview` is
+managed-only because its host bridge is tied to the pinned release layout.
+External executables and their path ancestors must be owned by root or the
+effective user, and ancestor directories cannot be group/world-writable. An
+unsafe private certification receipt must be inspected and removed manually, or
+superseded with the explicit managed `!` action; it is never overwritten.
+Older managed records without the complete metadata fingerprint require repair.
+`:checkhealth nvimconfig` prints the effective origin and order.
 External tools are optional unless their feature is used:
 
 | Feature | Tools |
 | --- | --- |
 | Mermaid diagrams | `mmdflux` (`:NvimConfigToolsInstall mmdflux`); `rsvg-convert` from librsvg for image mode |
 | PlantUML diagrams | `plantuml` (`:NvimConfigToolsInstall plantuml`); `rsvg-convert` for image mode |
-| Rust language intelligence/formatting | Host/user `rust-analyzer` and `rustfmt`; managed and Mason paths are ignored |
+| Rust language intelligence | Host/user `rust-analyzer`; managed and Mason paths are ignored |
 | Dockerfile/Markdown lint | `hadolint` and `markdownlint-cli2`, managed by Mason |
 | Inline diagram images | A terminal with the Kitty graphics protocol, such as Ghostty |
 | Pager profile | `nvimpager` plus the config symlink below |
 | Git terminal UI | Host `lazygit` |
-| Container editor | An already-installed `@devcontainers/cli` and project `devcontainer.json`; see [the focused workflow](docs/devcontainer-neovim.md) |
+| Container editor | An active verified `devcontainers-cli` bundle and project `devcontainer.json`; an explicit `:NvimConfigToolsInstall devcontainers-cli` (or `all`) resolves npm `latest`, bundles private Node 24.20.0, and activates it for offline runtime use. See [the focused workflow](docs/devcontainer-neovim.md) |
 | Just recipes | Host `just`; it is never installed automatically |
 
 `mmdflux`, PlantUML, release tools and exact Mason packages share
 `:NvimConfigToolsInstall [all|name]`; append `!` for explicit repair or to
-force the managed pin when a compatible external tool would otherwise win.
+force the managed pin when a compatible external tool would otherwise be
+certified. Repeating the non-bang command recertifies a changed compatible
+external executable.
 Naming one tool plans only that target; spelling `all` is the explicit aggregate
 planning/install path. That explicit request also imports only the matching
 legacy tool record; startup never scans the legacy catalog.
+Each valid invocation owns a distinct persistent `Tools` spinner while its
+items move through the shared host queue. Progress frames stay out of native
+notification history; after every item in that invocation settles, the same
+toast becomes one aggregate success or persistent failure summary. Existing
+per-tool result notices remain available for detail, and overlapping requests
+do not share progress state.
+If an older Neovim owns unfinished verified-tools work, close that editor and
+rerun the explicit install or repair from a fresh Neovim. A live or
+unverifiable owner is never stolen, even with `!`; do not delete its state or
+lock tickets manually.
 
-Mason's UI is
-read-only: its install, update and uninstall commands and mappings are removed.
+Mason's UI is command-lazy and read-only: it stays outside normal file/LSP
+startup, and its install, update and uninstall commands and mappings are
+removed. Native `nvim-lspconfig` loads independently on file open;
+`mason-lspconfig` remains dormant for compatibility checks and has no runtime
+setup.
 Release installs bind the verified source-archive SHA to hashes of every
 promoted command/artifact. Mason validates its exact raw source version and
-complete executable-link map, then binds them to a private `0600` receipt;
-an explicit request for an already-succeeded identity attests it and detects
-receipt or executable drift without refreshing the registry.
+complete declared executable-link map, then binds them to a private `0600`
+receipt and canonical launcher fingerprints. Before an already-succeeded record
+is attested, the host compares it with the current immutable manifest; mismatch
+selects explicit repair instead of attesting an obsolete plan.
+Mason proof currently covers the receipt and canonical launcher targets, not a
+launcher's transitive package tree or host interpreter. Node-loaded `dist` files
+therefore remain a documented closure limit pending a versioned proof extension.
+The current Mason identity digest also covers its complete immutable entry,
+integrity, and executable maps. Older partial-digest records are retained as
+recovery evidence but require an explicit current managed install/repair before
+runtime use.
 
 The managed backends and their host prerequisites are:
 
@@ -186,14 +310,21 @@ The managed backends and their host prerequisites are:
 | npm | Bash/JSON/TypeScript/YAML language servers, markdownlint-cli2, prettierd | `node` and `npm` |
 | PyPI | ty, cmake-language-server, clang-format, debugpy | Python with `venv` |
 
+The private npm-release bundle for `devcontainers-cli` scans eligible `curl`
+and Python candidates in `PATH` order and executes only the first canonical
+absolute path that passes authority validation. An unsafe Homebrew candidate
+therefore cannot mask a later safe system executable, and is never executed.
+
 Python language tooling is pinned to Ruff 0.16.6 and ty 0.0.77. Removing
 Pyright from the manifest does not uninstall an existing Mason copy.
 
-Rust remains fully editable even without language tooling. Its LSP and formatter
-activate only for external host/user `rust-analyzer` and `rustfmt` executables;
-`:checkhealth nvimconfig` explains the edit-only state when they are absent. The
-ASM and PlantUML language servers are intentionally absent. PlantUML rendering
-remains available through the precompiled renderer above.
+Rust remains fully editable even without language tooling. Its LSP activates
+only for an external host/user `rust-analyzer`; formatting stays disabled until
+`rustfmt` has an exact manifest contract instead of falling through to an
+unverified PATH executable. `:checkhealth nvimconfig` explains the edit-only
+state when the analyzer is absent. The ASM and PlantUML language servers are
+intentionally absent. PlantUML rendering remains available through the
+precompiled renderer above.
 
 TOML language intelligence and formatting use the exact Mason pin Tombi 1.2.7.
 The versioned user default in `tombi/config.toml` keeps schema strict mode off
@@ -205,7 +336,14 @@ project or document names one explicitly.
 The unified viewer is `:DiagramShow [svg|ascii]`. Rendering is asynchronous,
 superseded work is cancelled, and content-addressed results are bounded under
 `stdpath("cache")/diagram`. Missing tools are reported with install hints and
-SVG mode falls back to ASCII when possible. `:LogWatchCurrentFile` follows
+SVG mode falls back to ASCII when possible. In the image window, `+` (or `=`)
+and `-` zoom between 100% and 800%; `0` fits the whole diagram. Move around the
+enlarged image with `h`/`j`/`k`/`l` or the arrow keys. `y` copies the whole
+diagram, and `q` or Escape closes the window. Zoom uses the full float as its
+viewport while preserving the diagram's aspect ratio; an axis that still fits
+stays centered. Zoomed views render from the
+original diagram, preserving readable text; the previous view stays visible
+while the new one renders. `:LogWatchCurrentFile` follows
 files incrementally, preserves partial lines, survives rotation, and refuses
 to overwrite unsaved buffer changes. Automatic log highlighting applies only
 to the `log` filetype and `*.log`; ordinary `*.txt` files remain untouched.
@@ -289,10 +427,17 @@ title/footer; it reserves its one-to-six-row body plus two chrome rows and
 scrolls longer text. Host config may select `composer.style = "minimal"` to keep
 the borderless body and separate footer while retaining the colored badge. File
 and review-level comments, including edits and replies, use a centered rounded
-modal capped at 88 by 18 rows without reserving source lines. Tab and Shift-Tab
-cycle types for new comments and edits in Normal or Insert mode, returning to
-Insert; replies do not cycle. In Normal mode, `<CR><CR>` saves through the same
-path as `<C-s>`.
+modal capped at 88 by 18 rows without reserving source lines. New comments and
+replies open in Insert mode; editing an existing comment opens in Normal mode.
+Tab and Shift-Tab cycle types for new comments and edits only in Normal mode;
+Insert-mode Tab is ordinary input and replies do not cycle. `<C-s>` saves
+immediately. Enter then Enter within `timeoutlen` saves in Normal mode, while Esc
+then Esc discards a non-empty draft. A physical Esc used to leave Insert counts
+as the first Esc.
+The transient title prompt is cancelled by any intervening key, text change,
+focus/completion boundary, timeout, or teardown; `q` closes only an empty
+composer. Confirmation uses a one-shot timer, never animation or periodic
+redraw.
 
 `:ReviewExport[!]` always renders the complete saved review and may be repeated;
 it copies Markdown or opens a closable float when no clipboard is available. Its
@@ -335,10 +480,13 @@ reply, `rt` resolve, `rE` export, `ru` refresh, and `rq` close. `]r` and `[r`
 navigate comments. Tests use `<leader>Tn` / `<leader>Td`, Python uses
 `<leader>pr` / `<leader>ps`, and LSP rename uses `<leader>lr`.
 
-Each interactive full editor also registers, just after its UI enters, a private
-Unix RPC socket and an owner-only JSON record under the exact-editor state root. This
-keeps socket and Git discovery off the startup critical path; headless validators
-are not editor targets. The root is
+Each interactive full editor also registers, by default 300 ms after `UIEnter`,
+a private Unix RPC socket and an owner-only JSON record under the exact-editor
+state root. Set `plugins.exact_editor.activation_delay_ms` to an integer from 0
+through 5000 in `~/.nvim-local.lua` to tune that settling window. Calls are
+coalesced, and exit cancels a pending activation. This keeps the core import,
+socket setup, and Git discovery off the startup critical path; headless
+validators are not editor targets. The root is
 `$NVIM_EXACT_EDITOR_STATE_HOME`, otherwise `$XDG_STATE_HOME/exact-editor`, otherwise
 `~/.local/state/exact-editor`; its `editors`, `requests`, `waits`, and `sockets`
 directories are mode 0700 and JSON files are mode 0600. Registry roots update
@@ -438,7 +586,11 @@ fallback; a live REPL asks before changing interpreter.
 Coverage is import-only: `:CoverageLoad [path]` reads an existing
 `coverage.json` or LCOV report, `:CoverageSummary` displays it and
 `:CoverageClear` removes it. These commands never run tests or generate a
-report. CMake Tools keeps its selected build directory as clangd's
+report. Host configuration may reduce the 16 MiB per-source and 64 MiB
+aggregate-source/model bounds under `plugins.coverage_workbench`; canonical
+duplicate sources, out-of-range sign lines, model expansion, and overlapping
+executed/missing/excluded classifications fail closed.
+CMake Tools keeps its selected build directory as clangd's
 `--compile-commands-dir` for the same root without copying or linking
 `compile_commands.json`; `:ClangdSetCompileCommands` remains the manual
 override and `:ClangdSwitchSourceHeader` opens the paired source/header. CTest
@@ -447,22 +599,74 @@ for a focused associated test.
 
 `:JustRun [recipe]` reads recipes from `just --dump --dump-format json` only
 after the justfile content is trusted, prompts for structured parameters and
-executes literal argv in the lower terminal. `:JustImportLast` conservatively
-imports contained `file:line[:column]` output into quickfix and Trouble. The
-project/branch `:Scratch` (`<leader>.`) is private under `stdpath("state")`,
-saved atomically and prunes only inactive files older than 30 days when opened.
+executes literal argv in the lower terminal. Flags use their long/short switches;
+bounded and variadic options/positionals prompt repeatedly, required empty input
+retries, repeated-flag counts accept decimal digits only, and dismissing any
+prompt cancels without launching. The core rejects more than 4,096
+recipe-supplied argv entries before materialization. `:JustImportLast`
+conservatively imports contained `file:line[:column]` output into quickfix and
+Trouble. The project/branch `:Scratch` (`<leader>.`) is private under
+`stdpath("state")`, saved atomically and prunes only inactive files older than 30
+days when opened.
 
 `Alt-Space` in tmux exposes stable container/host editor actions. The container
 action starts a detached coordinator for the dev session's exact single
-`editor` pane through the already-installed `@devcontainers/cli`;
+`editor` pane through the active verified `devcontainers-cli` bundle;
 agent/Git/LazyGit remain on the host. The coordinator holds an advisory lock,
 the adapter waits for its unique `starting` claim, and the coordinator checks
 pane PID/ownership before publishing `running`. Routing state is removed only
 after a verified host-editor handoff and durable ACK. The spool secret stays
 solely in its private `auth.json`; requests and ACKs carry HMACs instead of that
-secret.
+secret. Selecting the container action again verifies and focuses an already
+live registered pane without restarting it. The tmux host action asks the live
+coordinator through that authenticated spool, because the coordinator retains
+the lifecycle lock until the container editor exits.
 `:DevContainerUp[!]`, `:DevContainerRecreate[!]`, `:DevContainerStatus`,
 `:DevContainerLog`, and `:DevContainerHostEditor` provide the editor surfaces.
+Up/recreate keep one persistent, non-history spinner updated every 500 ms with
+the current v6 lifecycle phase and elapsed time; the replacement container
+editor requests an authenticated readiness ACK after its UI is ready and only
+then publishes the one-shot success. `:DevContainerLog` opens or focuses one
+live right-hand tail split; terminal lifecycle failures observed for the exact
+claim open it automatically, while preflight or UI-monitor failures do not. The host-only
+`plugins.devcontainer_editor.ui` policy controls progress, interval, width, and
+failure auto-open behavior. Private sanitized logs retain at most 256 KiB;
+legacy v2-v5 records remain readable and are never mass-rewritten.
+On macOS with Podman Machine, SSH-agent forwarding does not change or disable
+SELinux; enforcing state and the proxy's actual SELinux domain remain live
+canary evidence. A private authenticated host Unix gate is reverse-forwarded
+only to loopback TCP inside the pinned Machine, and the configured Dev
+Containers remote user creates a private container-owned `SSH_AUTH_SOCK` Unix
+proxy at a fresh unpredictable owner-only path for that lifecycle. The route
+retries an early SSH forward failure on at most three distinct VM ports,
+fully reaping each failed child before the next attempt. The route
+requires a canonical user-owned host `SSH_AUTH_SOCK` plus host
+`/usr/bin/ssh`; its complete canonical parent chain is identity- and
+mode-attested, with one narrow `root:daemon` macOS launchd runtime exception.
+The route also requires Machine `/bin/sh` and `/usr/bin/ss`, and a
+host-networked target container with `/usr/bin/test`, an executable
+`/usr/bin/python3` run with `-I -S`, `/bin/sh`, and `/usr/bin/ssh-add`; the Dev Containers CLI
+must also expose the probed `up`, `exec`, and
+`run-user-commands` options. Its fresh 256-bit lifecycle token is delivered
+only over proxy stdin and never crosses loopback TCP; each connection uses a
+fresh challenge plus domain-separated HMACs that authenticate both proxy and
+gate. The
+container is first selected with post-create commands deferred, then its full
+ID, running state, exact `devcontainer.local_folder` and
+`devcontainer.config_file` labels, host network, and agent path are verified
+before lifecycle hooks run with that `SSH_AUTH_SOCK`; the protocol probe is
+repeated after the hooks. The launchd socket is never a Podman bind source, no
+agent volume is mounted, and no private key is copied. Record v6 pins the
+Machine generation and later CLI calls use its exact SSH URI and identity
+instead of following a changed default. OpenSSH resets `IdentityFile` to
+`none` before adding that exact key, so a validation-to-exec disappearance
+cannot fall back to user-default private keys. Its first host-key enrollment is
+allowed only against a descriptor-proven empty private pin; all later relay
+connections require that immutable pin, and learned keys are durably retained
+even when the first SSH attempt fails. Compromise by the same host UID, root,
+or the macOS daemon-group system principal remains inside the host trust
+boundary. Reusing a compatible container does not require recreation solely
+for agent forwarding.
 `!` authorizes network-dependent managed tools in the container; without it
 verified-tools remains `blocked/offline` and does not consume an attempt. See
 [Neovim inside a Dev Container](docs/devcontainer-neovim.md) for lifecycle,

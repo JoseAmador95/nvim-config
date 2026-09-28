@@ -476,6 +476,19 @@ local function screen_row(rows, text)
 	return nil
 end
 
+local function flush_scheduled()
+	local done = false
+	vim.schedule(function()
+		done = true
+	end)
+	assert(
+		vim.wait(200, function()
+			return done
+		end, 1),
+		"scheduled review work did not complete"
+	)
+end
+
 local function assert_same_screen_row(left, right, left_text, right_text)
 	right_text = right_text or left_text
 	local left_row = screen_row(left, left_text)
@@ -667,6 +680,134 @@ test("inline hunks use configured context and keep only the review window out of
 	if ordinary_win and vim.api.nvim_win_is_valid(ordinary_win) then
 		vim.api.nvim_win_close(ordinary_win, true)
 	end
+	assert(ok, err)
+end)
+
+test("inline hunk scrolling retains the same rows as a complete redraw", function()
+	local state = setup_state()
+	local win = state.origin.win
+	local previous_scrolloff = vim.o.scrolloff
+	local previous_cursorline = vim.wo[win].cursorline
+	local ok, err = xpcall(function()
+		vim.o.scrolloff = 10
+		vim.wo[win].cursorline = true
+		local selected = entry()
+		local old, new = {}, {}
+		for index = 1, 200 do
+			old[index] = ("ORIGINAL_LINE_%03d %s"):format(index, string.rep("x", index % 36))
+			new[index] = old[index]
+		end
+		for _, index in ipairs({ 5, 25, 40, 75, 100, 130, 160, 180, 195 }) do
+			new[index] = ("CHANGED_LINE_%03d"):format(index)
+		end
+		selected.old_text = table.concat(old, "\n") .. "\n"
+		selected.new_text = table.concat(new, "\n") .. "\n"
+		selected.hunks = vim.diff(selected.old_text, selected.new_text, { result_type = "indices" })
+		assert(presenter.show(state, selected, { layout = "inline", context = "hunks" }))
+		local buf = state.presentation.inline.buf
+		local commands = {}
+		for _, command in ipairs({ "j", "k" }) do
+			for _ = 1, 28 do
+				commands[#commands + 1] = command
+			end
+		end
+		for _ = 1, 13 do
+			commands[#commands + 1] = "\005"
+		end
+		vim.list_extend(commands, { "\025", "\025", "\004", "zz", "zt", "zb", "gg", "G" })
+		vim.cmd("redraw!")
+		for index, command in ipairs(commands) do
+			local before = vim.fn.winsaveview()
+			vim.api.nvim_feedkeys(command, "xt", false)
+			vim.api.nvim_exec_autocmds("CursorMoved", { buffer = buf, modeline = false })
+			local after = vim.fn.winsaveview()
+			if
+				before.topline ~= after.topline
+				or before.topfill ~= after.topfill
+				or before.leftcol ~= after.leftcol
+				or before.skipcol ~= after.skipcol
+			then
+				-- Script-driven input does not run the main loop's WinScrolled dispatch.
+				vim.api.nvim_exec_autocmds("WinScrolled", { pattern = tostring(win), modeline = false })
+			end
+			flush_scheduled()
+			vim.cmd("redraw")
+			local actual = screen_rows(win)
+			vim.cmd("redraw!")
+			local expected = screen_rows(win)
+			-- The ruler in the statusline has its own deferred refresh policy.
+			table.remove(actual)
+			table.remove(expected)
+			assert(
+				vim.deep_equal(actual, expected),
+				("scroll step %d (%s) left stale rows:\nactual=%s\nexpected=%s"):format(
+					index,
+					vim.inspect(command),
+					vim.inspect(actual),
+					vim.inspect(expected)
+				)
+			)
+		end
+		assert(vim.o.scrolloff == 10, "review scrolling changed the user's scrolloff")
+	end, debug.traceback)
+	pcall(mode.disable, state)
+	vim.o.scrolloff = previous_scrolloff
+	vim.wo[win].cursorline = previous_cursorline
+	assert(ok, err)
+end)
+
+test("inline hunk redraws are coalesced and stop with their owning presentation", function()
+	local state, source, selected = setup_cursor_state()
+	local win = state.origin.win
+	local original_redraw = vim.api.nvim__redraw
+	local redraws = {}
+	local function scroll(target)
+		vim.api.nvim_exec_autocmds("WinScrolled", { pattern = tostring(target or win), modeline = false })
+	end
+	local ok, err = xpcall(function()
+		assert(presenter.show(state, selected))
+		flush_scheduled()
+		vim.api.nvim__redraw = function(options)
+			if options.win == win and options.valid == false then
+				redraws[#redraws + 1] = options
+			end
+			return original_redraw(options)
+		end
+		scroll(win + 100000)
+		vim.api.nvim_exec_autocmds("CursorMoved", { buffer = state.presentation.inline.buf })
+		flush_scheduled()
+		assert(#redraws == 0, "ordinary cursor movement or another window invalidated review rows")
+		scroll()
+		scroll()
+		assert(#redraws == 0, "review redraw ran inside WinScrolled")
+		flush_scheduled()
+		assert(vim.deep_equal(redraws, { { win = win, valid = false } }), vim.inspect(redraws))
+		redraws = {}
+		scroll()
+		assert(presenter.toggle_context(state))
+		flush_scheduled()
+		scroll()
+		flush_scheduled()
+		assert(#redraws == 0, "old or full-context presentation invalidated rows")
+		assert(presenter.toggle_context(state))
+		scroll()
+		vim.api.nvim_win_set_buf(win, source)
+		flush_scheduled()
+		assert(#redraws == 0, "queued redraw touched a replacement buffer")
+		assert(presenter.show(state, selected, { layout = "split", context = "hunks" }))
+		scroll()
+		flush_scheduled()
+		assert(#redraws == 0, "split review installed the inline redraw workaround")
+		assert(presenter.show(state, selected))
+		scroll()
+		presenter.clear(state)
+		flush_scheduled()
+		scroll()
+		flush_scheduled()
+		assert(#redraws == 0, "cleared presentation kept a redraw callback")
+	end, debug.traceback)
+	vim.api.nvim__redraw = original_redraw
+	pcall(mode.disable, state)
 	assert(ok, err)
 end)
 
@@ -1273,6 +1414,159 @@ test("unified renames retain distinct OLD and NEW paths across layout toggles", 
 	mode.disable(state)
 end)
 
+test("logical locations survive unified projection rebuilds and reveal concealed rows", function()
+	local state, _, selected = setup_cursor_state()
+	assert(presenter.show(state, selected, { layout = "inline", context = "full" }))
+	local full = state.presentation
+	local source_line = 10
+	local display_line = assert(full.projection.by_source.new[source_line])
+	vim.api.nvim_set_current_win(full.inline.win)
+	vim.api.nvim_win_set_cursor(full.inline.win, { display_line, 3 })
+	local location = assert(presenter.capture_location(state))
+	assert(vim.deep_equal(location, {
+		entry_identity = selected.identity,
+		layer = "history",
+		side = "new",
+		path = selected.new_path,
+		line = source_line,
+		col = 4,
+	}))
+
+	assert(presenter.show(state, selected, { layout = "inline", context = "hunks" }))
+	local hunks = state.presentation
+	local target_line = assert(hunks.projection.by_source.new[source_line])
+	local before = vim.api.nvim_win_get_cursor(hunks.inline.win)
+	local stale, stale_err = presenter.restore_location(state, location, hunks.generation + 1)
+	assert(stale == nil and stale_err:find("generation changed", 1, true), stale_err)
+	assert(vim.deep_equal(vim.api.nvim_win_get_cursor(hunks.inline.win), before))
+	assert(presenter.restore_location(state, location, hunks.generation))
+	assert(vim.api.nvim_get_current_win() == hunks.inline.win)
+	assert(vim.deep_equal(vim.api.nvim_win_get_cursor(hunks.inline.win), { target_line, 3 }))
+	assert(move_and_fire(hunks.inline.win, hunks.inline.buf, target_line) == target_line)
+	mode.disable(state)
+end)
+
+test("logical split locations restore exact OLD and NEW source cursors", function()
+	local state = setup_state()
+	local selected = entry()
+	assert(presenter.show(state, selected, { layout = "split", context = "full" }))
+	local presentation = state.presentation
+	local left = assert(presentation.left)
+	local right = assert(presentation.right)
+
+	vim.api.nvim_set_current_win(right.win)
+	vim.api.nvim_win_set_cursor(right.win, { 3, 2 })
+	local new_location = assert(presenter.capture_location(state))
+	assert(new_location.side == "new" and new_location.path == selected.new_path)
+	assert(new_location.line == 3 and new_location.col == 3)
+
+	vim.api.nvim_set_current_win(left.win)
+	vim.api.nvim_win_set_cursor(left.win, { 2, 1 })
+	local old_location = assert(presenter.capture_location(state))
+	assert(old_location.side == "old" and old_location.path == selected.old_path)
+	assert(old_location.line == 2 and old_location.col == 2)
+
+	assert(presenter.restore_location(state, new_location, presentation.generation))
+	assert(vim.api.nvim_get_current_win() == right.win)
+	assert(vim.deep_equal(vim.api.nvim_win_get_cursor(right.win), { 3, 2 }))
+	assert(presenter.restore_location(state, old_location, presentation.generation))
+	assert(vim.api.nvim_get_current_win() == left.win)
+	assert(vim.deep_equal(vim.api.nvim_win_get_cursor(left.win), { 2, 1 }))
+	mode.disable(state)
+end)
+
+test("unified context retains the restored OLD logical side", function()
+	local state = setup_state()
+	local selected = entry()
+	selected.old_path = "before.lua"
+	selected.new_path = "after.lua"
+	selected.path = selected.new_path
+	selected.identity = "history\0before.lua\0after.lua"
+	assert(presenter.show(state, selected, { layout = "split", context = "full" }))
+	local left = assert(state.presentation.left)
+	vim.api.nvim_set_current_win(left.win)
+	vim.api.nvim_win_set_cursor(left.win, { 1, 1 })
+	local old_context = assert(presenter.capture_location(state))
+	assert(old_context.side == "old" and old_context.path == selected.old_path and old_context.line == 1)
+
+	assert(presenter.show(state, selected, { layout = "inline", context = "full", side = "old" }))
+	local presentation = state.presentation
+	assert(presenter.restore_location(state, old_context, presentation.generation))
+	local restored = assert(presenter.capture_location(state))
+	assert(vim.deep_equal(restored, old_context), "unified context changed the restored OLD identity")
+	local inline = presentation.inline
+	vim.api.nvim_win_set_cursor(inline.win, { 2, 0 })
+	vim.api.nvim_exec_autocmds("CursorMoved", { buffer = inline.buf })
+	vim.api.nvim_win_set_cursor(inline.win, { 1, 1 })
+	local revisited = assert(presenter.capture_location(state))
+	assert(revisited.side == "new" and revisited.path == selected.new_path, "departed logical side remained sticky")
+	mode.disable(state)
+end)
+
+test("empty unified entries retain the restored OLD logical side", function()
+	local state = setup_state()
+	local selected = entry("")
+	selected.old_text = ""
+	selected.old_path = "before.txt"
+	selected.new_path = "after.txt"
+	selected.path = selected.new_path
+	selected.identity = "history\0before.txt\0after.txt"
+	selected.hunks = {}
+	assert(presenter.show(state, selected, { layout = "split", context = "full" }))
+	local left = assert(state.presentation.left)
+	vim.api.nvim_set_current_win(left.win)
+	vim.api.nvim_win_set_cursor(left.win, { 1, 0 })
+	local old_empty = assert(presenter.capture_location(state))
+	assert(old_empty.side == "old" and old_empty.path == selected.old_path and old_empty.line == 0)
+
+	assert(presenter.show(state, selected, { layout = "inline", context = "full", side = "old" }))
+	assert(presenter.restore_location(state, old_empty, state.presentation.generation))
+	assert(vim.deep_equal(presenter.capture_location(state), old_empty), "empty projection changed the OLD identity")
+	mode.disable(state)
+end)
+
+test("unified projections retain restored file-level locations on an empty side", function()
+	for _, fixture in ipairs({
+		{ side = "old", old_text = "", new_text = "new line\n", path = "before.txt" },
+		{ side = "new", old_text = "old line\n", new_text = "", path = "after.txt" },
+	}) do
+		local state = setup_state()
+		local selected = entry(fixture.new_text)
+		selected.old_text = fixture.old_text
+		selected.old_path = "before.txt"
+		selected.new_path = "after.txt"
+		selected.path = selected.new_path
+		selected.identity = "history\0before.txt\0after.txt"
+		selected.hunks = vim.diff(selected.old_text, selected.new_text, { result_type = "indices" })
+		assert(presenter.show(state, selected, { layout = "split", context = "full" }))
+		local pane = assert(fixture.side == "old" and state.presentation.left or state.presentation.right)
+		vim.api.nvim_set_current_win(pane.win)
+		vim.api.nvim_win_set_cursor(pane.win, { 1, 0 })
+		local file_location = assert(presenter.capture_location(state))
+		assert(file_location.side == fixture.side and file_location.path == fixture.path and file_location.line == 0)
+
+		assert(presenter.show(state, selected, { layout = "inline", context = "full", side = fixture.side }))
+		assert(presenter.restore_location(state, file_location, state.presentation.generation))
+		local inline = state.presentation.inline
+		local cursor = vim.api.nvim_win_get_cursor(inline.win)
+		local line = vim.api.nvim_buf_get_lines(inline.buf, cursor[1] - 1, cursor[1], false)[1] or ""
+		vim.api.nvim_win_set_cursor(inline.win, { cursor[1], math.min(3, #line) })
+		local unified_location = assert(presenter.capture_location(state))
+		assert(
+			vim.deep_equal(unified_location, file_location),
+			fixture.side .. " file-level location was not canonical"
+		)
+
+		assert(presenter.show(state, selected, { layout = "split", context = "full", side = fixture.side }))
+		assert(presenter.restore_location(state, unified_location, state.presentation.generation))
+		assert(
+			vim.deep_equal(presenter.capture_location(state), file_location),
+			fixture.side .. " file-level location changed after split restoration"
+		)
+		mode.disable(state)
+	end
+end)
+
 test("unified pure insertions are real rows at BOF and after unchanged rows", function()
 	local state = setup_state()
 	local selected = entry()
@@ -1804,6 +2098,28 @@ test("deleted and binary entries remain metadata-safe without a right pane", fun
 	assert_transient_immutable(buf)
 	local first = vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1]
 	assert(first == "[binary file]")
+	presenter.clear(state)
+	binary.old_path = "before.bin"
+	binary.new_path = "after.bin"
+	binary.path = binary.new_path
+	binary.identity = "history\0before.bin\0after.bin"
+	binary.old_text = "\0old binary bytes"
+	binary.new_text = "\0new binary bytes"
+	assert(presenter.show(state, binary, { layout = "split", context = "full" }))
+	local left = assert(state.presentation.left)
+	vim.api.nvim_set_current_win(left.win)
+	vim.api.nvim_win_set_cursor(left.win, { 1, 3 })
+	local old_location = assert(presenter.capture_location(state))
+	assert(
+		old_location.side == "old"
+			and old_location.path == binary.old_path
+			and old_location.line == 0
+			and old_location.col == 1
+	)
+	assert(presenter.show(state, binary, { layout = "inline", context = "full", side = "old" }))
+	assert(state.presentation.inline.side == "old", "metadata inline view ignored the requested OLD side")
+	assert(presenter.restore_location(state, old_location, state.presentation.generation))
+	assert(vim.deep_equal(presenter.capture_location(state), old_location))
 	mode.disable(state)
 end)
 

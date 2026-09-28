@@ -1,4 +1,33 @@
 local M = {}
+local editor = require("config.editor")
+
+local function trim_location_token(token)
+	token = token:gsub("^[%(%[%{<\"'`]+", "")
+	token = token:gsub("[%)%]%}>,;\"'`]+$", "")
+	return token
+end
+
+local function location_under_cursor()
+	local expanded, token = pcall(vim.fn.expand, "<cWORD>")
+	token = trim_location_token(expanded and token or "")
+	local file, line, col = token:match("^(.-):(%d+):(%d+):?$")
+	if file and file ~= "" then
+		return file, tonumber(line) or 1, tonumber(col) or 1
+	end
+	file, line = token:match("^(.-):(%d+):?$")
+	if file and file ~= "" then
+		return file, tonumber(line) or 1, 1
+	end
+	local file_ok
+	file_ok, file = pcall(vim.fn.expand, "<cfile>")
+	if not file_ok then
+		return nil
+	end
+	if file == "" then
+		return nil
+	end
+	return file, 1, 1
+end
 
 local function current_target()
 	local winid = vim.api.nvim_get_current_win()
@@ -116,21 +145,13 @@ end
 ---@return boolean, string?
 function M.open_file_under_cursor(target)
 	local ok, err = M.with_target(target, { window = true }, function()
-		local file = vim.fn.expand("<cfile>")
-		local line = 1
-		local col = 1
-		local parsed_file, parsed_line, parsed_col = file:match("^(.-):(%d+):(%d+)$")
-		if parsed_file then
-			file, line, col = parsed_file, parsed_line, parsed_col
-		else
-			parsed_file, parsed_line = file:match("^(.-):(%d+)$")
-			if parsed_file then
-				file, line = parsed_file, parsed_line
-			end
+		local file, line, col = location_under_cursor()
+		if not file then
+			error("No file under cursor", 0)
 		end
-		require("config.editor").open_file_in_tab(file, {
-			lnum = tonumber(line) or 1,
-			col = tonumber(col) or 1,
+		editor.open_file_in_tab(file, {
+			lnum = line,
+			col = col,
 		})
 	end)
 	if not ok then

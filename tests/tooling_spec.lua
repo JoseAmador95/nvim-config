@@ -6,11 +6,22 @@ local function fail(message)
 	vim.cmd("cquit")
 end
 
+local function global_mapping(mode, lhs)
+	for _, mapping in ipairs(vim.api.nvim_get_keymap(mode)) do
+		if mapping.lhs == lhs then
+			return mapping
+		end
+	end
+end
+
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,
 	callback = function()
 		vim.schedule(function()
 			local ok, err = xpcall(function()
+				assert(package.loaded.mason == nil, "Mason loaded before its UI was requested")
+				assert(package.loaded["mason-registry"] == nil, "Mason registry loaded on the file-open path")
+				assert(package.loaded["mason-lspconfig"] == nil, "mason-lspconfig loaded on the file-open path")
 				require("lazy").load({ plugins = { "venv-selector.nvim" } })
 				assert(vim.fn.exists(":VenvSelect") == 2, "manual Python environment picker is missing")
 				assert(
@@ -18,6 +29,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"venv-selector still runs install-capable PEP 723 uv automation"
 				)
 
+				assert(package.loaded.mason == nil, "Python environment selection activated Mason")
+				require("lazy").load({ plugins = { "mason.nvim" } })
 				local mason_options = require("mason.settings").current
 				assert(
 					mason_options.install_root_dir == require("config.tool_paths").mason_root(),
@@ -39,9 +52,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				}) do
 					assert(mason_options.ui.keymaps[key] == "<Nop>", "Mason mutation key remains: " .. key)
 				end
-				local mason_settings = require("mason-lspconfig.settings").current
-				assert(mason_settings.automatic_enable == false, "Mason automatic LSP enablement is not disabled")
-				assert(vim.tbl_isempty(mason_settings.ensure_installed), "mason-lspconfig still schedules installs")
+				assert(package.loaded["mason-lspconfig"] == nil, "opening Mason activated its unused LSP bridge")
 				assert(vim.lsp.is_enabled("docker_language_server"), "Docker LSP is not explicitly enabled")
 				assert(not vim.lsp.is_enabled("stylua"), "Stylua was unexpectedly enabled as an LSP")
 				assert(vim.lsp.config["*"].before_init == nil, "wildcard before_init hook is still configured")
@@ -55,14 +66,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				end
 
 				local neoconf = require("neoconf")
-				local rust_path = require("config.rust_tools").rust_analyzer()
-				assert(
-					vim.lsp.is_enabled("rust_analyzer") == (rust_path ~= nil),
-					"Rust LSP enablement does not match the external executable"
-				)
-				if rust_path then
-					assert(vim.lsp.config.rust_analyzer.cmd[1] == rust_path, "Rust LSP did not pin the external path")
-					assert(not require("config.tool_paths").is_mason_path(rust_path), "Rust LSP resolved through Mason")
+				assert(vim.lsp.is_enabled("rust_analyzer"), "deferred host Rust LSP registration is missing")
+				assert(type(vim.lsp.config.rust_analyzer.cmd) == "function", "Rust path was resolved eagerly")
+				local lsp_runtime = require("config.lsp_runtime")
+				local original_runtime_resolve = lsp_runtime._resolve
+				lsp_runtime._resolve = function(_, command)
+					return "/verified/bin/" .. command
 				end
 
 				local project = vim.fn.tempname()
@@ -94,6 +103,13 @@ vim.api.nvim_create_autocmd("VimEnter", {
 						source.repo = source.workspace.repo_identity
 						source.approved = approved_fingerprint == source.fingerprint
 						return { sources = { source } }
+					end,
+					has_approval = function(request)
+						assert(vim.deep_equal(request.workspace, current_source.workspace))
+						assert(
+							request.source == current_source.id and request.fingerprint == current_source.fingerprint
+						)
+						return approved_fingerprint == request.fingerprint
 					end,
 					approve = function(request)
 						assert(vim.deep_equal(request.workspace, current_source.workspace))
@@ -282,10 +298,15 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				editor.open_file_in_tab = function(path, position)
 					opened = { path = path, position = position }
 				end
+				local declaration_origin = package.loaded["config.navigation_history"].capture()
 				navigation.declaration()
 				assert(request_count == 2, "declaration issued more than one LSP request")
 				assert(opened and opened.path == "/tmp/only.lua", "single declaration did not open directly")
-				assert(vim.deep_equal(opened.position, { lnum = 11, col = 6 }), "direct declaration position drifted")
+				assert(opened.position.lnum == 11 and opened.position.col == 6, "direct declaration position drifted")
+				assert(
+					vim.deep_equal(opened.position.history_origin, declaration_origin),
+					"direct declaration did not retain its invocation origin"
+				)
 
 				vim.lsp.get_clients = original_get_clients
 				vim.lsp.buf.definition = original_definition
@@ -295,9 +316,9 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				editor.open_file_in_tab = original_open
 
 				for _, lhs in ipairs({ "K", "gO", "gra", "gri", "grn", "grr", "grt", "grx" }) do
-					assert(vim.fn.maparg(lhs, "n") == "", "Neovim default LSP mapping remains: " .. lhs)
+					assert(global_mapping("n", lhs) == nil, "Neovim default global LSP mapping remains: " .. lhs)
 				end
-				assert(vim.fn.maparg("gra", "x") == "", "Neovim visual code-action mapping remains")
+				assert(global_mapping("x", "gra") == nil, "Neovim visual code-action mapping remains")
 				local keymap_buf = vim.api.nvim_create_buf(false, true)
 				vim.api.nvim_exec_autocmds("LspAttach", {
 					buffer = keymap_buf,
@@ -324,8 +345,18 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(menu_route_count == 1, "menu definition bypassed shared LSP navigation")
 
 				local clangd_command = vim.lsp.config.clangd.cmd
-				assert(clangd_command[1] == "clangd", "clangd ignored the default local binary setting")
-				assert(vim.tbl_contains(clangd_command, "--clang-tidy"), "clangd lost --clang-tidy")
+				assert(type(clangd_command) == "function", "clangd did not register a root-scoped command function")
+				assert(
+					clangd_command == require("config.lsp_deferred").clangd_rpc_start,
+					"clangd command bypassed the deferred native RPC boundary"
+				)
+				for _, server in ipairs(require("config.lsp_catalog").servers) do
+					assert(
+						type(vim.lsp.config[server.name].cmd) == "function",
+						server.name .. " bypassed runtime resolution"
+					)
+				end
+				lsp_runtime._resolve = original_runtime_resolve
 			end, debug.traceback)
 
 			if not ok then

@@ -40,6 +40,8 @@ local function ensure_workbench()
 	end
 	local options = local_config.plugin("coverage_workbench", {
 		max_report_bytes = 50 * 1024 * 1024,
+		max_source_bytes = 16 * 1024 * 1024,
+		max_model_bytes = 64 * 1024 * 1024,
 		signs = "all",
 		stale = "hide",
 	})

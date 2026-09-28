@@ -69,6 +69,12 @@ replacement before the backend reports `on_exit`. Buffer mappings are host
 policy via `buffer_mappings = { close = "q", open_location = "gf" }`; either
 mapping can be changed or disabled with `false`.
 
+`max_output_lines` defaults to 10000 and accepts only integers from 1 through
+100000. `lines()` asks the backend for at most that many newest lines, enforces
+the bound again, validates string-only output, and always returns a caller-owned
+array. A backend callback that exits or disposes the process synchronously while
+showing the view cannot be followed by a stale focus or visibility update.
+
 Zero-argument `status()` is a pure aggregate available before setup, and
 `effective_config()` always returns copied non-callback defaults or active
 policy. Unknown setup options are rejected before mutation, teardown is

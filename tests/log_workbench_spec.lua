@@ -81,7 +81,14 @@ end
 package.loaded["config.local_config"] = {
 	plugin = function(key, fallback)
 		if key == "log_workbench" then
-			return { poll_interval_ms = 500, max_lines = 3, max_bytes = 128 }
+			return {
+				poll_interval_ms = 500,
+				max_lines = 3,
+				max_bytes = 128,
+				continuity_bytes = 1024,
+				max_matches = 7,
+				scan_lines_per_tick = 2,
+			}
 		end
 		return fallback
 	end,
@@ -96,6 +103,7 @@ assert(log_watch.setup({
 	new_fs_event = watcher,
 	notify = vim.notify,
 }))
+equal(1024, require("log_workbench.follow").effective_config().continuity_bytes)
 
 test("host command opens a distinct tail buffer and restores the untouched source", function()
 	local path = temporary_file({ "one", "two" })
@@ -180,6 +188,10 @@ test("host color UI drives plugin extmarks while log-highlight remains external"
 	equal(1, #state.patterns)
 	equal("red", state.patterns[1].color_key)
 	local match_core = require("log_workbench.matches")
+	equal({ max_matches = 7, scan_lines_per_tick = 2 }, match_core.effective_config())
+	wait_for(function()
+		return #match_core.locations(buf) == 2
+	end, "host-configured match scan did not complete")
 	equal(2, #match_core.locations(buf))
 	equal(2, #vim.api.nvim_buf_get_extmarks(buf, match_core.namespace(), 0, -1, {}))
 	patterns.clear({ args = "red" })

@@ -616,12 +616,78 @@ test("deferred setup callbacks are invalidated by teardown", function()
 		end,
 		setup = function()
 			setup_calls = setup_calls + 1
+			return true
 		end,
 	})
 	assert(type(scheduled) == "function")
 	assert(exact.teardown())
 	scheduled()
 	assert(setup_calls == 0, "deferred setup survived teardown")
+end)
+
+test("deferred setup retries after the UI detaches before its callback", function()
+	assert(exact.teardown())
+	local callbacks = {}
+	local uis = 0
+	local setup_calls = 0
+	exact.setup_deferred({
+		ui_count = function()
+			return uis
+		end,
+		schedule = function(callback)
+			callbacks[#callbacks + 1] = callback
+		end,
+		setup = function()
+			setup_calls = setup_calls + 1
+			return true
+		end,
+	})
+
+	uis = 1
+	vim.api.nvim_exec_autocmds("UIEnter", { modeline = false })
+	assert(#callbacks == 1, "first UI did not queue deferred setup")
+	uis = 0
+	callbacks[1]()
+	assert(setup_calls == 0, "setup ran after its UI detached")
+	uis = 1
+	vim.api.nvim_exec_autocmds("UIEnter", { modeline = false })
+	assert(#callbacks == 2, "later UI could not retry deferred setup")
+	callbacks[2]()
+	assert(setup_calls == 1, "retried setup did not run exactly once")
+	assert(vim.fn.exists("#exact_editor_rpc_deferred#UIEnter") == 0, "effective setup left a deferred watcher")
+	assert(exact.teardown())
+end)
+
+test("deferred setup remains retryable until setup is effective", function()
+	assert(exact.teardown())
+	local callbacks = {}
+	local uis = 1
+	local setup_calls = 0
+	exact.setup_deferred({
+		ui_count = function()
+			return uis
+		end,
+		schedule = function(callback)
+			callbacks[#callbacks + 1] = callback
+		end,
+		setup = function()
+			setup_calls = setup_calls + 1
+			return setup_calls > 1
+		end,
+	})
+
+	callbacks[1]()
+	assert(setup_calls == 1, "first deferred setup did not run")
+	assert(vim.fn.exists("#exact_editor_rpc_deferred#UIEnter") == 1, "failed setup removed its retry watcher")
+	uis = 0
+	vim.api.nvim_exec_autocmds("UILeave", { modeline = false })
+	uis = 1
+	vim.api.nvim_exec_autocmds("UIEnter", { modeline = false })
+	assert(#callbacks == 2, "failed setup was not retried on a later UI")
+	callbacks[2]()
+	assert(setup_calls == 2, "retry did not run exactly once")
+	assert(vim.fn.exists("#exact_editor_rpc_deferred#UIEnter") == 0, "successful retry left a watcher")
+	assert(exact.teardown())
 end)
 
 vim.fn.delete(fixture, "rf")

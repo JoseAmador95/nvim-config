@@ -9,6 +9,10 @@ function M.capture()
 	return runtime.capture()
 end
 
+function M.same_location(left, right)
+	return runtime.same_location(left, right)
+end
+
 function M.record_transition(origin, destination)
 	return runtime.record_transition(origin, destination)
 end
@@ -32,15 +36,11 @@ function M.select()
 	local choices = {}
 	for index = #snapshot.entries, 1, -1 do
 		local entry = snapshot.entries[index]
+		local label = entry.kind == "provider" and entry.label
+			or string.format("%s:%d:%d", vim.fn.fnamemodify(entry.path, ":~:."), entry.lnum, entry.col)
 		choices[#choices + 1] = {
 			index = index,
-			label = string.format(
-				"%s%s:%d:%d",
-				index == snapshot.index and "● " or "  ",
-				vim.fn.fnamemodify(entry.path, ":~:."),
-				entry.lnum,
-				entry.col
-			),
+			label = (index == snapshot.index and "● " or "  ") .. label,
 		}
 	end
 	vim.ui.select(choices, {
@@ -64,18 +64,22 @@ function M.reset()
 end
 
 function M.setup()
-	vim.api.nvim_create_user_command("NavigationBack", function()
-		M.back()
-	end, { desc = "Go back in semantic navigation history", force = true })
-	vim.api.nvim_create_user_command("NavigationForward", function()
-		M.forward()
-	end, { desc = "Go forward in semantic navigation history", force = true })
+	vim.api.nvim_create_user_command("NavigationBack", function(options)
+		M.back({ count = options.count > 0 and options.count or 1 })
+	end, { count = true, desc = "Go back in semantic navigation history", force = true })
+	vim.api.nvim_create_user_command("NavigationForward", function(options)
+		M.forward({ count = options.count > 0 and options.count or 1 })
+	end, { count = true, desc = "Go forward in semantic navigation history", force = true })
 	vim.api.nvim_create_user_command("NavigationHistory", M.select, {
 		desc = "Show semantic navigation history",
 		force = true,
 	})
-	vim.keymap.set("n", "<C-o>", M.back, { silent = true, desc = "Navigation back" })
-	vim.keymap.set("n", "<C-i>", M.forward, { silent = true, desc = "Navigation forward" })
+	vim.keymap.set("n", "<C-o>", function()
+		M.back({ count = vim.v.count1 })
+	end, { silent = true, desc = "Navigation back" })
+	vim.keymap.set("n", "<C-i>", function()
+		M.forward({ count = vim.v.count1 })
+	end, { silent = true, desc = "Navigation forward" })
 	vim.keymap.set("n", "<leader>nh", M.select, { silent = true, desc = "Show navigation history" })
 end
 

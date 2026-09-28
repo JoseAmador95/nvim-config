@@ -5,6 +5,7 @@ local repo = require("native_review.dependencies").get("repo")
 local fs = require("native_review.dependencies").get("fs")
 local config = require("native_review.dependencies").get("config")
 local tabs = require("native_review.dependencies").get("tabs")
+local clipboard = require("native_review.dependencies").get("clipboard")
 local comment_types = require("native_review.comment_types")
 local review_changes = require("native_review.changes")
 local review_editor = require("native_review.editor")
@@ -18,12 +19,16 @@ local review_store = require("native_review.store")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comments")
 local PREVIEW_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comment_preview")
-local REVIEW_TYPES = comment_types.ids()
-local COMMENT_SIGN_TYPES = comment_types.rail_ids()
+local function select_review(items, options, callback)
+	options.kind = "native_review"
+	vim.ui.select(items, options, callback)
+end
 
 local function apply_comment_highlights()
 	for _, definition in ipairs(comment_types.all()) do
-		vim.api.nvim_set_hl(0, definition.highlight, { default = true, link = definition.default_link })
+		if definition.highlight ~= definition.default_link then
+			vim.api.nvim_set_hl(0, definition.highlight, { default = true, link = definition.default_link })
+		end
 	end
 end
 
@@ -33,35 +38,6 @@ vim.api.nvim_create_autocmd("ColorScheme", {
 	group = comment_highlight_group,
 	callback = apply_comment_highlights,
 })
-local HELP_GROUPS = { common = "review", diff_line = "review_diff", file = "review_file" }
-local MAPPINGS = {
-	{ lhs = "<leader>rr", rhs = "<cmd>ReviewPanel<cr>", desc = "Toggle review panel", help = "common" },
-	{ lhs = "<leader>ro", rhs = "<cmd>ReviewOpen<cr>", desc = "Open default review", help = "common" },
-	{ lhs = "<leader>rm", rhs = "<cmd>ReviewMode<cr>", desc = "Toggle review mode", help = "common" },
-	{ lhs = "<leader>rs", rhs = "<cmd>ReviewScope<cr>", desc = "Review scope/session", help = "common" },
-	{ lhs = "<leader>rb", rhs = "<cmd>ReviewScopeBack<cr>", desc = "Return to parent review scope", help = "common" },
-	{ lhs = "<leader>rf", rhs = "<cmd>ReviewFiles<cr>", desc = "Focus review files", help = "common" },
-	{ lhs = "<leader>rh", rhs = "<cmd>ReviewCommits<cr>", desc = "Focus review commits", help = "common" },
-	{ lhs = "<leader>rl", rhs = "<cmd>ReviewComments<cr>", desc = "Focus review comments", help = "common" },
-	{ lhs = "<leader>rv", rhs = "<cmd>ReviewLayout<cr>", desc = "Toggle review layout", help = "common" },
-	{ lhs = "<leader>rw", rhs = "<cmd>ReviewContext<cr>", desc = "Toggle review context", help = "common" },
-	{ lhs = "<leader>ri", rhs = "<cmd>ReviewInlineComments<cr>", desc = "Toggle inline comments", help = "common" },
-	{ lhs = "<leader>rg", rhs = "<cmd>ReviewCode<cr>", desc = "Focus reviewed code", help = "common" },
-	{ lhs = "<leader>ra", rhs = "<cmd>ReviewComment<cr>", desc = "Add line/range comment", help = "diff_line" },
-	{ lhs = "<leader>rA", rhs = "<cmd>ReviewFileComment<cr>", desc = "Add file comment", help = "file" },
-	{ lhs = "<leader>rR", rhs = "<cmd>ReviewGeneralComment<cr>", desc = "Add review-level comment", help = "common" },
-	{ lhs = "<leader>re", rhs = "<cmd>ReviewEdit<cr>", desc = "Edit review comment", help = "common" },
-	{ lhs = "<leader>rc", rhs = "<cmd>ReviewChangeType<cr>", desc = "Change comment type", help = "diff_line" },
-	{ lhs = "<leader>rd", rhs = "<cmd>ReviewDeleteDraft<cr>", desc = "Delete review comment", help = "diff_line" },
-	{ lhs = "<leader>rp", rhs = "<cmd>ReviewReply<cr>", desc = "Reply to review comment", help = "common" },
-	{ lhs = "<leader>rt", rhs = "<cmd>ReviewToggleResolve<cr>", desc = "Resolve or reopen comment", help = "common" },
-	{ lhs = "<leader>rE", rhs = "<cmd>ReviewExport<cr>", desc = "Export review", help = "common" },
-	{ lhs = "<leader>ru", rhs = "<cmd>ReviewRefresh<cr>", desc = "Refresh review", help = "common" },
-	{ lhs = "<leader>rq", rhs = "<cmd>ReviewClose<cr>", desc = "Close review", help = "common" },
-	{ lhs = "]r", rhs = "<cmd>ReviewNext<cr>", desc = "Next review comment", help = "common" },
-	{ lhs = "[r", rhs = "<cmd>ReviewPrev<cr>", desc = "Previous review comment", help = "common" },
-}
-
 local workspaces = {}
 local active
 local suspended
@@ -76,13 +52,78 @@ local handle_surface_request_close
 local handle_surface_closed
 local workspace_generation = 0
 local definition_navigation_options
+local operation_epoch = 0
+local pending_operation
+local HISTORY_PROVIDER = "native-review"
+local ENTRY_SNAPSHOT_FIELDS = {
+	"layer",
+	"status",
+	"score",
+	"old_mode",
+	"new_mode",
+	"old_oid",
+	"new_oid",
+	"old_path",
+	"new_path",
+	"renamed",
+	"copied",
+	"added",
+	"deleted",
+	"submodule",
+	"conflicted",
+	"path",
+	"identity",
+	"binary",
+	"metadata_only",
+	"old_text",
+	"new_text",
+	"hunks",
+}
+local focus_snapshot
+local restore_focus
+local surface_focus_snapshot
 
 local function notify(message, level)
 	vim.notify(tostring(message), level or vim.log.levels.INFO, { title = "Review" })
 end
 
 local function message(err)
-	return type(err) == "table" and (err.message or err.code or vim.inspect(err)) or tostring(err)
+	if type(err) ~= "table" then
+		return tostring(err)
+	end
+	if err.code == "review_limit_exceeded" and type(err.details) == "table" then
+		local details = err.details
+		return ("%s [%s %s, %s: %s > %s]"):format(
+			err.message or err.code,
+			tostring(details.layer),
+			tostring(details.side),
+			tostring(details.limit),
+			tostring(details.actual),
+			tostring(details.maximum)
+		)
+	end
+	return err.message or err.code or vim.inspect(err)
+end
+
+local function construction_options(control)
+	return {
+		control = control,
+		max_files = config.max_files,
+		max_file_bytes = config.max_file_bytes,
+		max_model_bytes = config.max_model_bytes,
+	}
+end
+
+local function operation_checkpoint(options, phase, progress)
+	local callback = options and options.control and options.control.checkpoint
+	if type(callback) ~= "function" then
+		return true
+	end
+	local continued, err = callback(phase, vim.deepcopy(progress or {}))
+	if continued == false then
+		return nil, tostring(err or "review operation was cancelled")
+	end
+	return true
 end
 
 local function valid_buf(buf)
@@ -249,9 +290,31 @@ local function find_entry(workspace, identity)
 	return nil
 end
 
+local function entry_snapshot(entry)
+	if type(entry) ~= "table" then
+		return nil
+	end
+	local snapshot = {}
+	for _, field in ipairs(ENTRY_SNAPSHOT_FIELDS) do
+		local value = entry[field]
+		snapshot[field] = type(value) == "table" and vim.deepcopy(value) or value
+	end
+	return snapshot
+end
+
+local function entry_matches_snapshot(entry, snapshot)
+	local current = entry_snapshot(entry)
+	return current ~= nil and type(snapshot) == "table" and vim.deep_equal(current, snapshot)
+end
+
+local function same_entry(left, right)
+	local snapshot = entry_snapshot(left)
+	return snapshot ~= nil and entry_matches_snapshot(right, snapshot)
+end
+
 local function status_side(workspace, entry)
 	local presentation = workspace.mode_state and workspace.mode_state.presentation
-	if presentation and presentation.entry == entry then
+	if presentation and same_entry(presentation.entry, entry) then
 		local current = vim.api.nvim_get_current_win()
 		for _, name in ipairs({ "inline", "left", "right" }) do
 			local side = presentation[name]
@@ -275,7 +338,17 @@ end
 function M.status()
 	local workspace = current_workspace()
 	if not workspace then
-		return { active = false, mode_on = false }
+		local status = { active = false, mode_on = false }
+		if pending_operation then
+			status.pending = true
+			status.operation = {
+				kind = pending_operation.kind,
+				epoch = pending_operation.epoch,
+				phase = pending_operation.phase,
+				progress = vim.deepcopy(pending_operation.progress),
+			}
+		end
+		return status
 	end
 	local status = {
 		active = true,
@@ -286,6 +359,15 @@ function M.status()
 		context = workspace.context,
 		inline_comments = workspace.inline_comments ~= false,
 	}
+	if pending_operation then
+		status.pending = true
+		status.operation = {
+			kind = pending_operation.kind,
+			epoch = pending_operation.epoch,
+			phase = pending_operation.phase,
+			progress = vim.deepcopy(pending_operation.progress),
+		}
+	end
 	local entry = find_entry(workspace, workspace.entry_identity)
 	if entry then
 		local side = status_side(workspace, entry)
@@ -304,6 +386,96 @@ local function emit_changed()
 	pcall(event, vim.deepcopy(M.status()))
 end
 
+local function cancel_pending(reason, emit)
+	operation_epoch = operation_epoch + 1
+	local pending = pending_operation
+	pending_operation = nil
+	if pending then
+		pending.cancelled = reason or "cancelled"
+		if emit then
+			emit_changed()
+		end
+		return true
+	end
+	return false
+end
+
+local function start_async(kind, worker, callback)
+	assert(type(worker) == "function", "async review worker must be a function")
+	assert(callback == nil or type(callback) == "function", "async review callback must be a function")
+	cancel_pending("superseded", false)
+	operation_epoch = operation_epoch + 1
+	local epoch = operation_epoch
+	local operation = {
+		kind = kind,
+		epoch = epoch,
+		phase = "scheduled",
+		progress = {},
+	}
+	pending_operation = operation
+	emit_changed()
+
+	local control = {}
+	function control.checkpoint(phase, progress)
+		if epoch ~= operation_epoch or pending_operation ~= operation then
+			return false, "review operation was superseded"
+		end
+		operation.phase = phase
+		operation.progress = vim.deepcopy(progress or {})
+		coroutine.yield()
+		if epoch ~= operation_epoch or pending_operation ~= operation then
+			return false, "review operation was superseded"
+		end
+		return true
+	end
+
+	local thread = coroutine.create(function()
+		return worker(control)
+	end)
+	local function finish(first, second)
+		if epoch ~= operation_epoch or pending_operation ~= operation then
+			return
+		end
+		pending_operation = nil
+		emit_changed()
+		if callback then
+			local ok, callback_err = pcall(callback, first, second)
+			if not ok then
+				notify("Review operation callback failed: " .. tostring(callback_err), vim.log.levels.ERROR)
+			end
+		end
+	end
+	local function step()
+		if epoch ~= operation_epoch or pending_operation ~= operation then
+			return
+		end
+		local ok, first, second = coroutine.resume(thread)
+		if not ok then
+			pending_operation = nil
+			notify("Review " .. kind .. " failed: " .. tostring(first), vim.log.levels.ERROR)
+			emit_changed()
+			return
+		end
+		if coroutine.status(thread) == "dead" then
+			finish(first, second)
+		else
+			vim.schedule(step)
+		end
+	end
+	vim.schedule(step)
+	return {
+		kind = kind,
+		epoch = epoch,
+		cancel = function()
+			if epoch == operation_epoch and pending_operation == operation then
+				cancel_pending("cancelled", true)
+				return true
+			end
+			return false
+		end,
+	}
+end
+
 local function root_for_command()
 	local root = repo.current_root(0)
 	local workspace = current_workspace()
@@ -318,10 +490,11 @@ local function buffer_in_root(root, buf)
 	return path ~= "" and repo.contains(root, path)
 end
 
-local function update_panel(workspace)
+local function update_panel(workspace, selected_identity)
 	if workspace.panel then
-		review_panel.refresh(workspace.panel, workspace)
+		return review_panel.refresh(workspace.panel, workspace, selected_identity)
 	end
+	return true
 end
 
 local function refresh_trouble()
@@ -434,11 +607,11 @@ local function mutation_failed(workspace, err)
 	return false
 end
 
-local function stale_now(workspace)
+local function stale_now(workspace, control)
 	if workspace.scope.kind ~= "working" then
 		return false
 	end
-	local drift, err = review_scope.detect_drift(workspace.scope)
+	local drift, err = review_scope.detect_drift(workspace.scope, construction_options(control))
 	if not drift then
 		return nil, message(err)
 	end
@@ -572,6 +745,556 @@ local function on_surface()
 	return surface_valid() and vim.api.nvim_get_current_tabpage() == review_surface.tabpage
 end
 
+local function encoded_history_key(...)
+	local values = { ... }
+	for index, value in ipairs(values) do
+		values[index] = ("%d:%s"):format(#value, value)
+	end
+	return table.concat(values, "|")
+end
+
+local function history_document_key(payload)
+	return encoded_history_key(
+		payload.workspace_key,
+		payload.scope_id,
+		payload.entry_identity,
+		payload.layer,
+		payload.side,
+		payload.path
+	)
+end
+
+local function history_location_key(payload)
+	return ("%d:%d"):format(payload.line, payload.col)
+end
+
+local function source_line_count(text)
+	if text == "" then
+		return 0
+	end
+	local _, newlines = text:gsub("\n", "")
+	return newlines + (text:sub(-1) == "\n" and 0 or 1)
+end
+
+local function validate_history_location(entry, location)
+	if type(location) ~= "table" then
+		return false
+	elseif type(location.entry_identity) ~= "string" or location.entry_identity ~= entry.identity then
+		return false
+	elseif type(location.layer) ~= "string" or location.layer ~= (entry.layer or "history") then
+		return false
+	elseif location.side ~= "old" and location.side ~= "new" then
+		return false
+	elseif type(location.path) ~= "string" or location.path == "" then
+		return false
+	elseif location.path ~= (location.side == "old" and entry.old_path or entry.new_path) then
+		return false
+	elseif type(location.line) ~= "number" or location.line % 1 ~= 0 or location.line < 0 then
+		return false
+	elseif type(location.col) ~= "number" or location.col % 1 ~= 0 or location.col < 1 then
+		return false
+	elseif location.line == 0 and location.col ~= 1 then
+		return false
+	end
+	local text = location.side == "old" and entry.old_text or entry.new_text
+	local line_count = entry.metadata_only and 0 or source_line_count(type(text) == "string" and text or "")
+	return (location.line == 0 and line_count == 0) or (location.line >= 1 and location.line <= line_count)
+end
+
+local function valid_provider_entry(value)
+	local payload = type(value) == "table" and value.payload or nil
+	if
+		type(payload) ~= "table"
+		or value.kind ~= "provider"
+		or value.provider ~= HISTORY_PROVIDER
+		or type(value.document_key) ~= "string"
+		or value.document_key == ""
+		or type(value.location_key) ~= "string"
+		or value.location_key == ""
+		or type(value.label) ~= "string"
+		or type(payload.workspace_key) ~= "string"
+		or payload.workspace_key == ""
+		or type(payload.workspace_generation) ~= "number"
+		or payload.workspace_generation % 1 ~= 0
+		or type(payload.scope_id) ~= "string"
+		or payload.scope_id == ""
+		or type(payload.entry_identity) ~= "string"
+		or payload.entry_identity == ""
+		or type(payload.layer) ~= "string"
+		or payload.layer == ""
+		or (payload.side ~= "old" and payload.side ~= "new")
+		or type(payload.path) ~= "string"
+		or payload.path == ""
+		or type(payload.line) ~= "number"
+		or payload.line % 1 ~= 0
+		or payload.line < 0
+		or type(payload.col) ~= "number"
+		or payload.col % 1 ~= 0
+		or payload.col < 1
+	then
+		return nil
+	end
+	if value.document_key ~= history_document_key(payload) or value.location_key ~= history_location_key(payload) then
+		return nil
+	end
+	return payload
+end
+
+local function presentation_source_window(state, win)
+	local presentation = state and state.presentation or nil
+	local entry = presentation and presentation.entry or nil
+	for _, name in ipairs({ "inline", "left", "right" }) do
+		local candidate = presentation and presentation[name] or nil
+		if candidate and candidate.win == win then
+			if candidate.side == "unified" then
+				return type(entry) == "table"
+					and (
+						type(entry.old_path) == "string" and entry.old_path ~= ""
+						or type(entry.new_path) == "string" and entry.new_path ~= ""
+					)
+			end
+			local path = candidate.side == "old" and entry and entry.old_path
+				or candidate.side == "new" and entry and entry.new_path
+				or nil
+			return type(path) == "string" and path ~= ""
+		end
+	end
+	return false
+end
+
+---Capture the current review cursor without exposing transient UI identities.
+---@return table?
+---@return string? err
+function M.capture_location()
+	local workspace = current_workspace()
+	local state = workspace and workspace.mode_state or nil
+	if
+		not workspace
+		or not registered(workspace)
+		or suspended ~= nil
+		or not surface_valid()
+		or not on_surface()
+		or workspace.mode_on ~= true
+		or not state
+		or state.enabled ~= true
+		or type(workspace.scope) ~= "table"
+		or type(workspace.scope.id) ~= "string"
+		or workspace.scope.id == ""
+	then
+		return nil
+	end
+	local current_win = vim.api.nvim_get_current_win()
+	if not presentation_source_window(state, current_win) then
+		return nil
+	elseif type(review_presenter.capture_location) ~= "function" then
+		return nil, "review presenter capture callback is unavailable"
+	end
+	local workspace_key_before = workspace_key(workspace)
+	local workspace_generation = workspace.generation
+	local scope_id = workspace.scope.id
+	local entry_identity = workspace.entry_identity
+	local presentation = state.presentation
+	local presentation_generation = presentation and presentation.generation or nil
+	local presentation_entry_snapshot = entry_snapshot(presentation and presentation.entry or nil)
+	local expected_surface = vim.deepcopy(review_surface)
+	local location, capture_err = review_presenter.capture_location(state)
+	if not location then
+		return nil, capture_err or "review source location could not be captured"
+	end
+	if
+		current_workspace() ~= workspace
+		or not registered(workspace)
+		or workspace_key(workspace) ~= workspace_key_before
+		or workspace.generation ~= workspace_generation
+		or type(workspace.scope) ~= "table"
+		or workspace.scope.id ~= scope_id
+		or not same_surface(review_surface, expected_surface)
+		or not surface_valid()
+		or not on_surface()
+		or workspace.mode_on ~= true
+		or workspace.mode_state ~= state
+		or state.enabled ~= true
+		or state.presentation ~= presentation
+		or not state.presentation
+		or state.presentation.generation ~= presentation_generation
+		or workspace.entry_identity ~= entry_identity
+		or vim.api.nvim_get_current_win() ~= current_win
+		or not presentation_source_window(state, current_win)
+	then
+		return nil, "review owner changed while capturing the source location"
+	end
+	if location.entry_identity ~= entry_identity then
+		return nil, "captured review entry changed during location capture"
+	end
+	local entry = find_entry(workspace, location.entry_identity)
+	if not entry then
+		return nil, "captured review entry is no longer available"
+	elseif not validate_history_location(entry, location) then
+		return nil, "captured review location is invalid"
+	elseif not entry_matches_snapshot(entry, presentation_entry_snapshot) then
+		return nil, "captured review entry no longer matches the current model"
+	end
+	local payload = {
+		workspace_key = workspace_key_before,
+		workspace_generation = workspace_generation,
+		scope_id = scope_id,
+		entry_identity = location.entry_identity,
+		layer = location.layer,
+		side = location.side,
+		path = location.path,
+		line = location.line,
+		col = location.col,
+	}
+	return {
+		kind = "provider",
+		provider = HISTORY_PROVIDER,
+		document_key = history_document_key(payload),
+		location_key = history_location_key(payload),
+		label = ("Review %s %s:%d:%d"):format(payload.side:upper(), payload.path, payload.line, payload.col),
+		payload = payload,
+	}
+end
+
+local function history_owner_current(workspace, state, payload, expected_surface)
+	return current_workspace() == workspace
+		and registered(workspace)
+		and workspace_key(workspace) == payload.workspace_key
+		and workspace.generation == payload.workspace_generation
+		and type(workspace.scope) == "table"
+		and workspace.scope.id == payload.scope_id
+		and same_surface(review_surface, expected_surface)
+		and surface_valid()
+		and workspace.mode_on == true
+		and workspace.mode_state == state
+		and state.enabled == true
+end
+
+local function history_surface_current(workspace, state, expected_surface)
+	return current_workspace() == workspace
+		and registered(workspace)
+		and same_surface(review_surface, expected_surface)
+		and surface_valid()
+		and workspace.mode_state == state
+end
+
+local function history_presentation_entry(workspace, state, location, expected_entry_snapshot)
+	local entry = find_entry(workspace, location.entry_identity)
+	if not entry then
+		return nil, "review entry is no longer available"
+	elseif not validate_history_location(entry, location) then
+		return nil, "review location no longer matches the current model"
+	elseif not entry_matches_snapshot(entry, expected_entry_snapshot) then
+		return nil, "review entry changed in the current model"
+	elseif not state.presentation then
+		return nil, "review presentation is no longer available"
+	elseif not entry_matches_snapshot(state.presentation.entry, expected_entry_snapshot) then
+		return nil, "review presentation no longer matches the current model"
+	end
+	return entry
+end
+
+local function call_history_operation(callback, ...)
+	local ok, first, second = pcall(callback, ...)
+	if not ok then
+		return nil, tostring(first)
+	end
+	return first, second
+end
+
+local function history_restore_snapshot(workspace, state, expected_surface)
+	local previous_entry = find_entry(workspace, workspace.entry_identity)
+	local snapshot = {
+		entry_identity = workspace.entry_identity,
+		entry_snapshot = entry_snapshot(previous_entry),
+		caller_focus = focus_snapshot(workspace),
+		review_focus = surface_focus_snapshot(workspace),
+		locations = {},
+	}
+	local candidates = {}
+	local seen = {}
+	local function add_candidate(win)
+		if valid_win(win) and vim.api.nvim_win_get_tabpage(win) == expected_surface.tabpage and not seen[win] then
+			seen[win] = true
+			candidates[#candidates + 1] = win
+		end
+	end
+	if valid_tab(expected_surface.tabpage) then
+		add_candidate(vim.api.nvim_tabpage_get_win(expected_surface.tabpage))
+	end
+	add_candidate(workspace.panel and workspace.panel.source_win or nil)
+	local target_ok, target = pcall(review_presenter.current_target, state)
+	if not target_ok then
+		return nil, "previous review target could not be inspected: " .. tostring(target)
+	end
+	add_candidate(target and target.win or nil)
+	for _, name in ipairs({ "inline", "left", "right" }) do
+		local pane = state.presentation and state.presentation[name] or nil
+		add_candidate(pane and pane.win or nil)
+	end
+	for _, win in ipairs(candidates) do
+		local snapshot_err
+		local call_ok, call_err = pcall(vim.api.nvim_win_call, win, function()
+			if previous_entry and presentation_source_window(state, win) then
+				local pane_focus = focus_snapshot(workspace)
+				if type(review_presenter.capture_location) ~= "function" then
+					snapshot_err = "review presenter capture callback is unavailable"
+					return
+				end
+				local location, capture_err = review_presenter.capture_location(state)
+				if not location then
+					snapshot_err = capture_err or "previous review cursor could not be captured"
+				elseif not validate_history_location(previous_entry, location) then
+					snapshot_err = "previous review cursor snapshot is invalid"
+				else
+					local captured = vim.deepcopy(location)
+					snapshot.location = snapshot.location or captured
+					snapshot.locations[#snapshot.locations + 1] = {
+						focus = pane_focus,
+						location = captured,
+					}
+				end
+			end
+		end)
+		if not call_ok then
+			return nil, "previous review snapshot failed: " .. tostring(call_err)
+		elseif snapshot_err then
+			return nil, snapshot_err
+		end
+	end
+	if previous_entry and #snapshot.locations == 0 then
+		return nil, "previous review cursor is unavailable for an atomic restore"
+	end
+	if previous_entry then
+		local current_entry = find_entry(workspace, snapshot.entry_identity)
+		if not current_entry then
+			return nil, "previous review entry is no longer available"
+		elseif not entry_matches_snapshot(current_entry, snapshot.entry_snapshot) then
+			return nil, "previous review entry changed while its state was captured"
+		end
+	end
+	return snapshot
+end
+
+local function rollback_history_restore(workspace, state, payload, expected_surface, snapshot)
+	if not history_owner_current(workspace, state, payload, expected_surface) then
+		return nil, "review owner changed before rollback"
+	end
+	local previous_entry = find_entry(workspace, snapshot.entry_identity)
+	if not previous_entry then
+		return nil, "previous review entry is no longer available"
+	elseif not entry_matches_snapshot(previous_entry, snapshot.entry_snapshot) then
+		return nil, "previous review entry changed before rollback"
+	elseif not snapshot.location or not validate_history_location(previous_entry, snapshot.location) then
+		return nil, "previous review location no longer matches the current model"
+	end
+	local shown, show_err = call_history_operation(M.present, snapshot.entry_identity, payload.workspace_key, {
+		emit = false,
+		side = snapshot.location.side,
+	})
+	if shown ~= true then
+		return nil, "previous review presentation could not be restored: " .. tostring(show_err)
+	end
+	if not history_owner_current(workspace, state, payload, expected_surface) then
+		return nil, "review owner changed while rolling back"
+	end
+	local current_entry, current_entry_err =
+		history_presentation_entry(workspace, state, snapshot.location, snapshot.entry_snapshot)
+	if not current_entry then
+		return nil, "previous review model changed while rolling back: " .. tostring(current_entry_err)
+	end
+	local generation = state.presentation.generation
+	local function rollback_current()
+		if not history_owner_current(workspace, state, payload, expected_surface) then
+			return false, "review owner changed during rollback"
+		end
+		local entry, entry_err =
+			history_presentation_entry(workspace, state, snapshot.location, snapshot.entry_snapshot)
+		if not entry then
+			return false, entry_err
+		elseif state.presentation.generation ~= generation then
+			return false, "review presentation changed during rollback"
+		end
+		return true
+	end
+	for _, captured in ipairs(snapshot.locations) do
+		local restored, restore_err =
+			call_history_operation(review_presenter.restore_location, state, captured.location, generation)
+		local current, current_err = rollback_current()
+		if restored ~= true or not current then
+			return nil,
+				("previous %s review cursor could not be restored: %s"):format(
+					captured.location.side,
+					tostring(restore_err or current_err or "restore did not succeed")
+				)
+		end
+	end
+	for _, captured in ipairs(snapshot.locations) do
+		local focused, focus_err = call_history_operation(restore_focus, workspace, captured.focus)
+		local current, current_err = rollback_current()
+		if focused ~= true or not current then
+			return nil,
+				("previous %s review view could not be restored: %s"):format(
+					captured.location.side,
+					tostring(focus_err or current_err or "focus restore did not succeed")
+				)
+		end
+	end
+	if snapshot.review_focus then
+		local focused, focus_err = call_history_operation(restore_focus, workspace, snapshot.review_focus)
+		local current, current_err = rollback_current()
+		if focused ~= true or not current then
+			return nil,
+				"previous review focus could not be restored: " .. tostring(
+					focus_err or current_err or "focus restore did not succeed"
+				)
+		end
+	end
+	if snapshot.caller_focus then
+		local focused, focus_err = call_history_operation(restore_focus, workspace, snapshot.caller_focus)
+		local current, current_err = rollback_current()
+		if focused ~= true or not current then
+			return nil,
+				"calling focus could not be restored: " .. tostring(
+					focus_err or current_err or "focus restore did not succeed"
+				)
+		end
+	end
+	return true
+end
+
+local function failed_history_restore(workspace, state, payload, expected_surface, snapshot, err)
+	local rolled_back, rollback_err =
+		call_history_operation(rollback_history_restore, workspace, state, payload, expected_surface, snapshot)
+	if not rolled_back then
+		if snapshot.caller_focus and snapshot.caller_focus.kind == "window" then
+			pcall(restore_focus, nil, snapshot.caller_focus)
+		end
+		if history_surface_current(workspace, state, expected_surface) then
+			emit_changed()
+		end
+	end
+	local detail = "Could not restore review navigation: " .. tostring(err)
+	if not rolled_back then
+		detail = detail .. "; rollback failed: " .. tostring(rollback_err)
+	end
+	notify(detail, rolled_back and vim.log.levels.WARN or vim.log.levels.ERROR)
+	return false, detail, true
+end
+
+---Restore a captured logical review cursor only into its still-live owner.
+---@param value table
+---@return boolean restored
+---@return string? err
+---@return boolean? already_reported
+function M.restore_location(value)
+	local payload = valid_provider_entry(value)
+	if not payload or suspended ~= nil then
+		return false
+	end
+	local workspace = current_workspace()
+	local state = workspace and workspace.mode_state or nil
+	if
+		not workspace
+		or not registered(workspace)
+		or workspace_key(workspace) ~= payload.workspace_key
+		or workspace.generation ~= payload.workspace_generation
+		or type(workspace.scope) ~= "table"
+		or workspace.scope.id ~= payload.scope_id
+		or not surface_valid()
+		or workspace.mode_on ~= true
+		or not state
+		or state.enabled ~= true
+		or type(review_presenter.restore_location) ~= "function"
+	then
+		return false
+	end
+	local expected_surface = vim.deepcopy(review_surface)
+	local entry = find_entry(workspace, payload.entry_identity)
+	if not entry or not validate_history_location(entry, payload) then
+		return false
+	end
+	local destination_entry_snapshot = entry_snapshot(entry)
+	local snapshot, snapshot_err = call_history_operation(history_restore_snapshot, workspace, state, expected_surface)
+	if not snapshot then
+		local detail = "Could not restore review navigation: " .. tostring(snapshot_err)
+		notify(detail, vim.log.levels.WARN)
+		return false, detail, true
+	end
+	if not history_owner_current(workspace, state, payload, expected_surface) then
+		if snapshot.caller_focus and snapshot.caller_focus.kind == "window" then
+			pcall(restore_focus, nil, snapshot.caller_focus)
+		end
+		return false
+	end
+	local shown, show_err = call_history_operation(M.present, payload.entry_identity, payload.workspace_key, {
+		emit = false,
+		side = payload.side,
+	})
+	if shown ~= true then
+		return failed_history_restore(workspace, state, payload, expected_surface, snapshot, show_err)
+	end
+	if not history_owner_current(workspace, state, payload, expected_surface) then
+		return failed_history_restore(
+			workspace,
+			state,
+			payload,
+			expected_surface,
+			snapshot,
+			"review owner changed while presenting the destination"
+		)
+	end
+	local destination_entry, destination_entry_err =
+		history_presentation_entry(workspace, state, payload, destination_entry_snapshot)
+	if not destination_entry then
+		return failed_history_restore(
+			workspace,
+			state,
+			payload,
+			expected_surface,
+			snapshot,
+			"review destination model changed while presenting: " .. tostring(destination_entry_err)
+		)
+	end
+	local presentation_generation = state.presentation.generation
+	local restored, restore_err =
+		call_history_operation(review_presenter.restore_location, state, payload, presentation_generation)
+	if restored ~= true then
+		return failed_history_restore(
+			workspace,
+			state,
+			payload,
+			expected_surface,
+			snapshot,
+			restore_err or "destination cursor restore did not succeed"
+		)
+	end
+	if not history_owner_current(workspace, state, payload, expected_surface) then
+		return failed_history_restore(
+			workspace,
+			state,
+			payload,
+			expected_surface,
+			snapshot,
+			"review owner changed while restoring the destination cursor"
+		)
+	end
+	destination_entry, destination_entry_err =
+		history_presentation_entry(workspace, state, payload, destination_entry_snapshot)
+	if not destination_entry or state.presentation.generation ~= presentation_generation then
+		return failed_history_restore(
+			workspace,
+			state,
+			payload,
+			expected_surface,
+			snapshot,
+			"review destination changed while restoring its cursor: "
+				.. tostring(destination_entry_err or "presentation generation changed")
+		)
+	end
+	emit_changed()
+	return true
+end
+
 local function surface_title(workspace)
 	local name = vim.fs.basename(vim.fs.normalize(workspace.root))
 	local label = workspace.scope and workspace.scope.label or workspace.session.id
@@ -614,7 +1337,7 @@ local function window_focus_snapshot(win)
 	return value
 end
 
-local function focus_snapshot(workspace)
+focus_snapshot = function(workspace)
 	local win = vim.api.nvim_get_current_win()
 	local value = window_focus_snapshot(win)
 	for name, pane in pairs(workspace and workspace.panel and workspace.panel.panes or {}) do
@@ -636,10 +1359,49 @@ local function focus_snapshot(workspace)
 	return value
 end
 
+local function rememberable_surface_focus(workspace, value)
+	if type(value) ~= "table" then
+		return false
+	end
+	if value.kind == "panel" then
+		local pane = workspace.panel and workspace.panel.panes and workspace.panel.panes[value.pane] or nil
+		return panel_open(workspace) and pane and pane.win == value.win and valid_win(pane.win) or false
+	elseif value.kind == "presentation" then
+		local presentation = workspace.mode_state and workspace.mode_state.presentation
+		for _, name in ipairs({ "inline", "left", "right" }) do
+			local side = presentation and presentation[name] or nil
+			if side and side.side == value.side and side.win == value.win and valid_win(side.win) then
+				return true
+			end
+		end
+		return false
+	elseif
+		value.kind == "window"
+		and valid_win(value.win)
+		and surface_valid()
+		and vim.api.nvim_win_get_tabpage(value.win) == review_surface.tabpage
+	then
+		local window_config = vim.api.nvim_win_get_config(value.win)
+		return not window_config.relative or window_config.relative == ""
+	end
+	return false
+end
+
 -- A supported close can target the review tab while another tab is current.
 -- In that case the process-global current window is not review UI, so derive
 -- the resumable focus from the review's own live surface instead.
-local function surface_focus_snapshot(workspace)
+surface_focus_snapshot = function(workspace)
+	if workspace and current_workspace() == workspace and on_surface() then
+		local current = focus_snapshot(workspace)
+		if rememberable_surface_focus(workspace, current) then
+			workspace.surface_focus = vim.deepcopy(current)
+			return current
+		end
+	end
+	local remembered = workspace and workspace.surface_focus or nil
+	if rememberable_surface_focus(workspace, remembered) then
+		return vim.deepcopy(remembered)
+	end
 	local focused = workspace and workspace.panel and workspace.panel.focused
 	local pane = focused and workspace.panel.panes and workspace.panel.panes[focused] or nil
 	if pane and valid_win(pane.win) then
@@ -658,6 +1420,18 @@ local function surface_focus_snapshot(workspace)
 	-- The fallback deliberately carries no ordinary-window identity. Once the
 	-- surface is rebuilt, restore_focus() will select its current target.
 	return { kind = "surface" }
+end
+
+local function remember_surface_focus()
+	local workspace = current_workspace()
+	if workspace and on_surface() then
+		local current = focus_snapshot(workspace)
+		if rememberable_surface_focus(workspace, current) then
+			workspace.surface_focus = vim.deepcopy(current)
+			return true
+		end
+	end
+	return false
 end
 
 local function set_focus(win, snapshot, require_same_buffer)
@@ -696,7 +1470,7 @@ local function normal_window(tab, preferred)
 	return nil
 end
 
-local function restore_focus(workspace, snapshot)
+restore_focus = function(workspace, snapshot)
 	if not snapshot then
 		return false
 	end
@@ -948,6 +1722,7 @@ handle_surface_closed = function(handle, reason)
 	if not same_surface(handle, review_surface) then
 		return
 	end
+	cancel_pending("review surface closed", true)
 	local close_state = same_surface(handle, pending_surface_close) and pending_surface_close or nil
 	pending_surface_close = nil
 	review_surface = nil
@@ -1092,9 +1867,16 @@ local function open_resolved(root, scope, supplied, options)
 	if session.scope.kind == "working" and session.stale then
 		return nil, "saved working review is stale; use :ReviewOpen working for a new exact scope"
 	end
-	local model, model_err = review_changes.build(root, scope)
+	local model, model_err = review_changes.build(root, scope, construction_options(options and options.control))
 	if not model then
 		return nil, message(model_err)
+	end
+	local continued, checkpoint_err = operation_checkpoint(options, "controller.open_publish", {
+		root = root,
+		scope_id = scope.id,
+	})
+	if not continued then
+		return nil, checkpoint_err
 	end
 	if created then
 		local saved, save_err = review_store.save(root, session)
@@ -1123,7 +1905,8 @@ local function open_request(request, root, options)
 		notify("Current buffer is not inside a Git repository", vim.log.levels.ERROR)
 		return nil
 	end
-	local scope, scope_err = review_scope.resolve(root, request or { kind = "branch" })
+	local scope, scope_err =
+		review_scope.resolve(root, request or { kind = "branch" }, construction_options(options and options.control))
 	if not scope then
 		notify("Could not resolve review scope: " .. message(scope_err), vim.log.levels.ERROR)
 		return nil
@@ -1136,6 +1919,7 @@ local function open_request(request, root, options)
 end
 
 function M.open(request, root)
+	cancel_pending("superseded by synchronous open", true)
 	local workspace, err = open_request(request, root)
 	if workspace then
 		clear_scope_history()
@@ -1144,7 +1928,39 @@ function M.open(request, root)
 	return workspace, err
 end
 
+function M.open_async(request, root, callback)
+	local captured_request = vim.deepcopy(request)
+	local captured_root = root or root_for_command()
+	return start_async("open", function(control)
+		if not captured_root then
+			notify("Current buffer is not inside a Git repository", vim.log.levels.ERROR)
+			return nil
+		end
+		local workspace, err = open_request(captured_request, captured_root, { control = control })
+		if workspace then
+			clear_scope_history()
+		end
+		return workspace, err
+	end, callback)
+end
+
+function M.cancel_pending(reason, emit)
+	return cancel_pending(reason or "cancelled", emit ~= false)
+end
+
+local function open_saved_async(root, session, callback)
+	local captured_session = vim.deepcopy(session)
+	return start_async("open", function(control)
+		local workspace, err = open_resolved(root, captured_session.scope, captured_session, { control = control })
+		if workspace then
+			clear_scope_history()
+		end
+		return workspace, err
+	end, callback)
+end
+
 open_drilldown = function(request, parent)
+	cancel_pending("superseded by review drilldown", true)
 	if not registered(parent) or parent ~= current_workspace() then
 		return nil, "review session is no longer active"
 	end
@@ -1173,6 +1989,7 @@ open_drilldown = function(request, parent)
 end
 
 function M.scope_back(expected)
+	cancel_pending("superseded by review scope navigation", true)
 	local frame = scope_history[#scope_history]
 	if not frame then
 		notify("Already at full review scope")
@@ -1245,6 +2062,17 @@ function M.scope_back(expected)
 	return true
 end
 
+local function present_owner_current(workspace, generation, state, expected_surface)
+	return current_workspace() == workspace
+		and registered(workspace)
+		and workspace.generation == generation
+		and same_surface(review_surface, expected_surface)
+		and surface_valid()
+		and workspace.mode_on == true
+		and workspace.mode_state == state
+		and state.enabled == true
+end
+
 function M.present(identity, expected, options)
 	clear_inline_preview()
 	if suspended then
@@ -1261,6 +2089,9 @@ function M.present(identity, expected, options)
 	if not entry then
 		return nil, "review entry is no longer part of the exact model"
 	end
+	local selected_entry_snapshot = entry_snapshot(entry)
+	local generation = workspace.generation
+	local previous_identity = workspace.entry_identity
 	local resume_ui = workspace.resume_ui
 	local acquired, surface_result = acquire_surface(workspace)
 	if not acquired then
@@ -1268,9 +2099,11 @@ function M.present(identity, expected, options)
 	end
 	local new_surface = surface_result == true
 	bind_workspace(workspace)
+	local state = workspace.mode_state
+	local expected_surface = vim.deepcopy(review_surface)
 	local enabled_for_present = false
 	if not workspace.mode_on then
-		local enabled, err = review_mode.enable(workspace.mode_state)
+		local enabled, err = review_mode.enable(state)
 		if not enabled then
 			if new_surface then
 				disable_ui(workspace, true)
@@ -1283,13 +2116,22 @@ function M.present(identity, expected, options)
 		workspace.mode_on = true
 		enabled_for_present = true
 	end
-	local shown, err = review_presenter.show(workspace.mode_state, entry, {
+	if not present_owner_current(workspace, generation, state, expected_surface) then
+		return nil, "review owner changed before presenting the entry"
+	elseif not entry_matches_snapshot(find_entry(workspace, identity), selected_entry_snapshot) then
+		return nil, "review entry changed before it could be presented"
+	end
+	local shown, err = call_history_operation(review_presenter.show, state, entry, {
 		layout = workspace.layout,
 		context = workspace.context,
+		side = options and options.side or nil,
 	})
 	if not shown then
+		if not present_owner_current(workspace, generation, state, expected_surface) then
+			return nil, "review owner changed while presenting the entry: " .. tostring(err)
+		end
 		if enabled_for_present then
-			review_mode.disable(workspace.mode_state)
+			review_mode.disable(state)
 			workspace.mode_on = false
 		end
 		if new_surface then
@@ -1300,11 +2142,55 @@ function M.present(identity, expected, options)
 		end
 		return nil, err
 	end
-	local target = review_presenter.current_target(workspace.mode_state)
-	review_panel.update_source(workspace.panel, target and target.win or nil)
+	if
+		not present_owner_current(workspace, generation, state, expected_surface)
+		or not entry_matches_snapshot(find_entry(workspace, identity), selected_entry_snapshot)
+		or not state.presentation
+		or not entry_matches_snapshot(state.presentation.entry, selected_entry_snapshot)
+		or workspace.entry_identity ~= previous_identity
+	then
+		return nil, "review owner changed while presenting the entry"
+	end
+	local presentation = state.presentation
+	local presentation_generation = presentation.generation
+	local function finalization_current()
+		return present_owner_current(workspace, generation, state, expected_surface)
+			and entry_matches_snapshot(find_entry(workspace, identity), selected_entry_snapshot)
+			and workspace.entry_identity == previous_identity
+			and state.presentation == presentation
+			and entry_matches_snapshot(presentation.entry, selected_entry_snapshot)
+			and presentation.generation == presentation_generation
+	end
+	local target, target_err = call_history_operation(review_presenter.current_target, state)
+	if not finalization_current() then
+		return nil, "review owner changed while resolving the presented entry"
+	end
+	if target_err then
+		return nil, "could not resolve the presented review target: " .. tostring(target_err)
+	end
+	local _, source_err =
+		call_history_operation(review_panel.update_source, workspace.panel, target and target.win or nil)
+	if not finalization_current() then
+		return nil, "review owner changed while finalizing the presented entry"
+	end
+	if source_err then
+		return nil, "could not update the review panel source: " .. tostring(source_err)
+	end
+	local panel_refreshed, panel_err = call_history_operation(update_panel, workspace, identity)
+	if not finalization_current() then
+		return nil, "review owner changed while refreshing the review panel"
+	end
+	if panel_refreshed ~= true then
+		return nil, "could not refresh the review panel: " .. tostring(panel_err or "refresh did not succeed")
+	end
+	local _, marks_err = call_history_operation(M.refresh_marks, workspace)
+	if not finalization_current() then
+		return nil, "review owner changed while refreshing review decorations"
+	end
+	if marks_err then
+		return nil, "could not refresh review decorations: " .. tostring(marks_err)
+	end
 	workspace.entry_identity = identity
-	update_panel(workspace)
-	M.refresh_marks(workspace)
 	if not options or options.emit ~= false then
 		emit_changed()
 	end
@@ -1948,7 +2834,7 @@ local function choose_target(workspace, captured, callback)
 	elseif #targets == 1 then
 		callback(targets[1])
 	else
-		vim.ui.select(targets, {
+		select_review(targets, {
 			prompt = "Review layer",
 			format_item = function(value)
 				return string.format("[%s] %s", value.layer, value.path)
@@ -2220,7 +3106,7 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 		compose(workspace, {
 			title = anchor.kind == "file" and "New file comment" or "New",
 			type_cycle = true,
-			selected_type = requested_type or REVIEW_TYPES[1],
+			selected_type = requested_type or "issue",
 			source_win = target.win,
 			anchor_line = anchor.kind == "range" and display.last or nil,
 			anchor_range = anchor.kind == "range" and { first = display.first, last = display.last } or nil,
@@ -2234,7 +3120,7 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 				return false
 			end
 			local changed, err = review_store.add(current.session, {
-				type = selected_type or requested_type or REVIEW_TYPES[1],
+				type = selected_type or requested_type or "issue",
 				body = body,
 				anchor = anchor,
 			})
@@ -2253,7 +3139,7 @@ local function choose_saved(root, callback, token)
 		notify("Could not list review sessions: " .. tostring(err), vim.log.levels.ERROR)
 		return
 	end
-	vim.ui.select(sessions, {
+	select_review(sessions, {
 		prompt = "Saved review session",
 		format_item = function(session)
 			return string.format("%s · %d comments", session.scope.label, #session.items)
@@ -2265,16 +3151,13 @@ local function choose_saved(root, callback, token)
 		if not resolve_interaction_token(token, "selecting a saved review session") then
 			return
 		end
-		local workspace, open_err = open_resolved(root, session.scope, session)
-		if not workspace then
-			notify("Could not open saved review: " .. tostring(open_err), vim.log.levels.ERROR)
-		else
-			clear_scope_history()
-			emit_changed()
-			if callback then
+		open_saved_async(root, session, function(workspace, open_err)
+			if not workspace then
+				notify("Could not open saved review: " .. tostring(open_err), vim.log.levels.ERROR)
+			elseif callback then
 				callback(workspace)
 			end
-		end
+		end)
 	end)
 end
 
@@ -2302,12 +3185,13 @@ local function scope_picker(root, callback)
 		if not resolve_interaction_token(token, "selecting a review scope") then
 			return
 		end
-		local workspace = M.open(request, root)
-		if workspace and callback then
-			callback(workspace)
-		end
+		M.open_async(request, root, function(workspace)
+			if workspace and callback then
+				callback(workspace)
+			end
+		end)
 	end
-	vim.ui.select(choices, {
+	select_review(choices, {
 		prompt = "Review scope",
 		format_item = function(value)
 			return value.label
@@ -2337,7 +3221,7 @@ end
 
 function M.comment(first, last, requested_type)
 	if not valid_type(requested_type) then
-		notify("Usage: ReviewComment [" .. table.concat(REVIEW_TYPES, "|") .. "]", vim.log.levels.ERROR)
+		notify("Usage: ReviewComment [" .. table.concat(comment_types.ids(), "|") .. "]", vim.log.levels.ERROR)
 		return
 	end
 	first = first or vim.fn.line(".")
@@ -2360,7 +3244,7 @@ end
 
 function M.file_comment(requested_type)
 	if not valid_type(requested_type) then
-		notify("Usage: ReviewFileComment [" .. table.concat(REVIEW_TYPES, "|") .. "]", vim.log.levels.ERROR)
+		notify("Usage: ReviewFileComment [" .. table.concat(comment_types.ids(), "|") .. "]", vim.log.levels.ERROR)
 		return
 	end
 	local line = vim.fn.line(".")
@@ -2382,7 +3266,7 @@ end
 
 function M.general_comment(requested_type)
 	if not valid_type(requested_type) then
-		notify("Usage: ReviewGeneralComment [" .. table.concat(REVIEW_TYPES, "|") .. "]", vim.log.levels.ERROR)
+		notify("Usage: ReviewGeneralComment [" .. table.concat(comment_types.ids(), "|") .. "]", vim.log.levels.ERROR)
 		return
 	end
 	local workspace = current_workspace()
@@ -2407,7 +3291,7 @@ function M.general_comment(requested_type)
 	compose(workspace, {
 		title = "New review-level comment",
 		type_cycle = true,
-		selected_type = requested_type or REVIEW_TYPES[1],
+		selected_type = requested_type or "issue",
 		source_win = source.win,
 		anchor = anchor,
 	}, function(body, interrupted, selected_type)
@@ -2419,7 +3303,7 @@ function M.general_comment(requested_type)
 			return false
 		end
 		local changed, err = review_store.add(current.session, {
-			type = selected_type or REVIEW_TYPES[1],
+			type = selected_type or "issue",
 			body = body,
 			anchor = anchor,
 		})
@@ -2596,7 +3480,7 @@ local function inline_preview_text(item, maximum)
 	local last = anchor.end_line or anchor.start_line
 	local range = anchor.start_line == last and ("L%d"):format(anchor.start_line)
 		or ("L%d-%d"):format(anchor.start_line, last)
-	local definition = comment_types.get(item.type) or comment_types.get("question")
+	local definition = comment_types.get(item.type)
 	local prefix = ("  [%s %s][%s] %s · "):format(
 		definition.icon,
 		definition.id,
@@ -2609,7 +3493,7 @@ end
 
 local function inline_preview_chunks(item, maximum)
 	local text = inline_preview_text(item, maximum)
-	local definition = comment_types.get(item.type) or comment_types.get("question")
+	local definition = comment_types.get(item.type)
 	local badge = ("[%s %s]"):format(definition.icon, definition.id)
 	local first = text:find(badge, 1, true)
 	if not first then
@@ -2713,7 +3597,7 @@ local function item_label(item)
 		location = "[" .. side .. "] " .. location
 	end
 	local preview = (item.body:match("[^\n]+") or item.body):gsub("%s+", " ")
-	local definition = comment_types.get(item.type) or comment_types.get("question")
+	local definition = comment_types.get(item.type)
 	return string.format(
 		"%02d %s %-10s %-14s %s %s",
 		item.sequence,
@@ -2781,7 +3665,7 @@ local function choose_item(workspace, id, prompt, callback)
 		if not workspace then
 			return
 		end
-		vim.ui.select(choices, { prompt = prompt, format_item = item_label }, function(selected)
+		select_review(choices, { prompt = prompt, format_item = item_label }, function(selected)
 			if not selected then
 				return
 			end
@@ -2870,8 +3754,9 @@ local function compose_item(token, action)
 	compose(workspace, {
 		title = title,
 		body = edit and item.body or "",
+		start_in_insert = not edit,
 		type_cycle = edit,
-		selected_type = item.type,
+		selected_type = edit and item.type or (comment_types.contains(item.type) and item.type or "issue"),
 		source_win = location.win,
 		anchor_line = display and display.last or nil,
 		anchor_range = display and { first = display.first, last = display.last } or nil,
@@ -2884,7 +3769,11 @@ local function compose_item(token, action)
 		if not current or not stable or (not interrupted and not allow_mutation(current)) then
 			return false
 		end
-		local values = { type = selected_type or stable.type, body = body, anchor = stable.anchor }
+		local values = {
+			type = selected_type or (edit and stable.type or "issue"),
+			body = body,
+			anchor = stable.anchor,
+		}
 		local changed, err = edit and review_store.edit(current.session, stable.id, values)
 			or review_store.reply(current.session, stable.id, values)
 		if not changed then
@@ -2954,7 +3843,7 @@ function M.delete(id)
 		if not current or not selected then
 			return
 		end
-		vim.ui.select({ "Cancel", "Delete" }, { prompt = delete_prompt(selected) }, function(choice)
+		select_review({ "Cancel", "Delete" }, { prompt = delete_prompt(selected) }, function(choice)
 			if choice ~= "Delete" then
 				return
 			end
@@ -2975,7 +3864,7 @@ function M.change_type(id)
 		if not current then
 			return
 		end
-		vim.ui.select(REVIEW_TYPES, {
+		select_review(comment_types.ids(), {
 			prompt = "Review comment type",
 			format_item = function(item_type)
 				local definition = comment_types.get(item_type)
@@ -3236,19 +4125,55 @@ function M.prev()
 	navigate(-1)
 end
 
-function M.refresh()
+local function refresh_target_error(workspace, expected)
+	if
+		not registered(workspace)
+		or current_workspace() ~= workspace
+		or workspace_key(workspace) ~= expected.workspace_key
+	then
+		return "active review changed while refresh was pending; current review was kept unchanged"
+	end
+	if
+		workspace.generation ~= expected.generation
+		or workspace.session ~= expected.session
+		or workspace.session.revision ~= expected.revision
+	then
+		return "review content changed while refresh was pending; current review was kept unchanged"
+	end
+	return nil
+end
+
+local function refresh_current(options)
+	options = options or {}
 	clear_inline_preview()
-	local workspace = current_workspace()
+	local workspace
+	if options.target_captured then
+		workspace = options.workspace
+	else
+		workspace = current_workspace()
+	end
 	if not workspace then
 		notify("No active review", vim.log.levels.ERROR)
 		return nil
+	end
+	local expected = options.expected
+		or {
+			workspace_key = workspace_key(workspace),
+			generation = workspace.generation,
+			session = workspace.session,
+			revision = workspace.session.revision,
+		}
+	local target_err = refresh_target_error(workspace, expected)
+	if target_err then
+		notify("Could not refresh review: " .. target_err, vim.log.levels.ERROR)
+		return nil, target_err
 	end
 	local blocked = unsaved_transition_error("refresh it")
 	if blocked then
 		notify("Could not refresh review: " .. blocked, vim.log.levels.ERROR)
 		return nil, blocked
 	end
-	local stale, stale_err = stale_now(workspace)
+	local stale, stale_err = stale_now(workspace, options.control)
 	if stale == nil then
 		notify("Could not refresh review: " .. stale_err, vim.log.levels.ERROR)
 		return nil
@@ -3263,13 +4188,31 @@ function M.refresh()
 		notify("Could not reload review: " .. tostring(load_err), vim.log.levels.ERROR)
 		return nil
 	end
-	local model, model_err = review_changes.build(workspace.root, loaded.scope)
+	local model, model_err = review_changes.build(workspace.root, loaded.scope, construction_options(options.control))
 	if not model then
 		notify("Could not rebuild exact review: " .. message(model_err), vim.log.levels.ERROR)
-		return nil
+		return nil, message(model_err)
+	end
+	local continued, checkpoint_err = operation_checkpoint(options, "controller.refresh_publish", {
+		root = workspace.root,
+		scope_id = loaded.scope.id,
+	})
+	if not continued then
+		return nil, checkpoint_err
+	end
+	target_err = refresh_target_error(workspace, expected)
+	if target_err then
+		notify("Could not refresh review: " .. target_err, vim.log.levels.ERROR)
+		return nil, target_err
 	end
 	local identity = first_identity(model, workspace.entry_identity)
 	-- Nothing becomes visible until both persistence and exact model construction succeed.
+	local previous = {
+		session = workspace.session,
+		scope = workspace.scope,
+		model = workspace.model,
+		entry_identity = workspace.entry_identity,
+	}
 	workspace.session = loaded
 	workspace.scope = loaded.scope
 	workspace.model = model
@@ -3278,14 +4221,56 @@ function M.refresh()
 	if workspace.mode_on and identity then
 		local shown, show_err = M.present(identity, nil, { emit = false })
 		if not shown then
-			notify("Model refreshed but presentation failed: " .. tostring(show_err), vim.log.levels.ERROR)
-			return nil
+			workspace.session = previous.session
+			workspace.scope = previous.scope
+			workspace.model = previous.model
+			workspace.entry_identity = previous.entry_identity
+			bump_workspace_generation(workspace)
+			local restored = true
+			local restore_err
+			if previous.entry_identity then
+				restored, restore_err = M.present(previous.entry_identity, nil, { emit = false })
+			end
+			local detail = "Model refresh presentation failed: " .. tostring(show_err)
+			if not restored then
+				detail = detail .. "; previous review presentation could not be restored: " .. tostring(restore_err)
+			end
+			notify(detail, vim.log.levels.ERROR)
+			return nil, detail
 		end
 	end
 	update_panel(workspace)
 	M.refresh_marks(workspace)
-	emit_changed()
+	if options.emit ~= false then
+		emit_changed()
+	end
 	return true
+end
+
+function M.refresh()
+	cancel_pending("superseded by synchronous refresh", true)
+	return refresh_current()
+end
+
+function M.refresh_async(callback)
+	local workspace = current_workspace()
+	local expected = workspace
+			and {
+				workspace_key = workspace_key(workspace),
+				generation = workspace.generation,
+				session = workspace.session,
+				revision = workspace.session.revision,
+			}
+		or nil
+	return start_async("refresh", function(control)
+		return refresh_current({
+			control = control,
+			emit = false,
+			target_captured = true,
+			workspace = workspace,
+			expected = expected,
+		})
+	end, callback)
 end
 
 function M.export(force)
@@ -3343,7 +4328,11 @@ function M.export(force)
 			return nil
 		end
 	end
-	local result, err = review_export.deliver(snapshot, force == true)
+	local available_ok, available = pcall(clipboard.available)
+	local result, err = review_export.deliver(snapshot, force == true, {
+		has_clipboard = available_ok and available == true,
+		setreg = clipboard.setreg,
+	})
 	if not result then
 		notify(err, vim.log.levels.ERROR)
 		return nil
@@ -3385,7 +4374,7 @@ local function aggregate_connector(mark)
 end
 
 local function aggregate_sign_text(item_type, mark)
-	local definition = comment_types.get(item_type) or comment_types.get("question")
+	local definition = comment_types.get(item_type)
 	local icon = definition.icon
 	local shows_badge = mark.single or mark.starts
 	if not shows_badge then
@@ -3397,6 +4386,9 @@ local function aggregate_sign_text(item_type, mark)
 	elseif not mark.multiline then
 		return icon
 	elseif mark.starts then
+		if vim.fn.strdisplaywidth(icon) > 1 then
+			return icon
+		end
 		return aggregate_connector(mark) .. icon
 	end
 	return aggregate_connector(mark)
@@ -3404,7 +4396,7 @@ end
 
 local function file_comment_virtual_line(item)
 	local side = item.anchor.side == "left" and "OLD" or "NEW"
-	local definition = comment_types.get(item.type) or comment_types.get("question")
+	local definition = comment_types.get(item.type)
 	local badge = ("[%s %s]"):format(definition.icon, definition.id)
 	local prefix = ("0 │ [%s]%s[%s] "):format(side, badge, review_store.item_status(item))
 	local body, multiline = first_body_line(item.body)
@@ -3436,7 +4428,7 @@ function M.decorate_buffer(workspace, buf)
 			local rendered_rows = vim.tbl_filter(function(line)
 				return line >= 1 and line <= count
 			end, anchor_rows)
-			local item_type = comment_types.contains(item.type) and item.type or "question"
+			local item_type = item.type
 			for index, line in ipairs(rendered_rows) do
 				marks[line] = marks[line] or {}
 				local mark = marks[line][item_type]
@@ -3476,12 +4468,21 @@ function M.decorate_buffer(workspace, buf)
 		})
 	end
 	for line, line_marks in pairs(marks) do
-		for type_index, item_type in ipairs(COMMENT_SIGN_TYPES) do
+		local ordered_types = comment_types.rail_ids()
+		local inactive_types = {}
+		for item_type in pairs(line_marks) do
+			if not comment_types.contains(item_type) then
+				inactive_types[#inactive_types + 1] = item_type
+			end
+		end
+		table.sort(inactive_types)
+		vim.list_extend(ordered_types, inactive_types)
+		for type_index, item_type in ipairs(ordered_types) do
 			local mark = line_marks[item_type]
 			if mark then
 				local definition = comment_types.get(item_type)
 				vim.api.nvim_buf_set_extmark(buf, NAMESPACE, line - 1, 0, {
-					priority = 90 - type_index,
+					priority = math.max(1, 90 - type_index),
 					sign_hl_group = definition.highlight,
 					sign_text = aggregate_sign_text(item_type, mark),
 				})
@@ -3710,6 +4711,7 @@ function M.restore_after_session()
 end
 
 function M.close(force)
+	cancel_pending("review closed", true)
 	clear_inline_preview()
 	local workspace = current_workspace()
 	if not workspace then
@@ -3791,24 +4793,6 @@ local function parse_open(arguments)
 	return nil
 end
 
-function M.mapping_specs()
-	return vim.deepcopy(MAPPINGS)
-end
-
-function M.help_groups()
-	return vim.deepcopy(HELP_GROUPS)
-end
-
-function M.help_mappings(group)
-	local values = {}
-	for _, mapping in ipairs(MAPPINGS) do
-		if mapping.help == group then
-			values[#values + 1] = { "n", mapping.lhs, mapping.rhs, { desc = mapping.desc } }
-		end
-	end
-	return values
-end
-
 local function setup_autocmds()
 	local group = vim.api.nvim_create_augroup("NvimConfigCodeReview", { clear = true })
 	vim.api.nvim_create_autocmd("CursorHold", {
@@ -3825,6 +4809,7 @@ local function setup_autocmds()
 		group = group,
 		callback = function()
 			clear_inline_preview()
+			remember_surface_focus()
 			capture_invocation()
 		end,
 		desc = "Remember the latest ordinary review invocation",
@@ -3872,7 +4857,14 @@ local function setup_autocmds()
 end
 
 function M.setup()
+	apply_comment_highlights()
+	review_panel.refresh_highlights()
 	if setup_done then
+		local workspace = current_workspace()
+		if workspace then
+			update_panel(workspace)
+			M.refresh_marks(workspace)
+		end
 		return
 	end
 	setup_done = true
@@ -3881,6 +4873,7 @@ function M.setup()
 end
 
 function M.teardown()
+	cancel_pending("review teardown", false)
 	clear_inline_preview()
 	local _, discard_err = discard_suspended_preview(suspended)
 	if discard_err then
@@ -3897,6 +4890,7 @@ function M.teardown()
 	active = nil
 	suspended = nil
 	pending_surface_close = nil
+	pending_operation = nil
 	invocation = nil
 	clear_scope_history()
 	pcall(vim.api.nvim_del_augroup_by_name, "NvimConfigCodeReview")

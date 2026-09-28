@@ -4,9 +4,9 @@ return {
 		cond = function()
 			return not vim.g.vscode
 		end,
+		event = "BufReadPre",
 		cmd = { "HexDump", "HexAssemble", "HexToggle" },
-		config = function()
-			require("hex").setup()
-		end,
+		main = "config.hex",
+		opts = {},
 	},
 }

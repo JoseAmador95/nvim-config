@@ -25,8 +25,12 @@ The native-review controller acquires one transient lease with identity
 `Review: <repository basename> · <scope label>`.
 
 - `ReviewOpen` validates and freezes the scope, model, and store before it
-  acquires the tab. Reopening, drilling into commits, and returning to a parent
-  scope focus and retitle that same live lease.
+  acquires the tab. Interactive open and refresh run through generation-bound
+  scheduled coroutines, with cooperative checkpoints between bounded Git calls
+  and batches, files, and diffs. A newer operation, close, or teardown
+  cancels stale completion; the prior visible review stays active until the
+  replacement is complete. Reopening, drilling into commits, and returning to
+  a parent scope focus and retitle that same live lease.
 - The controller records the last valid ordinary invocation independently from
   review windows. `ReviewClose` and UI-only release return to it when it remains
   valid; review-internal transitions never overwrite it.

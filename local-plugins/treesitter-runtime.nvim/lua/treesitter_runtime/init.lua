@@ -306,50 +306,72 @@ local function detach(buf)
 	return true
 end
 
-local function eligible(buf, selected)
+local function current_policy(buf, selected)
 	selected = selected or config
+	local policy = {
+		buf = buf,
+		eligible = false,
+		reason = "unknown",
+	}
 	if not selected then
-		return false, nil, "not-configured"
+		policy.reason = "not-configured"
+		return policy
 	end
 	if not selected.enabled then
-		return false, nil, "disabled"
+		policy.reason = "disabled"
+		return policy
 	end
 	if not selected.highlight then
-		return false, nil, "highlight-disabled"
+		policy.reason = "highlight-disabled"
+		return policy
 	end
 	if not vim.api.nvim_buf_is_valid(buf) then
-		return false, nil, "invalid-buffer"
+		policy.reason = "invalid-buffer"
+		return policy
 	end
 	if not vim.api.nvim_buf_is_loaded(buf) then
-		return false, nil, "unloaded-buffer"
+		policy.reason = "unloaded-buffer"
+		return policy
 	end
 	local ok, language = pcall(selected.language, buf)
 	if not ok then
-		return false, nil, "language-error"
+		policy.reason = "language-error"
+		return policy
 	end
 	if type(language) ~= "string" or language == "" then
-		return false, nil, "no-language"
+		policy.reason = "no-language"
+		return policy
 	end
-	if not selected.allowed[language] then
-		return false, language, "not-allowlisted"
-	end
-	if not selected.installed_set[language] then
-		return false, language, "parser-not-installed"
-	end
+	policy.language = language
 	local size_ok, bytes = pcall(selected.buffer_bytes, buf)
 	if not size_ok or type(bytes) ~= "number" or bytes < 0 then
-		return false, language, "size-unavailable"
+		policy.reason = "size-unavailable"
+		return policy
 	end
 	local override = selected.languages[language] or {}
 	local max_bytes = override.max_bytes or selected.max_bytes
-	if bytes > max_bytes then
-		return false, language, "max-bytes-exceeded", bytes, max_bytes
-	end
 	local indent = override.indent
 	if indent == nil then
 		indent = selected.indent
 	end
-	return true, language, "attached", bytes, max_bytes, indent
+	policy.bytes = bytes
+	policy.max_bytes = max_bytes
+	policy.indent = indent
+	if not selected.allowed[language] then
+		policy.reason = "not-allowlisted"
+		return policy
+	end
+	if not selected.installed_set[language] then
+		policy.reason = "parser-not-installed"
+		return policy
+	end
+	if bytes > max_bytes then
+		policy.reason = "max-bytes-exceeded"
+		return policy
+	end
+	policy.eligible = true
+	policy.reason = "eligible"
+	return policy
 end
 
 local evaluate
@@ -357,8 +379,8 @@ local evaluate
 local function detach_for_reconfiguration(next_config)
 	local impacted = {}
 	for buf, record in pairs(attached) do
-		local is_eligible, language = eligible(buf, next_config)
-		if not is_eligible or language ~= record.language then
+		local policy = current_policy(buf, next_config)
+		if not policy.eligible or policy.language ~= record.language then
 			impacted[#impacted + 1] = buf
 		end
 	end
@@ -376,22 +398,46 @@ local function detach_for_reconfiguration(next_config)
 	return true
 end
 
+local function stop_ineligible_highlighter(buf, policy)
+	if policy.bytes == nil or policy.max_bytes == nil or policy.bytes <= policy.max_bytes then
+		return true
+	end
+	local started = parser_is_started(buf, policy.language)
+	if started == nil then
+		return false, "parser-state-error"
+	end
+	if not started then
+		return true
+	end
+	local ok, result = pcall(config.stop, buf, policy.language)
+	if not ok or result == false then
+		return false, "stop-failed"
+	end
+	return true
+end
+
 evaluate = function(buf)
-	local is_eligible, language, reason, bytes, max_bytes, indent = eligible(buf)
+	local policy = current_policy(buf)
 	local record = attached[buf]
-	if not is_eligible then
+	if not policy.eligible then
 		local detached = detach(buf)
+		local stopped, stop_reason = true, nil
+		if detached then
+			stopped, stop_reason = stop_ineligible_highlighter(buf, policy)
+		end
 		record_status(buf, {
 			attached = attached[buf] ~= nil,
-			language = language,
-			reason = detached and reason or "stop-failed",
-			bytes = bytes,
-			max_bytes = max_bytes,
+			eligible = false,
+			language = policy.language,
+			reason = not detached and "stop-failed" or not stopped and stop_reason or policy.reason,
+			bytes = policy.bytes,
+			max_bytes = policy.max_bytes,
+			indent = policy.indent,
 		})
 		return false
 	end
 
-	if record and record.language ~= language then
+	if record and record.language ~= policy.language then
 		if not detach(buf) then
 			record_status(buf, { attached = true, language = record.language, reason = "stop-failed" })
 			return false
@@ -399,20 +445,20 @@ evaluate = function(buf)
 		record = nil
 	end
 	if record then
-		local started = parser_is_started(buf, language)
+		local started = parser_is_started(buf, policy.language)
 		if started == nil then
-			record_status(buf, { attached = true, language = language, reason = "parser-state-error" })
+			record_status(buf, { attached = true, language = policy.language, reason = "parser-state-error" })
 			return false
 		end
 		if not started then
 			record.parser_managed = false
-			local ok, result = pcall(config.start, buf, language)
+			local ok, result = pcall(config.start, buf, policy.language)
 			if not ok or result == false then
 				if record.indent_owned and current_indentexpr(buf) ~= record.indent_value then
 					record.indent_external = true
 				end
 				restore_indent(buf, record)
-				record_status(buf, { attached = true, language = language, reason = "start-failed" })
+				record_status(buf, { attached = true, language = policy.language, reason = "start-failed" })
 				return false
 			end
 			record.parser_managed = true
@@ -420,36 +466,37 @@ evaluate = function(buf)
 	end
 
 	if not record then
-		local preexisting = parser_is_started(buf, language)
+		local preexisting = parser_is_started(buf, policy.language)
 		if preexisting == nil then
-			record_status(buf, { attached = false, language = language, reason = "parser-state-error" })
+			record_status(buf, { attached = false, language = policy.language, reason = "parser-state-error" })
 			return false
 		end
 		record = {
-			language = language,
+			language = policy.language,
 			parser_managed = false,
 			stop = config.stop,
 			indent_owned = false,
 			indent_external = false,
 		}
 		if not preexisting then
-			local ok, result = pcall(config.start, buf, language)
+			local ok, result = pcall(config.start, buf, policy.language)
 			if not ok or result == false then
-				record_status(buf, { attached = false, language = language, reason = "start-failed" })
+				record_status(buf, { attached = false, language = policy.language, reason = "start-failed" })
 				return false
 			end
 		end
 		record.parser_managed = true
 		attached[buf] = record
 	end
-	ensure_indent(buf, record, indent)
+	ensure_indent(buf, record, policy.indent)
 	record_status(buf, {
 		attached = true,
-		language = language,
+		eligible = true,
+		language = policy.language,
 		reason = "attached",
-		bytes = bytes,
-		max_bytes = max_bytes,
-		indent = indent,
+		bytes = policy.bytes,
+		max_bytes = policy.max_bytes,
+		indent = policy.indent,
 	})
 	return true
 end
@@ -476,6 +523,15 @@ end
 
 local function register_autocmds()
 	local group = vim.api.nvim_create_augroup(AUGROUP, { clear = true })
+	vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
+		group = group,
+		callback = function(args)
+			pending[args.buf] = nil
+			attached[args.buf] = nil
+			buffer_status[args.buf] = nil
+			emit("buffer_deleted", { buf = args.buf })
+		end,
+	})
 	if not config.enabled or not config.highlight then
 		return
 	end
@@ -489,14 +545,6 @@ local function register_autocmds()
 		group = group,
 		callback = function(args)
 			schedule_evaluate(args.buf)
-		end,
-	})
-	vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
-		group = group,
-		callback = function(args)
-			pending[args.buf] = nil
-			attached[args.buf] = nil
-			buffer_status[args.buf] = nil
 		end,
 	})
 end
@@ -633,6 +681,18 @@ function M.effective_config()
 		languages = config.languages,
 		reevaluate_debounce_ms = config.reevaluate_debounce_ms,
 	})
+end
+
+---Return the current caller-owned eligibility policy for one buffer.
+---This query never starts or stops a parser and does not update runtime state.
+---@param buf? integer
+---@return table
+function M.policy(buf)
+	local selected = buf
+	if selected == nil or selected == 0 then
+		selected = vim.api.nvim_get_current_buf()
+	end
+	return copy(current_policy(selected))
 end
 
 ---Return a caller-owned, side-effect-free buffer status snapshot.

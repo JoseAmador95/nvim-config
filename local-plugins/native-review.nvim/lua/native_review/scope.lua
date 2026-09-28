@@ -7,6 +7,12 @@ local M = {}
 local DEFAULT_BACKEND = "diffview"
 local HASH_VERSION = "nvim-review-scope-v1"
 local EXECUTABLE_BITS = tonumber("111", 8)
+local HASH_ARGV_MAX_BYTES = 128 * 1024
+local DEFAULT_LIMITS = {
+	max_files = 2000,
+	max_file_bytes = 4 * 1024 * 1024,
+	max_model_bytes = 64 * 1024 * 1024,
+}
 
 local COMMON_KEYS = { kind = true, backend_id = true }
 local REQUEST_KEYS = {
@@ -18,6 +24,42 @@ local REQUEST_KEYS = {
 
 local function failure(code, message, details)
 	return { code = code, message = message, details = details or {} }
+end
+
+local function limit_failure(limit, maximum, actual, path, layer, side)
+	return failure("review_limit_exceeded", ("review %s exceeded for %s"):format(limit, path or "scope"), {
+		limit = limit,
+		maximum = maximum,
+		actual = actual,
+		path = path,
+		layer = layer,
+		side = side,
+	})
+end
+
+local function option_limit(options, name)
+	local source = type(options.limits) == "table" and options.limits or options
+	local value = source[name]
+	if type(value) == "number" and value % 1 == 0 and value > 0 then
+		return value
+	end
+	return DEFAULT_LIMITS[name]
+end
+
+local function checkpoint(deps, phase, progress)
+	local callback = deps.control and deps.control.checkpoint
+	if type(callback) ~= "function" then
+		return true
+	end
+	local allowed, reason = callback(phase, vim.deepcopy(progress or {}))
+	if allowed == false then
+		return nil,
+			failure("review_cancelled", tostring(reason or "review model construction was cancelled"), {
+				phase = phase,
+				progress = vim.deepcopy(progress or {}),
+			})
+	end
+	return true
 end
 
 local function valid_oid(value)
@@ -52,6 +94,10 @@ local function make_dependencies(options)
 		hash = options.hash or vim.fn.sha256,
 		lstat = options.lstat or vim.uv.fs_lstat,
 		readlink = options.readlink or vim.uv.fs_readlink,
+		control = options.control,
+		max_files = option_limit(options, "max_files"),
+		max_file_bytes = option_limit(options, "max_file_bytes"),
+		max_model_bytes = option_limit(options, "max_model_bytes"),
 	}
 end
 
@@ -74,6 +120,10 @@ local function git_required(root, arguments, deps, code, context)
 	local output, err = git(root, arguments, deps)
 	if not output then
 		return nil, failure(code, context .. ": " .. tostring(err), { argv = arguments })
+	end
+	local continued, checkpoint_err = checkpoint(deps, "scope.git", { argv = arguments, context = context })
+	if not continued then
+		return nil, checkpoint_err
 	end
 	return output
 end
@@ -124,31 +174,208 @@ local function parse_nul_list(output)
 	return paths
 end
 
-local function untracked_mode(root, path, deps)
+local function untracked_metadata(root, path, deps)
 	local full_path = vim.fs.joinpath(root, path)
 	local stat, stat_err = deps.lstat(full_path)
 	if not stat then
 		return nil,
-			nil,
 			failure("working_tree_unavailable", "cannot inspect untracked file " .. path .. ": " .. tostring(stat_err))
 	end
 	if stat.type == "link" then
-		local target, target_err = deps.readlink(full_path)
-		if not target then
-			return nil,
-				nil,
-				failure(
-					"working_tree_unavailable",
-					"cannot read untracked symlink " .. path .. ": " .. tostring(target_err)
-				)
+		if type(stat.size) ~= "number" or stat.size < 0 then
+			return nil, failure("working_tree_unavailable", "invalid untracked symlink metadata for " .. path)
 		end
-		return "120000", digest("symlink\0" .. target, deps)
+		return {
+			path = path,
+			mode = "120000",
+			size = stat.size,
+		}
 	end
-	if stat.type ~= "file" or type(stat.mode) ~= "number" then
-		return nil, nil, failure("working_tree_unavailable", "unsupported untracked file type for " .. path)
+	if stat.type ~= "file" then
+		return nil, failure("working_tree_unavailable", "unsupported untracked file type for " .. path)
+	end
+	if type(stat.mode) ~= "number" or type(stat.size) ~= "number" or stat.size < 0 then
+		return nil, failure("working_tree_unavailable", "invalid untracked file metadata for " .. path)
 	end
 	local mode = bit.band(stat.mode, EXECUTABLE_BITS) == 0 and "100644" or "100755"
-	return mode
+	return { path = path, mode = mode, size = stat.size }
+end
+
+local function argv_bytes(root, arguments, deps)
+	local command = { "git", "-C", root }
+	vim.list_extend(command, arguments)
+	if type(deps.repo.clean_git_command) == "function" then
+		command = deps.repo.clean_git_command(command)
+	end
+	local total = 0
+	for _, argument in ipairs(command) do
+		total = total + #argument + 1
+	end
+	return total
+end
+
+local function parse_hashes(output, expected)
+	local lines = vim.split(output, "\n", { plain = true })
+	if lines[#lines] == "" then
+		table.remove(lines)
+	end
+	if #lines ~= expected then
+		return nil,
+			"Git returned " .. tostring(#lines) .. " untracked content IDs for " .. tostring(expected) .. " paths"
+	end
+	for index, oid in ipairs(lines) do
+		if not valid_oid(oid) then
+			return nil, "Git returned an invalid untracked content ID at result " .. tostring(index)
+		end
+		lines[index] = oid:lower()
+	end
+	return lines
+end
+
+local function hash_regular_untracked(root, records, deps)
+	local regular = {}
+	for _, record in ipairs(records) do
+		if record.mode ~= "120000" then
+			regular[#regular + 1] = record
+		end
+	end
+	local offset = 1
+	local batch_index = 0
+	while offset <= #regular do
+		local arguments = { "hash-object", "--no-filters", "--" }
+		local batch = {}
+		while offset <= #regular do
+			local record = regular[offset]
+			local candidate = vim.deepcopy(arguments)
+			candidate[#candidate + 1] = record.path
+			if #batch > 0 and argv_bytes(root, candidate, deps) > HASH_ARGV_MAX_BYTES then
+				break
+			end
+			if argv_bytes(root, candidate, deps) > HASH_ARGV_MAX_BYTES then
+				return nil,
+					failure("working_tree_unavailable", "untracked path exceeds the private Git argv bound", {
+						path = record.path,
+						maximum = HASH_ARGV_MAX_BYTES,
+					})
+			end
+			arguments = candidate
+			batch[#batch + 1] = record
+			offset = offset + 1
+		end
+		batch_index = batch_index + 1
+		local continued, checkpoint_err = checkpoint(deps, "scope.untracked_hash_batch", {
+			batch = batch_index,
+			processed = offset - #batch - 1,
+			total = #regular,
+		})
+		if not continued then
+			return nil, checkpoint_err
+		end
+		local output, hash_err =
+			git_required(root, arguments, deps, "working_tree_unavailable", "cannot fingerprint untracked file batch")
+		if not output then
+			return nil, hash_err
+		end
+		local hashes, hashes_err = parse_hashes(output, #batch)
+		if not hashes then
+			return nil,
+				failure(
+					"invalid_git_output",
+					hashes_err,
+					{ paths = vim.tbl_map(function(record)
+						return record.path
+					end, batch) }
+				)
+		end
+		for index, record in ipairs(batch) do
+			record.content_id = hashes[index]
+		end
+	end
+	return true
+end
+
+local function recheck_untracked_limits(root, records, deps)
+	local represented_bytes = 0
+	for index, record in ipairs(records) do
+		local full_path = vim.fs.joinpath(root, record.path)
+		local stat, stat_err = deps.lstat(full_path)
+		if not stat then
+			return nil,
+				failure(
+					"working_tree_unavailable",
+					"cannot recheck untracked file " .. record.path .. ": " .. tostring(stat_err)
+				)
+		end
+		local actual_size
+		if record.mode == "120000" then
+			local target, target_err = deps.readlink(full_path)
+			if type(target) ~= "string" then
+				return nil,
+					failure(
+						"working_tree_unavailable",
+						"cannot recheck untracked symlink " .. record.path .. ": " .. tostring(target_err)
+					)
+			end
+			actual_size = stat.size
+			if stat.type ~= "link" or type(actual_size) ~= "number" or actual_size < 0 or #target ~= actual_size then
+				return nil,
+					failure("working_tree_changed", "untracked symlink changed before hashing", {
+						path = record.path,
+						layer = "untracked",
+						side = "NEW",
+					})
+			end
+			record.target = target
+		else
+			actual_size = stat.size
+			local mode = type(stat.mode) == "number"
+					and (bit.band(stat.mode, EXECUTABLE_BITS) == 0 and "100644" or "100755")
+				or nil
+			if stat.type ~= "file" or type(actual_size) ~= "number" or actual_size < 0 or mode ~= record.mode then
+				return nil,
+					failure("working_tree_changed", "untracked file metadata changed before hashing", {
+						path = record.path,
+						layer = "untracked",
+						side = "NEW",
+					})
+			end
+		end
+		if actual_size > deps.max_file_bytes then
+			return nil,
+				limit_failure("max_file_bytes", deps.max_file_bytes, actual_size, record.path, "untracked", "NEW")
+		end
+		if actual_size ~= record.size then
+			return nil,
+				failure("working_tree_changed", "untracked file size changed before hashing", {
+					path = record.path,
+					layer = "untracked",
+					side = "NEW",
+					expected = record.size,
+					actual = actual_size,
+				})
+		end
+		represented_bytes = represented_bytes + actual_size
+		if represented_bytes > deps.max_model_bytes then
+			return nil,
+				limit_failure(
+					"max_model_bytes",
+					deps.max_model_bytes,
+					represented_bytes,
+					record.path,
+					"untracked",
+					"NEW"
+				)
+		end
+		local continued, checkpoint_err = checkpoint(deps, "scope.untracked_recheck", {
+			index = index,
+			total = #records,
+			path = record.path,
+		})
+		if not continued then
+			return nil, checkpoint_err
+		end
+	end
+	return true
 end
 
 local function fingerprint_worktree(root, deps)
@@ -199,31 +426,48 @@ local function fingerprint_worktree(root, deps)
 		return nil, failure("invalid_git_output", paths_err)
 	end
 	table.sort(paths)
+	if #paths > deps.max_files then
+		return nil, limit_failure("max_files", deps.max_files, #paths, paths[deps.max_files + 1], "untracked", "NEW")
+	end
+	local records = {}
+	local represented_bytes = 0
+	for index, path in ipairs(paths) do
+		local continued, checkpoint_err =
+			checkpoint(deps, "scope.untracked_file", { index = index, total = #paths, path = path })
+		if not continued then
+			return nil, checkpoint_err
+		end
+		local record, metadata_err = untracked_metadata(root, path, deps)
+		if not record then
+			return nil, metadata_err
+		end
+		if record.size > deps.max_file_bytes then
+			return nil, limit_failure("max_file_bytes", deps.max_file_bytes, record.size, path, "untracked", "NEW")
+		end
+		represented_bytes = represented_bytes + record.size
+		if represented_bytes > deps.max_model_bytes then
+			return nil,
+				limit_failure("max_model_bytes", deps.max_model_bytes, represented_bytes, path, "untracked", "NEW")
+		end
+		records[#records + 1] = record
+	end
+	local rechecked, recheck_err = recheck_untracked_limits(root, records, deps)
+	if not rechecked then
+		return nil, recheck_err
+	end
+	for _, record in ipairs(records) do
+		if record.mode == "120000" then
+			record.content_id = digest("symlink\0" .. record.target, deps)
+		end
+	end
+	local hashed, hash_err = hash_regular_untracked(root, records, deps)
+	if not hashed then
+		return nil, hash_err
+	end
 	local untracked_material = {}
-	for _, path in ipairs(paths) do
-		local mode, link_digest, mode_err = untracked_mode(root, path, deps)
-		if not mode then
-			return nil, mode_err
-		end
-		local content_id = link_digest
-		if not content_id then
-			local output, hash_err = git_required(
-				root,
-				{ "hash-object", "--no-filters", "--", path },
-				deps,
-				"working_tree_unavailable",
-				"cannot fingerprint untracked file " .. path
-			)
-			if not output then
-				return nil, hash_err
-			end
-			content_id = vim.trim(output):lower()
-			if not valid_oid(content_id) then
-				return nil,
-					failure("invalid_git_output", "Git returned an invalid untracked content ID", { path = path })
-			end
-		end
-		untracked_material[#untracked_material + 1] = table.concat({ path, mode, content_id }, "\0")
+	for _, record in ipairs(records) do
+		untracked_material[#untracked_material + 1] =
+			table.concat({ record.path, record.mode, record.content_id }, "\0")
 	end
 
 	local layers = {

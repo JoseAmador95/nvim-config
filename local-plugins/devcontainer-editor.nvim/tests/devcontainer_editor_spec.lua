@@ -20,11 +20,22 @@ end
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture .. "/repo/sub", "p") == 1)
 assert(vim.fn.mkdir(fixture .. "/state/workspaces", "p") == 1)
+assert(vim.fn.mkdir(fixture .. "/state/logs", "p") == 1)
 assert(vim.fn.mkdir(fixture .. "/spool", "p") == 1)
 assert(vim.fn.writefile({ "hello" }, fixture .. "/repo/sub/file.txt") == 0)
 local repo = assert(vim.uv.fs_realpath(fixture .. "/repo"))
 local state = assert(vim.uv.fs_realpath(fixture .. "/state"))
 local spool = assert(vim.uv.fs_realpath(fixture .. "/spool"))
+assert(vim.uv.fs_chmod(state, tonumber("700", 8)))
+assert(vim.uv.fs_chmod(state .. "/logs", tonumber("700", 8)))
+local cli = fixture .. "/devcontainer"
+local docker = fixture .. "/docker"
+assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, cli) == 0)
+assert(vim.fn.writefile({ "#!/bin/sh", "exit 0" }, docker) == 0)
+assert(vim.uv.fs_chmod(cli, tonumber("700", 8)))
+assert(vim.uv.fs_chmod(docker, tonumber("700", 8)))
+cli = assert(vim.uv.fs_realpath(cli))
+docker = assert(vim.uv.fs_realpath(docker))
 local token = string.rep("s", 32)
 local original_env = {
 	NVIM_DEVCONTAINER = vim.env.NVIM_DEVCONTAINER,
@@ -46,6 +57,10 @@ local function configure(notify, open_callback, overrides)
 		state_root = state,
 		spool_root = spool,
 		launcher = "/bin/devcontainer-editor",
+		docker_path = docker,
+		resolve_cli = function()
+			return cli
+		end,
 		watch = false,
 		notify = notify,
 		uuid = function()
@@ -59,6 +74,58 @@ local function configure(notify, open_callback, overrides)
 		options[key] = value
 	end
 	assert(plugin_module.setup(options))
+end
+
+local workspace_record_file = state .. "/workspaces/" .. vim.fn.sha256(repo) .. ".json"
+local lifecycle_log_file = state .. "/logs/" .. vim.fn.sha256(repo) .. ".log"
+
+local function workspace_record(version, overrides)
+	local record = {
+		version = version,
+		host_root = repo,
+		config_path = repo .. "/.devcontainer/devcontainer.json",
+		container_root = "/workspaces/project",
+		container_id = "container",
+		claim_id = "00000000-0000-4000-8000-000000000030",
+		workspace_key = { runtime = "container", root = "/workspaces/project", repo_identity = repo },
+		pid = 1,
+		pane_pid = 7007,
+		status = "running",
+		network_authorized = false,
+		ssh_agent_forwarding = false,
+		tmux_pane = "%7",
+		log_path = lifecycle_log_file,
+		updated_at = "2026-08-31T00:00:00Z",
+		exit_code = vim.NIL,
+		error = vim.NIL,
+	}
+	if version >= 3 then
+		record.cli_path = "/opt/devcontainer/bin/devcontainer"
+	end
+	if version >= 4 then
+		record.docker_path = "/opt/homebrew/bin/podman"
+	end
+	if version >= 5 then
+		record.phase = "monitoring-editor"
+	end
+	if version >= 6 then
+		record.podman_connection = {
+			name = "podman-machine-default",
+			machine_pin = string.rep("a", 64),
+		}
+	end
+	for key, value in pairs(overrides or {}) do
+		record[key] = value
+	end
+	return record
+end
+
+local function write_workspace_record(record)
+	assert(plugin_module._atomic_write(workspace_record_file, vim.json.encode(record)))
+end
+
+local function write_lifecycle_log(payload)
+	assert(plugin_module._atomic_write(lifecycle_log_file, payload or "lifecycle\n"))
 end
 
 local function with_directory_fsync_failure(directory, failure, callback)
@@ -116,7 +183,7 @@ end
 
 test("pre-setup public defaults and aggregate status are copied", function()
 	local first = plugin_module.effective_config()
-	assert(first.cli == "devcontainer" and first.lockfile_policy == "preserve")
+	assert(first.docker_path == "docker" and first.lockfile_policy == "preserve")
 	assert(first.claim_timeout_ms == 2000 and first.ack_timeout_ms == 5000)
 	assert(first.max_messages_per_tick == 32 and first.ssh_agent == "auto")
 	first.max_messages_per_tick = 1
@@ -338,7 +405,7 @@ test("invalid inbox cleanup failure is appended without masking the JSON error",
 	assert(vim.uv.fs_unlink(path))
 end)
 
-test("host requests use an authenticated private spool and exact allowlist", function()
+test("readiness requests use an authenticated private spool and exact allowlist", function()
 	local callback_value
 	local function defer(callback)
 		local request_path = spool .. "/outbox/00000000-0000-4000-8000-000000000001.json"
@@ -356,10 +423,10 @@ test("host requests use an authenticated private spool and exact allowlist", fun
 		assert(plugin_module._atomic_create(spool .. "/acks/" .. request.request_id .. ".json", vim.json.encode(ack)))
 		callback()
 	end
-	assert(plugin_module.request_host("lazygit", { defer = defer }, function(value)
+	assert(plugin_module.request_host("editor_ready", { defer = defer }, function(value)
 		callback_value = value
 	end))
-	assert(callback_value.action == "lazygit")
+	assert(callback_value.action == "editor_ready")
 	assert(plugin_module.request_host("publish") == nil)
 	assert(plugin_module.request_host("execute") == nil)
 	assert(vim.uv.fs_unlink(spool .. "/outbox/00000000-0000-4000-8000-000000000001.json"))
@@ -933,8 +1000,10 @@ test("offline authorization and lifecycle argv are explicit", function()
 		"up",
 		"--repo",
 		repo,
-		"--cli",
-		"devcontainer",
+		"--cli-path",
+		cli,
+		"--docker-path",
+		docker,
 		"--lockfile-policy",
 		"preserve",
 		"--ssh-agent",
@@ -949,22 +1018,70 @@ test("offline authorization and lifecycle argv are explicit", function()
 	assert(plugin_module.lifecycle_argv("up", { root = repo }) == nil)
 	assert(plugin_module.lifecycle_argv("up", { root = repo, tmux_pane = "%7\n" }) == nil)
 	assert(plugin_module.lifecycle_argv("up", { root = repo, tmux_pane = "%7", claim_id = "bad" }) == nil)
+	assert(vim.deep_equal(
+		assert(plugin_module.lifecycle_argv("restart-dead", {
+			root = repo,
+			tmux_pane = "%7",
+			claim_id = "00000000-0000-4000-8000-000000000031",
+			recreate = true,
+		})),
+		{
+			"/bin/devcontainer-editor",
+			"restart-dead",
+			"--repo",
+			repo,
+			"--tmux-pane",
+			"%7",
+			"--claim-id",
+			"00000000-0000-4000-8000-000000000031",
+			"--recreate",
+		}
+	))
 	assert(plugin_module.lifecycle_argv("delete", {}) == nil)
 	assert(vim.deep_equal(assert(plugin_module.lifecycle_argv("doctor", { root = repo })), {
 		"/bin/devcontainer-editor",
 		"doctor",
 		"--repo",
 		repo,
-		"--cli",
-		"devcontainer",
+		"--cli-path",
+		cli,
+		"--docker-path",
+		docker,
 		"--lockfile-policy",
 		"preserve",
 		"--ssh-agent",
 		"auto",
 	}))
+	assert(vim.deep_equal(
+		assert(plugin_module.lifecycle_argv("doctor", {
+			root = repo,
+			config = repo .. "/.devcontainer/devcontainer.json",
+			cli_path = cli,
+			docker_path = docker,
+		})),
+		{
+			"/bin/devcontainer-editor",
+			"doctor",
+			"--repo",
+			repo,
+			"--cli-path",
+			cli,
+			"--docker-path",
+			docker,
+			"--lockfile-policy",
+			"preserve",
+			"--ssh-agent",
+			"auto",
+			"--config",
+			repo .. "/.devcontainer/devcontainer.json",
+		}
+	))
+	assert(plugin_module.lifecycle_argv("doctor", { root = repo, cli_path = cli }) == nil)
+	assert(plugin_module.lifecycle_argv("host", { root = repo, tmux_pane = "%bad" }) == nil)
 end)
 
 test("workspace status rejects hostile state and returns immutable copies", function()
+	local expected_log = state .. "/logs/" .. vim.fn.sha256(repo) .. ".log"
 	local record = {
 		version = 2,
 		host_root = repo,
@@ -979,7 +1096,7 @@ test("workspace status rejects hostile state and returns immutable copies", func
 		network_authorized = false,
 		ssh_agent_forwarding = false,
 		tmux_pane = "%7",
-		log_path = state .. "/log",
+		log_path = expected_log,
 		updated_at = "2026-08-31T00:00:00Z",
 		exit_code = vim.NIL,
 		error = vim.NIL,
@@ -990,9 +1107,237 @@ test("workspace status rejects hostile state and returns immutable copies", func
 	assert(first.token == nil and first.workspace_key.runtime == "container")
 	first.workspace_key.runtime = "changed"
 	assert(assert(plugin_module.status(repo)).workspace_key.runtime == "container")
+	record.version = 3
+	record.cli_path = "/opt/devcontainer/bin/devcontainer"
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	local current = assert(plugin_module.status(repo))
+	assert(current.version == 3 and current.cli_path == "/opt/devcontainer/bin/devcontainer")
+	record.cli_path = "relative/devcontainer"
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil)
+	record.version = 4
+	record.cli_path = "/opt/devcontainer/bin/devcontainer"
+	record.docker_path = "/opt/homebrew/bin/podman"
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(assert(plugin_module.status(repo)).docker_path == "/opt/homebrew/bin/podman")
+	record.docker_path = "podman"
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil)
+	record.docker_path = "/opt/homebrew/bin/podman"
+	record.phase = "claimed"
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil, "v4 must reject the v5 phase field")
+	record.version = 5
+	local phases = {
+		"claimed",
+		"preparing-config",
+		"starting-container",
+		"checking-ssh-agent",
+		"checking-editor-config",
+		"opening-editor",
+		"monitoring-editor",
+		"returning-host",
+	}
+	for _, phase in ipairs(phases) do
+		record.phase = phase
+		assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+		local current_phase = assert(plugin_module.status(repo))
+		assert(current_phase.version == 5 and current_phase.phase == phase)
+		current_phase.phase = "mutated"
+		assert(assert(plugin_module.status(repo)).phase == phase)
+	end
+	record.phase = nil
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil, "v5 must require phase")
+	record.phase = "unknown"
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil, "v5 must reject unknown phases")
+	record.phase = "monitoring-editor"
+	record.extra = true
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil, "v5 must reject extra fields")
+	record.extra = nil
+	record.version = 6
+	record.podman_connection = {
+		name = "podman-machine-default",
+		machine_pin = string.rep("a", 64),
+	}
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	local current_v6 = assert(plugin_module.status(repo))
+	assert(current_v6.version == 6 and current_v6.phase == "monitoring-editor")
+	assert(current_v6.podman_connection.name == "podman-machine-default")
+	current_v6.podman_connection.name = "mutated"
+	assert(assert(plugin_module.status(repo)).podman_connection.name == "podman-machine-default")
+
+	local invalid_connections = {
+		"podman-machine-default",
+		{ name = 7, machine_pin = string.rep("a", 64) },
+		{ name = "", machine_pin = string.rep("a", 64) },
+		{ name = string.rep("a", 129), machine_pin = string.rep("a", 64) },
+		{ name = "podman machine", machine_pin = string.rep("a", 64) },
+		{ name = "podman-machine-default", machine_pin = string.rep("A", 64) },
+		{ name = "podman-machine-default", machine_pin = string.rep("a", 63) },
+		{ name = "podman-machine-default" },
+		{ machine_pin = string.rep("a", 64) },
+		{ name = "podman-machine-default", machine_pin = string.rep("a", 64), extra = true },
+	}
+	for _, connection in ipairs(invalid_connections) do
+		record.podman_connection = connection
+		assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+		assert(plugin_module.status(repo) == nil, "v6 must reject an invalid Podman connection")
+	end
+	record.podman_connection = nil
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil, "v6 must require the Podman connection field")
+	record.podman_connection = {
+		name = "podman-machine-default",
+		machine_pin = string.rep("a", 64),
+	}
+	record.version = 7
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil, "v7 record versions must fail closed")
+	record.version = 6
+	record.phase = "starting-container"
+	record.status = "error"
+	record.error = "runtime resolution failed before a claim could start"
+	record.cli_path = vim.NIL
+	record.docker_path = vim.NIL
+	record.podman_connection = vim.NIL
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	local early_failure = assert(plugin_module.status(repo))
+	assert(early_failure.error == record.error)
+	assert(early_failure.phase == "starting-container", "errors must retain their last lifecycle phase")
+	assert(early_failure.cli_path == nil and early_failure.docker_path == nil)
+	assert(early_failure.podman_connection == nil)
+	record.status = "running"
+	record.error = vim.NIL
+	record.cli_path = "/opt/devcontainer/bin/devcontainer"
+	record.docker_path = "podman"
+	assert(plugin_module._atomic_write(path, vim.json.encode(record)))
+	assert(plugin_module.status(repo) == nil)
 	assert(vim.uv.fs_unlink(path))
 	assert(vim.uv.fs_symlink(repo .. "/sub/file.txt", path))
 	assert(plugin_module.status(repo) == nil)
+	assert(vim.uv.fs_unlink(path))
+end)
+
+test("lifecycle log path is derived once and enforces exact records and size bounds", function()
+	write_lifecycle_log("starting\n")
+	local resolutions = 0
+	configure(nil, nil, {
+		state_root = function()
+			resolutions = resolutions + 1
+			return state
+		end,
+	})
+	for version = 2, 6 do
+		write_workspace_record(workspace_record(version))
+		resolutions = 0
+		assert(plugin_module.log_path(repo) == lifecycle_log_file)
+		assert(resolutions == 1, "log_path must resolve state_root exactly once")
+	end
+
+	local mismatch = workspace_record(6, { log_path = state .. "/logs/other.log" })
+	write_workspace_record(mismatch)
+	assert(plugin_module.log_path(repo) == nil, "record-controlled log paths must be rejected")
+	write_workspace_record(workspace_record(6))
+
+	write_lifecycle_log(string.rep("x", 256 * 1024))
+	assert(plugin_module.log_path(repo) == lifecycle_log_file, "the 256 KiB boundary must be accepted")
+	write_lifecycle_log(string.rep("x", 256 * 1024 + 1))
+	assert(plugin_module.log_path(repo) == nil, "oversized lifecycle logs must fail closed")
+	assert(vim.uv.fs_unlink(lifecycle_log_file))
+	assert(plugin_module.log_path(repo) == nil, "missing lifecycle logs must fail closed")
+	assert(vim.uv.fs_lstat(lifecycle_log_file) == nil, "log_path must not create a missing log")
+	configure()
+end)
+
+test("lifecycle log path rejects hostile leaves and unsafe hierarchy", function()
+	write_workspace_record(workspace_record(6))
+	local target = repo .. "/sub/file.txt"
+	assert(vim.uv.fs_symlink(target, lifecycle_log_file))
+	assert(plugin_module.log_path(repo) == nil, "symlink logs must be rejected")
+	assert(vim.uv.fs_unlink(lifecycle_log_file))
+
+	local hardlink_source = state .. "/logs/hardlink-source.log"
+	write_lifecycle_log("hardlink\n")
+	assert(vim.uv.fs_rename(lifecycle_log_file, hardlink_source))
+	assert(vim.uv.fs_link(hardlink_source, lifecycle_log_file))
+	assert(plugin_module.log_path(repo) == nil, "multi-link logs must be rejected")
+	assert(vim.uv.fs_unlink(lifecycle_log_file))
+	assert(vim.uv.fs_unlink(hardlink_source))
+
+	assert(vim.fn.mkdir(lifecycle_log_file, "p", tonumber("700", 8)) == 1)
+	assert(plugin_module.log_path(repo) == nil, "non-regular logs must be rejected")
+	assert(vim.uv.fs_rmdir(lifecycle_log_file))
+	write_lifecycle_log("mode\n")
+	assert(vim.uv.fs_chmod(lifecycle_log_file, tonumber("640", 8)))
+	assert(plugin_module.log_path(repo) == nil, "group-readable logs must be rejected")
+	assert(vim.uv.fs_chmod(lifecycle_log_file, tonumber("600", 8)))
+
+	local target_stat = assert(vim.uv.fs_stat(lifecycle_log_file))
+	local original_fstat = vim.uv.fs_fstat
+	vim.uv.fs_fstat = function(fd)
+		local stat, stat_err = original_fstat(fd)
+		if stat and stat.dev == target_stat.dev and stat.ino == target_stat.ino then
+			stat = vim.deepcopy(stat)
+			stat.uid = stat.uid + 1
+		end
+		return stat, stat_err
+	end
+	local safe, owner_result = pcall(plugin_module.log_path, repo)
+	vim.uv.fs_fstat = original_fstat
+	assert(safe and owner_result == nil, "wrong-owner logs must be rejected")
+
+	assert(vim.uv.fs_chmod(state .. "/logs", tonumber("750", 8)))
+	assert(plugin_module.log_path(repo) == nil, "unsafe log directory modes must be rejected")
+	assert(vim.uv.fs_chmod(state .. "/logs", tonumber("700", 8)))
+	assert(vim.uv.fs_chmod(state, tonumber("750", 8)))
+	assert(plugin_module.log_path(repo) == nil, "unsafe state root modes must be rejected")
+	assert(vim.uv.fs_chmod(state, tonumber("700", 8)))
+	local original_getuid = vim.uv.getuid
+	vim.uv.getuid = function()
+		return original_getuid() + 1
+	end
+	local owner_safe, hierarchy_owner_result = pcall(plugin_module.log_path, repo)
+	vim.uv.getuid = original_getuid
+	assert(owner_safe and hierarchy_owner_result == nil, "wrong-owner state hierarchy must be rejected")
+
+	local real_logs = state .. "/logs-real"
+	assert(vim.uv.fs_rename(state .. "/logs", real_logs))
+	assert(vim.uv.fs_symlink(real_logs, state .. "/logs"))
+	assert(plugin_module.log_path(repo) == nil, "symlinked log directories must be rejected")
+	assert(vim.uv.fs_unlink(state .. "/logs"))
+	assert(vim.uv.fs_rename(real_logs, state .. "/logs"))
+
+	assert(vim.uv.fs_rename(state .. "/logs", real_logs))
+	assert(plugin_module.log_path(repo) == nil, "missing log directories must fail closed")
+	assert(vim.uv.fs_lstat(state .. "/logs") == nil, "log_path must not recreate a missing directory")
+	assert(vim.uv.fs_rename(real_logs, state .. "/logs"))
+
+	local state_alias = fixture .. "/state-alias"
+	assert(vim.uv.fs_symlink(state, state_alias))
+	configure(nil, nil, { state_root = state_alias })
+	assert(plugin_module.log_path(repo) == nil, "symlinked state roots must be rejected")
+	assert(vim.uv.fs_unlink(state_alias))
+	configure()
+end)
+
+test("lifecycle log path detects replacement during descriptor validation", function()
+	write_workspace_record(workspace_record(6))
+	write_lifecycle_log("original\n")
+	local displaced = lifecycle_log_file .. ".displaced"
+	local rejected = with_test_hook(function(event)
+		if event == "before_log_revalidation" then
+			assert(vim.uv.fs_rename(lifecycle_log_file, displaced))
+			write_lifecycle_log("replacement\n")
+		end
+	end, function()
+		return plugin_module.log_path(repo) == nil
+	end)
+	assert(rejected, "a path replacement during validation must fail closed")
+	assert(vim.uv.fs_unlink(lifecycle_log_file))
+	assert(vim.uv.fs_rename(displaced, lifecycle_log_file))
 end)
 
 test("spool batches backlog and reports each record outcome", function()
@@ -1046,7 +1391,9 @@ test("setup contracts reject unknown keys without state mutation", function()
 	assert(assert(plugin_module.effective_config()).max_messages_per_tick == 32)
 	for label, invalid in pairs({
 		false_options = false,
-		false_cli = { cli = false },
+		retired_cli = { cli = "devcontainer" },
+		false_docker = { docker_path = false },
+		false_resolver = { resolve_cli = false },
 		nul_launcher = { launcher = "/bin/tool\0arg" },
 		empty_state_root = { state_root = "" },
 		nul_spool_root = { spool_root = "spool\0root" },

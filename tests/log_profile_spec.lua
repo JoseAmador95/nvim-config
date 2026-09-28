@@ -8,6 +8,8 @@ end
 
 local log_path = vim.fn.tempname() .. ".log"
 local text_path = vim.fn.tempname() .. ".txt"
+local generated_syntax = vim.fs.joinpath(vim.fn.stdpath("data"), "log-highlight", "after", "syntax", "log.vim")
+local generated_before = vim.uv.fs_lstat(generated_syntax)
 assert(vim.fn.writefile({ "INFO boot", "custom-marker" }, log_path) == 0)
 assert(vim.fn.writefile({ "INFO prose", "custom-marker" }, text_path) == 0)
 
@@ -22,13 +24,17 @@ vim.api.nvim_create_autocmd("VimEnter", {
 		vim.schedule(function()
 			local ok, err = xpcall(function()
 				local spec = require("plugins.log-highlight")
-				assert(spec.opts.extension == "log", "*.log extension detection is missing")
-				assert(vim.tbl_isempty(spec.opts.filename), "automatic log filenames are broader than *.log")
-				assert(vim.tbl_isempty(spec.opts.pattern), "automatic log patterns are broader than *.log")
+				assert(type(spec.init) == "function", "*.log extension detection is missing")
+				assert(spec.opts == nil and spec.config == nil, "syntax backend still generates runtime config state")
 
 				vim.cmd.edit(vim.fn.fnameescape(log_path))
 				assert(vim.bo.filetype == "log", "*.log was not detected as the log filetype")
-				assert(package.loaded["log-highlight"] ~= nil, "log-highlight did not load for *.log")
+				assert(vim.b.current_syntax == "log", "external log syntax backend did not load for *.log")
+				assert(package.loaded["log-highlight"] == nil, "upstream state-generating setup module was loaded")
+				assert(
+					vim.deep_equal(generated_before, vim.uv.fs_lstat(generated_syntax)),
+					"log-highlight generated or rewrote mutable syntax state"
+				)
 				for _, command in ipairs({ "LogHlAdd", "LogHlRegex", "LogHlClear", "LogWatchCurrentFile" }) do
 					assert(vim.fn.exists(":" .. command) == 2, command .. " is missing")
 				end

@@ -14,10 +14,6 @@ function M.rust_analyzer()
 	return M.external_executable("rust-analyzer")
 end
 
-function M.rustfmt()
-	return M.external_executable("rustfmt")
-end
-
 function M.notify_missing_analyzer()
 	if missing_analyzer_notified or M.rust_analyzer() then
 		return false

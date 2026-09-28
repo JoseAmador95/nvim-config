@@ -10,6 +10,7 @@ local executions = {}
 local one_capabilities = {}
 local lifecycle_generation = 0
 local request_sequence = 0
+local MAX_RECIPE_ARGV_ENTRIES = 4096
 
 local SETUP_KEYS = {
 	event = true,
@@ -153,10 +154,15 @@ local function normalize_parameters(parameters, action)
 		return nil, "parameters are not an array: " .. action
 	end
 	local result = {}
+	local names = {}
 	for index, parameter in ipairs(parameters) do
 		if type(parameter) ~= "table" or not valid_string(parameter.name) then
 			return nil, ("invalid parameter %d: %s"):format(index, action)
 		end
+		if names[parameter.name] then
+			return nil, ("duplicate parameter %s: %s"):format(parameter.name, action)
+		end
+		names[parameter.name] = true
 		local kind = parameter.kind or "singular"
 		if kind ~= "singular" and kind ~= "plus" and kind ~= "star" and kind ~= "variadic" then
 			return nil, ("unsupported parameter kind %s: %s"):format(tostring(kind), action)
@@ -169,8 +175,12 @@ local function normalize_parameters(parameters, action)
 		end
 		for _, key in ipairs({ "help", "long", "short" }) do
 			local value = optional(parameter[key])
-			if value ~= nil and type(value) ~= "string" then
-				return nil, ("parameter %s.%s must be a string: %s"):format(parameter.name, key, action)
+			if value ~= nil and (type(value) ~= "string" or value:find("\0", 1, true)) then
+				return nil,
+					("parameter %s.%s must be a string without NUL bytes: %s"):format(parameter.name, key, action)
+			end
+			if (key == "long" or key == "short") and value == "" then
+				return nil, ("parameter %s.%s must not be empty: %s"):format(parameter.name, key, action)
 			end
 		end
 		for _, key in ipairs({ "min", "max" }) do
@@ -184,17 +194,31 @@ local function normalize_parameters(parameters, action)
 		if minimum and maximum and minimum > maximum then
 			return nil, "parameter min exceeds max: " .. action
 		end
+		local default = copy(optional(parameter.default))
+		local flag = optional(parameter.flag) == true
+		local multiple = optional(parameter.multiple) == true
+		local effective_minimum = minimum
+		if effective_minimum == nil then
+			effective_minimum = default == nil and not flag and kind ~= "star" and 1 or 0
+		end
+		local effective_maximum = maximum
+		if effective_maximum == nil then
+			effective_maximum = (kind ~= "singular" or multiple) and math.huge or 1
+		end
+		if effective_minimum > effective_maximum then
+			return nil, "parameter minimum exceeds its effective maximum: " .. action
+		end
 		result[index] = {
 			name = parameter.name,
 			kind = kind,
-			default = copy(optional(parameter.default)),
+			default = default,
 			export = optional(parameter.export) == true,
-			flag = optional(parameter.flag) == true,
+			flag = flag,
 			help = optional(parameter.help),
 			long = optional(parameter.long),
 			max = maximum,
 			min = minimum,
-			multiple = optional(parameter.multiple) == true,
+			multiple = multiple,
 			pattern = copy(optional(parameter.pattern)),
 			short = optional(parameter.short),
 			value = copy(optional(parameter.value)),
@@ -203,20 +227,30 @@ local function normalize_parameters(parameters, action)
 	return result
 end
 
+local function parameter_cardinality(parameter)
+	local variadic = parameter.kind ~= "singular" or parameter.multiple
+	local minimum = parameter.min
+	if minimum == nil then
+		minimum = parameter.default == nil and not parameter.flag and parameter.kind ~= "star" and 1 or 0
+	end
+	local maximum = parameter.max
+	if maximum == nil then
+		maximum = variadic and math.huge or 1
+	end
+	return minimum, maximum
+end
+
 local function cardinality(parameters)
 	local minimum = 0
 	local maximum = 0
 	for _, parameter in ipairs(parameters) do
-		local variadic = parameter.kind ~= "singular" or parameter.multiple
-		local implicit_minimum = parameter.default == nil and not parameter.flag and parameter.kind ~= "star" and 1 or 0
-		minimum = minimum + (parameter.min or implicit_minimum)
+		local parameter_minimum, parameter_maximum = parameter_cardinality(parameter)
+		minimum = minimum + parameter_minimum
 		if maximum ~= math.huge then
-			if parameter.max ~= nil then
-				maximum = maximum + parameter.max
-			elseif variadic then
+			if parameter_maximum == math.huge then
 				maximum = math.huge
 			else
-				maximum = maximum + 1
+				maximum = maximum + parameter_maximum
 			end
 		end
 	end
@@ -507,6 +541,10 @@ function M.effective_config()
 	return {}
 end
 
+function M.limits()
+	return { max_recipe_argv_entries = MAX_RECIPE_ARGV_ENTRIES }
+end
+
 function M.teardown()
 	if not is_configured then
 		return true
@@ -605,16 +643,153 @@ local function find_action(record, name)
 	return nil
 end
 
-local function normalize_values(values)
+local function string_values(value, name)
+	local values = type(value) == "string" and { value } or value
 	if type(values) ~= "table" or not vim.islist(values) then
-		return nil, "recipe values must be an array"
+		return nil, ("binding %s must be a string or an array of strings"):format(name)
 	end
 	local result = {}
-	for index, value in ipairs(values) do
-		if type(value) ~= "string" or value:find("\0", 1, true) then
-			return nil, ("recipe value %d must be a string without NUL bytes"):format(index)
+	for index, item in ipairs(values) do
+		if type(item) ~= "string" or item:find("\0", 1, true) then
+			return nil, ("binding %s value %d must be a string without NUL bytes"):format(name, index)
 		end
-		result[index] = value
+		result[index] = item
+	end
+	return result
+end
+
+local function switch(parameter)
+	if parameter.long then
+		return parameter.long:sub(1, 1) == "-" and parameter.long or ("--" .. parameter.long)
+	end
+	if parameter.short then
+		return parameter.short:sub(1, 1) == "-" and parameter.short or ("-" .. parameter.short)
+	end
+	return nil
+end
+
+local function normalize_values(action, values)
+	if type(values) ~= "table" then
+		return nil, "recipe values must be a legacy string array or a bindings object"
+	end
+	if vim.islist(values) then
+		local result = {}
+		for index, value in ipairs(values) do
+			if type(value) ~= "string" or value:find("\0", 1, true) then
+				return nil, ("recipe value %d must be a string without NUL bytes"):format(index)
+			end
+			result[index] = value
+		end
+		return result, { kind = "legacy" }
+	end
+
+	local parameters = {}
+	for _, parameter in ipairs(action.parameters) do
+		parameters[parameter.name] = parameter
+	end
+	local names = vim.tbl_keys(values)
+	table.sort(names, function(left, right)
+		return tostring(left) < tostring(right)
+	end)
+	for _, name in ipairs(names) do
+		if type(name) ~= "string" or not parameters[name] then
+			return nil, "bindings contain an unknown parameter: " .. tostring(name)
+		end
+	end
+
+	local counts = {}
+	local parts = {}
+	for _, parameter in ipairs(action.parameters) do
+		local value = values[parameter.name]
+		if value ~= nil then
+			local option = switch(parameter)
+			if parameter.flag then
+				local count
+				if value == true then
+					count = 1
+				elseif value == false then
+					count = 0
+				elseif type(value) == "number" and value >= 0 and value % 1 == 0 then
+					count = value
+				else
+					return nil, ("flag binding %s must be boolean or a non-negative integer"):format(parameter.name)
+				end
+				if not option and count > 0 then
+					return nil, ("flag parameter %s has no long or short switch"):format(parameter.name)
+				end
+				counts[parameter.name] = count
+				parts[#parts + 1] = { count = count, option = option }
+			else
+				local bound, bound_err = string_values(value, parameter.name)
+				if not bound then
+					return nil, bound_err
+				end
+				counts[parameter.name] = #bound
+				parts[#parts + 1] = { option = option, values = bound }
+			end
+		end
+	end
+	return {}, { kind = "bindings", counts = counts, parts = parts }
+end
+
+local function validate_values(action, values, normalized)
+	if normalized.kind == "legacy" then
+		if #values < action.min_arguments then
+			return nil, ("recipe %s requires at least %d argument(s)"):format(action.name, action.min_arguments)
+		end
+		if action.max_arguments ~= math.huge and #values > action.max_arguments then
+			return nil, ("recipe %s accepts at most %d argument(s)"):format(action.name, action.max_arguments)
+		end
+		if #values > MAX_RECIPE_ARGV_ENTRIES then
+			return nil, ("recipe arguments exceed the hard limit of %d argv entries"):format(MAX_RECIPE_ARGV_ENTRIES)
+		end
+		return true
+	end
+	for _, parameter in ipairs(action.parameters) do
+		local count = normalized.counts[parameter.name] or 0
+		local minimum, maximum = parameter_cardinality(parameter)
+		if count < minimum then
+			return nil, ("parameter %s requires at least %d value(s)"):format(parameter.name, minimum)
+		end
+		if maximum ~= math.huge and count > maximum then
+			return nil, ("parameter %s accepts at most %d value(s)"):format(parameter.name, maximum)
+		end
+	end
+	local remaining = MAX_RECIPE_ARGV_ENTRIES
+	for _, part in ipairs(normalized.parts) do
+		if part.count ~= nil then
+			if part.count > remaining then
+				return nil,
+					("recipe arguments exceed the hard limit of %d argv entries"):format(MAX_RECIPE_ARGV_ENTRIES)
+			end
+			remaining = remaining - part.count
+		else
+			local width = part.option and 2 or 1
+			if #part.values > math.floor(remaining / width) then
+				return nil,
+					("recipe arguments exceed the hard limit of %d argv entries"):format(MAX_RECIPE_ARGV_ENTRIES)
+			end
+			remaining = remaining - (#part.values * width)
+		end
+	end
+	return true
+end
+
+local function materialize_values(normalized)
+	local result = {}
+	for _, part in ipairs(normalized.parts) do
+		if part.count then
+			for _ = 1, part.count do
+				result[#result + 1] = part.option
+			end
+		else
+			for _, value in ipairs(part.values) do
+				if part.option then
+					result[#result + 1] = part.option
+				end
+				result[#result + 1] = value
+			end
+		end
 	end
 	return result
 end
@@ -691,9 +866,9 @@ function M.run(catalog, name, values, opts)
 	if not action then
 		return nil, "unknown recipe or alias: " .. name
 	end
-	local normalized_values, values_err = normalize_values(values or {})
+	local normalized_values, normalized_or_err = normalize_values(action, values or {})
 	if not normalized_values then
-		return nil, values_err
+		return nil, normalized_or_err
 	end
 	local deps = record.dependencies
 	local key = terminal_key(record)
@@ -717,11 +892,12 @@ function M.run(catalog, name, values, opts)
 	elseif decision ~= nil and decision ~= "replace" then
 		return nil, "there is no existing execution to " .. tostring(decision)
 	end
-	if #normalized_values < action.min_arguments then
-		return nil, ("recipe %s requires at least %d argument(s)"):format(action.name, action.min_arguments)
+	local values_valid, values_err = validate_values(action, normalized_values, normalized_or_err)
+	if not values_valid then
+		return nil, values_err
 	end
-	if action.max_arguments ~= math.huge and #normalized_values > action.max_arguments then
-		return nil, ("recipe %s accepts at most %d argument(s)"):format(action.name, action.max_arguments)
+	if normalized_or_err.kind == "bindings" then
+		normalized_values = materialize_values(normalized_or_err)
 	end
 	local valid, valid_err = revalidate(record)
 	if not valid then

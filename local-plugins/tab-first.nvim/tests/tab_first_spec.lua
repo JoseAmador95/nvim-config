@@ -109,6 +109,21 @@ test("canonical opening reuses the exact visible split", function()
 	assert(vim.api.nvim_win_is_valid(other_win), "opening replaced the neighboring split")
 end)
 
+test("canonical opening prefers the current duplicate tab", function()
+	reset_editor()
+	local path = make_file("duplicate-current")
+	vim.cmd("edit! " .. vim.fn.fnameescape(path))
+	vim.cmd("tab split")
+	local preferred = vim.api.nvim_get_current_tabpage()
+	local preferred_win = vim.api.nvim_get_current_win()
+
+	local opened = tab_first.open(path, { lnum = 2, col = 2 })
+	equal(preferred, vim.api.nvim_get_current_tabpage(), "opening selected an earlier duplicate tab")
+	equal(preferred_win, vim.api.nvim_get_current_win(), "opening selected another duplicate window")
+	equal("visible", opened.reused, "current duplicate was not classified as visible reuse")
+	equal({ 2, 1 }, vim.api.nvim_win_get_cursor(0), "current duplicate lost the requested cursor")
+end)
+
 test("opening reuses only a pristine marked home tab", function()
 	reset_editor()
 	local home = vim.api.nvim_get_current_tabpage()
@@ -444,7 +459,7 @@ test("teardown clears lease callbacks without closing the visible tab", function
 	assert(tab_first.setup({}), "tab-first setup after teardown failed")
 end)
 
-test("semantic history traverses exact locations then falls back when exhausted", function()
+test("semantic history never falls through after entries exist", function()
 	reset_editor()
 	local first = make_file("history-first")
 	local second = make_file("history-second")
@@ -463,10 +478,319 @@ test("semantic history traverses exact locations then falls back when exhausted"
 	assert(tab_first.back(), "semantic back did not restore the origin")
 	equal({ 2, 1 }, vim.api.nvim_win_get_cursor(0), "semantic back lost the origin cursor")
 	assert(not tab_first.back(), "exhausted back reported a semantic traversal")
-	equal({ -1 }, fallbacks, "exhausted back did not call native fallback")
+	equal({}, fallbacks, "exhausted back escaped into native history")
 	assert(tab_first.forward(), "semantic forward did not restore the destination")
 	assert(not tab_first.forward(), "exhausted forward reported a semantic traversal")
-	equal({ -1, 1 }, fallbacks, "exhausted forward did not call native fallback")
+	equal({}, fallbacks, "exhausted forward escaped into native history")
+end)
+
+test("semantic history honors counts without forwarding residual steps", function()
+	reset_editor()
+	local first = make_file("history-count-first")
+	local second = make_file("history-count-second")
+	local third = make_file("history-count-third")
+	local fallbacks = {}
+	tab_first.setup({
+		history = {
+			native_fallback = function(direction, count)
+				fallbacks[#fallbacks + 1] = { direction, count }
+			end,
+		},
+	})
+	vim.cmd("edit! " .. vim.fn.fnameescape(first))
+	tab_first.open(second)
+	tab_first.open(third)
+
+	assert(tab_first.back({ count = 2 }), "counted semantic back did not move")
+	equal(
+		vim.uv.fs_realpath(first),
+		vim.uv.fs_realpath(vim.api.nvim_buf_get_name(0)),
+		"counted back landed incorrectly"
+	)
+	equal({}, fallbacks, "counted back fell through before history was exhausted")
+	assert(tab_first.forward({ count = 5 }), "partial counted forward did not report semantic movement")
+	equal(
+		vim.uv.fs_realpath(third),
+		vim.uv.fs_realpath(vim.api.nvim_buf_get_name(0)),
+		"counted forward landed incorrectly"
+	)
+	equal({}, fallbacks, "residual forward count escaped into native history")
+	assert(not tab_first.forward({ count = 4, fallback = false }), "disabled fallback reported movement")
+	equal(0, #fallbacks, "fallback=false still invoked native history")
+end)
+
+test("empty history delegates one counted request and propagates fallback errors", function()
+	reset_editor()
+	local calls = {}
+	tab_first.setup({
+		history = {
+			native_fallback = function(direction, count)
+				calls[#calls + 1] = { direction, count }
+			end,
+		},
+	})
+	assert(not tab_first.forward({ count = 4 }), "native fallback reported semantic movement")
+	equal({ { 1, 4 } }, calls, "empty history did not forward the exact count once")
+
+	tab_first.setup({
+		history = {
+			native_fallback = function()
+				error("native fallback failed")
+			end,
+		},
+	})
+	local ok, err = pcall(tab_first.back)
+	assert(not ok and tostring(err):find("native fallback failed", 1, true), "fallback error was silently swallowed")
+end)
+
+test("unrecorded same-file movement is appended before traversal", function()
+	reset_editor()
+	local path = make_file("history-native-same-file")
+	vim.cmd("edit! " .. vim.fn.fnameescape(path))
+	vim.api.nvim_win_set_cursor(0, { 1, 0 })
+	tab_first.open(path, { lnum = 2, col = 1 })
+	vim.api.nvim_win_set_cursor(0, { 3, 0 })
+
+	assert(tab_first.back({ fallback = false }), "back did not return to the semantic endpoint")
+	equal({ 2, 0 }, vim.api.nvim_win_get_cursor(0), "first back skipped the semantic endpoint")
+	assert(tab_first.back({ fallback = false }), "second back did not return to the semantic origin")
+	equal({ 1, 0 }, vim.api.nvim_win_get_cursor(0), "second back lost the semantic origin")
+end)
+
+test("explicit open origins remain immutable across delayed navigation", function()
+	reset_editor()
+	local first = make_file("history-explicit-first")
+	local intermediate = make_file("history-explicit-intermediate")
+	local destination = make_file("history-explicit-destination")
+	vim.cmd("edit! " .. vim.fn.fnameescape(first))
+	local origin = assert(tab_first.capture())
+	vim.cmd("edit! " .. vim.fn.fnameescape(intermediate))
+	tab_first.open(destination, { history_origin = origin })
+
+	local snapshot = tab_first.history_snapshot()
+	equal(2, #snapshot.entries, "delayed open recorded an extra location")
+	equal(vim.uv.fs_realpath(first), snapshot.entries[1].path, "delayed open recaptured its late origin")
+	equal(vim.uv.fs_realpath(destination), snapshot.entries[2].path, "delayed open lost its destination")
+end)
+
+test("provider history captures, restores, and skips stale entries", function()
+	reset_editor()
+	local current
+	local restores = {}
+	local function entry(location, stale)
+		return {
+			kind = "provider",
+			provider = "review",
+			document_key = "session:file.lua",
+			location_key = location,
+			label = "Review file.lua:" .. location,
+			payload = { location = location, stale = stale == true },
+		}
+	end
+	tab_first.setup({
+		history = {
+			capture_location = function()
+				return current
+			end,
+			restore_location = function(value)
+				restores[#restores + 1] = value.location_key
+				if value.payload.stale then
+					return false
+				end
+				current = value
+				return true
+			end,
+		},
+	})
+	local first = entry("1:1")
+	local stale = entry("2:1", true)
+	local third = entry("3:1")
+	current = first
+	equal(first, tab_first.capture(), "provider capture changed the opaque entry")
+	assert(tab_first.same_location(first, vim.deepcopy(first)), "provider identity was not recognized")
+	assert(not tab_first.same_location(first, stale), "different provider locations compared equal")
+	assert(tab_first.record_transition(first, stale), "provider transition was rejected")
+	assert(tab_first.record_transition(stale, third), "provider destination was rejected")
+	current = third
+	assert(tab_first.back({ fallback = false }), "stale provider entry consumed the traversal")
+	equal({ "2:1", "1:1" }, restores, "provider restoration order changed")
+	equal("1:1", current.location_key, "provider traversal landed at the wrong location")
+end)
+
+test("recorded history owns immutable copies of provider entries", function()
+	reset_editor()
+	local origin = {
+		kind = "provider",
+		provider = "review",
+		document_key = "session:first.lua",
+		location_key = "1:1",
+		label = "Review first.lua:1:1",
+		payload = { location = { line = 1, col = 1 } },
+	}
+	local destination = {
+		kind = "provider",
+		provider = "review",
+		document_key = "session:second.lua",
+		location_key = "2:3",
+		label = "Review second.lua:2:3",
+		payload = { location = { line = 2, col = 3 } },
+	}
+	assert(tab_first.record_transition(origin, destination), "provider transition was rejected")
+	origin.location_key = "mutated"
+	origin.payload.location.line = 99
+	destination.document_key = "mutated"
+	destination.payload.location.col = 99
+
+	local snapshot = tab_first.history_snapshot()
+	equal("1:1", snapshot.entries[1].location_key, "origin key remained caller-owned")
+	equal(1, snapshot.entries[1].payload.location.line, "origin payload remained caller-owned")
+	equal("session:second.lua", snapshot.entries[2].document_key, "destination key remained caller-owned")
+	equal(3, snapshot.entries[2].payload.location.col, "destination payload remained caller-owned")
+end)
+
+test("provider callback failures are notified without crashing capture or traversal", function()
+	reset_editor()
+	local notifications = {}
+	local named_path = make_file("history-provider-capture-error")
+	vim.cmd("edit! " .. vim.fn.fnameescape(named_path))
+	tab_first.setup({
+		notify = function(message)
+			notifications[#notifications + 1] = message
+		end,
+		history = {
+			capture_location = function()
+				error("capture exploded")
+			end,
+		},
+	})
+	equal(nil, tab_first.capture(), "failed provider capture fabricated a location")
+	assert(notifications[1]:find("capture exploded", 1, true), "provider capture failure was not notified")
+	tab_first.setup({
+		notify = function(message)
+			notifications[#notifications + 1] = message
+		end,
+		history = {
+			capture_location = function()
+				return nil, "capture returned an error"
+			end,
+		},
+	})
+	equal(nil, tab_first.capture(), "provider capture error fabricated a location")
+	assert(
+		notifications[#notifications]:find("capture returned an error", 1, true),
+		"returned provider capture failure was not notified"
+	)
+	equal(2, #notifications, "returned provider capture failure notified more than once")
+	vim.cmd("enew!")
+	tab_first.setup({
+		notify = function(message)
+			notifications[#notifications + 1] = message
+		end,
+		history = {
+			capture_location = function()
+				return nil
+			end,
+		},
+	})
+	equal(nil, tab_first.capture(), "neutral provider capture fabricated a location")
+	equal(2, #notifications, "neutral provider capture emitted an error")
+
+	local first = {
+		kind = "provider",
+		provider = "review",
+		document_key = "session:file.lua",
+		location_key = "1:1",
+		label = "Review file.lua:1:1",
+		payload = {},
+	}
+	local second = vim.tbl_extend("force", vim.deepcopy(first), { location_key = "2:1" })
+	local third = vim.tbl_extend("force", vim.deepcopy(first), { location_key = "3:1" })
+	assert(tab_first.record_transition(first, second), "provider error fixture was not recorded")
+	assert(tab_first.record_transition(second, third), "provider error destination was not recorded")
+	local restore_calls = {}
+	tab_first.setup({
+		notify = function(message)
+			notifications[#notifications + 1] = message
+		end,
+		history = {
+			capture_location = function()
+				return third
+			end,
+			restore_location = function(entry)
+				restore_calls[#restore_calls + 1] = entry.location_key
+				if entry.location_key == second.location_key then
+					error("restore exploded")
+				end
+				return true
+			end,
+		},
+	})
+	assert(not tab_first.back({ fallback = false }), "failed provider restore reported movement")
+	assert(notifications[#notifications]:find("restore exploded", 1, true), "provider restore failure was not notified")
+	equal({ "2:1" }, restore_calls, "provider restore failure continued into older history")
+	equal(3, tab_first.history_snapshot().index, "provider restore failure advanced the history index")
+
+	local notifications_before_reported_failure = #notifications
+	restore_calls = {}
+	tab_first.setup({
+		notify = function(message)
+			notifications[#notifications + 1] = message
+		end,
+		history = {
+			capture_location = function()
+				return third
+			end,
+			restore_location = function(entry)
+				restore_calls[#restore_calls + 1] = entry.location_key
+				return false, "restore was already reported", true
+			end,
+		},
+	})
+	assert(not tab_first.back({ fallback = false }), "reported provider failure claimed movement")
+	equal({ "2:1" }, restore_calls, "reported provider failure continued into older history")
+	equal(
+		notifications_before_reported_failure,
+		#notifications,
+		"provider failure reported by its owner was notified twice"
+	)
+end)
+
+test("malformed public history entries are rejected without poisoning the stack", function()
+	reset_editor()
+	local valid = { path = "/tmp/valid-history-entry", lnum = 1, col = 1 }
+	for _, malformed in ipairs({
+		{},
+		{ path = "/tmp/missing-position" },
+		{ path = "/tmp/invalid-line", lnum = 0, col = 1 },
+		{ path = "/tmp/invalid-column", lnum = 1, col = 0 },
+		{
+			kind = "provider",
+			provider = "review",
+			document_key = "document",
+			location_key = "location",
+			label = "Missing payload",
+		},
+	}) do
+		assert(not tab_first.record_transition(malformed, valid), "malformed origin entered history")
+		assert(not tab_first.record_transition(valid, malformed), "malformed destination entered history")
+	end
+	equal({ entries = {}, index = 0 }, tab_first.history_snapshot(), "malformed entries changed history")
+end)
+
+test("counted traversal skips stale entries without consuming a step", function()
+	reset_editor()
+	local first = make_file("history-stale-first")
+	local stale = make_file("history-stale-middle")
+	local third = make_file("history-stale-third")
+	vim.cmd("edit! " .. vim.fn.fnameescape(first))
+	tab_first.open(stale)
+	local stale_buf = vim.api.nvim_get_current_buf()
+	tab_first.open(third)
+	vim.api.nvim_buf_delete(stale_buf, { force = true })
+	vim.fn.delete(stale)
+
+	assert(tab_first.back({ count = 1, fallback = false }), "stale entry consumed the requested step")
+	equal(vim.uv.fs_realpath(first), vim.uv.fs_realpath(vim.api.nvim_buf_get_name(0)), "stale skip landed incorrectly")
 end)
 
 test("closed history locations reopen through the injected host adapter", function()
@@ -498,6 +822,58 @@ test("closed history locations reopen through the injected host adapter", functi
 	equal(vim.uv.fs_realpath(first), vim.uv.fs_realpath(vim.api.nvim_buf_get_name(0)), "adapter reopened wrong path")
 end)
 
+test("closed-location adapter errors are visible and do not advance history", function()
+	reset_editor()
+	local first = make_file("history-adapter-error-first")
+	local second = make_file("history-adapter-error-second")
+	local notifications = {}
+	tab_first.setup({
+		notify = function(message)
+			notifications[#notifications + 1] = message
+		end,
+		history = {
+			open_location = function()
+				error("adapter exploded")
+			end,
+		},
+	})
+	vim.cmd("edit! " .. vim.fn.fnameescape(first))
+	local first_tab = vim.api.nvim_get_current_tabpage()
+	tab_first.open(second)
+	vim.api.nvim_set_current_tabpage(first_tab)
+	vim.cmd("tabclose")
+
+	local before = tab_first.history_snapshot()
+	assert(not tab_first.back({ fallback = false }), "failed adapter reported a traversal")
+	equal(before.index, tab_first.history_snapshot().index, "failed adapter advanced the history index")
+	assert(
+		notifications[#notifications]:find("adapter exploded", 1, true),
+		"closed-location adapter failure was not notified"
+	)
+end)
+
+test("closed-location adapters must confirm restoration explicitly", function()
+	reset_editor()
+	local first = make_file("history-adapter-nil-first")
+	local second = make_file("history-adapter-nil-second")
+	tab_first.setup({
+		history = {
+			open_location = function()
+				return nil
+			end,
+		},
+	})
+	vim.cmd("edit! " .. vim.fn.fnameescape(first))
+	local first_tab = vim.api.nvim_get_current_tabpage()
+	tab_first.open(second)
+	vim.api.nvim_set_current_tabpage(first_tab)
+	vim.cmd("tabclose")
+
+	local before = tab_first.history_snapshot()
+	assert(not tab_first.back({ fallback = false }), "unconfirmed adapter reported a traversal")
+	equal(before.index, tab_first.history_snapshot().index, "unconfirmed adapter advanced the history index")
+end)
+
 test("semantic history can be disabled without changing canonical opening", function()
 	reset_editor()
 	local first = make_file("disabled-first")
@@ -517,6 +893,25 @@ test("semantic history can be disabled without changing canonical opening", func
 	equal(0, #tab_first.history_snapshot().entries, "disabled history recorded a transition")
 	assert(not tab_first.back(), "disabled history reported a semantic traversal")
 	equal(-1, fallback, "disabled history did not delegate to the native fallback")
+end)
+
+test("disabling populated history delegates to the native fallback", function()
+	reset_editor()
+	local first = make_file("disabled-populated-first")
+	local second = make_file("disabled-populated-second")
+	vim.cmd("edit! " .. vim.fn.fnameescape(first))
+	tab_first.open(second)
+	local fallback
+	tab_first.setup({
+		history = {
+			enabled = false,
+			native_fallback = function(direction, count)
+				fallback = { direction, count }
+			end,
+		},
+	})
+	assert(not tab_first.back({ count = 3 }), "disabled populated history reported a semantic traversal")
+	equal({ -1, 3 }, fallback, "disabled populated history did not delegate the native count")
 end)
 
 test("history events are isolated and repeated teardown/setup resets lifecycle state", function()

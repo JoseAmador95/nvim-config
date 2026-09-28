@@ -33,8 +33,11 @@ local LSP_KEYS = {
 	client_root = true,
 	clients = true,
 	config = true,
+	discard = true,
+	reconcile = true,
 	start = true,
 	stop = true,
+	wait_initialized = true,
 	wait_stopped = true,
 }
 
@@ -75,7 +78,13 @@ end
 local function state_for(root)
 	local state = roots[root]
 	if not state then
-		state = { generation = 0, state = "candidate", candidates = {} }
+		state = {
+			generation = 0,
+			state = "candidate",
+			candidates = {},
+			active_revision = 0,
+			applied_revision = 0,
+		}
 		roots[root] = state
 	end
 	return state
@@ -417,6 +426,48 @@ local function same_record(left, right)
 		and left.validity == right.validity
 end
 
+local function same_configuration(left, right)
+	return (left == nil and right == nil) or same_record(left, right)
+end
+
+local function application_matches(state, active)
+	return state.applied_revision ~= nil and same_configuration(state.applied, active)
+end
+
+local function advance_active_revision(state, active)
+	if same_configuration(state.active, active) then
+		return false
+	end
+	state.active_revision = state.active_revision + 1
+	return true
+end
+
+local function touch(root)
+	local state = state_for(root)
+	state.generation = state.generation + 1
+	state.updated_at = type(configured.clock) == "function" and configured.clock() or os.time()
+	emit("status", { root = root, status = M.status(root) })
+	return state
+end
+
+local function mark_applied(root, revision, active)
+	local state = state_for(root)
+	state.applied_revision = revision
+	state.applied = copy(active)
+	if revision == state.active_revision and same_configuration(state.active, active) then
+		state.state = active and "active" or "candidate"
+		state.error = nil
+	end
+	return touch(root)
+end
+
+local function mark_unapplied(root, message)
+	local state = state_for(root)
+	state.applied = nil
+	state.applied_revision = nil
+	return publish(root, "error", { error = message })
+end
+
 local function refresh_record(record, options)
 	options = options or {}
 	local validated, err = M.validate(record.directory, {
@@ -453,10 +504,199 @@ local function client_root(lsp, client)
 end
 
 local function stopped_clients(lsp, clients, root)
-	if type(lsp.wait_stopped) == "function" then
-		return lsp.wait_stopped(clients, root, configured.restart_timeout_ms)
+	if type(lsp.wait_stopped) ~= "function" then
+		return nil, "cannot confirm that clangd stopped: wait callback is missing"
+	end
+	local ok, stopped = pcall(lsp.wait_stopped, clients, root, configured.restart_timeout_ms)
+	if not ok then
+		return nil, "could not confirm that clangd stopped: " .. tostring(stopped)
+	end
+	if not stopped then
+		return nil, "timed out waiting for clangd to stop"
 	end
 	return true
+end
+
+local function ticket_live(root, ticket)
+	return is_configured and pending_restarts[root] == ticket
+end
+
+local function valid_buffers(lsp, buffers)
+	local ordered = vim.tbl_keys(buffers)
+	table.sort(ordered)
+	local valid = {}
+	for _, bufnr in ipairs(ordered) do
+		local ok, keep = true, true
+		if type(lsp.buffer_valid) == "function" then
+			ok, keep = pcall(lsp.buffer_valid, bufnr)
+		end
+		if not ok then
+			return nil, "could not validate clangd buffer " .. tostring(bufnr) .. ": " .. tostring(keep)
+		end
+		if keep then
+			valid[#valid + 1] = bufnr
+		end
+	end
+	return valid
+end
+
+local function merge_buffers(target, source)
+	for _, bufnr in ipairs(source or {}) do
+		if type(bufnr) ~= "number" or bufnr < 1 or bufnr % 1 ~= 0 then
+			return nil, "clangd reconciliation returned an invalid buffer"
+		end
+		target[bufnr] = true
+	end
+	return target
+end
+
+local function reconcile_clients(lsp, root, buffers)
+	if type(lsp.reconcile) ~= "function" then
+		return nil, "cannot reconcile autoactivated clangd clients: reconcile callback is missing"
+	end
+	local ok, extra, reconcile_err = pcall(lsp.reconcile, root, configured.restart_timeout_ms)
+	if not ok then
+		return nil, "could not reconcile autoactivated clangd clients: " .. tostring(extra)
+	end
+	if type(extra) ~= "table" or not vim.islist(extra) then
+		return nil,
+			"could not reconcile autoactivated clangd clients: " .. tostring(
+				reconcile_err or "callback did not return a buffer list"
+			)
+	end
+	local merged, merge_err = merge_buffers(buffers, extra)
+	if not merged then
+		return nil, merge_err
+	end
+	return valid_buffers(lsp, merged)
+end
+
+local function discard_started(lsp, client_id, root)
+	if type(lsp.discard) ~= "function" then
+		return nil, "discard callback is missing"
+	end
+	local ok, discarded, discard_err = pcall(lsp.discard, client_id, root, configured.restart_timeout_ms)
+	if not ok then
+		return nil, tostring(discarded)
+	end
+	if discarded ~= true then
+		return nil, tostring(discard_err or "owned client did not stop")
+	end
+	return true
+end
+
+local function start_configuration(lsp, root, active, buffers)
+	if
+		type(lsp.config) ~= "function"
+		or type(lsp.start) ~= "function"
+		or type(lsp.attach) ~= "function"
+		or type(lsp.wait_initialized) ~= "function"
+	then
+		return nil, "clangd restart callbacks are incomplete", true, buffers
+	end
+	local config_ok, config = pcall(lsp.config, root, copy(active))
+	if not config_ok then
+		return nil, "could not build clangd restart config: " .. tostring(config), true, buffers
+	end
+	if type(config) ~= "table" then
+		return nil, "could not build clangd restart config", true, buffers
+	end
+	local buffer_set = {}
+	for _, bufnr in ipairs(buffers) do
+		buffer_set[bufnr] = true
+	end
+	local reconciled, reconcile_err = reconcile_clients(lsp, root, buffer_set)
+	if not reconciled then
+		return nil, reconcile_err, false, buffers
+	end
+	if #reconciled == 0 then
+		return { skipped = true, buffers = reconciled }
+	end
+	local start_ok, outcome = pcall(lsp.start, config)
+	if not start_ok then
+		return nil, "clangd restart raised an error: " .. tostring(outcome), false, reconciled
+	end
+	if type(outcome) ~= "table" then
+		return nil, "clangd restart returned an invalid ownership outcome", false, reconciled
+	end
+	if outcome.owned ~= true or type(outcome.client_id) ~= "number" or outcome.client_id < 1 then
+		if outcome.owned == false and outcome.client_id == nil then
+			return nil, tostring(outcome.error or "clangd restart failed"), true, reconciled
+		end
+		return nil, "clangd restart returned an invalid ownership outcome", false, reconciled
+	end
+	for _, bufnr in ipairs(reconciled) do
+		local attached_ok, attached = pcall(lsp.attach, bufnr, outcome.client_id)
+		if not attached_ok or attached ~= true then
+			local attach_err = ("could not attach clangd to buffer %d: %s"):format(
+				bufnr,
+				tostring(attached_ok and "rejected" or attached)
+			)
+			local discarded, discard_err = discard_started(lsp, outcome.client_id, root)
+			if not discarded then
+				return nil, attach_err .. "; could not discard owned client: " .. discard_err, false, reconciled
+			end
+			return nil, attach_err, true, reconciled
+		end
+	end
+	local wait_ok, initialized, initialize_err =
+		pcall(lsp.wait_initialized, outcome.client_id, root, configured.restart_timeout_ms)
+	if not wait_ok or initialized ~= true then
+		local message = wait_ok and tostring(initialize_err or "clangd did not initialize")
+			or "could not confirm clangd initialization: " .. tostring(initialized)
+		local discarded, discard_err = discard_started(lsp, outcome.client_id, root)
+		if not discarded then
+			return nil, message .. "; could not discard owned client: " .. discard_err, false, reconciled
+		end
+		return nil, message, true, reconciled
+	end
+	return { client_id = outcome.client_id, buffers = reconciled }
+end
+
+local schedule_restart
+
+local function finish_restart(root, ticket, attempted_revision)
+	if pending_restarts[root] ~= ticket then
+		return
+	end
+	local followup_force = ticket.followup_force == true
+	pending_restarts[root] = nil
+	if is_configured and (state_for(root).active_revision ~= attempted_revision or followup_force) then
+		schedule_restart(root, followup_force)
+	end
+end
+
+local function fail_after_stop(
+	root,
+	ticket,
+	attempted_revision,
+	message,
+	rollback_safe,
+	rollback_revision,
+	rollback,
+	lsp,
+	buffers
+)
+	if not ticket_live(root, ticket) then
+		return
+	end
+	if rollback_safe and rollback_revision ~= nil and not same_configuration(rollback, ticket.target) then
+		local restored, restore_err = start_configuration(lsp, root, rollback, buffers)
+		if not ticket_live(root, ticket) then
+			return
+		end
+		if restored then
+			local suffix = restore_err and "; " .. restore_err or ""
+			publish(root, "error", { error = message .. "; previous clangd configuration restored" .. suffix })
+			finish_restart(root, ticket, attempted_revision)
+			return
+		end
+		message = message .. "; previous clangd configuration could not be restored: " .. tostring(restore_err)
+	elseif not rollback_safe then
+		message = message .. "; replacement outcome is uncertain, so rollback was not attempted"
+	end
+	mark_unapplied(root, message)
+	finish_restart(root, ticket, attempted_revision)
 end
 
 local function restart_now(root, ticket)
@@ -465,74 +705,139 @@ local function restart_now(root, ticket)
 	end
 	ticket.scheduled = false
 	ticket.running = true
+	local attempted_revision = state_for(root).active_revision
+	local rollback_revision = state_for(root).applied_revision
+	local rollback = copy(state_for(root).applied)
+	if not ticket.force and same_configuration(state_for(root).active, rollback) and rollback_revision ~= nil then
+		mark_applied(root, attempted_revision, state_for(root).active)
+		finish_restart(root, ticket, attempted_revision)
+		return
+	end
 	local lsp = configured.lsp
 	if type(lsp) ~= "table" then
-		pending_restarts[root] = nil
+		mark_applied(root, attempted_revision, state_for(root).active)
+		finish_restart(root, ticket, attempted_revision)
 		return
 	end
 	local buffers = {}
 	local stopped_for_root = {}
-	local clients = type(lsp.clients) == "function" and lsp.clients(root) or {}
+	if type(lsp.clients) ~= "function" then
+		publish(root, "error", { error = "cannot enumerate clangd clients: clients callback is missing" })
+		finish_restart(root, ticket, attempted_revision)
+		return
+	end
+	local clients_ok, clients = pcall(lsp.clients, root)
+	if not ticket_live(root, ticket) then
+		return
+	end
+	if not clients_ok or type(clients) ~= "table" then
+		publish(root, "error", { error = "could not enumerate clangd clients: " .. tostring(clients) })
+		finish_restart(root, ticket, attempted_revision)
+		return
+	end
 	for _, client in ipairs(clients or {}) do
-		if client_root(lsp, client) == root then
+		local root_ok, current_root = pcall(client_root, lsp, client)
+		if not root_ok then
+			publish(root, "error", { error = "could not inspect clangd client root: " .. tostring(current_root) })
+			finish_restart(root, ticket, attempted_revision)
+			return
+		end
+		if current_root == root then
 			stopped_for_root[#stopped_for_root + 1] = client
 			for bufnr in pairs(client.attached_buffers or {}) do
 				buffers[bufnr] = true
 			end
-			if type(lsp.stop) == "function" then
-				lsp.stop(client)
-			end
 		end
 	end
-	if not stopped_clients(lsp, stopped_for_root, root) then
-		pending_restarts[root] = nil
-		publish(root, "error", { error = "timed out waiting for clangd to stop" })
+	if #stopped_for_root == 0 then
+		local revision = state_for(root).active_revision
+		mark_applied(root, revision, state_for(root).active)
+		finish_restart(root, ticket, revision)
 		return
 	end
-	local ordered = vim.tbl_keys(buffers)
-	table.sort(ordered)
-	local valid = {}
-	for _, bufnr in ipairs(ordered) do
-		if type(lsp.buffer_valid) ~= "function" or lsp.buffer_valid(bufnr) then
-			valid[#valid + 1] = bufnr
+	if type(lsp.stop) ~= "function" then
+		mark_unapplied(root, "cannot stop existing clangd clients: stop callback is missing")
+		finish_restart(root, ticket, attempted_revision)
+		return
+	end
+	for _, client in ipairs(stopped_for_root) do
+		local stop_ok, stop_err = pcall(lsp.stop, client)
+		if not ticket_live(root, ticket) then
+			return
+		end
+		if not stop_ok then
+			mark_unapplied(root, "could not stop clangd: " .. tostring(stop_err))
+			finish_restart(root, ticket, attempted_revision)
+			return
 		end
 	end
-	if #valid == 0 or type(lsp.config) ~= "function" or type(lsp.start) ~= "function" then
-		pending_restarts[root] = nil
+	local stopped, stopped_err = stopped_clients(lsp, stopped_for_root, root)
+	if not ticket_live(root, ticket) then
 		return
 	end
-	local starting_generation = state_for(root).generation
-	local config = lsp.config(root, M.active(root))
-	local client = lsp.start(config, valid[1])
-	if not client then
-		pending_restarts[root] = nil
-		publish(root, "error", { error = "clangd restart failed" })
+	if not stopped then
+		mark_unapplied(root, stopped_err)
+		finish_restart(root, ticket, attempted_revision)
 		return
 	end
-	if type(lsp.attach) == "function" then
-		for index = 2, #valid do
-			lsp.attach(valid[index], client)
-		end
+	local valid, valid_err = valid_buffers(lsp, buffers)
+	if not ticket_live(root, ticket) then
+		return
 	end
-	pending_restarts[root] = nil
-	if state_for(root).generation > starting_generation then
-		local defer = configured.defer or vim.defer_fn
-		local replacement = { generation = state_for(root).generation, scheduled = true, running = false }
-		pending_restarts[root] = replacement
-		defer(function()
-			restart_now(root, replacement)
-		end, configured.restart_delay_ms)
+	if not valid then
+		mark_unapplied(root, valid_err)
+		finish_restart(root, ticket, attempted_revision)
+		return
 	end
+	local state = state_for(root)
+	local target_revision = state.active_revision
+	local target = copy(state.active)
+	ticket.target = target
+	if #valid == 0 then
+		mark_applied(root, target_revision, target)
+		finish_restart(root, ticket, target_revision)
+		return
+	end
+	local outcome, start_err, rollback_safe, reconciled = start_configuration(lsp, root, target, valid)
+	if not ticket_live(root, ticket) then
+		return
+	end
+	if not outcome then
+		fail_after_stop(
+			root,
+			ticket,
+			target_revision,
+			start_err,
+			rollback_safe,
+			rollback_revision,
+			rollback,
+			lsp,
+			reconciled or valid
+		)
+		return
+	end
+	mark_applied(root, target_revision, target)
+	finish_restart(root, ticket, target_revision)
 end
 
-local function schedule_restart(root)
+schedule_restart = function(root, force)
 	local state = state_for(root)
 	local pending = pending_restarts[root]
 	if pending then
-		pending.generation = state.generation
+		pending.requested_revision = state.active_revision
+		if pending.running and force == true then
+			pending.followup_force = true
+		else
+			pending.force = pending.force or force == true
+		end
 		return
 	end
-	local ticket = { generation = state.generation, scheduled = true, running = false }
+	local ticket = {
+		requested_revision = state.active_revision,
+		scheduled = true,
+		running = false,
+		force = force == true,
+	}
 	pending_restarts[root] = ticket
 	local defer = configured.defer or vim.defer_fn
 	defer(function()
@@ -572,9 +877,9 @@ function M.apply(root, options)
 		publish(root, "error", { error = err, candidate = refreshed })
 		return nil, err
 	end
-	local changed = not same_record(state.active, refreshed)
+	local changed = advance_active_revision(state, refreshed)
 	publish(root, "active", { active = refreshed }, { "candidate", "error" })
-	if changed then
+	if changed or not application_matches(state, refreshed) then
 		schedule_restart(root)
 	end
 	return M.status(root, { refresh = false })
@@ -619,8 +924,9 @@ function M.clear_override(root)
 	local previous = state.active
 	local fallback = best_candidate(state)
 	if not fallback then
+		advance_active_revision(state, nil)
 		publish(root, "candidate", {}, { "active", "candidate", "error" })
-		if previous then
+		if previous or not application_matches(state, nil) then
 			schedule_restart(root)
 		end
 		return M.status(root, { refresh = false })
@@ -645,6 +951,7 @@ function M.clear_override(root)
 		end
 		local clear = { "candidate" }
 		if previous and previous.provider == "manual" then
+			advance_active_revision(state, nil)
 			clear[#clear + 1] = "active"
 		end
 		publish(root, "error", fields, clear)
@@ -654,9 +961,9 @@ function M.clear_override(root)
 		return nil, err
 	end
 
-	local changed = not same_record(previous, refreshed)
+	local changed = advance_active_revision(state, refreshed)
 	publish(root, "active", { active = refreshed }, { "candidate", "error" })
-	if changed then
+	if changed or not application_matches(state, refreshed) then
 		schedule_restart(root)
 	end
 	return M.status(root, { refresh = false })
@@ -686,11 +993,15 @@ function M.status(root)
 			root = root,
 			candidate = nil,
 			active = nil,
+			active_revision = 0,
+			applied_revision = 0,
 			error = nil,
+			restart_pending = false,
 		}
 	end
 	local result = copy(state)
 	result.root = root
+	result.restart_pending = pending_restarts[root] ~= nil
 	return result
 end
 
@@ -716,8 +1027,12 @@ function M.refresh(root)
 		if state.state == "stale" or state.state == "error" then
 			publish(root, "active", { active = refreshed }, { "candidate", "error" })
 		end
+		if not application_matches(state, refreshed) then
+			schedule_restart(root)
+		end
 		return M.status(root)
 	end
+	advance_active_revision(state, refreshed)
 	publish(root, "active", { active = refreshed }, { "candidate", "error" })
 	schedule_restart(root)
 	return M.status(root)
@@ -728,7 +1043,7 @@ function M.restart(root)
 	if not root then
 		return nil, "invalid project root"
 	end
-	schedule_restart(root)
+	schedule_restart(root, true)
 	return true
 end
 

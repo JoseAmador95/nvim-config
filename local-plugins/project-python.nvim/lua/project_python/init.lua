@@ -660,7 +660,7 @@ end
 function M.repl_spec(root, interpreter)
 	root = canonical(root)
 	local snapshot = root and M.snapshot(root) or nil
-	local python = executable(interpreter) or (snapshot and snapshot.value.interpreter)
+	local python = executable(interpreter) or (snapshot and executable(snapshot.value.interpreter))
 	if not root or not python then
 		return nil, "project Python is unavailable"
 	end
@@ -679,12 +679,16 @@ function M.repl(action, root, options)
 		return nil, "terminal lifecycle is unavailable"
 	end
 	options = options or {}
-	if action == "status" then
-		return terminal.status(M.repl_identity(root))
-	elseif action == "send" then
-		return terminal.send(M.repl_identity(root), options.text)
+	local repl_root = canonical(root)
+	if not repl_root then
+		return nil, "project root is invalid"
 	end
-	local spec, err = M.repl_spec(root, options.interpreter)
+	if action == "status" then
+		return terminal.status(M.repl_identity(repl_root))
+	elseif action == "send" then
+		return terminal.send(M.repl_identity(repl_root), options.text, repl_root)
+	end
+	local spec, err = M.repl_spec(repl_root, options.interpreter)
 	if not spec then
 		return nil, err
 	end

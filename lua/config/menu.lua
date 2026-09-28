@@ -1,6 +1,7 @@
 local backend = require("config.menu.backend").default()
 local context = require("config.menu.context")
 local deferred = require("config.deferred")
+local recent = require("config.menu.recent")
 
 local M = {}
 
@@ -37,7 +38,7 @@ local function palette_items(sections)
 			}
 		end
 	end
-	return items
+	return recent.order(items)
 end
 
 ---The menu belongs only to full terminal Neovim, never VS Code or nvimpager.
@@ -76,7 +77,8 @@ function M.open_palette()
 		title = "Actions",
 		items = palette_items(descriptors(current_context(), "palette")),
 		format = function(item)
-			local formatted = { { item.display } }
+			local prefix = item.recent and "󰋚 " or ""
+			local formatted = { { prefix .. item.display } }
 			if item.hint then
 				formatted[#formatted + 1] = { "  " .. item.hint, "Comment" }
 			end
@@ -84,6 +86,7 @@ function M.open_palette()
 		end,
 		preview = false,
 		layout = { preset = "select" },
+		matcher = { sort_empty = false },
 		confirm = function(picker, item)
 			if confirmed then
 				return

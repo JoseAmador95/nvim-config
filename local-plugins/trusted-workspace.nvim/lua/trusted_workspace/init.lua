@@ -676,6 +676,32 @@ local function same_entry_after_rename(left, right)
 		and same_time(left.mtime, right.mtime)
 end
 
+local function same_read_snapshot(left, right)
+	return left
+		and right
+		and left.type == "file"
+		and right.type == "file"
+		and same_identity(left, right)
+		and left.size == right.size
+		and left.mode == right.mode
+		and left.nlink == right.nlink
+		and same_time(left.mtime, right.mtime)
+		and same_time(left.ctime, right.ctime)
+end
+
+local function same_directory_snapshot(left, right)
+	return left
+		and right
+		and left.type == "directory"
+		and right.type == "directory"
+		and same_identity(left, right)
+		and left.size == right.size
+		and left.mode == right.mode
+		and left.nlink == right.nlink
+		and same_time(left.mtime, right.mtime)
+		and same_time(left.ctime, right.ctime)
+end
+
 local function state_path()
 	return vim.fs.joinpath(state.state_root, STATE_FILE)
 end
@@ -971,6 +997,32 @@ local function inspect_root(create)
 	return anchor
 end
 
+local function inspect_root_observational()
+	local info, err = lstat(state.state_root)
+	if err then
+		return nil, "could not inspect state root: " .. tostring(err)
+	end
+	if not info then
+		if state.root_identity then
+			return nil, "state root was removed after setup"
+		end
+		return false
+	end
+	local anchor, open_err = open_directory(state.state_root, false)
+	if not anchor then
+		return nil, open_err
+	end
+	if anchor.identity.mode % 512 ~= DIRECTORY_MODE then
+		close_anchor(anchor)
+		return nil, "state root permissions must already be 0700"
+	end
+	if state.root_identity and not same_identity(anchor.identity, state.root_identity) then
+		close_anchor(anchor)
+		return nil, "state root identity changed"
+	end
+	return anchor
+end
+
 local function entry_name(name)
 	if type(name) ~= "string" or name == "" or name == "." or name == ".." or name:find("/", 1, true) then
 		return nil, "filesystem entry name is invalid"
@@ -1065,7 +1117,8 @@ local function inspect_state_target(directory, name, label)
 	return entry_snapshot(directory, name or STATE_FILE, label or "state file", MAX_STATE_BYTES)
 end
 
-local function read_verified_file(directory, name, label, maximum, link_count)
+local function read_verified_file(directory, name, label, maximum, link_count, options)
+	options = options or {}
 	local before, inspect_err = entry_snapshot(directory, name, label, maximum, link_count)
 	if before == false then
 		return nil, "missing"
@@ -1078,21 +1131,40 @@ local function read_verified_file(directory, name, label, maximum, link_count)
 		return nil, opened_or_err
 	end
 	local opened = opened_or_err
-	if not same_identity(before, opened) or before.size ~= opened.size then
+	if
+		(options.repair_permissions == false and not same_read_snapshot(before, opened))
+		or (options.repair_permissions ~= false and (not same_identity(before, opened) or before.size ~= opened.size))
+	then
 		uv.fs_close(fd)
 		return nil, label .. " changed or became unsafe while it was opened: identity mismatch"
 	end
-	local secured, secure_err = uv.fs_fchmod(fd, FILE_MODE)
-	local contents, read_err = secured and uv.fs_read(fd, opened.size, 0) or nil
+	local secured, secure_err
+	local read_snapshot = opened
+	if options.repair_permissions == false then
+		secured = opened.mode % 512 == FILE_MODE
+		if not secured then
+			secure_err = "permissions must already be 0600"
+		end
+	else
+		secured, secure_err = uv.fs_fchmod(fd, FILE_MODE)
+		read_snapshot = secured and uv.fs_fstat(fd) or nil
+		secured = secured
+			and read_snapshot ~= nil
+			and same_identity(opened, read_snapshot)
+			and opened.size == read_snapshot.size
+			and read_snapshot.mode % 512 == FILE_MODE
+	end
+	local contents, read_err = secured and uv.fs_read(fd, read_snapshot.size, 0) or nil
 	local after, after_err = entry_snapshot(directory, name, label, maximum, link_count)
 	local closed, close_err = uv.fs_close(fd)
 	if not secured then
-		return nil, "could not secure " .. label .. ": " .. tostring(secure_err)
+		local action = options.repair_permissions == false and "use " or "secure "
+		return nil, "could not " .. action .. label .. ": " .. tostring(secure_err)
 	end
-	if not contents or #contents ~= opened.size then
+	if not contents or #contents ~= read_snapshot.size then
 		return nil, "could not read complete " .. label .. ": " .. tostring(read_err or "short read")
 	end
-	if not after or not same_identity(opened, after) or after.size ~= opened.size then
+	if not after or not same_read_snapshot(read_snapshot, after) then
 		return nil, label .. " changed while it was read: " .. tostring(after_err or "identity mismatch")
 	end
 	if not closed then
@@ -1101,10 +1173,16 @@ local function read_verified_file(directory, name, label, maximum, link_count)
 	return contents, nil, after
 end
 
-local function read_state(anchor)
+local function read_state(anchor, options)
+	options = options or {}
 	local owned = false
 	if not anchor then
-		local root, root_err = inspect_root(false)
+		local root, root_err
+		if options.observational == true then
+			root, root_err = inspect_root_observational()
+		else
+			root, root_err = inspect_root(false)
+		end
 		if root == false then
 			return { version = STATE_VERSION, approvals = {}, grants = {} }, nil, { exists = false }
 		end
@@ -1114,8 +1192,25 @@ local function read_state(anchor)
 		anchor = root
 		owned = true
 	end
-	local contents, read_err, file_stat = read_verified_file(anchor, STATE_FILE, "state file", MAX_STATE_BYTES)
+	local contents, read_err, file_stat = read_verified_file(
+		anchor,
+		STATE_FILE,
+		"state file",
+		MAX_STATE_BYTES,
+		nil,
+		{ repair_permissions = options.observational ~= true }
+	)
 	local function finish(persistent, finish_err, snapshot)
+		if options.observational == true and not finish_err then
+			local current = anchor and anchor.fd and uv.fs_fstat(anchor.fd) or nil
+			if
+				not same_directory_snapshot(anchor.identity, current)
+				or not directory_anchor_valid(anchor, state.state_root)
+			then
+				persistent = nil
+				finish_err = "state root changed or became unsafe while state was read"
+			end
+		end
 		if owned then
 			local closed, close_err = close_anchor(anchor)
 			if not closed and not finish_err then
@@ -2846,6 +2941,41 @@ function M.approvals(selector)
 	return copy(state.persistent.approvals[repo] or {})
 end
 
+function M.has_approval(repo_or_spec, source_id, fingerprint)
+	if not state.configured then
+		return nil, "setup must be called first"
+	end
+	local workspace, repo, source, expected = approval_args(repo_or_spec, source_id, fingerprint)
+	if workspace ~= nil then
+		local workspace_err
+		workspace, workspace_err = normalize_workspace(workspace, "approval.workspace")
+		if not workspace then
+			return nil, workspace_err
+		end
+		repo = workspace.repo_identity
+	end
+	local repo_ok, err = nonempty_string(repo, "approval.repo")
+	if not repo_ok then
+		return nil, err
+	end
+	local source_ok
+	source_ok, err = nonempty_string(source, "approval.source")
+	if not source_ok then
+		return nil, err
+	end
+	local fingerprint_ok
+	fingerprint_ok, err = nonempty_string(expected, "approval.fingerprint")
+	if not fingerprint_ok then
+		return nil, err
+	end
+	local persistent, read_err = read_state(nil, { observational = true })
+	if not persistent then
+		return nil, read_err
+	end
+	local by_repo = persistent.approvals[repo]
+	return type(by_repo) == "table" and by_repo[source] == expected
+end
+
 function M.revoke_approval(workspace_or_repo, source_id)
 	if not state.configured then
 		return nil, "setup must be called first"
@@ -2926,6 +3056,25 @@ function M.authorize(repo_or_spec, capability)
 		return nil, write_err
 	end
 	return true
+end
+
+function M.has_grant(repo_or_spec, capability)
+	if not state.configured then
+		return nil, "setup must be called first"
+	end
+	local repo, requested = grant_args(repo_or_spec, capability)
+	local repo_ok, err = nonempty_string(repo, "grant.repo")
+	if not repo_ok then
+		return nil, err
+	end
+	if not CAPABILITIES[requested] then
+		return nil, "grant.capability must be one of lint-format, test, build, debug"
+	end
+	local persistent, read_err = read_state(nil, { observational = true })
+	if not persistent then
+		return nil, read_err
+	end
+	return persistent.grants[repo] ~= nil and persistent.grants[repo][requested] == true
 end
 
 function M.revoke(repo_or_spec, capability)

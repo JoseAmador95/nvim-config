@@ -15,13 +15,37 @@
 --
 --   return {
 --     plugins = {
---       native_review = { hunk_context = 3, composer = { style = "card" } },
+--       native_review = {
+--         hunk_context = 3,
+--         max_files = 2000,
+--         max_file_bytes = 4 * 1024 * 1024,
+--         max_model_bytes = 64 * 1024 * 1024,
+--         composer = { style = "card" },
+--         -- comment_types = {}, -- replace the five host types with issue-only
+--       },
 --       clangd_compile_db = { path = "clangd", profile = "full" },
---       render_markdown = { preset = "subtle" },
+--       exact_editor = { activation_delay_ms = 300 },
+--       devcontainer_editor = {
+--         ui = {
+--           progress = true,
+--           progress_interval_ms = 500,
+--           log_width = 72,
+--           auto_open_log_on_error = true,
+--         },
+--       },
 --       theme_router = { background = "auto", transparent = false },
 --     },
 --     dap = { ui = "dap-ui" }, -- dap-ui | dap-view
---     ui = { redraw_profile = "full" }, -- full | low-bandwidth
+--     ui = {
+--       redraw_profile = "full", -- full | low-bandwidth
+--       -- inline_diagnostics = "settled-line", -- current-line | settled-line | off
+--       -- full_refresh_ms = 50, -- 8..1000; full profile only
+--       -- noice_progress_throttle_ms = 100, -- 8..5000
+--       -- bufferline_diagnostics = false,
+--       -- bufferline_hover = false,
+--     },
+--     clipboard = { osc52_max_bytes = 1024 * 1024 },
+--     whitespace = { max_bytes = 4 * 1024 * 1024, max_lines = 100000 },
 --     path = { "~/bin" },          -- dirs prepended to $PATH
 --     env = { FOO = "bar" },       -- environment variables to export
 --     plugins_dir = { "~/.nvim-plugins" }, -- dirs of extra lazy.nvim specs
@@ -36,6 +60,7 @@ local M = {}
 
 local TITLE = "nvim.config"
 local PROJECT_NAME = ".nvim-local.lua"
+local PROJECT_SOURCE_ID = "local-config-project"
 
 local KIBIBYTE = 1024
 local MEBIBYTE = 1024 * KIBIBYTE
@@ -49,24 +74,106 @@ local function nonempty_string(default)
 	return { type = "string", default = default, nonempty = true, no_nul = true }
 end
 
+-- The standalone plugin supplies only issue. This host keeps its existing
+-- reviewer vocabulary as an explicit, replaceable configuration default.
+local REVIEW_COMMENT_TYPE_DEFAULTS = {
+	{
+		id = "suggestion",
+		icon = "◆",
+		highlight = "NvimReviewCommentSuggestion",
+		default_link = "DiagnosticSignWarn",
+		rail_rank = 2,
+		severity = vim.diagnostic.severity.WARN,
+	},
+	{
+		id = "objection!",
+		icon = "!",
+		highlight = "NvimReviewCommentObjection",
+		default_link = "Special",
+		rail_rank = 4,
+		severity = vim.diagnostic.severity.INFO,
+	},
+	{
+		id = "question",
+		icon = "?",
+		highlight = "NvimReviewCommentQuestion",
+		default_link = "DiagnosticSignInfo",
+		rail_rank = 3,
+		severity = vim.diagnostic.severity.INFO,
+	},
+	{
+		id = "pedantic",
+		icon = "·",
+		highlight = "NvimReviewCommentPedantic",
+		default_link = "DiagnosticSignHint",
+		rail_rank = 5,
+		severity = vim.diagnostic.severity.HINT,
+	},
+	{
+		id = "praise",
+		icon = "♥",
+		highlight = "NvimReviewCommentPraise",
+		default_link = "DiagnosticSignOk",
+		rail_rank = 6,
+		severity = vim.diagnostic.severity.HINT,
+	},
+}
+
+local function safe_highlight_name(value)
+	return type(value) == "string" and #value <= 80 and value:match("^[A-Za-z][A-Za-z0-9_]*$") ~= nil
+end
+
+local function validate_review_comment_type(value, path, errors)
+	if type(value.id) == "string" and (#value.id > 64 or not value.id:match("^[a-z][a-z0-9_!%-]*$")) then
+		errors[#errors + 1] = path .. ".id: expected a lowercase ASCII token of at most 64 bytes"
+	end
+	if type(value.icon) == "string" then
+		local utf8_ok = pcall(vim.str_utfindex, value.icon)
+		local width_ok, width = pcall(vim.fn.strdisplaywidth, value.icon)
+		if #value.icon > 16 or value.icon:find("%c") or not utf8_ok or not width_ok or width < 1 or width > 2 then
+			errors[#errors + 1] = path .. ".icon: expected a UTF-8 icon of one or two display cells without controls"
+		end
+	end
+	for _, field in ipairs({ "highlight", "default_link" }) do
+		if type(value[field]) == "string" and not safe_highlight_name(value[field]) then
+			errors[#errors + 1] = path .. "." .. field .. ": expected a safe highlight group name"
+		end
+	end
+end
+
+local function validate_review_comment_types(value, path, errors)
+	local seen_ids = { issue = true, rationale = true }
+	local seen_ranks = { [1] = true }
+	local invalid = false
+	for index, definition in ipairs(value.comment_types) do
+		local item_path = ("%s.comment_types[%d]"):format(path, index)
+		if seen_ids[definition.id] then
+			errors[#errors + 1] = item_path .. ".id: duplicate or reserved review type"
+			invalid = true
+		end
+		if seen_ranks[definition.rail_rank] then
+			errors[#errors + 1] = item_path .. ".rail_rank: duplicate or reserved rail priority"
+			invalid = true
+		end
+		seen_ids[definition.id] = true
+		seen_ranks[definition.rail_rank] = true
+	end
+	if invalid then
+		value.comment_types = vim.deepcopy(REVIEW_COMMENT_TYPE_DEFAULTS)
+	end
+end
+
 local SCHEMA = {
 	plugins = {
 		type = "table",
 		fields = {
-			render_markdown = {
-				type = "table",
-				fields = {
-					preset = {
-						type = "enum",
-						values = { "subtle", "minimal", "semantic" },
-						default = "subtle",
-					},
-				},
-			},
 			native_review = {
 				type = "table",
 				fields = {
 					hunk_context = integer(3, 0, 1000),
+					max_files = integer(2000, 1),
+					max_file_bytes = integer(4 * MEBIBYTE, 1),
+					max_model_bytes = integer(64 * MEBIBYTE, 1),
 					layout = { type = "enum", values = { "inline", "split" }, default = "inline" },
 					context = { type = "enum", values = { "hunks", "full" }, default = "hunks" },
 					inline_comments = { type = "boolean", default = true },
@@ -74,6 +181,24 @@ local SCHEMA = {
 						type = "table",
 						fields = {
 							style = { type = "enum", values = { "card", "minimal" }, default = "card" },
+						},
+					},
+					comment_types = {
+						type = "list",
+						default = REVIEW_COMMENT_TYPE_DEFAULTS,
+						atomic = true,
+						max_items = 32,
+						item = {
+							type = "table",
+							fields = {
+								id = { type = "string", required = true },
+								icon = { type = "string", required = true },
+								highlight = { type = "string", required = true },
+								default_link = { type = "string", required = true },
+								rail_rank = { type = "number", required = true, finite = true, integer = true, min = 1 },
+								severity = integer(vim.diagnostic.severity.INFO, 1, 4),
+							},
+							validate = validate_review_comment_type,
 						},
 					},
 					panel = {
@@ -84,10 +209,12 @@ local SCHEMA = {
 						},
 					},
 				},
+				validate = validate_review_comment_types,
 			},
 			exact_editor = {
 				type = "table",
 				fields = {
+					activation_delay_ms = integer(300, 0, 5000),
 					workspace_retention = { type = "enum", values = { "visited" }, default = "visited" },
 					registry_heartbeat_seconds = integer(21600, 60, 604800),
 				},
@@ -95,12 +222,21 @@ local SCHEMA = {
 			devcontainer_editor = {
 				type = "table",
 				fields = {
-					cli = nonempty_string("devcontainer"),
+					docker_path = nonempty_string("docker"),
 					lockfile_policy = { type = "enum", values = { "preserve" }, default = "preserve" },
 					ssh_agent = { type = "enum", values = { "auto", "off" }, default = "auto" },
 					claim_timeout_ms = integer(2000, 100, 60000),
 					ack_timeout_ms = integer(5000, 100, 120000),
 					max_messages_per_tick = integer(32, 1, 256),
+					ui = {
+						type = "table",
+						fields = {
+							progress = { type = "boolean", default = true },
+							progress_interval_ms = integer(500, 200, 5000),
+							log_width = integer(72, 30, 160),
+							auto_open_log_on_error = { type = "boolean", default = true },
+						},
+					},
 				},
 			},
 			tab_first = {
@@ -120,6 +256,7 @@ local SCHEMA = {
 				type = "table",
 				fields = {
 					stop_timeout_ms = integer(5000, 100, 120000),
+					max_output_lines = integer(10000, 1, 100000),
 					buffer_mappings = {
 						type = "table",
 						fields = {
@@ -154,6 +291,7 @@ local SCHEMA = {
 			action_palette = {
 				type = "table",
 				fields = {
+					recent_limit = integer(5, 0, 20),
 					target_default = {
 						type = "enum",
 						values = { "exact", "buffer", "window", "none" },
@@ -183,6 +321,9 @@ local SCHEMA = {
 					poll_interval_ms = integer(500, 50, 60000),
 					max_lines = integer(100000, 1, 100000),
 					max_bytes = integer(64 * MEBIBYTE, KIBIBYTE, 64 * MEBIBYTE),
+					continuity_bytes = integer(64 * KIBIBYTE, KIBIBYTE, MEBIBYTE),
+					max_matches = integer(20000, 1, 100000),
+					scan_lines_per_tick = integer(1000, 1, 10000),
 				},
 			},
 			repo_scratch = {
@@ -197,6 +338,8 @@ local SCHEMA = {
 				type = "table",
 				fields = {
 					max_report_bytes = integer(50 * MEBIBYTE, KIBIBYTE, 256 * MEBIBYTE),
+					max_source_bytes = integer(16 * MEBIBYTE, 1, 16 * MEBIBYTE),
+					max_model_bytes = integer(64 * MEBIBYTE, 1, 64 * MEBIBYTE),
 					signs = { type = "enum", values = { "all", "covered", "missing", "none" }, default = "all" },
 					stale = { type = "enum", values = { "hide", "show" }, default = "hide" },
 				},
@@ -243,8 +386,8 @@ local SCHEMA = {
 						value = {
 							type = "table",
 							fields = {
-								max_bytes = integer(200 * KIBIBYTE, KIBIBYTE, 16 * MEBIBYTE),
-								indent = { type = "boolean", default = true },
+								max_bytes = integer(nil, KIBIBYTE, 16 * MEBIBYTE),
+								indent = { type = "boolean" },
 							},
 						},
 					},
@@ -271,6 +414,26 @@ local SCHEMA = {
 		type = "table",
 		fields = {
 			redraw_profile = { type = "enum", values = { "full", "low-bandwidth" }, default = "full" },
+			-- Intentionally no schema defaults: redraw_profile resolves these
+			-- absent overrides against the effective frontend/transport policy.
+			inline_diagnostics = { type = "enum", values = { "current-line", "settled-line", "off" } },
+			full_refresh_ms = integer(nil, 8, 1000),
+			noice_progress_throttle_ms = integer(nil, 8, 5000),
+			bufferline_diagnostics = { type = "boolean" },
+			bufferline_hover = { type = "boolean" },
+		},
+	},
+	clipboard = {
+		type = "table",
+		fields = {
+			osc52_max_bytes = integer(MEBIBYTE, 1, 16 * MEBIBYTE),
+		},
+	},
+	whitespace = {
+		type = "table",
+		fields = {
+			max_bytes = integer(4 * MEBIBYTE, 1, 64 * MEBIBYTE),
+			max_lines = integer(100000, 1, 1000000),
 		},
 	},
 	path = {
@@ -292,6 +455,9 @@ local SCHEMA = {
 }
 
 local cache = nil
+local host_cache_loaded = false
+local host_cache = nil
+local host_cache_status = nil
 local sources = {}
 local last_errors = {}
 local blocked_env_warnings = {}
@@ -378,6 +544,14 @@ local function load_host(path)
 	return result, result and "loaded" or "error"
 end
 
+local function read_host()
+	if not host_cache_loaded then
+		host_cache, host_cache_status = load_host(home_path())
+		host_cache_loaded = true
+	end
+	return vim.deepcopy(host_cache), host_cache_status
+end
+
 -- Project file: arbitrary directories are untrusted, so gate on vim.secure.read
 -- (the same trust flow as exrc). Returns nil if the user declines.
 local function load_project(path)
@@ -429,7 +603,7 @@ function validate_value(spec, value, path, errors)
 
 	if t == "list" then
 		if value == nil then
-			return spec.default or {}
+			return vim.deepcopy(spec.default or {})
 		end
 		-- Accept a bare string where a list of strings is expected.
 		if type(value) == "string" and spec.item and spec.item.type == "string" then
@@ -437,8 +611,17 @@ function validate_value(spec, value, path, errors)
 		end
 		if type(value) ~= "table" then
 			errors[#errors + 1] = string.format("%s: expected list, got %s", path, type(value))
-			return spec.default or {}
+			return vim.deepcopy(spec.default or {})
 		end
+		if spec.atomic and not vim.islist(value) then
+			errors[#errors + 1] = path .. ": expected a dense list"
+			return vim.deepcopy(spec.default or {})
+		end
+		if spec.max_items and #value > spec.max_items then
+			errors[#errors + 1] = string.format("%s: expected at most %d item(s)", path, spec.max_items)
+			return vim.deepcopy(spec.default or {})
+		end
+		local first_error = #errors
 		local out = {}
 		for i, item in ipairs(value) do
 			local before = #errors
@@ -450,6 +633,9 @@ function validate_value(spec, value, path, errors)
 		end
 		if spec.min_items and #out < spec.min_items then
 			errors[#errors + 1] = string.format("%s: expected at least %d valid item(s)", path, spec.min_items)
+			return vim.deepcopy(spec.default or {})
+		end
+		if spec.atomic and #errors > first_error then
 			return vim.deepcopy(spec.default or {})
 		end
 		return out
@@ -562,7 +748,7 @@ local function compute()
 	end
 
 	local home = home_path()
-	local host_cfg, host_status = load_host(home)
+	local host_cfg, host_status = read_host()
 	sources[#sources + 1] = { path = home, status = host_status }
 	local _, host_err = trusted_workspace.register_source({
 		id = "local-config-host",
@@ -587,7 +773,7 @@ local function compute()
 		if proj_cfg then
 			local repo = repo_identity()
 			local _, source_err = trusted_workspace.register_source({
-				id = "local-config-project",
+				id = PROJECT_SOURCE_ID,
 				layer = "project",
 				repo = repo,
 				fingerprint = fingerprint,
@@ -596,14 +782,14 @@ local function compute()
 			if source_err then
 				last_errors[#last_errors + 1] = "project source: " .. tostring(source_err)
 			else
-				local approved, approval_err = trusted_workspace.approve(repo, "local-config-project", fingerprint)
+				local approved, approval_err = trusted_workspace.approve(repo, PROJECT_SOURCE_ID, fingerprint)
 				if not approved then
 					last_errors[#last_errors + 1] = "project approval: " .. tostring(approval_err)
 				end
 			end
 		else
 			local _, source_err = trusted_workspace.register_source({
-				id = "local-config-project",
+				id = PROJECT_SOURCE_ID,
 				layer = "project",
 				repo = repo_identity(),
 				fingerprint = "disabled:" .. tostring(proj_status),
@@ -616,7 +802,7 @@ local function compute()
 		end
 	else
 		local _, source_err = trusted_workspace.register_source({
-			id = "local-config-project",
+			id = PROJECT_SOURCE_ID,
 			layer = "project",
 			repo = repo_identity(),
 			fingerprint = "disabled:same-as-host",
@@ -680,8 +866,37 @@ function M.plugin(name, default)
 	return vim.deepcopy(value)
 end
 
+-- Read one plugin's owner-controlled host policy without consulting a project
+-- file or initializing trusted-workspace state. Headless host adapters use this
+-- boundary before they have a normal editor session in which project approval
+-- can be requested safely.
+function M.host_plugin(name, default)
+	if type(name) ~= "string" or name == "" then
+		error("plugin name must be a non-empty string")
+	end
+	local spec = SCHEMA.plugins.fields[name]
+	if not spec then
+		error("unknown plugin name: " .. name)
+	end
+	local host = read_host() or {}
+	local raw_plugins = host.plugins
+	local errors = {}
+	if raw_plugins ~= nil and type(raw_plugins) ~= "table" then
+		errors[#errors + 1] = "plugins: expected table, got " .. type(raw_plugins)
+		raw_plugins = {}
+	end
+	local value = validate_value(spec, (raw_plugins or {})[name], "plugins." .. name, errors)
+	if #errors > 0 then
+		notify("Host plugin config issues:\n  " .. table.concat(errors, "\n  "))
+	end
+	return vim.tbl_deep_extend("force", vim.deepcopy(default or {}), value or {})
+end
+
 function M.reload()
 	cache = nil
+	host_cache_loaded = false
+	host_cache = nil
+	host_cache_status = nil
 	return M.read()
 end
 
@@ -708,6 +923,18 @@ end
 function M.errors()
 	M.read()
 	return vim.deepcopy(last_errors)
+end
+
+-- Return only state that has already been computed by a normal config caller.
+-- Health checks use this seam so observation can never trigger trust prompts,
+-- approvals, source registration, or persistent-state writes.
+function M.observation()
+	return vim.deepcopy({
+		evaluated = cache ~= nil,
+		config = cache,
+		errors = last_errors,
+		sources = sources,
+	})
 end
 
 local function redact_all(value)
@@ -764,47 +991,71 @@ local TEMPLATE = [[-- ~/.nvim-local.lua -- per-host Neovim settings (not under v
 
 return {
   plugins = {
-    render_markdown = { preset = "subtle" }, -- subtle | minimal | semantic; host-only
     native_review = {
       hunk_context = 3,
+      max_files = 2000, -- host-only model construction bound
+      max_file_bytes = 4 * 1024 * 1024, -- host-only OLD/NEW side bound
+      max_model_bytes = 64 * 1024 * 1024, -- host-only represented-side total
       layout = "inline", -- inline | split
       context = "hunks", -- hunks | full
       inline_comments = true,
       composer = { style = "card" }, -- card | minimal; host-only
+      -- comment_types = {}, -- replace the five host types with issue-only
       panel = { max_width = 200, max_height = 48 },
     },
 
     exact_editor = {
+      activation_delay_ms = 300, -- 0..5000; wait after UIEnter before socket/Git setup
       workspace_retention = "visited", -- visited
       registry_heartbeat_seconds = 21600, -- 60..604800
     },
     devcontainer_editor = {
-      cli = "devcontainer",
+      docker_path = "docker", -- use "podman" on hosts backed by Podman
       lockfile_policy = "preserve", -- lockfile updates require an explicit action
       ssh_agent = "auto", -- auto | off
       claim_timeout_ms = 2000,
       ack_timeout_ms = 5000,
       max_messages_per_tick = 32,
+      ui = {
+        progress = true,
+        progress_interval_ms = 500, -- 200..5000; explicit frames, friendly to SSH
+        log_width = 72, -- 30..160; capped to half of the current editor
+        auto_open_log_on_error = true,
+      },
     },
     tab_first = { history = { enabled = true, max_entries = 200, scope = "workspace" } },
     terminal_lifecycle = {
       stop_timeout_ms = 5000,
+      max_output_lines = 10000,
       buffer_mappings = { close = "q", open_location = "gf" }, -- either may be false
     },
     project_python = {
       test_runner = "pytest", -- pytest | unittest
       repl = { readiness_timeout_ms = 5000, poll_interval_ms = 50 },
     },
-    action_palette = { target_default = "exact", unavailable = "hide" },
+    action_palette = { target_default = "exact", unavailable = "hide", recent_limit = 5 }, -- 0..20, session-only
     diagram_view = {
       default_mode = "svg", -- svg | ascii
       stage_timeout_ms = 30000,
       max_stage_output_bytes = 16 * 1024 * 1024,
       cache = { max_age_seconds = 30 * 24 * 60 * 60, max_bytes = 256 * 1024 * 1024 },
     },
-    log_workbench = { poll_interval_ms = 500, max_lines = 100000, max_bytes = 64 * 1024 * 1024 },
+    log_workbench = {
+      poll_interval_ms = 500,
+      max_lines = 100000,
+      max_bytes = 64 * 1024 * 1024,
+      continuity_bytes = 64 * 1024, -- host-only continuity verification cost
+      max_matches = 20000, -- host-only match index bound
+      scan_lines_per_tick = 1000, -- host-only match scan cost
+    },
     repo_scratch = { retention_days = 30, lease_seconds = 300, prune_on_open = true },
-    coverage_workbench = { max_report_bytes = 50 * 1024 * 1024, signs = "all", stale = "hide" }, -- all | covered | missing | none
+    coverage_workbench = {
+      max_report_bytes = 50 * 1024 * 1024,
+      max_source_bytes = 16 * 1024 * 1024, -- hard per-source ceiling
+      max_model_bytes = 64 * 1024 * 1024, -- hard aggregate-source and normalized-model ceiling
+      signs = "all", -- all | covered | missing | none
+      stale = "hide", -- hide | show
+    },
     just_workbench = {
       binary = "just",
       root_mode = "repo", -- repo | nearest
@@ -835,8 +1086,23 @@ return {
   -- Debug UI selected at startup. $NVIM_DAP_UI overrides this value.
   dap = { ui = "dap-ui" }, -- dap-ui | dap-view
 
-  -- Terminal redraw policy selected explicitly per host. Never inferred from SSH.
-  ui = { redraw_profile = "full" }, -- full | low-bandwidth
+  -- Full/low-bandwidth stays explicit. The unset cost controls use quieter
+  -- defaults over SSH without changing the selected profile.
+  ui = {
+    redraw_profile = "full", -- full | low-bandwidth
+    -- inline_diagnostics = "settled-line", -- current-line | settled-line | off
+    -- full_refresh_ms = 50, -- 8..1000; full profile only (local 16, SSH 50)
+    -- noice_progress_throttle_ms = 100, -- 8..5000 (local full ~=33, SSH/low 100)
+    -- bufferline_diagnostics = false, -- local full true; SSH/low false
+    -- bufferline_hover = false, -- local full true; SSH/low false
+  },
+
+  -- Host-only bounds for terminal clipboard traffic and write-time cleanup.
+  clipboard = { osc52_max_bytes = 1024 * 1024 }, -- exact raw bytes, 1..16 MiB
+  whitespace = {
+    max_bytes = 4 * 1024 * 1024, -- 1..64 MiB
+    max_lines = 100000, -- 1..1000000
+  },
 
   -- Directories prepended to $PATH (expanded).
   path = {

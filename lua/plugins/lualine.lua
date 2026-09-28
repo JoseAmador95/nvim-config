@@ -44,7 +44,7 @@ return {
 		local function setup()
 			lualine.setup({
 				options = {
-					refresh = { refresh_time = redraw_profile.low_bandwidth() and 100 or 16 },
+					refresh = { refresh_time = redraw_profile.refresh_ms() },
 					theme = theme(),
 					icons_enabled = true,
 					component_separators = "",
@@ -76,7 +76,7 @@ return {
 						statusline.python,
 						statusline.cmake,
 						statusline.clangd,
-						"diagnostics",
+						{ "diagnostics", sources = { statusline.diagnostics } },
 						"filetype",
 					},
 					lualine_y = {},
@@ -101,6 +101,9 @@ return {
 		end
 
 		setup()
+		redraw_profile.register_repaint("lualine", function()
+			lualine.refresh({ place = { "statusline", "tabline", "winbar" } })
+		end)
 		statusline.setup_refresh()
 		vim.api.nvim_create_autocmd("ColorScheme", {
 			group = vim.api.nvim_create_augroup("NvimConfigLualineTheme", { clear = true }),

@@ -6,13 +6,56 @@ local review_scope = require("native_review.scope")
 
 local ZERO_OID = "^0+$"
 local LAYER_ORDER = { staged = 1, unstaged = 2, untracked = 3 }
+local BLOB_BATCH_SIZE = 512
+local READ_CHUNK_BYTES = 64 * 1024
+local DEFAULT_LIMITS = {
+	max_files = 2000,
+	max_file_bytes = 4 * 1024 * 1024,
+	max_model_bytes = 64 * 1024 * 1024,
+}
 
 local function failure(code, message, details)
 	return { code = code, message = message, details = details or {} }
 end
 
-local function binary_runner(command)
-	return vim.system(repo.clean_git_command(command), { text = false }):wait()
+local function limit_failure(limit, maximum, actual, entry, side)
+	return failure("review_limit_exceeded", ("review %s exceeded for %s"):format(limit, entry.path or "scope"), {
+		limit = limit,
+		maximum = maximum,
+		actual = actual,
+		path = side == "OLD" and (entry.old_path or entry.path) or (entry.new_path or entry.path),
+		layer = entry.layer or "history",
+		side = side,
+	})
+end
+
+local function option_limit(options, name)
+	local source = type(options.limits) == "table" and options.limits or options
+	local value = source[name]
+	if type(value) == "number" and value % 1 == 0 and value > 0 then
+		return value
+	end
+	return DEFAULT_LIMITS[name]
+end
+
+local function checkpoint(deps, phase, progress)
+	local callback = deps.control and deps.control.checkpoint
+	if type(callback) ~= "function" then
+		return true
+	end
+	local allowed, reason = callback(phase, vim.deepcopy(progress or {}))
+	if allowed == false then
+		return nil,
+			failure("review_cancelled", tostring(reason or "review model construction was cancelled"), {
+				phase = phase,
+				progress = vim.deepcopy(progress or {}),
+			})
+	end
+	return true
+end
+
+local function binary_runner(command, input)
+	return vim.system(repo.clean_git_command(command), { text = false, stdin = input }):wait()
 end
 
 local function dependencies(options)
@@ -24,6 +67,10 @@ local function dependencies(options)
 		read_file = options.read_file,
 		lstat = options.lstat or vim.uv.fs_lstat,
 		readlink = options.readlink or vim.uv.fs_readlink,
+		control = options.control,
+		max_files = option_limit(options, "max_files"),
+		max_file_bytes = option_limit(options, "max_file_bytes"),
+		max_model_bytes = option_limit(options, "max_model_bytes"),
 	}
 end
 
@@ -31,6 +78,10 @@ local function git(root, arguments, deps, context)
 	local output, err = deps.repo.git(root, arguments, deps.runner)
 	if not output then
 		return nil, failure("git_failed", context .. ": " .. tostring(err), { argv = arguments })
+	end
+	local continued, checkpoint_err = checkpoint(deps, "changes.git", { argv = arguments, context = context })
+	if not continued then
+		return nil, checkpoint_err
 	end
 	return output
 end
@@ -137,7 +188,19 @@ local function safe_worktree_path(root, relative)
 	return path
 end
 
-local function read_regular(path)
+local WORKTREE_IDENTITY_FIELDS = { "type", "size", "mode", "dev", "ino", "uid", "gid", "nlink", "mtime", "ctime" }
+
+local function worktree_identity(stat)
+	local identity = {}
+	for _, field in ipairs(WORKTREE_IDENTITY_FIELDS) do
+		if stat[field] ~= nil then
+			identity[field] = vim.deepcopy(stat[field])
+		end
+	end
+	return identity
+end
+
+local function read_regular(path, entry, side, expected, deps)
 	local handle, open_err = vim.uv.fs_open(path, "r", 0)
 	if not handle then
 		return nil, open_err
@@ -147,12 +210,31 @@ local function read_regular(path)
 		vim.uv.fs_close(handle)
 		return nil, stat_err
 	end
+	if stat.type ~= "file" or type(stat.size) ~= "number" or stat.size < 0 then
+		vim.uv.fs_close(handle)
+		return nil, "path is no longer a regular file"
+	end
+	if stat.size > deps.max_file_bytes then
+		vim.uv.fs_close(handle)
+		return nil, limit_failure("max_file_bytes", deps.max_file_bytes, stat.size, entry, side)
+	end
+	if stat.size ~= expected then
+		vim.uv.fs_close(handle)
+		return nil,
+			failure("working_tree_changed", "working-tree file size changed during review model construction", {
+				path = side == "OLD" and entry.old_path or entry.new_path,
+				layer = entry.layer or "history",
+				side = side,
+				expected = expected,
+				actual = stat.size,
+			})
+	end
 	local chunks = {}
 	local offset = 0
 	local read_err
 	while offset < stat.size do
 		local value
-		value, read_err = vim.uv.fs_read(handle, stat.size - offset, offset)
+		value, read_err = vim.uv.fs_read(handle, math.min(READ_CHUNK_BYTES, stat.size - offset), offset)
 		if value == nil then
 			break
 		end
@@ -163,70 +245,145 @@ local function read_regular(path)
 		chunks[#chunks + 1] = value
 		offset = offset + #value
 	end
+	local final_stat, final_stat_err = vim.uv.fs_fstat(handle)
 	vim.uv.fs_close(handle)
 	if read_err then
 		return nil, read_err
 	end
+	if not final_stat then
+		return nil, final_stat_err
+	end
+	if final_stat.size > deps.max_file_bytes then
+		return nil, limit_failure("max_file_bytes", deps.max_file_bytes, final_stat.size, entry, side)
+	end
+	if final_stat.size ~= expected then
+		return nil,
+			failure("working_tree_changed", "working-tree file size changed while it was read", {
+				path = side == "OLD" and entry.old_path or entry.new_path,
+				layer = entry.layer or "history",
+				side = side,
+				expected = expected,
+				actual = final_stat.size,
+			})
+	end
 	return table.concat(chunks)
 end
 
-local function read_worktree(root, path, deps)
+local function inspect_worktree(root, entry, side, deps)
+	local path = side == "OLD" and entry.old_path or entry.new_path
 	local full_path, path_err = safe_worktree_path(root, path)
 	if not full_path then
 		return nil, failure("unsafe_path", path_err, { path = path })
-	end
-	if deps.read_file then
-		local value, err = deps.read_file(full_path, path)
-		if value == nil then
-			return nil, failure("worktree_unavailable", tostring(err), { path = path })
-		end
-		return value
 	end
 	local stat, stat_err = deps.lstat(full_path)
 	if not stat then
 		return nil, failure("worktree_unavailable", tostring(stat_err), { path = path })
 	end
-	if stat.type == "link" then
-		local target, target_err = deps.readlink(full_path)
-		if not target then
-			return nil, failure("worktree_unavailable", tostring(target_err), { path = path })
-		end
-		return target
-	end
-	if stat.type ~= "file" then
+	if (stat.type ~= "file" and stat.type ~= "link") or type(stat.size) ~= "number" or stat.size < 0 then
 		return nil, failure("worktree_unavailable", "path is not a regular file or symlink", { path = path })
 	end
-	local value, read_err = read_regular(full_path)
+	if stat.size > deps.max_file_bytes then
+		return nil, limit_failure("max_file_bytes", deps.max_file_bytes, stat.size, entry, side)
+	end
+	return {
+		entry = entry,
+		side = side,
+		source = "worktree",
+		path = path,
+		full_path = full_path,
+		kind = stat.type,
+		size = stat.size,
+		identity = worktree_identity(stat),
+	}
+end
+
+local function read_worktree(plan, deps)
+	local stat, stat_err = deps.lstat(plan.full_path)
+	if not stat then
+		return nil, failure("worktree_unavailable", tostring(stat_err), { path = plan.path })
+	end
+	if stat.type ~= plan.kind or type(stat.size) ~= "number" or stat.size < 0 then
+		return nil,
+			failure("working_tree_changed", "working-tree file type changed during review model construction", {
+				path = plan.path,
+				layer = plan.entry.layer or "history",
+				side = plan.side,
+			})
+	end
+	local identity = worktree_identity(stat)
+	if not vim.deep_equal(identity, plan.identity) then
+		return nil,
+			failure("working_tree_changed", "working-tree metadata changed before content was read", {
+				path = plan.path,
+				layer = plan.entry.layer or "history",
+				side = plan.side,
+				expected = plan.identity,
+				actual = identity,
+			})
+	end
+	if stat.size > deps.max_file_bytes then
+		return nil, limit_failure("max_file_bytes", deps.max_file_bytes, stat.size, plan.entry, plan.side)
+	end
+	if stat.size ~= plan.size then
+		return nil,
+			failure("working_tree_changed", "working-tree file size changed during review model construction", {
+				path = plan.path,
+				layer = plan.entry.layer or "history",
+				side = plan.side,
+				expected = plan.size,
+				actual = stat.size,
+			})
+	end
+	local value
+	local read_err
+	if plan.kind == "link" then
+		value, read_err = deps.readlink(plan.full_path)
+	elseif deps.read_file then
+		value, read_err = deps.read_file(plan.full_path, plan.path)
+	else
+		value, read_err = read_regular(plan.full_path, plan.entry, plan.side, plan.size, deps)
+	end
 	if value == nil then
-		return nil, failure("worktree_unavailable", tostring(read_err), { path = path })
+		if type(read_err) == "table" then
+			return nil, read_err
+		end
+		return nil, failure("worktree_unavailable", tostring(read_err), { path = plan.path })
+	end
+	if type(value) ~= "string" then
+		return nil, failure("worktree_unavailable", "file reader returned non-string content", { path = plan.path })
+	end
+	if #value > deps.max_file_bytes then
+		return nil, limit_failure("max_file_bytes", deps.max_file_bytes, #value, plan.entry, plan.side)
+	end
+	if #value ~= plan.size then
+		return nil,
+			failure("working_tree_changed", "working-tree bytes changed during review model construction", {
+				path = plan.path,
+				layer = plan.entry.layer or "history",
+				side = plan.side,
+				expected = plan.size,
+				actual = #value,
+			})
+	end
+	local final_stat, final_err = deps.lstat(plan.full_path)
+	if not final_stat then
+		return nil, failure("worktree_unavailable", tostring(final_err), { path = plan.path })
+	end
+	local final_identity = worktree_identity(final_stat)
+	if not vim.deep_equal(final_identity, plan.identity) then
+		return nil,
+			failure("working_tree_changed", "working-tree metadata changed while content was read", {
+				path = plan.path,
+				layer = plan.entry.layer or "history",
+				side = plan.side,
+				expected = plan.identity,
+				actual = final_identity,
+			})
 	end
 	return value
 end
 
-local function read_blob(root, oid, deps)
-	if not oid then
-		return ""
-	end
-	if not valid_oid(oid) then
-		return nil, failure("invalid_git_output", "Git returned an invalid blob object ID", { oid = oid })
-	end
-	return git(root, { "cat-file", "blob", oid }, deps, "cannot read exact blob " .. oid)
-end
-
-local function entry_content(root, entry, source, deps)
-	if source == "old" then
-		return read_blob(root, entry.old_oid, deps)
-	end
-	if not entry.new_path then
-		return ""
-	end
-	if entry.layer == "unstaged" or entry.layer == "untracked" then
-		return read_worktree(root, entry.new_path, deps)
-	end
-	return read_blob(root, entry.new_oid, deps)
-end
-
-local function finish_entry(root, entry, deps)
+local function finish_entry_metadata(entry)
 	entry.renamed = entry.status == "R"
 	entry.copied = entry.status == "C"
 	entry.added = entry.status == "A" or entry.old_path == nil
@@ -235,26 +392,290 @@ local function finish_entry(root, entry, deps)
 	entry.conflicted = entry.status == "U"
 	entry.path = entry.new_path or entry.old_path
 	entry.identity = table.concat({ entry.layer or "history", entry.old_path or "", entry.new_path or "" }, "\0")
-
-	if not entry.submodule and not entry.conflicted then
-		local old_text, old_err = entry_content(root, entry, "old", deps)
-		if old_text == nil then
-			return nil, old_err
-		end
-		local new_text, new_err = entry_content(root, entry, "new", deps)
-		if new_text == nil then
-			return nil, new_err
-		end
-		entry.old_text = old_text
-		entry.new_text = new_text
-		entry.binary = old_text:find("\0", 1, true) ~= nil or new_text:find("\0", 1, true) ~= nil
-	else
-		entry.binary = false
-	end
-	entry.binary = entry.binary == true
-	entry.metadata_only = entry.binary or entry.submodule or entry.conflicted
-	entry.hunks = entry.metadata_only and {} or vim.diff(entry.old_text, entry.new_text, { result_type = "indices" })
+	entry.binary = false
+	entry.metadata_only = entry.submodule or entry.conflicted
 	return entry
+end
+
+local function blob_plan(entry, side)
+	local oid = side == "OLD" and entry.old_oid or entry.new_oid
+	local path = side == "OLD" and entry.old_path or entry.new_path
+	if not path then
+		return nil
+	end
+	if not valid_oid(oid or "") then
+		return nil, failure("invalid_git_output", "Git returned an invalid blob object ID", { oid = oid, path = path })
+	end
+	return { entry = entry, side = side, source = "blob", path = path, oid = oid }
+end
+
+local function add_plan(plans, descriptors, entry, side, plan)
+	plans[entry] = plans[entry] or {}
+	plans[entry][side == "OLD" and "old" or "new"] = plan
+	descriptors[#descriptors + 1] = plan
+end
+
+local function result_output(result)
+	if not result or result.code ~= 0 then
+		local reason = result and vim.trim(result.stderr or "") or "could not start Git"
+		return nil, reason ~= "" and reason or "Git exited with a nonzero status"
+	end
+	return result.stdout or ""
+end
+
+local function parse_blob_batch(output, batch)
+	local lines = vim.split(output, "\n", { plain = true })
+	if lines[#lines] == "" then
+		table.remove(lines)
+	end
+	if #lines ~= #batch then
+		return nil, "Git returned incomplete blob metadata"
+	end
+	local sizes = {}
+	for index, line in ipairs(lines) do
+		local oid, kind, size_text = line:match("^([0-9a-f]+) ([^ ]+) (%d+)$")
+		if oid ~= batch[index] or kind ~= "blob" then
+			return nil, "Git returned invalid blob metadata"
+		end
+		local size = tonumber(size_text)
+		if not size or size < 0 or size % 1 ~= 0 then
+			return nil, "Git returned an invalid blob size"
+		end
+		sizes[oid] = size
+	end
+	return sizes
+end
+
+local function batch_blob_sizes(root, oids, deps)
+	local sizes = {}
+	if #oids == 0 then
+		return sizes
+	end
+	if not deps.runner then
+		for index, oid in ipairs(oids) do
+			local output, err = git(root, { "cat-file", "-s", oid }, deps, "cannot inspect exact blob " .. oid)
+			if not output then
+				return nil, err
+			end
+			local size = tonumber(vim.trim(output))
+			if not size or size < 0 or size % 1 ~= 0 then
+				return nil, failure("invalid_git_output", "Git returned an invalid blob size", { oid = oid })
+			end
+			sizes[oid] = size
+			local continued, checkpoint_err =
+				checkpoint(deps, "changes.blob_metadata", { index = index, total = #oids, oid = oid })
+			if not continued then
+				return nil, checkpoint_err
+			end
+		end
+		return sizes
+	end
+	local batch_number = 0
+	for first = 1, #oids, BLOB_BATCH_SIZE do
+		local batch = vim.list_slice(oids, first, math.min(#oids, first + BLOB_BATCH_SIZE - 1))
+		batch_number = batch_number + 1
+		local continued, checkpoint_err = checkpoint(deps, "changes.blob_metadata_batch", {
+			batch = batch_number,
+			processed = first - 1,
+			total = #oids,
+		})
+		if not continued then
+			return nil, checkpoint_err
+		end
+		local command = { "git", "-C", root, "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)" }
+		local output, run_err = result_output(deps.runner(command, table.concat(batch, "\n") .. "\n"))
+		if not output then
+			return nil,
+				failure("git_failed", "cannot inspect exact blob batch: " .. tostring(run_err), {
+					argv = vim.list_slice(command, 4),
+				})
+		end
+		local parsed, parse_err = parse_blob_batch(output, batch)
+		if not parsed then
+			return nil, failure("invalid_git_output", parse_err, { oids = vim.deepcopy(batch) })
+		end
+		for oid, size in pairs(parsed) do
+			sizes[oid] = size
+		end
+	end
+	return sizes
+end
+
+local function preflight(root, entries, deps)
+	if #entries > deps.max_files then
+		local entry = finish_entry_metadata(entries[deps.max_files + 1])
+		local side = entry.new_path and "NEW" or "OLD"
+		return nil, limit_failure("max_files", deps.max_files, #entries, entry, side)
+	end
+	local plans = {}
+	local descriptors = {}
+	local unique_oids = {}
+	local seen_oids = {}
+	for index, entry in ipairs(entries) do
+		finish_entry_metadata(entry)
+		local continued, checkpoint_err = checkpoint(deps, "changes.file_metadata", {
+			index = index,
+			total = #entries,
+			path = entry.path,
+			layer = entry.layer or "history",
+		})
+		if not continued then
+			return nil, checkpoint_err
+		end
+		if not entry.metadata_only then
+			if entry.old_path then
+				local plan, plan_err = blob_plan(entry, "OLD")
+				if not plan then
+					return nil, plan_err
+				end
+				add_plan(plans, descriptors, entry, "OLD", plan)
+			end
+			if entry.new_path then
+				local plan
+				local plan_err
+				if entry.layer == "unstaged" or entry.layer == "untracked" then
+					plan, plan_err = inspect_worktree(root, entry, "NEW", deps)
+				else
+					plan, plan_err = blob_plan(entry, "NEW")
+				end
+				if not plan then
+					return nil, plan_err
+				end
+				add_plan(plans, descriptors, entry, "NEW", plan)
+			end
+		end
+	end
+	for _, descriptor in ipairs(descriptors) do
+		if descriptor.source == "blob" and not seen_oids[descriptor.oid] then
+			seen_oids[descriptor.oid] = true
+			unique_oids[#unique_oids + 1] = descriptor.oid
+		end
+	end
+	local blob_sizes, blob_err = batch_blob_sizes(root, unique_oids, deps)
+	if not blob_sizes then
+		return nil, blob_err
+	end
+	local represented_bytes = 0
+	for _, descriptor in ipairs(descriptors) do
+		if descriptor.source == "blob" then
+			descriptor.size = blob_sizes[descriptor.oid]
+		end
+		if descriptor.size > deps.max_file_bytes then
+			return nil,
+				limit_failure("max_file_bytes", deps.max_file_bytes, descriptor.size, descriptor.entry, descriptor.side)
+		end
+		represented_bytes = represented_bytes + descriptor.size
+		if represented_bytes > deps.max_model_bytes then
+			return nil,
+				limit_failure(
+					"max_model_bytes",
+					deps.max_model_bytes,
+					represented_bytes,
+					descriptor.entry,
+					descriptor.side
+				)
+		end
+	end
+	return plans
+end
+
+local function read_blob(root, plan, deps)
+	local value, err = git(root, { "cat-file", "blob", plan.oid }, deps, "cannot read exact blob " .. plan.oid)
+	if value == nil then
+		return nil, err
+	end
+	if type(value) ~= "string" then
+		return nil,
+			failure("invalid_git_output", "Git returned non-string blob content", {
+				oid = plan.oid,
+				path = plan.path,
+				layer = plan.entry.layer or "history",
+				side = plan.side,
+			})
+	end
+	if #value > deps.max_file_bytes then
+		return nil, limit_failure("max_file_bytes", deps.max_file_bytes, #value, plan.entry, plan.side)
+	end
+	if #value ~= plan.size then
+		return nil,
+			failure("invalid_git_output", "Git blob size changed after metadata preflight", {
+				oid = plan.oid,
+				path = plan.path,
+				layer = plan.entry.layer or "history",
+				side = plan.side,
+				expected = plan.size,
+				actual = #value,
+			})
+	end
+	return value
+end
+
+local function read_side(root, plan, deps)
+	if not plan then
+		return ""
+	end
+	if plan.source == "worktree" then
+		return read_worktree(plan, deps)
+	end
+	return read_blob(root, plan, deps)
+end
+
+local function materialize(root, entries, plans, deps)
+	local represented_bytes = 0
+	for index, entry in ipairs(entries) do
+		local continued, checkpoint_err = checkpoint(deps, "changes.file_read", {
+			index = index,
+			total = #entries,
+			path = entry.path,
+			layer = entry.layer or "history",
+		})
+		if not continued then
+			return nil, checkpoint_err
+		end
+		if not entry.metadata_only then
+			local entry_plans = plans[entry] or {}
+			local old_text, old_err = read_side(root, entry_plans.old, deps)
+			if old_text == nil then
+				return nil, old_err
+			end
+			local new_text, new_err = read_side(root, entry_plans.new, deps)
+			if new_text == nil then
+				return nil, new_err
+			end
+			for _, side_value in ipairs({ { "OLD", old_text, entry_plans.old }, { "NEW", new_text, entry_plans.new } }) do
+				if side_value[3] then
+					represented_bytes = represented_bytes + #side_value[2]
+					if represented_bytes > deps.max_model_bytes then
+						return nil,
+							limit_failure(
+								"max_model_bytes",
+								deps.max_model_bytes,
+								represented_bytes,
+								entry,
+								side_value[1]
+							)
+					end
+				end
+			end
+			entry.old_text = old_text
+			entry.new_text = new_text
+			entry.binary = old_text:find("\0", 1, true) ~= nil or new_text:find("\0", 1, true) ~= nil
+		end
+		entry.binary = entry.binary == true
+		entry.metadata_only = entry.metadata_only or entry.binary
+		continued, checkpoint_err = checkpoint(deps, "changes.diff", {
+			index = index,
+			total = #entries,
+			path = entry.path,
+			layer = entry.layer or "history",
+		})
+		if not continued then
+			return nil, checkpoint_err
+		end
+		entry.hunks = entry.metadata_only and {}
+			or vim.diff(entry.old_text, entry.new_text, { result_type = "indices" })
+	end
+	return true
 end
 
 local function raw_command(arguments)
@@ -280,13 +701,6 @@ local function load_raw(root, arguments, layer, deps)
 	local entries, parse_err = parse_raw(output, layer)
 	if not entries then
 		return nil, parse_err
-	end
-	for index, entry in ipairs(entries) do
-		local finished, finish_err = finish_entry(root, entry, deps)
-		if not finished then
-			return nil, finish_err
-		end
-		entries[index] = finished
 	end
 	return entries
 end
@@ -332,11 +746,7 @@ local function load_untracked(root, deps)
 			old_path = nil,
 			new_path = path,
 		}
-		local finished, finish_err = finish_entry(root, entry, deps)
-		if not finished then
-			return nil, finish_err
-		end
-		entries[#entries + 1] = finished
+		entries[#entries + 1] = entry
 	end
 	return entries
 end
@@ -524,8 +934,16 @@ function M.build(root, scope, options)
 		return nil, failure("invalid_scope", "scope root does not match the requested repository")
 	end
 	canonical = vim.fs.normalize(canonical)
+	local scope_options = {
+		repo = deps.repo,
+		runner = deps.runner,
+		control = deps.control,
+		max_files = deps.max_files,
+		max_file_bytes = deps.max_file_bytes,
+		max_model_bytes = deps.max_model_bytes,
+	}
 	if scope.kind == "working" and type(scope.fingerprint) == "string" then
-		local drift, drift_err = review_scope.detect_drift(scope, { repo = deps.repo })
+		local drift, drift_err = review_scope.detect_drift(scope, scope_options)
 		if not drift then
 			return nil, drift_err
 		end
@@ -544,8 +962,16 @@ function M.build(root, scope, options)
 	if not built then
 		return nil, build_err
 	end
+	local plans, preflight_err = preflight(canonical, built.entries, deps)
+	if not plans then
+		return nil, preflight_err
+	end
+	local materialized, materialize_err = materialize(canonical, built.entries, plans, deps)
+	if not materialized then
+		return nil, materialize_err
+	end
 	if scope.kind == "working" and type(scope.fingerprint) == "string" then
-		local drift, drift_err = review_scope.detect_drift(scope, { repo = deps.repo })
+		local drift, drift_err = review_scope.detect_drift(scope, scope_options)
 		if not drift then
 			return nil, drift_err
 		end

@@ -243,6 +243,31 @@ test("confirmation is intrinsic and a bound callback executes at most once", fun
 	equal({ { id = "sample.confirm", surface = "context" } }, executions, "exactly-once execution")
 end)
 
+test("confirmation accepts only an explicit boolean true", function()
+	local decision
+	local executions = 0
+	local registry = action_palette.new({
+		confirm = function(_, callback)
+			decision = callback
+		end,
+	})
+	registry:register_catalog(catalog(), {
+		supports = function()
+			return true
+		end,
+		confirmation = function(id)
+			return id == "sample.confirm" and "Proceed?" or nil
+		end,
+		execute = function()
+			executions = executions + 1
+		end,
+	})
+	assert(registry:bind("sample.confirm", { target = action_palette.capture_target() }, "context")())
+	decision("yes")
+	decision(true)
+	equal(0, executions, "truthy non-boolean confirmation bypassed explicit acceptance")
+end)
+
 test("confirmation revalidates the target again immediately before execution", function()
 	local decision
 	local executions = 0
@@ -297,6 +322,127 @@ test("confirmation fails closed without a host presentation adapter", function()
 	assert(not ok and err == "Confirmation adapter is unavailable", "missing confirmation adapter did not fail closed")
 	equal(0, executions, "confirmed action executed without a host presentation adapter")
 	equal(err, notification, "missing confirmation adapter was not reported")
+end)
+
+test("adapter failures are contained and consume the bound invocation", function()
+	local executions = 0
+	local notifications = {}
+	local events = {}
+	local registry = action_palette.new({
+		target = {
+			revalidate = function()
+				error("target exploded")
+			end,
+		},
+		notify = function(message)
+			notifications[#notifications + 1] = tostring(message)
+		end,
+		event = function(event)
+			events[#events + 1] = event
+		end,
+	})
+	registry:register_catalog(catalog(), {
+		supports = function()
+			return true
+		end,
+		execute = function()
+			executions = executions + 1
+		end,
+	})
+	local run = registry:bind("sample.run", { target = action_palette.capture_target() }, "palette")
+	local ok, err = run()
+	assert(not ok and err:find("target revalidation failed", 1, true), tostring(err))
+	equal(0, executions, "failed target adapter reached execution")
+	assert(not run(), "failed target adapter left a reusable invocation")
+	equal("rejected", events[1].kind)
+	assert(notifications[1]:find("target exploded", 1, true), notifications[1])
+
+	registry = action_palette.new({
+		refresh_context = function()
+			error("refresh exploded")
+		end,
+		notify = function(message)
+			notifications[#notifications + 1] = tostring(message)
+		end,
+	})
+	registry:register_catalog(catalog(), {
+		supports = function()
+			return true
+		end,
+		execute = function()
+			executions = executions + 1
+		end,
+	})
+	run = registry:bind("sample.run", { target = action_palette.capture_target() }, "palette")
+	ok, err = run()
+	assert(not ok and err:find("context refresh failed", 1, true), tostring(err))
+	equal(0, executions, "failed refresh adapter reached execution")
+
+	registry = action_palette.new({
+		confirm = function()
+			error("confirm exploded")
+		end,
+		notify = function(message)
+			notifications[#notifications + 1] = tostring(message)
+		end,
+	})
+	registry:register_catalog(catalog(), {
+		supports = function()
+			return true
+		end,
+		confirmation = function(id)
+			return id == "sample.confirm" and "Proceed?" or nil
+		end,
+		execute = function()
+			executions = executions + 1
+		end,
+	})
+	run = registry:bind("sample.confirm", { target = action_palette.capture_target() }, "palette")
+	ok, err = run()
+	assert(not ok and err:find("Confirmation adapter failed", 1, true), tostring(err))
+	equal(0, executions, "failed confirmation adapter reached execution")
+	assert(not run(), "failed confirmation adapter left a reusable invocation")
+end)
+
+test("a confirmation exception after resolving is still reported once", function()
+	local executions = 0
+	local events = {}
+	local notifications = {}
+	local registry = action_palette.new({
+		confirm = function(_, callback)
+			callback(true)
+			error("late confirm failure")
+		end,
+		notify = function(message)
+			notifications[#notifications + 1] = tostring(message)
+		end,
+		event = function(event)
+			events[#events + 1] = event
+		end,
+	})
+	registry:register_catalog(catalog(), {
+		supports = function()
+			return true
+		end,
+		confirmation = function(id)
+			return id == "sample.confirm" and "Proceed?" or nil
+		end,
+		execute = function()
+			executions = executions + 1
+		end,
+	})
+	local run = registry:bind("sample.confirm", { target = action_palette.capture_target() }, "palette")
+	local ok, err = run()
+	assert(not ok and err:find("late confirm failure", 1, true), tostring(err))
+	equal(1, executions, "late adapter failure repeated or suppressed accepted execution")
+	equal(
+		{ "executed", "error" },
+		vim.tbl_map(function(event)
+			return event.kind
+		end, events)
+	)
+	equal(1, #notifications, "late confirmation failure was not reported exactly once")
+	assert(not run(), "late confirmation failure left a reusable invocation")
 end)
 
 test("plugin setup creates no global commands, mappings, or config imports", function()

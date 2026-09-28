@@ -14,6 +14,13 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
+package.loaded["config.local_config"] = {
+	plugin = function(name, defaults)
+		assert(name == "tab_first")
+		return vim.deepcopy(defaults)
+	end,
+}
+
 local failures = {}
 local count = 0
 
@@ -185,7 +192,22 @@ test("transient tabs are neither captured nor reused by history restoration", fu
 	equal(vim.uv.fs_realpath(second), current_path(), "history restored the wrong destination")
 end)
 
-test("exhausted semantic history delegates to the native jumplist", function()
+test("empty semantic history uses real counted Ctrl-O and Ctrl-I fallback", function()
+	reset_editor()
+	local path = make_file("native-fallback")
+	vim.cmd("edit! " .. vim.fn.fnameescape(path))
+	vim.api.nvim_win_set_cursor(0, { 1, 0 })
+	vim.cmd("normal! m'")
+	vim.cmd("normal! G")
+	equal({ 3, 0 }, vim.api.nvim_win_get_cursor(0), "native fixture did not jump forward")
+
+	assert(not history.back(), "native Ctrl-O reported a semantic traversal")
+	equal({ 1, 0 }, vim.api.nvim_win_get_cursor(0), "empty-history Ctrl-O fallback did not execute")
+	assert(not history.forward(), "native Ctrl-I reported a semantic traversal")
+	equal({ 3, 0 }, vim.api.nvim_win_get_cursor(0), "empty-history Ctrl-I fallback did not execute")
+end)
+
+test("semantic boundaries never escape into the native jumplist", function()
 	reset_editor()
 	local first = make_file("fallback-first")
 	local second = make_file("fallback-second")
@@ -203,12 +225,48 @@ test("exhausted semantic history delegates to the native jumplist", function()
 	assert(history.back(), "semantic back did not reach the first entry")
 	equal({}, fallbacks, "native back ran before semantic history was exhausted")
 	assert(not history.back(), "exhausted semantic back reported a semantic traversal")
-	equal({ -1 }, fallbacks, "exhausted back did not delegate to the native jumplist")
+	equal({}, fallbacks, "exhausted back escaped into native history")
 
 	assert(history.forward(), "semantic forward did not reach the second entry")
-	equal({ -1 }, fallbacks, "native forward ran before semantic history was exhausted")
+	equal({}, fallbacks, "native forward ran before semantic history was exhausted")
 	assert(not history.forward(), "exhausted semantic forward reported a semantic traversal")
-	equal({ -1, 1 }, fallbacks, "exhausted forward did not delegate to the native jumplist")
+	equal({}, fallbacks, "exhausted forward escaped into native history")
+end)
+
+test("history picker renders provider labels without filesystem fields", function()
+	reset_editor()
+	local runtime = require("tab_first")
+	local current = {
+		kind = "provider",
+		provider = "review",
+		document_key = "session:file.lua",
+		location_key = "1:1",
+		label = "Review file.lua:1:1",
+		payload = {},
+	}
+	local destination = vim.tbl_extend("force", vim.deepcopy(current), {
+		location_key = "2:1",
+		label = "Review file.lua:2:1",
+	})
+	runtime.setup({
+		history = {
+			capture_location = function()
+				return destination
+			end,
+		},
+	})
+	assert(history.record_transition(current, destination), "provider picker fixture was not recorded")
+	local original_select = vim.ui.select
+	local choices
+	vim.ui.select = function(items)
+		choices = items
+	end
+	local ok, err = xpcall(history.select, debug.traceback)
+	vim.ui.select = original_select
+	assert(ok, err)
+	equal("● Review file.lua:2:1", choices[1].label, "current provider label changed")
+	equal("  Review file.lua:1:1", choices[2].label, "provider origin label changed")
+	runtime.setup({ history = {} })
 end)
 
 test("setup exposes commands and back-forward mappings", function()
@@ -222,6 +280,27 @@ test("setup exposes commands and back-forward mappings", function()
 	equal("Navigation back", vim.fn.maparg("<C-o>", "n", false, true).desc, "back mapping")
 	equal("Navigation forward", vim.fn.maparg("<C-i>", "n", false, true).desc, "forward mapping")
 	equal("Show navigation history", vim.fn.maparg("<leader>nh", "n", false, true).desc, "history mapping")
+	local original_back = history.back
+	local original_forward = history.forward
+	local back_count
+	local forward_count
+	history.back = function(options)
+		back_count = options.count
+		return true
+	end
+	history.forward = function(options)
+		forward_count = options.count
+		return true
+	end
+	vim.cmd("3NavigationBack")
+	vim.cmd("4NavigationForward")
+	equal(3, back_count, "NavigationBack discarded its command count")
+	equal(4, forward_count, "NavigationForward discarded its command count")
+	back_count = nil
+	vim.api.nvim_feedkeys(vim.keycode("2<C-o>"), "x", false)
+	equal(2, back_count, "<C-o> discarded its mapping count")
+	history.back = original_back
+	history.forward = original_forward
 end)
 
 for _, path in ipairs(paths) do

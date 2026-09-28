@@ -1,4 +1,5 @@
 local M = {}
+local inline_diagnostics = require("config.inline_diagnostics")
 
 local function notify(msg)
 	vim.notify(msg, vim.log.levels.INFO, { title = "LSP" })
@@ -10,18 +11,14 @@ function M.CodeActions()
 end
 
 -- === Extra helpers you might want from earlier steps ===
--- Toggle current-line inline diagnostics on/off
+-- Toggle the configured inline-diagnostic presenter on/off.
 function M.ToggleInlineDiagnostics()
-	local config = vim.diagnostic.config()
-	local enabled = type(config.virtual_lines) == "table" or config.virtual_lines == true
-	local virtual_lines = false
-	if not enabled then
-		virtual_lines = { current_line = true }
+	local mode, err = inline_diagnostics.toggle()
+	if not mode then
+		vim.notify("Could not toggle inline diagnostics: " .. tostring(err), vim.log.levels.ERROR, { title = "LSP" })
+		return
 	end
-	vim.diagnostic.config({
-		virtual_lines = virtual_lines,
-	})
-	notify("Inline diagnostics: " .. (enabled and "OFF" or "ON"))
+	notify("Inline diagnostics: " .. mode)
 end
 
 -- Show diagnostics at cursor in a small float

@@ -817,7 +817,7 @@ test("cleanup quarantines a replacement introduced after its final validation", 
 	vim.fn.delete(root, "rf")
 end)
 
-test("directory fsync failures after exchange preserve committed success and recovery", function()
+test("directory fsync failures after exchange report unknown durability and retain recovery", function()
 	local root = temp_dir()
 	local state_dir = vim.fs.joinpath(root, "state")
 	local path = vim.fs.joinpath(state_dir, "theme.yaml")
@@ -831,12 +831,13 @@ test("directory fsync failures after exchange preserve committed success and rec
 			error("simulated directory fsync failure")
 		end
 	end)
-	local persisted, warning = theme_router.persist("tokyonight")
+	local persisted, persist_err, durable = theme_router.persist("tokyonight")
 	theme_router._set_test_hook(nil)
-	assert(injected and persisted, "post-commit directory fsync failure was reported as a failed write")
-	assert(tostring(warning):find("directory fsync hook failed", 1, true), "fsync warning was not returned")
-	equal("tokyonight", theme_router.selection().colorscheme, "committed fsync warning did not advance memory")
-	assert(read_bytes(path):find("tokyonight", 1, true), "committed theme bytes were lost")
+	assert(injected and not persisted, "post-exchange directory fsync failure was reported as committed")
+	equal("unknown", durable, "post-exchange directory fsync failure did not report unknown durability")
+	assert(tostring(persist_err):find("directory fsync hook failed", 1, true), "fsync failure was not returned")
+	equal("catppuccin", theme_router.selection().colorscheme, "unknown fsync outcome advanced memory")
+	assert(read_bytes(path):find("tokyonight", 1, true), "unknown durable outcome lost the visible NEW bytes")
 	local recovery
 	for name in vim.fs.dir(state_dir) do
 		if name:find(".theme.yaml.tmp.", 1, true) == 1 then
@@ -845,12 +846,15 @@ test("directory fsync failures after exchange preserve committed success and rec
 		end
 	end
 	assert(recovery and read_bytes(recovery):find("catppuccin", 1, true), "uncertain exchange lost recovery OLD")
-	assert(has_message(observed, "durability warning"), "post-commit fsync warning was not notified")
-	local warning_event = false
+	local failure_event = false
 	for _, event in ipairs(observed.events) do
-		warning_event = warning_event or (event.kind == "warning" and event.operation == "persist")
+		failure_event = failure_event
+			or (event.kind == "error" and event.operation == "persist" and event.durable == "unknown")
 	end
-	assert(warning_event, "post-commit fsync warning was not emitted structurally")
+	assert(failure_event, "post-exchange fsync uncertainty was not emitted structurally")
+	local status = theme_router.status()
+	equal("unknown", status.last_transaction.durable, "status lost post-exchange uncertainty")
+	assert(not status.last_transaction.ok and status.last_error == persist_err)
 	vim.fn.delete(root, "rf")
 end)
 
@@ -1110,21 +1114,285 @@ test("select and reload distinguish durable selection from active last-known-goo
 	local valid, active = theme_router.reload()
 	assert(valid and active == "tokyonight", "valid reload did not repaint the durable selection")
 	equal("tokyonight", theme_router.status().active.colorscheme, "valid reload left stale active state")
-	equal({ "catppuccin", "tokyonight" }, painted, "reload painted an unexpected sequence")
+	equal({ "vscode", "catppuccin", "tokyonight" }, painted, "reload painted an unexpected sequence")
 	valid, active = theme_router.reload()
 	assert(valid and active == "tokyonight", "unchanged valid reload failed")
-	equal({ "catppuccin", "tokyonight" }, painted, "unchanged valid reload called a painter")
+	equal({ "vscode", "catppuccin", "tokyonight" }, painted, "unchanged valid reload called a painter")
 	context.background = "light"
 	valid, active = theme_router.reload()
 	assert(valid and active == "tokyonight", "context-changing reload failed")
-	equal({ "catppuccin", "tokyonight", "tokyonight" }, painted, "changed repaint context did not call the painter")
+	equal(
+		{ "vscode", "catppuccin", "tokyonight", "tokyonight" },
+		painted,
+		"changed repaint context did not call the painter"
+	)
 	assert(theme_router.repaint(), "explicit repaint failed")
-	equal({ "catppuccin", "tokyonight", "tokyonight", "tokyonight" }, painted, "explicit repaint was deduplicated")
+	equal(
+		{ "vscode", "catppuccin", "tokyonight", "tokyonight", "tokyonight" },
+		painted,
+		"explicit repaint was deduplicated"
+	)
 	local before = theme_router.status()
 	local accepted, setup_err = theme_router.setup({ injected = true })
 	assert(not accepted and setup_err:find("unknown option: injected", 1, true), "unknown setup option was accepted")
 	equal(before, theme_router.status(), "rejected setup mutated router state")
 	assert(theme_router.teardown() and theme_router.teardown(), "teardown was not repeatable")
+	vim.fn.delete(root, "rf")
+end)
+
+test("select compensates the exact visual snapshot before reporting an unchanged commit failure", function()
+	local root = temp_dir()
+	local path = vim.fs.joinpath(root, "state", "theme.yaml")
+	local painted = {}
+	local candidate_status
+	local observed = callbacks({
+		paint = function(name, context)
+			painted[#painted + 1] = { name = name, background = context.background }
+			if name == "catppuccin" then
+				candidate_status = theme_router.status()
+			end
+			return true
+		end,
+		context = function()
+			return { background = "dark" }
+		end,
+	})
+	setup(path, observed)
+	assert(theme_router.apply("vscode"))
+	painted = {}
+	local event_start = #observed.events
+	local before = theme_router.status()
+	local selected, select_err, durable = with_uv_override("fs_write", function()
+		return nil, "forced precommit write failure"
+	end, function()
+		return theme_router.select("catppuccin")
+	end)
+	assert(not selected and tostring(select_err):find("forced precommit write failure", 1, true))
+	equal("unchanged", durable, "precommit select failure reported the wrong durable outcome")
+	equal({
+		{ name = "catppuccin", background = "dark" },
+		{ name = "vscode", background = "dark" },
+	}, painted, "select did not repaint the exact prior snapshot")
+	equal("select", candidate_status.operation, "candidate painter ran outside the select transaction")
+	equal("painting", candidate_status.phase, "candidate painter observed the wrong transaction phase")
+	equal("vscode", candidate_status.selected.colorscheme, "candidate paint published selection before commit")
+	equal("vscode", candidate_status.active.colorscheme, "candidate paint published active state before commit")
+
+	local status = theme_router.status()
+	equal(before.generation + 1, status.generation, "select transaction advanced generation more than once")
+	equal(nil, status.operation, "completed select retained operation ownership")
+	equal("idle", status.phase, "completed select retained a transient phase")
+	equal("vscode", status.selected.colorscheme, "failed select changed durable selection")
+	equal("vscode", status.active.colorscheme, "failed select changed active paint")
+	equal("vscode", status.last_known_good.colorscheme, "failed select displaced last-known-good")
+	equal("unchanged", status.last_transaction.durable, "status lost the precommit outcome")
+	assert(status.last_error == select_err, "status lost the exact select error")
+	for index = event_start + 1, #observed.events do
+		local event = observed.events[index]
+		assert(
+			not (event.kind == "applied" and event.colorscheme == "catppuccin"),
+			"candidate theme was published before durable commit"
+		)
+	end
+
+	status.selected.colorscheme = "mutated"
+	status.last_transaction.durable = "mutated"
+	local independent = theme_router.status()
+	equal("vscode", independent.selected.colorscheme, "status shares selected state")
+	equal("unchanged", independent.last_transaction.durable, "status shares transaction state")
+	vim.fn.delete(root, "rf")
+end)
+
+test("failed compensation clears active while preserving the last-known-good", function()
+	local root = temp_dir()
+	local path = vim.fs.joinpath(root, "state", "theme.yaml")
+	local reject_restore = false
+	local observed = callbacks({
+		paint = function(name)
+			if name == "catppuccin" then
+				reject_restore = true
+				return true
+			end
+			if name == "vscode" and reject_restore then
+				return false, "restore rejected"
+			end
+			return true
+		end,
+	})
+	setup(path, observed)
+	assert(theme_router.apply("vscode"))
+	local selected, select_err = with_uv_override("fs_write", function()
+		return nil, "forced write failure"
+	end, function()
+		return theme_router.select("catppuccin")
+	end)
+	assert(not selected and tostring(select_err):find("visual compensation failed", 1, true))
+	local status = theme_router.status()
+	equal(nil, status.active, "failed compensation retained a false active theme")
+	equal("vscode", status.last_known_good.colorscheme, "failed compensation erased last-known-good")
+	equal("vscode", status.selected.colorscheme, "failed compensation changed selection")
+	assert(status.last_error:find("restore rejected", 1, true), "combined compensation failure was not observable")
+	vim.fn.delete(root, "rf")
+end)
+
+test("reset reports partial durability and compensates when only the marker commits", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local marker = vim.fs.joinpath(state_dir, ".legacy-migrated")
+	local painted = {}
+	local observed = callbacks({
+		paint = function(name)
+			painted[#painted + 1] = name
+			return true
+		end,
+	})
+	setup(path, observed)
+	assert(theme_router.apply("vscode"))
+	assert(theme_router.select("catppuccin"))
+	painted = {}
+	local yaml_identity = assert(vim.uv.fs_lstat(path))
+	local reset_ok, reset_err, durable = with_uv_override("fs_fchmod", function(original, fd, mode)
+		if same_object(yaml_identity, vim.uv.fs_fstat(fd)) then
+			return nil, "forced YAML delete failure"
+		end
+		return original(fd, mode)
+	end, function()
+		return theme_router.reset()
+	end)
+	assert(not reset_ok and tostring(reset_err):find("forced YAML delete failure", 1, true))
+	equal("partial", durable, "marker-only reset did not report partial durability")
+	equal({ "vscode", "catppuccin" }, painted, "partial reset did not compensate the candidate default")
+	assert(vim.fn.filereadable(path) == 1, "partial reset removed the unconfirmed YAML")
+	equal({ "version: 1" }, vim.fn.readfile(marker), "partial reset did not preserve the committed marker")
+	local status = theme_router.status()
+	equal("catppuccin", status.selected.colorscheme, "partial reset changed selected theme")
+	equal("catppuccin", status.active.colorscheme, "partial reset changed active theme")
+	equal("catppuccin", status.last_known_good.colorscheme, "partial reset displaced last-known-good")
+	equal("partial", status.last_transaction.durable, "partial reset outcome is absent from status")
+	equal("committed", status.last_transaction.marker.durable, "partial reset lost marker outcome")
+	equal("unchanged", status.last_transaction.deletion.durable, "partial reset lost deletion outcome")
+	vim.fn.delete(root, "rf")
+end)
+
+test("reset exceptions after the marker commit remain partial and compensate", function()
+	local root = temp_dir()
+	local state_dir = vim.fs.joinpath(root, "state")
+	local path = vim.fs.joinpath(state_dir, "theme.yaml")
+	local marker = vim.fs.joinpath(state_dir, ".legacy-migrated")
+	local painted = {}
+	local observed = callbacks({
+		paint = function(name)
+			painted[#painted + 1] = name
+			return true
+		end,
+	})
+	setup(path, observed)
+	assert(theme_router.apply("vscode"))
+	assert(theme_router.select("catppuccin"))
+	painted = {}
+	local yaml_identity = assert(vim.uv.fs_lstat(path))
+	local reset_ok, reset_err, durable = with_uv_override("fs_fchmod", function(original, fd, mode)
+		if same_object(yaml_identity, vim.uv.fs_fstat(fd)) then
+			error("forced YAML delete exception")
+		end
+		return original(fd, mode)
+	end, function()
+		return theme_router.reset()
+	end)
+	assert(not reset_ok and tostring(reset_err):find("forced YAML delete exception", 1, true))
+	equal("partial", durable, "post-marker exception lost the known partial commit")
+	equal({ "vscode", "catppuccin" }, painted, "post-marker exception did not compensate the candidate default")
+	assert(vim.fn.filereadable(path) == 1, "post-marker exception removed the YAML")
+	equal({ "version: 1" }, vim.fn.readfile(marker), "post-marker exception lost the committed marker")
+	local status = theme_router.status()
+	equal("partial", status.last_transaction.durable, "status lost post-marker exception durability")
+	equal("committed", status.last_transaction.marker.durable, "status lost the committed marker outcome")
+	equal(nil, status.last_transaction.deletion, "exception fabricated a deletion outcome")
+	equal("catppuccin", status.selected.colorscheme, "post-marker exception changed selection")
+	equal("catppuccin", status.active.colorscheme, "post-marker exception changed active paint")
+	vim.fn.delete(root, "rf")
+end)
+
+test("callbacks cannot reenter lifecycle operations or advance their generation", function()
+	local root = temp_dir()
+	local path = vim.fs.joinpath(root, "state", "theme.yaml")
+	local trigger
+	local nested = {}
+	local observed
+	local function record(label, callback)
+		local ok, err = callback()
+		nested[#nested + 1] = { label = label, ok = ok, err = err }
+	end
+	local function valid_setup()
+		return theme_router.setup({
+			state_path = path,
+			default = "vscode",
+			fallback = "habamax",
+			notify = observed.notify,
+			event = observed.event,
+			paint = observed.paint,
+			context = observed.context,
+		})
+	end
+	local function all_nested()
+		for label, callback in pairs({
+			apply = function()
+				return theme_router.apply("vscode")
+			end,
+			repaint = theme_router.repaint,
+			select = function()
+				return theme_router.select("catppuccin")
+			end,
+			reload = theme_router.reload,
+			persist = function()
+				return theme_router.persist("catppuccin")
+			end,
+			reset = theme_router.reset,
+			teardown = theme_router.teardown,
+			setup = valid_setup,
+			register = function()
+				return theme_router.register("nested", function() end)
+			end,
+		}) do
+			record(label, callback)
+		end
+	end
+	observed = callbacks({
+		context = function()
+			if trigger == "context" then
+				all_nested()
+			end
+			return { background = "dark" }
+		end,
+		paint = function()
+			if trigger == "painter" then
+				record("painter-select", function()
+					return theme_router.select("catppuccin")
+				end)
+			end
+			return true
+		end,
+		event = function(event)
+			observed.events[#observed.events + 1] = vim.deepcopy(event)
+			if trigger == "listener" and event.kind == "applied" then
+				record("listener-reset", theme_router.reset)
+			end
+		end,
+	})
+	setup(path, observed)
+	local generation = theme_router.status().generation
+	for _, phase in ipairs({ "context", "painter", "listener" }) do
+		trigger = phase
+		assert(theme_router.apply("vscode"), "outer " .. phase .. " operation failed")
+		generation = generation + 1
+		equal(generation, theme_router.status().generation, "reentrant " .. phase .. " advanced generation")
+	end
+	for _, item in ipairs(nested) do
+		assert(not item.ok, item.label .. " reentrant operation succeeded")
+		assert(tostring(item.err):find("already in progress", 1, true), item.label .. " returned the wrong rejection")
+	end
+	assert(vim.fn.filereadable(path) == 0, "reentrant persist/reset wrote theme state")
 	vim.fn.delete(root, "rf")
 end)
 

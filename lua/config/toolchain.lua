@@ -210,6 +210,39 @@ for name, entry in pairs(M.validation_tools) do
 	entry.version = M.versions[name]
 end
 
+M.dynamic_order = { "devcontainers-cli" }
+M.dynamic_tools = {
+	["devcontainers-cli"] = {
+		name = "devcontainers-cli",
+		backend = "npm-release",
+		package = "@devcontainers/cli",
+		command = "devcontainer",
+		metadata_url = "https://registry.npmjs.org/%40devcontainers%2fcli/latest",
+		dist_tag = "latest",
+		node = {
+			version = "24.20.0",
+			assets = {
+				["darwin-arm64"] = {
+					archive = "node-v24.20.0-darwin-arm64.tar.gz",
+					sha256 = "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8",
+				},
+				["darwin-x86_64"] = {
+					archive = "node-v24.20.0-darwin-x64.tar.gz",
+					sha256 = "9e5b2644cf107befb6aefca676b96d3296bc10138096f022ed378d6233ed81f4",
+				},
+				["linux-arm64"] = {
+					archive = "node-v24.20.0-linux-arm64.tar.gz",
+					sha256 = "3515603e2487879a39bc75716f1a2affd027500c64ba50e845cf72cb33219013",
+				},
+				["linux-x86_64"] = {
+					archive = "node-v24.20.0-linux-x64.tar.gz",
+					sha256 = "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec",
+				},
+			},
+		},
+	},
+}
+
 M.mason_order = {
 	"clangd",
 	"docker-language-server",
@@ -341,6 +374,15 @@ end
 
 function M.mason_entry(name)
 	return M.mason_tools[name]
+end
+
+function M.dynamic_entry(name)
+	return M.dynamic_tools[name]
+end
+
+function M.node_release_url(node, asset)
+	assert(node and node.version and asset and asset.archive, "Node release entry is incomplete")
+	return ("https://nodejs.org/dist/v%s/%s"):format(node.version, asset.archive)
 end
 
 function M.executable_map(entry)

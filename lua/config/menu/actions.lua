@@ -1,3 +1,5 @@
+local whitespace = require("config.whitespace")
+
 local M = {}
 
 local function notify(message, level)
@@ -13,12 +15,16 @@ local function require_or_notify(module, label)
 	return nil
 end
 
-local function command(name, args, bang, range)
+local function command_specification(name, args, bang, range)
 	local specification = { cmd = name, args = args or {}, bang = bang or false }
 	if range then
 		specification.range = range
 	end
-	return vim.api.nvim_cmd(specification, {})
+	return specification
+end
+
+local function command(name, args, bang, range)
+	return vim.api.nvim_cmd(command_specification(name, args, bang, range), {})
 end
 
 local picker_sources = {
@@ -148,14 +154,7 @@ local commands = {
 	markdown_preview = { "MarkdownPreviewToggle" },
 	markdown_preview_open = { "MarkdownPreview" },
 	markdown_preview_stop = { "MarkdownPreviewStop" },
-	markdown_render_buffer_disable = { name = "MarkdownRender", args = { "buf_disable" } },
-	markdown_render_buffer_enable = { name = "MarkdownRender", args = { "buf_enable" } },
-	markdown_render_buffer_toggle = { name = "MarkdownRender", args = { "buf_toggle" } },
-	markdown_render_contract = { name = "MarkdownRender", args = { "contract" } },
-	markdown_render_disable = { name = "MarkdownRender", args = { "disable" } },
-	markdown_render_enable = { name = "MarkdownRender", args = { "enable" } },
-	markdown_render_expand = { name = "MarkdownRender", args = { "expand" } },
-	markdown_render_preview = { name = "MarkdownRender", args = { "preview" } },
+	markdown_view = { "MarkdownView" },
 	mason = { "Mason" },
 	messages = { "messages" },
 	nvim_config_dump = { "NvimConfigDump" },
@@ -351,6 +350,16 @@ local function prompt_log_highlight(kind)
 	end)
 end
 
+local function command_error_message(value)
+	local message = tostring(value)
+	local first_line = message:match("^[^\r\n]*") or message
+	local wrapped = first_line:match("^Vim:(.*)$")
+	if wrapped and wrapped ~= "" and not wrapped:match("^Lua[%s:]") then
+		return wrapped
+	end
+	return message
+end
+
 local function on_target(target, options, callback)
 	local ok, err = require("config.editor_actions").with_target(target, options, callback)
 	if not ok then
@@ -360,9 +369,19 @@ local function on_target(target, options, callback)
 end
 
 local function target_command(target, name, args, bang, range)
-	return on_target(target, { window = true }, function()
-		command(name, args, bang, range)
+	local command_ok
+	local command_result
+	local target_ok = on_target(target, { window = true }, function()
+		command_ok, command_result = pcall(vim.api.nvim_cmd, command_specification(name, args, bang, range), {})
 	end)
+	if not target_ok then
+		return false
+	end
+	if not command_ok then
+		notify(command_error_message(command_result), vim.log.levels.WARN)
+		return false
+	end
+	return true
 end
 
 local function run_flash(name, target)
@@ -431,13 +450,68 @@ local function toggle_wrap(target)
 	notify("Wrap: " .. (value and "on" or "off"))
 end
 
+local function lexical_relative(base, path)
+	base = vim.fs.normalize(base)
+	path = vim.fs.normalize(path)
+	local base_prefix = base:match("^%a:") or (base:sub(1, 1) == "/" and "/" or "")
+	local path_prefix = path:match("^%a:") or (path:sub(1, 1) == "/" and "/" or "")
+	if base_prefix:lower() ~= path_prefix:lower() then
+		return path
+	end
+
+	local base_parts = vim.split(base:sub(#base_prefix + 1), "/", { plain = true, trimempty = true })
+	local path_parts = vim.split(path:sub(#path_prefix + 1), "/", { plain = true, trimempty = true })
+	local common = 0
+	while base_parts[common + 1] and base_parts[common + 1] == path_parts[common + 1] do
+		common = common + 1
+	end
+
+	local result = {}
+	for _ = common + 1, #base_parts do
+		result[#result + 1] = ".."
+	end
+	for index = common + 1, #path_parts do
+		result[#result + 1] = path_parts[index]
+	end
+	return #result == 0 and "." or table.concat(result, "/")
+end
+
+local function copy_file_path(target, relative_to)
+	return on_target(target, { window = true }, function(origin)
+		local path = origin.path or vim.api.nvim_buf_get_name(origin.bufnr)
+		if path == "" or vim.bo[origin.bufnr].buftype ~= "" then
+			notify("No file path for origin buffer", vim.log.levels.WARN)
+			return false
+		end
+
+		local copied = path
+		if relative_to == "cwd" then
+			copied = lexical_relative(origin.cwd or vim.fn.getcwd(origin.winid), path)
+		elseif relative_to == "git" then
+			local root = origin.git_root or vim.fs.root(path, ".git")
+			copied = root and vim.fs.relpath(root, path) or nil
+			if not copied then
+				notify("Origin file is not inside a Git repository", vim.log.levels.WARN)
+				return false
+			end
+		end
+
+		local ok, err = require("config.clipboard").copy_text(copied)
+		if not ok then
+			notify("Could not copy path: " .. tostring(err), vim.log.levels.ERROR)
+			return false
+		end
+		notify("Copied path: " .. copied)
+		return true
+	end)
+end
+
 local file_actions = {
 	new = function(target)
-		on_target(target, { window = true }, function(origin)
-			command("enew")
+		return on_target(target, { window = true }, function()
 			local ok, tabs = pcall(require, "config.tabs")
 			if ok then
-				tabs.unmark_home(origin.tabpage)
+				tabs.new_file()
 			end
 		end)
 	end,
@@ -477,6 +551,15 @@ local file_actions = {
 			end
 		end)
 	end,
+	copy_absolute_path = function(target)
+		return copy_file_path(target)
+	end,
+	copy_cwd_relative_path = function(target)
+		return copy_file_path(target, "cwd")
+	end,
+	copy_git_relative_path = function(target)
+		return copy_file_path(target, "git")
+	end,
 }
 
 local edit_actions = {
@@ -501,15 +584,9 @@ local edit_actions = {
 	end,
 	trim_whitespace = function(target)
 		on_target(target, { modifiable = true }, function(origin)
-			local lines = vim.api.nvim_buf_get_lines(origin.bufnr, 0, -1, false)
-			local changed = false
-			for index, line in ipairs(lines) do
-				local trimmed = line:gsub("%s+$", "")
-				changed = changed or trimmed ~= line
-				lines[index] = trimmed
-			end
-			if changed then
-				vim.api.nvim_buf_set_lines(origin.bufnr, 0, -1, false, lines)
+			local outcome = whitespace.trim(origin.bufnr)
+			if outcome.error then
+				notify("Could not trim trailing whitespace: " .. outcome.error, vim.log.levels.ERROR)
 			end
 		end)
 	end,
@@ -811,14 +888,6 @@ local handlers = {
 	end,
 	["log.highlight_regex"] = function()
 		prompt_log_highlight("regex")
-	end,
-	["markdown.render_toggle"] = function(target)
-		on_target(target, { window = true }, function()
-			local render_markdown = require_or_notify("render-markdown", "render-markdown")
-			if render_markdown then
-				render_markdown.toggle()
-			end
-		end)
 	end,
 	["session.delete"] = function()
 		command("AutoSession", { "deletePicker" })

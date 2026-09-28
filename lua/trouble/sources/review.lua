@@ -1,16 +1,8 @@
 -- Dedicated Trouble source for native review comments.
 local Item = require("trouble.item")
+local review = require("config.code_review")
 
 local M = {}
-
-local SEVERITY = {
-	issue = vim.diagnostic.severity.ERROR,
-	suggestion = vim.diagnostic.severity.WARN,
-	rationale = vim.diagnostic.severity.INFO,
-	question = vim.diagnostic.severity.INFO,
-	pedantic = vim.diagnostic.severity.HINT,
-	praise = vim.diagnostic.severity.HINT,
-}
 
 local function jump(_, context)
 	local item = context.item and context.item.item
@@ -19,7 +11,7 @@ local function jump(_, context)
 			vim.notify("Stale review locations cannot be opened", vim.log.levels.WARN)
 			return
 		end
-		require("config.code_review").jump(item.review_id, true)
+		review.jump(item.review_id, true)
 	end
 end
 
@@ -46,14 +38,14 @@ M.config = {
 ---Provide review comments without using quickfix or vim.diagnostic state.
 ---@param callback function
 function M.get(callback)
-	local snapshot = require("config.code_review").snapshot(true)
+	local snapshot = review.snapshot(true)
 	if not snapshot then
 		callback({})
 		return
 	end
 	local items = {}
-	for _, review in ipairs(snapshot.items) do
-		local anchor = review.anchor
+	for _, comment in ipairs(snapshot.items) do
+		local anchor = comment.anchor
 		local stale = snapshot.stale or anchor.stale
 		if anchor.path then
 			local file_level = anchor.kind == "file"
@@ -66,16 +58,16 @@ function M.get(callback)
 					range and (anchor.end_line or anchor.start_line) or 1,
 					math.max(0, (anchor.end_column or 1) - 1),
 				},
-				severity = SEVERITY[review.type],
+				severity = (review.comment_type(comment.type) or {}).severity or vim.diagnostic.severity.INFO,
 				text = string.format(
 					"[%s · %s%s%s] %s",
-					review.type,
-					review.status,
+					comment.type,
+					comment.status,
 					file_level and " · file" or "",
 					stale and " · stale" or "",
-					review.body
+					comment.body
 				),
-				item = { review_id = review.id, review_stale = stale },
+				item = { review_id = comment.id, review_stale = stale },
 			})
 		end
 	end

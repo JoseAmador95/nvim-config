@@ -57,6 +57,149 @@ local function temporary_text(lines)
 end
 
 local rpc = require("config.exact_editor")
+assert(package.loaded.exact_editor == nil, "host adapter imported exact-editor at module load")
+
+test("host adapter coalesces one delayed activation without importing the core", function()
+	local callbacks = {}
+	local delays = {}
+	local entered = false
+	local setups = 0
+	assert(type(rpc._options().open) == "function", "core-free host options are incomplete")
+	assert(package.loaded.exact_editor == nil, "host option construction imported exact-editor")
+	local deps = {
+		activation_delay_ms = 137,
+		has_entered = function()
+			return entered
+		end,
+		ui_count = function()
+			return 1
+		end,
+		defer_fn = function(callback, delay)
+			callbacks[#callbacks + 1] = callback
+			delays[#delays + 1] = delay
+		end,
+		setup = function()
+			setups = setups + 1
+			return true
+		end,
+	}
+	rpc.setup_deferred(deps)
+	rpc.setup_deferred(deps)
+	assert(#callbacks == 0, "attached UI bypassed the UIEnter lifecycle boundary")
+	entered = true
+	vim.api.nvim_exec_autocmds("UIEnter", { modeline = false })
+	assert(#callbacks == 1 and setups == 0, "delayed activation was not coalesced")
+	assert(delays[1] == 137, "configured activation delay was not forwarded")
+	assert(package.loaded.exact_editor == nil, "queued activation imported exact-editor before its callback")
+	callbacks[1]()
+	assert(setups == 1, "delayed activation did not run exactly once")
+	assert(package.loaded.exact_editor == nil, "injected activation unexpectedly imported the core")
+	assert(rpc.teardown(), "adapter teardown failed after injected activation")
+end)
+
+test("a detached UI at the deadline keeps activation dormant and retryable", function()
+	local callbacks = {}
+	local setups = 0
+	local uis = 1
+	rpc.setup_deferred({
+		activation_delay_ms = 0,
+		has_entered = function()
+			return true
+		end,
+		ui_count = function()
+			return uis
+		end,
+		defer_fn = function(callback)
+			callbacks[#callbacks + 1] = callback
+		end,
+		setup = function()
+			setups = setups + 1
+			return true
+		end,
+	})
+	assert(#callbacks == 1, "initial attached UI did not queue activation")
+	uis = 0
+	callbacks[1]()
+	assert(setups == 0, "activation ran after its UI detached")
+	uis = 1
+	vim.api.nvim_exec_autocmds("UIEnter", { modeline = false })
+	assert(#callbacks == 2, "a later UI could not retry activation")
+	callbacks[2]()
+	assert(setups == 1, "retried activation did not run exactly once")
+	assert(package.loaded.exact_editor == nil, "UI retry imported the core before explicit setup")
+	assert(rpc.teardown(), "adapter teardown failed after UI retry")
+end)
+
+test("teardown cancels and invalidates a pending activation without importing the core", function()
+	local callback
+	local setups = 0
+	local timer = { closed = false, stopped = false }
+	function timer:stop()
+		self.stopped = true
+	end
+	function timer:is_closing()
+		return self.closed
+	end
+	function timer:close()
+		self.closed = true
+	end
+	rpc.setup_deferred({
+		activation_delay_ms = 300,
+		has_entered = function()
+			return true
+		end,
+		ui_count = function()
+			return 1
+		end,
+		defer_fn = function(queued)
+			callback = queued
+			return timer
+		end,
+		setup = function()
+			setups = setups + 1
+			return true
+		end,
+	})
+	assert(type(callback) == "function", "pending activation callback is missing")
+	assert(rpc.teardown(), "core-free teardown failed")
+	assert(timer.stopped and timer.closed, "teardown did not stop and close the activation timer")
+	callback()
+	assert(setups == 0, "generation-invalidated activation still ran")
+	assert(package.loaded.exact_editor == nil, "teardown imported exact-editor")
+end)
+
+test("VimLeavePre cancels pending activation and blocks startup replay", function()
+	local callback
+	local setups = 0
+	rpc.setup_deferred({
+		activation_delay_ms = 300,
+		has_entered = function()
+			return true
+		end,
+		ui_count = function()
+			return 1
+		end,
+		defer_fn = function(queued)
+			callback = queued
+		end,
+		setup = function()
+			setups = setups + 1
+			return true
+		end,
+	})
+	vim.api.nvim_exec_autocmds("VimLeavePre", { modeline = false })
+	callback()
+	assert(setups == 0, "VimLeavePre did not invalidate pending activation")
+	rpc.setup_deferred({
+		ui_count = function()
+			return 1
+		end,
+	})
+	assert(setups == 0, "activation was re-armed after VimLeavePre")
+	assert(package.loaded.exact_editor == nil, "exit cancellation imported exact-editor")
+	assert(rpc.teardown(), "adapter teardown did not reset exit state")
+end)
+
 assert(rpc._prepare_state(state))
 local instance = {
 	root = state,
@@ -123,6 +266,7 @@ test("host setup options do not leak request-only dependencies", function()
 	local setup = rpc._options()
 	assert(type(setup.open) == "function", "setup open callback is missing")
 	assert(setup.open_file == nil, "request-only open_file leaked into strict setup options")
+	assert(setup.activation_delay_ms == nil, "host activation policy leaked into strict setup options")
 end)
 
 test("state root follows override, XDG, then home modes", function()
@@ -385,27 +529,6 @@ end)
 
 test("host applies the bounded default registry heartbeat", function()
 	assert(rpc._options().registry_heartbeat_seconds == 21600, "host heartbeat policy default changed")
-end)
-
-test("interactive registration is deferred once beyond the startup path", function()
-	local callbacks = {}
-	local setups = 0
-	local deps = {
-		ui_count = function()
-			return 1
-		end,
-		schedule = function(callback)
-			callbacks[#callbacks + 1] = callback
-		end,
-		setup = function()
-			setups = setups + 1
-		end,
-	}
-	rpc.setup_deferred(deps)
-	rpc.setup_deferred(deps)
-	assert(#callbacks == 1 and setups == 0, "deferred setup was not coalesced")
-	callbacks[1]()
-	assert(setups == 1, "deferred setup did not run exactly once")
 end)
 
 vim.fn.delete(fixture, "rf")

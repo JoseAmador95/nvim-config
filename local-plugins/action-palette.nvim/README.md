@@ -39,8 +39,11 @@ Availability is recomputed against refreshed host context and is always a
 structured `{ available, reason?, error? }` result. Unavailable actions are
 hidden by default or may remain visible with their reason when
 `unavailable = "show"`. Confirmation belongs to the action definition and
-therefore applies identically on every surface. A bound callback is consumed by
-its first attempt, including cancellation or failed revalidation.
+therefore applies identically on every surface and proceeds only on the explicit
+boolean value `true`. A bound callback is consumed by
+its first attempt, including cancellation or failed revalidation. Exceptions
+from injected target, context-refresh, and confirmation adapters are contained,
+reported, and fail closed without leaving a pending reusable invocation.
 
 `setup()` rejects unknown options before replacing the registry. Repeated setup
 starts with an empty catalog. `effective_config()` and `status()` return copies

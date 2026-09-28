@@ -39,6 +39,8 @@ local original_selector = package.loaded["venv-selector"]
 local original_terminal = package.loaded["config.terminal"]
 local original_project_settings = package.loaded["config.project_settings"]
 local original_local_config = package.loaded["config.local_config"]
+local original_execution = package.loaded["config.execution"]
+local original_verified_tools = package.loaded.verified_tools
 local original_clients = vim.lsp.get_clients
 local original_select = vim.ui.select
 local original_defer_fn = vim.defer_fn
@@ -65,9 +67,27 @@ end
 
 local active_python
 local explicit_project_values = {}
+local project_settings_batches = 0
+local project_settings_requests = {}
+local repo_config = require("config.repo")
+local debug_authorized = true
+local revoke_during_resolve = false
+local before_execution_resolver
+local execution_calls = {}
 package.loaded["config.project_settings"] = {
 	get = function(key, default)
-		return vim.deepcopy(explicit_project_values[key] or default)
+		local value = explicit_project_values[key]
+		return vim.deepcopy(value == nil and default or value)
+	end,
+	get_many = function(defaults)
+		project_settings_batches = project_settings_batches + 1
+		project_settings_requests[#project_settings_requests + 1] = vim.deepcopy(defaults)
+		local values = {}
+		for key, default in pairs(defaults) do
+			local value = explicit_project_values[key]
+			values[key] = vim.deepcopy(value == nil and default or value)
+		end
+		return values
 	end,
 }
 package.loaded["config.local_config"] = {
@@ -81,6 +101,33 @@ package.loaded["config.local_config"] = {
 		return vim.deepcopy(defaults)
 	end,
 }
+package.loaded["config.execution"] = {
+	resolve = function(capability, resolver, options)
+		execution_calls[#execution_calls + 1] = { capability = capability, options = vim.deepcopy(options) }
+		assert(capability == "debug", "Python REPL requested a non-debug capability")
+		if not debug_authorized then
+			return nil, "debug grant is not authorized"
+		end
+		if before_execution_resolver then
+			local callback = before_execution_resolver
+			before_execution_resolver = nil
+			callback()
+		end
+		local resolved, resolve_err = resolver()
+		if not resolved then
+			return nil, resolve_err
+		end
+		if revoke_during_resolve then
+			revoke_during_resolve = false
+			debug_authorized = false
+		end
+		if not debug_authorized then
+			return nil, "debug grant was revoked"
+		end
+		return resolved, { runtime = "host", root = options.root, repo_identity = options.root }
+	end,
+}
+package.loaded.verified_tools = nil
 package.loaded["venv-selector"] = {
 	python = function()
 		return active_python
@@ -160,6 +207,8 @@ end
 
 local python = require("config.python")
 assert(package.loaded.project_python == nil, "project-python loaded before the first Python operation")
+assert(package.loaded.terminal_lifecycle == nil, "terminal-lifecycle loaded with the Python host adapter")
+assert(package.loaded.verified_tools == nil, "Python REPL authority loaded verified-tools")
 local buf_a = vim.fn.bufadd(fixture .. "/a/src/test_a.py")
 local buf_b = vim.fn.bufadd(fixture .. "/b/src/test_b.py")
 vim.fn.bufload(buf_a)
@@ -169,6 +218,12 @@ local failures = {}
 local count = 0
 local function test(name, callback)
 	count = count + 1
+	debug_authorized = true
+	revoke_during_resolve = false
+	before_execution_resolver = nil
+	execution_calls = {}
+	project_settings_batches = 0
+	project_settings_requests = {}
 	local ok, err = xpcall(callback, debug.traceback)
 	if ok then
 		print("ok - " .. name)
@@ -348,6 +403,37 @@ test("DAP roots resolve cross-project config fields before the active buffer", f
 	assert(placeholder.pythonPath == python_a, "unresolved placeholder preempted the active buffer")
 end)
 
+test("DAP aborts an invalid explicit interpreter without mutating its input", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	local dap = { ABORT = {}, listeners = { on_config = {} } }
+	python.setup_dap(dap)
+	local input = {
+		type = "python",
+		request = "launch",
+		cwd = fixture .. "/a",
+		pythonPath = fixture .. "/a/missing/python",
+	}
+	local before = vim.deepcopy(input)
+	local notifications = {}
+	local original_notify = vim.notify
+	vim.notify = function(message, level)
+		notifications[#notifications + 1] = { message = tostring(message), level = level }
+	end
+	local ok, resolved = xpcall(function()
+		return dap.listeners.on_config.nvim_config_python(input)
+	end, debug.traceback)
+	vim.notify = original_notify
+	assert(ok, resolved)
+	assert(resolved ~= input and resolved.pythonPath == dap.ABORT, "invalid explicit Python did not abort DAP")
+	assert(vim.deep_equal(input, before), "DAP resolution mutated the launch configuration")
+	assert(
+		#notifications == 1
+			and notifications[1].level == vim.log.levels.WARN
+			and notifications[1].message:find("explicit Python interpreter is invalid", 1, true),
+		"invalid explicit Python was not reported"
+	)
+end)
+
 test("ty settings stay in place and trusted explicit precedence publishes one interpreter", function()
 	local environment = fixture .. "/a/.other"
 	local settings = {
@@ -376,6 +462,11 @@ test("ty settings stay in place and trusted explicit precedence publishes one in
 	explicit_project_values["lspconfig.pyright"] = { python = { pythonPath = python_b } }
 	local updated = { root_dir = fixture .. "/a", settings = { ty = { configuration = {} } } }
 	local updated_snapshot = python.on_new_config(updated, fixture .. "/a")
+	assert(project_settings_batches == 1, "one Python settings operation did not use exactly one project batch")
+	assert(
+		vim.deep_equal({ ["lspconfig.pyright"] = {}, ["lspconfig.ty"] = {}, vscode = {} }, project_settings_requests[1]),
+		"Python project batch omitted an interpreter compatibility source"
+	)
 	assert(updated_snapshot.value.interpreter == python_a2, "lspconfig.ty did not outrank VSCode settings")
 	assert(updated.settings.ty.configuration.environment.python == python_a2)
 
@@ -493,7 +584,6 @@ test("ty and legacy markers keep LSP and shared consumers on the same nested roo
 	vim.fn.writefile({ "pass" }, path)
 	local buf = vim.fn.bufadd(path)
 	vim.fn.bufload(buf)
-	local repo_config = require("config.repo")
 	local previous_root = repo_config.root
 	local previous_clients = vim.lsp.get_clients
 	repo_config.root = function()
@@ -516,6 +606,55 @@ test("ty and legacy markers keep LSP and shared consumers on the same nested roo
 	end, debug.traceback)
 	repo_config.root = previous_root
 	vim.lsp.get_clients = previous_clients
+	vim.api.nvim_buf_delete(buf, { force = true })
+	assert(ok, err)
+end)
+
+test("supplied repository roots avoid Git and preserve Python root precedence", function()
+	local monorepo = fixture .. "/supplied-root-monorepo"
+	local service = monorepo .. "/services/api"
+	local attached = service .. "/src"
+	local path = attached .. "/main.py"
+	vim.fn.mkdir(attached, "p")
+	vim.fn.writefile({ "pass" }, path)
+	vim.fn.writefile({}, service .. "/ty.toml")
+	local buf = vim.fn.bufadd(path)
+	vim.fn.bufload(buf)
+	local previous_root = repo_config.root
+	local previous_clients = vim.lsp.get_clients
+	local previous_system = vim.system
+	local fallback_calls = 0
+	repo_config.root = function()
+		fallback_calls = fallback_calls + 1
+		return monorepo
+	end
+	vim.system = function()
+		error("supplied Python root resolution executed a process")
+	end
+	vim.lsp.get_clients = function()
+		return {
+			{
+				name = "ty",
+				config = { root_dir = attached },
+			},
+		}
+	end
+	local ok, err = xpcall(function()
+		assert(python.root(buf, monorepo) == attached, "attached ty root lost precedence")
+		vim.lsp.get_clients = function()
+			return {}
+		end
+		assert(python.root(buf, monorepo) == service, "nearest Python marker lost precedence")
+		assert(vim.fn.delete(service .. "/ty.toml") == 0)
+		assert(python.root(buf, monorepo) == monorepo, "supplied repository root lost precedence")
+		assert(python.root(buf, nil) == attached, "an explicitly cached non-repository root fell back to Git")
+		assert(fallback_calls == 0, "supplied repository root called config.repo.root")
+		assert(python.root(buf) == monorepo, "callers without a supplied root lost Git fallback")
+		assert(fallback_calls == 1, "Git fallback was not called exactly once")
+	end, debug.traceback)
+	repo_config.root = previous_root
+	vim.lsp.get_clients = previous_clients
+	vim.system = previous_system
 	vim.api.nvim_buf_delete(buf, { force = true })
 	assert(ok, err)
 end)
@@ -669,6 +808,87 @@ test("queued REPL sends time out instead of retrying forever", function()
 	assert(notices[1].message:find("Timed out waiting for Python REPL input", 1, true))
 end)
 
+test("REPL open, restart, and send require a fresh durable debug grant", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "guarded = true" })
+	deferred_callbacks = {}
+	opened_specs = {}
+	restarted_specs = {}
+	sent = {}
+	local previous_notify = vim.notify
+	local notices = {}
+	vim.notify = function(message, level)
+		notices[#notices + 1] = { message = tostring(message), level = level }
+	end
+
+	debug_authorized = false
+	terminal_exists = false
+	terminal_running = false
+	terminal_accepting_input = false
+	python.send(false)
+	assert(#opened_specs == 0 and not terminal_exists, "a denied debug grant left a partial REPL open")
+
+	terminal_exists = true
+	terminal_running = false
+	python.send(false)
+	assert(#restarted_specs == 0 and not terminal_running, "a denied debug grant stopped or restarted the REPL")
+
+	terminal_running = true
+	terminal_accepting_input = true
+	python.send(false)
+	drain_deferred()
+	vim.notify = previous_notify
+	assert(#sent == 0, "queued REPL input bypassed revoked debug authority")
+	assert(#execution_calls == 3, "debug authority was not checked at every execution seam")
+	for _, call in ipairs(execution_calls) do
+		assert(call.capability == "debug" and call.options.root == fixture .. "/a")
+	end
+	assert(#notices == 3, "denied REPL operations were not reported exactly once")
+	assert(package.loaded.verified_tools == nil, "REPL authorization loaded verified-tools")
+end)
+
+test("revocation during the final grant recheck cannot create a partial REPL", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "race = true" })
+	deferred_callbacks = {}
+	terminal_exists = false
+	terminal_running = false
+	terminal_accepting_input = false
+	opened_specs = {}
+	revoke_during_resolve = true
+	local previous_notify = vim.notify
+	vim.notify = function() end
+	python.send(false)
+	vim.notify = previous_notify
+	assert(#execution_calls == 1, "REPL open did not pass through the authority resolver")
+	assert(#opened_specs == 0 and not terminal_exists, "revocation raced into a partially opened terminal")
+	assert(#deferred_callbacks == 0, "denied REPL open queued input for a nonexistent terminal")
+end)
+
+test("REPL launch revalidates the interpreter inside the authority seam", function()
+	vim.api.nvim_set_current_buf(buf_a)
+	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "race = 'interpreter'" })
+	terminal_exists = false
+	terminal_running = false
+	terminal_accepting_input = false
+	opened_specs = {}
+	active_python = python_a
+	python.refresh_current()
+	before_execution_resolver = function()
+		assert(vim.fn.delete(python_a) == 0)
+	end
+	local previous_notify = vim.notify
+	local notices = {}
+	vim.notify = function(message, level)
+		notices[#notices + 1] = { message = tostring(message), level = level }
+	end
+	python.send(false)
+	vim.notify = previous_notify
+	assert(#opened_specs == 0 and not terminal_exists, "a vanished interpreter reached the terminal backend")
+	assert(#notices == 1 and notices[1].message:find("no longer executable", 1, true))
+	interpreter(python_a, true)
+end)
+
 test("a live REPL asks before adopting a changed interpreter", function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = false
@@ -718,16 +938,18 @@ test("attached ty root scopes manual selection and shared consumers", function()
 	local path = service .. "/src/main.py"
 	local manual = service .. "/.manual/bin/python"
 	vim.fn.mkdir(service .. "/src", "p")
+	vim.fn.mkdir(monorepo .. "/.git", "p")
 	vim.fn.writefile({ "pass" }, path)
 	interpreter(manual, false)
 	local buf = vim.fn.bufadd(path)
 	vim.fn.bufload(buf)
 	local picker_buf = vim.api.nvim_create_buf(false, true)
-	local repo_config = require("config.repo")
 	local previous_root = repo_config.root
 	local previous_clients = vim.lsp.get_clients
 	local previous_defer = vim.defer_fn
 	local previous_start = vim.lsp.start
+	local previous_system = vim.system
+	local repository_root_calls = 0
 	local stopped = false
 	local started = {}
 	local client = {
@@ -739,6 +961,7 @@ test("attached ty root scopes manual selection and shared consumers", function()
 		end,
 	}
 	repo_config.root = function()
+		repository_root_calls = repository_root_calls + 1
 		return monorepo
 	end
 	vim.lsp.get_clients = function()
@@ -782,7 +1005,13 @@ test("attached ty root scopes manual selection and shared consumers", function()
 		}
 		package.loaded["config.code_review"] = { status = function() end }
 		local statusline = require("config.statusline")
+		repository_root_calls = 0
+		vim.system = function()
+			error("statusline refresh executed a process")
+		end
 		statusline.refresh_buffer(buf)
+		assert(vim.b[buf].nvim_config_root == monorepo, "statusline did not cache the repository root")
+		assert(repository_root_calls == 0, "statusline refresh called config.repo.root")
 		assert(statusline.python() == "Py:.manual")
 		package.loaded["config.cmake"] = original_cmake
 		package.loaded["config.clangd"] = original_clangd
@@ -792,6 +1021,7 @@ test("attached ty root scopes manual selection and shared consumers", function()
 	vim.lsp.get_clients = previous_clients
 	vim.defer_fn = previous_defer
 	vim.lsp.start = previous_start
+	vim.system = previous_system
 	vim.api.nvim_set_current_buf(buf_b)
 	vim.api.nvim_buf_delete(picker_buf, { force = true })
 	vim.api.nvim_buf_delete(buf, { force = true })
@@ -817,6 +1047,8 @@ package.loaded["venv-selector"] = original_selector
 package.loaded["config.terminal"] = original_terminal
 package.loaded["config.project_settings"] = original_project_settings
 package.loaded["config.local_config"] = original_local_config
+package.loaded["config.execution"] = original_execution
+package.loaded.verified_tools = original_verified_tools
 vim.lsp.get_clients = original_clients
 vim.ui.select = original_select
 vim.defer_fn = original_defer_fn

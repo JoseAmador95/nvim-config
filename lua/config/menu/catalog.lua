@@ -41,6 +41,8 @@ local function descriptor(id, label, hint, when, metadata)
 		surfaces = metadata.surfaces,
 		palette_label = metadata.palette_label,
 		keywords = metadata.keywords,
+		target = metadata.target,
+		unavailable = metadata.unavailable,
 	}
 	if hint then
 		item.hint = hint
@@ -75,6 +77,21 @@ function M.definitions()
 			keywords = keywords,
 		})
 	end
+	local path_item = function(id, label, when, keywords)
+		return descriptor(id, label, nil, when, {
+			surfaces = palette_only,
+			keywords = keywords,
+			target = "window",
+		})
+	end
+	local named_file = function(context)
+		return context.buftype == "" and type(context.path) == "string" and context.path ~= ""
+	end
+	local git_file = function(context)
+		return named_file(context)
+			and type(context.git_root) == "string"
+			and vim.fs.relpath(context.git_root, context.path) ~= nil
+	end
 
 	return {
 		section("file", "File", {
@@ -87,6 +104,19 @@ function M.definitions()
 			palette_item("file.close_all", "Close All...", "<leader>Q", nil, { "quit all" }),
 			palette_item("file.open_under_cursor", "Open File Under Cursor", "gf"),
 			palette_item("file.set_filetype", "Set File Type...", nil, nil, { "setfiletype", "set ft" }),
+			path_item("file.copy_absolute_path", "Copy Absolute Path", named_file, { "clipboard", "filename" }),
+			path_item(
+				"file.copy_cwd_relative_path",
+				"Copy Path Relative to Window CWD",
+				named_file,
+				{ "clipboard", "relative", "lcd", "working directory" }
+			),
+			path_item(
+				"file.copy_git_relative_path",
+				"Copy Path Relative to Git Root",
+				git_file,
+				{ "clipboard", "relative", "repository" }
+			),
 		}),
 		section("edit", "Edit", {
 			palette_item("edit.undo", "Undo", "u"),
@@ -182,50 +212,7 @@ function M.definitions()
 				"plantuml",
 				"text",
 			}),
-			item("markdown.render_toggle", "Toggle Markdown Inline Rendering", "<leader>mr", is_filetype("markdown")),
-			palette_item(
-				"command.markdown_render_enable",
-				"Enable Markdown Inline Rendering",
-				nil,
-				is_filetype("markdown")
-			),
-			palette_item(
-				"command.markdown_render_disable",
-				"Disable Markdown Inline Rendering",
-				nil,
-				is_filetype("markdown")
-			),
-			palette_item(
-				"command.markdown_render_buffer_toggle",
-				"Toggle Markdown Rendering in Buffer",
-				nil,
-				is_filetype("markdown")
-			),
-			palette_item(
-				"command.markdown_render_buffer_enable",
-				"Enable Markdown Rendering in Buffer",
-				nil,
-				is_filetype("markdown")
-			),
-			palette_item(
-				"command.markdown_render_buffer_disable",
-				"Disable Markdown Rendering in Buffer",
-				nil,
-				is_filetype("markdown")
-			),
-			palette_item(
-				"command.markdown_render_preview",
-				"Preview Markdown Inline Rendering",
-				nil,
-				is_filetype("markdown")
-			),
-			palette_item("command.markdown_render_expand", "Expand Markdown Decorations", nil, is_filetype("markdown")),
-			palette_item(
-				"command.markdown_render_contract",
-				"Contract Markdown Decorations",
-				nil,
-				is_filetype("markdown")
-			),
+			item("command.markdown_view", "Toggle Markdown Reading View", "<leader>mv", is_filetype("markdown")),
 			item("command.markdown_preview", "Toggle Markdown Browser Preview", "<leader>mp", is_filetype("markdown")),
 			palette_item(
 				"command.markdown_preview_open",
@@ -370,7 +357,9 @@ function M.definitions()
 			item("command.devcontainer_up", "Open Container Editor"),
 			item("command.devcontainer_recreate", "Recreate Container Editor"),
 			item("command.devcontainer_status", "Show Status"),
-			item("command.devcontainer_host", "Return to Host Editor"),
+			item("command.devcontainer_host", "Recover / Return to Host Editor", nil, nil, {
+				keywords = { "recover", "recovery", "lifecycle", "error", "stopped", "dead", "host" },
+			}),
 			palette_item("command.devcontainer_log", "Open Lifecycle Log"),
 		}),
 		section("problems", "Problems", {

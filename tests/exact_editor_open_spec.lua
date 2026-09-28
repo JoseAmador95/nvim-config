@@ -155,7 +155,7 @@ local function environment(extra_env)
 	return environment
 end
 
-local function invoke(extra_env, file, line, column, workspace)
+local function invoke(extra_env, file, line, column, workspace, tmux_pane)
 	local command = {
 		helper,
 		"--cwd",
@@ -176,6 +176,10 @@ local function invoke(extra_env, file, line, column, workspace)
 			"--repo-identity",
 			workspace.repo_identity,
 		})
+	end
+	if tmux_pane then
+		command[#command + 1] = "--tmux-pane"
+		command[#command + 1] = tmux_pane
 	end
 	return vim.system(command, { text = true, env = environment(extra_env), clear_env = true }):wait()
 end
@@ -284,6 +288,22 @@ test("multiple matching live editors fail visibly after server-only probes", fun
 	assert(result.code ~= 0 and result.stderr:find("multiple live", 1, true))
 	assert(#calls() == 2)
 	assert_server_only()
+end)
+
+test("normal requests can bind selection to one exact tmux pane", function()
+	reset()
+	local other_id = "25252525-2525-4525-8525-252525252525"
+	local expected_id = "35353535-3535-4535-8535-353535353535"
+	record(other_id, nil, nil, "%41")
+	record(expected_id, nil, nil, "%42")
+	local result = invoke(nil, "README.md", 1, 1, nil, "%42")
+	assert(result.code == 0, result.stderr)
+	local files = vim.fn.glob(state .. "/requests/*.json", false, true)
+	assert(#files == 1)
+	local request = vim.json.decode(table.concat(vim.fn.readfile(files[1]), "\n"))
+	assert(request.instance_id == expected_id, "normal request selected a different tmux pane")
+	local invalid = invoke(nil, "README.md", 1, 1, nil, "not-a-pane")
+	assert(invalid.code ~= 0 and invalid.stderr:find("exact tmux pane id", 1, true), invalid.stderr)
 end)
 
 test("a transiently unreachable peer cannot conceal editor ambiguity", function()

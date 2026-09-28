@@ -54,9 +54,13 @@ local function apply_highlights()
 		vim.api.nvim_set_hl(0, name, { default = true, link = link })
 	end
 	for _, definition in ipairs(comment_types.all()) do
-		vim.api.nvim_set_hl(0, definition.highlight, { default = true, link = definition.default_link })
+		if definition.highlight ~= definition.default_link then
+			vim.api.nvim_set_hl(0, definition.highlight, { default = true, link = definition.default_link })
+		end
 	end
 end
+
+M.refresh_highlights = apply_highlights
 
 apply_highlights()
 local highlight_group = vim.api.nvim_create_augroup("NvimReviewPanelHighlights", { clear = true })
@@ -583,7 +587,7 @@ local function append_rendered(lines, rows, decorations, rendered, row)
 	decorations[#lines] = rendered.highlights
 end
 
-local function render_file(lines, rows, decorations, state, file, depth, ancestors, counts)
+local function render_file(lines, rows, decorations, state, file, depth, ancestors, counts, selected_identity)
 	local entry = file.entry
 	local rendered = new_rendered_line()
 	local status = file_status(entry)
@@ -592,7 +596,7 @@ local function render_file(lines, rows, decorations, state, file, depth, ancesto
 	local icon, icon_highlight = devicon(file.path)
 	add_segment(rendered, icon .. " ", icon_highlight)
 	local selected = state.panes.files.selected_file == entry.identity
-		or state.workspace.entry_identity == entry.identity
+		or (selected_identity or state.workspace.entry_identity) == entry.identity
 	add_segment(rendered, file.basename, selected and "ReviewPanelFileSelected" or "ReviewPanelFile")
 	local additions, deletions = file_stats(entry)
 	if additions then
@@ -613,7 +617,18 @@ local function render_file(lines, rows, decorations, state, file, depth, ancesto
 	})
 end
 
-local function render_directory(lines, rows, decorations, state, node, depth, ancestors, counts, icons_available)
+local function render_directory(
+	lines,
+	rows,
+	decorations,
+	state,
+	node,
+	depth,
+	ancestors,
+	counts,
+	icons_available,
+	selected_identity
+)
 	local collapsed = state.collapsed[node.key] == true
 	local rendered = new_rendered_line()
 	add_segment(rendered, string.rep("  ", depth), "ReviewPanelNonText")
@@ -642,15 +657,16 @@ local function render_directory(lines, rows, decorations, state, node, depth, an
 			depth + 1,
 			child_ancestors,
 			counts,
-			icons_available
+			icons_available,
+			selected_identity
 		)
 	end
 	for _, file in ipairs(sorted_files(node)) do
-		render_file(lines, rows, decorations, state, file, depth + 1, child_ancestors, counts)
+		render_file(lines, rows, decorations, state, file, depth + 1, child_ancestors, counts, selected_identity)
 	end
 end
 
-local function file_lines(state)
+local function file_lines(state, selected_identity)
 	local lines = { header(state), "Enter open/toggle · 1/2/3 or Tab focus · q hide", "" }
 	local rows = {}
 	local decorations = {}
@@ -685,10 +701,21 @@ local function file_lines(state)
 			if not collapsed then
 				local ancestors = { group.tree.key }
 				for _, directory in ipairs(sorted_directories(group.tree)) do
-					render_directory(lines, rows, decorations, state, directory, 1, ancestors, counts, has_icons)
+					render_directory(
+						lines,
+						rows,
+						decorations,
+						state,
+						directory,
+						1,
+						ancestors,
+						counts,
+						has_icons,
+						selected_identity
+					)
 				end
 				for _, file in ipairs(sorted_files(group.tree)) do
-					render_file(lines, rows, decorations, state, file, 1, ancestors, counts)
+					render_file(lines, rows, decorations, state, file, 1, ancestors, counts, selected_identity)
 				end
 			end
 		end
@@ -761,7 +788,7 @@ local function comment_lines(state)
 	for _, item in ipairs(state.workspace.session.items or {}) do
 		local body = short_text(item.body:match("[^\n]+") or item.body, 54)
 		local side = anchor_side_label(item.anchor)
-		local definition = comment_types.get(item.type) or comment_types.get("question")
+		local definition = comment_types.get(item.type)
 		local rendered = new_rendered_line()
 		add_segment(rendered, string.format("%02d ", item.sequence))
 		add_segment(rendered, ("[%s %s]"):format(definition.icon, definition.id), definition.highlight)
@@ -904,14 +931,15 @@ end
 ---Refresh all pane contents while retaining stable selections and scroll positions.
 ---@param state table
 ---@param workspace? table
-function M.refresh(state, workspace)
+---@param selected_identity? string
+function M.refresh(state, workspace, selected_identity)
 	state.workspace = workspace or state.workspace
 	if not state.visible then
 		return true
 	end
 	capture_all(state)
 	ensure_windows(state)
-	local files, file_rows, file_decorations = file_lines(state)
+	local files, file_rows, file_decorations = file_lines(state, selected_identity)
 	local commits, commit_rows = commit_lines(state, vim.api.nvim_win_get_width(state.panes.commits.win))
 	local comments, comment_rows, comment_decorations = comment_lines(state)
 	set_lines(state.panes.files, files, file_rows)

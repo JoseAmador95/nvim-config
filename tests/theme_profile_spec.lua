@@ -37,6 +37,16 @@ local function assert_review_band_visible()
 	assert(band.bg ~= normal.bg, "native review band is indistinguishable from the editor background")
 end
 
+local function activate_review()
+	local original_notify = vim.notify
+	vim.notify = function() end
+	local ok, err = pcall(vim.cmd, "ReviewClose")
+	vim.notify = original_notify
+	assert(ok, err)
+	assert(package.loaded["config.native_review"] ~= nil, "Review action did not activate its host adapter")
+	assert(package.loaded.native_review ~= nil, "Review action did not activate native-review")
+end
+
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,
 	callback = function()
@@ -74,6 +84,8 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				assert(theme.selection().colorscheme == "vscode", ":Theme vscode did not update selection")
 				assert(vim.g.colors_name == "vscode", ":Theme vscode did not repaint")
 				if not pager.active then
+					assert(package.loaded["config.native_review"] == nil, "theme routing activated review at startup")
+					activate_review()
 					assert_review_band_visible()
 				end
 

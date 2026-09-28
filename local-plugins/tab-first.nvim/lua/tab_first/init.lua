@@ -35,6 +35,8 @@ local function default_options()
 			scope = "workspace",
 			native_fallback = nil,
 			open_location = nil,
+			capture_location = nil,
+			restore_location = nil,
 		},
 	}
 end
@@ -343,11 +345,32 @@ local function set_cursor(win, lnum, col)
 end
 
 local function same_document(left, right)
-	return left and right and left.path == right.path
+	if type(left) ~= "table" or type(right) ~= "table" then
+		return false
+	end
+	if left.kind == "provider" or right.kind == "provider" then
+		return left.kind == "provider"
+			and right.kind == "provider"
+			and type(left.provider) == "string"
+			and left.provider ~= ""
+			and left.provider == right.provider
+			and type(left.document_key) == "string"
+			and left.document_key ~= ""
+			and left.document_key == right.document_key
+	end
+	return type(left.path) == "string" and left.path ~= "" and left.path == right.path
 end
 
 local function same_location(left, right)
-	return same_document(left, right) and left.lnum == right.lnum and left.col == right.col
+	if not same_document(left, right) then
+		return false
+	end
+	if left.kind == "provider" then
+		return type(left.location_key) == "string"
+			and left.location_key ~= ""
+			and left.location_key == right.location_key
+	end
+	return left.lnum == right.lnum and left.col == right.col
 end
 
 local function trim_forward()
@@ -357,7 +380,7 @@ local function trim_forward()
 end
 
 local function append_history(entry)
-	history.entries[#history.entries + 1] = entry
+	history.entries[#history.entries + 1] = vim.deepcopy(entry)
 	history.index = #history.entries
 	local limit = math.max(1, tonumber(options.history.max_entries) or 200)
 	while #history.entries > limit do
@@ -373,7 +396,12 @@ local function window_has_path(win, path)
 	if M.is_transient(vim.api.nvim_win_get_tabpage(win)) then
 		return false
 	end
-	local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win))
+	local buf = vim.api.nvim_win_get_buf(win)
+	local special_ok, special = pcall(options.is_special_buffer, buf)
+	if not special_ok or special then
+		return false
+	end
+	local name = vim.api.nvim_buf_get_name(buf)
 	return name ~= "" and normalized_path(name) == path
 end
 
@@ -413,7 +441,66 @@ local function history_enabled()
 	return options.history.enabled ~= false
 end
 
+local function notify_history_callback(kind, err)
+	notify(("Navigation history %s callback failed: %s"):format(kind, tostring(err)), vim.log.levels.ERROR, "Tabs")
+end
+
+local function provider_entry(entry)
+	return type(entry) == "table"
+		and entry.kind == "provider"
+		and type(entry.provider) == "string"
+		and entry.provider ~= ""
+		and type(entry.document_key) == "string"
+		and entry.document_key ~= ""
+		and type(entry.location_key) == "string"
+		and entry.location_key ~= ""
+		and type(entry.label) == "string"
+		and type(entry.payload) == "table"
+end
+
+local function file_entry(entry)
+	return type(entry) == "table"
+		and entry.kind == nil
+		and type(entry.path) == "string"
+		and entry.path ~= ""
+		and type(entry.lnum) == "number"
+		and entry.lnum % 1 == 0
+		and entry.lnum >= 1
+		and type(entry.col) == "number"
+		and entry.col % 1 == 0
+		and entry.col >= 1
+end
+
+local function history_entry(entry)
+	return provider_entry(entry) or file_entry(entry)
+end
+
+local function callback_restore_result(kind, ok, restored, err, reported)
+	if not ok then
+		notify_history_callback(kind, restored)
+		return nil
+	elseif restored == true then
+		return true
+	elseif restored == false and err == nil then
+		return false
+	end
+	if reported ~= true then
+		notify_history_callback(kind, err or "did not confirm whether the location was stale")
+	end
+	return nil
+end
+
 local function restore_history_entry(entry)
+	if not history_entry(entry) then
+		return false
+	elseif entry.kind == "provider" then
+		if type(options.history.restore_location) ~= "function" then
+			notify_history_callback("restore_location", "provider restoration is not configured")
+			return nil
+		end
+		local ok, restored, restore_err, reported = pcall(options.history.restore_location, vim.deepcopy(entry))
+		return callback_restore_result("restore_location", ok, restored, restore_err, reported)
+	end
 	local tabpage, win = window_for_path(entry.path, entry.tabpage, entry.winid)
 	if win then
 		vim.api.nvim_set_current_tabpage(tabpage)
@@ -427,16 +514,23 @@ local function restore_history_entry(entry)
 		return false
 	end
 	if type(options.history.open_location) == "function" then
-		local ok, restored = pcall(options.history.open_location, vim.deepcopy(entry))
-		return ok and restored ~= false
+		local ok, restored, restore_err, reported = pcall(options.history.open_location, vim.deepcopy(entry))
+		return callback_restore_result("open_location", ok, restored, restore_err, reported)
 	end
 
-	local ok = pcall(M.open, entry.path, {
+	local ok, restored = pcall(M.open, entry.path, {
 		lnum = entry.lnum,
 		col = entry.col,
 		record_history = false,
 	})
-	return ok
+	if not ok then
+		notify_history_callback("open_location", restored)
+		return nil
+	elseif restored == nil then
+		notify_history_callback("open_location", "canonical opening did not return a destination")
+		return nil
+	end
+	return true
 end
 
 local function prepare_traversal()
@@ -444,37 +538,54 @@ local function prepare_traversal()
 	if not current or history.index == 0 then
 		return
 	end
-	if same_document(history.entries[history.index], current) then
-		history.entries[history.index] = current
+	if same_location(history.entries[history.index], current) then
+		history.entries[history.index] = vim.deepcopy(current)
 		return
 	end
 	trim_forward()
 	append_history(current)
 end
 
-local function fallback(direction, opts)
+local function traversal_count(opts)
+	local count = tonumber(opts.count) or 1
+	if count ~= count or count == math.huge or count == -math.huge then
+		return 1
+	end
+	return math.max(1, math.floor(count))
+end
+
+local function fallback(direction, opts, count)
 	if opts.fallback ~= false and type(options.history.native_fallback) == "function" then
-		pcall(options.history.native_fallback, direction)
+		options.history.native_fallback(direction, count)
 	end
 	return false
 end
 
 local function traverse(direction, opts)
 	opts = opts or {}
-	if not history_enabled() or #history.entries == 0 then
-		return fallback(direction, opts)
+	local remaining = traversal_count(opts)
+	if not history_enabled() then
+		return fallback(direction, opts, remaining)
+	end
+	if #history.entries == 0 then
+		return fallback(direction, opts, remaining)
 	end
 
 	prepare_traversal()
 	local candidate = history.index + direction
-	while candidate >= 1 and candidate <= #history.entries do
-		if restore_history_entry(history.entries[candidate]) then
+	local restored = false
+	while remaining > 0 and candidate >= 1 and candidate <= #history.entries do
+		local result = restore_history_entry(history.entries[candidate])
+		if result == nil then
+			return restored
+		elseif result == true then
 			history.index = candidate
-			return true
+			remaining = remaining - 1
+			restored = true
 		end
 		candidate = candidate + direction
 	end
-	return fallback(direction, opts)
+	return restored
 end
 
 ---Configure host-owned integrations. Repeated setup preserves tabs and history.
@@ -527,7 +638,9 @@ function M.setup(opts)
 				or key == "max_entries"
 				or key == "scope"
 				or key == "native_fallback"
-				or key == "open_location",
+				or key == "open_location"
+				or key == "capture_location"
+				or key == "restore_location",
 			"tab-first history contains an unknown option: " .. tostring(key)
 		)
 	end
@@ -548,7 +661,7 @@ function M.setup(opts)
 		history_options.scope == nil or history_options.scope == "workspace",
 		"tab-first history.scope must be workspace"
 	)
-	for _, key in ipairs({ "native_fallback", "open_location" }) do
+	for _, key in ipairs({ "native_fallback", "open_location", "capture_location", "restore_location" }) do
 		assert(
 			history_options[key] == nil or type(history_options[key]) == "function",
 			"tab-first history." .. key .. " must be a function"
@@ -1093,38 +1206,27 @@ end
 
 ---Open a path canonically, preferring its exact visible split and then home.
 ---@param filepath string
----@param opts? { lnum?: integer, col?: integer, record_history?: boolean }
+---@param opts? { lnum?: integer, col?: integer, record_history?: boolean, history_origin?: table }
 ---@return table
 function M.open(filepath, opts)
 	assert(type(filepath) == "string" and filepath ~= "", "filepath must be a non-empty string")
 	opts = opts or {}
-	local origin = opts.record_history ~= false and history_enabled() and M.capture() or nil
+	local origin
+	if opts.record_history ~= false and history_enabled() then
+		origin = opts.history_origin ~= nil and vim.deepcopy(opts.history_origin) or M.capture()
+	end
 	local absolute = vim.fn.fnamemodify(filepath, ":p")
 	local target_path = normalized_path(absolute)
 	local destination
 
-	for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
-		if not M.is_transient(tabpage) then
-			for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
-				if is_nonfloating_window(win, tabpage) then
-					local buf = vim.api.nvim_win_get_buf(win)
-					local special_ok, special = pcall(options.is_special_buffer, buf)
-					if special_ok and not special then
-						local name = vim.api.nvim_buf_get_name(buf)
-						if name ~= "" and normalized_path(name) == target_path then
-							vim.api.nvim_set_current_tabpage(tabpage)
-							vim.api.nvim_set_current_win(win)
-							set_cursor(win, opts.lnum, opts.col)
-							destination = { tabpage = tabpage, winid = win, bufnr = buf, reused = "visible" }
-							break
-						end
-					end
-				end
-			end
-		end
-		if destination then
-			break
-		end
+	local tabpage, win =
+		window_for_path(target_path, vim.api.nvim_get_current_tabpage(), vim.api.nvim_get_current_win())
+	if win then
+		local buf = vim.api.nvim_win_get_buf(win)
+		vim.api.nvim_set_current_tabpage(tabpage)
+		vim.api.nvim_set_current_win(win)
+		set_cursor(win, opts.lnum, opts.col)
+		destination = { tabpage = tabpage, winid = win, bufnr = buf, reused = "visible" }
 	end
 
 	if not destination then
@@ -1162,10 +1264,29 @@ end
 
 M.open_file_in_tab = M.open
 
----Capture the current file-backed, non-transient editor location.
+---Capture the current provider-owned or file-backed editor location.
 ---@return table?
 function M.capture()
-	if not history_enabled() or M.is_transient(vim.api.nvim_get_current_tabpage()) then
+	if not history_enabled() then
+		return nil
+	end
+	if type(options.history.capture_location) == "function" then
+		local ok, entry, capture_err = pcall(options.history.capture_location)
+		if not ok then
+			notify_history_callback("capture_location", entry)
+			return nil
+		elseif entry ~= nil then
+			if provider_entry(entry) then
+				return vim.deepcopy(entry)
+			end
+			notify_history_callback("capture_location", "returned an invalid provider entry")
+			return nil
+		elseif capture_err ~= nil then
+			notify_history_callback("capture_location", capture_err)
+			return nil
+		end
+	end
+	if M.is_transient(vim.api.nvim_get_current_tabpage()) then
 		return nil
 	end
 
@@ -1192,22 +1313,35 @@ function M.capture()
 	}
 end
 
+---Return whether two captured entries identify the same semantic location.
+---@param left table?
+---@param right table?
+---@return boolean
+function M.same_location(left, right)
+	return same_location(left, right)
+end
+
 ---Record one semantic origin/destination transition.
 ---@param origin table?
 ---@param destination table?
 ---@return boolean
 function M.record_transition(origin, destination)
-	if not history_enabled() or not origin or not destination or same_location(origin, destination) then
+	if
+		not history_enabled()
+		or not history_entry(origin)
+		or not history_entry(destination)
+		or same_location(origin, destination)
+	then
 		return false
 	end
 	trim_forward()
 	if history.index > 0 and same_document(history.entries[history.index], origin) then
-		history.entries[history.index] = origin
+		history.entries[history.index] = vim.deepcopy(origin)
 	else
 		append_history(origin)
 	end
 	if same_location(history.entries[history.index], destination) then
-		history.entries[history.index] = destination
+		history.entries[history.index] = vim.deepcopy(destination)
 	else
 		append_history(destination)
 	end
@@ -1215,13 +1349,13 @@ function M.record_transition(origin, destination)
 	return true
 end
 
----@param opts? { fallback?: boolean }
+---@param opts? { fallback?: boolean, count?: integer }
 ---@return boolean
 function M.back(opts)
 	return traverse(-1, opts)
 end
 
----@param opts? { fallback?: boolean }
+---@param opts? { fallback?: boolean, count?: integer }
 ---@return boolean
 function M.forward(opts)
 	return traverse(1, opts)

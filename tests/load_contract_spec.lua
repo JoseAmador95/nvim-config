@@ -25,18 +25,25 @@ vim.api.nvim_create_autocmd("User", {
 				local ok, err = xpcall(function()
 					assert(vim.g.did_very_lazy == true, "load boundary ran before User VeryLazy settled")
 					assert(late_very_lazy_callback_ran, "load boundary skipped a scheduled VeryLazy callback")
+					local notify_status = require("config.notify_broker").status()
+					assert(notify_status.installed, "notification broker lost vim.notify ownership")
+					assert(notify_status.active == "noice", "Noice did not acquire the notification lifecycle")
+					assert(notify_status.leases == 1, "Noice leaked notification provider leases")
 					for _, name in ipairs({
 						"trusted_workspace",
-						"exact_editor",
 						"tab_first",
 						"treesitter_runtime",
 						"theme_router",
-						"native_review",
 					}) do
 						assert(package.loaded[name] ~= nil, name .. " was not loaded at its required early boundary")
 					end
+					assert(
+						package.loaded["config.execution"] ~= nil,
+						"workspace execution authority was not registered at its host startup boundary"
+					)
 
 					local deferred_modules = {
+						"exact_editor",
 						"devcontainer_editor",
 						"terminal_lifecycle",
 						"project_python",
@@ -47,7 +54,8 @@ vim.api.nvim_create_autocmd("User", {
 						"coverage_workbench",
 						"just_workbench",
 						"clangd_compile_db",
-						"verified_tools",
+						"native_review",
+						"nvim-jqx",
 					}
 					for loaded_name in pairs(package.loaded) do
 						for _, prefix in ipairs(deferred_modules) do
@@ -63,18 +71,30 @@ vim.api.nvim_create_autocmd("User", {
 						"config.cmake",
 						"config.action_palette",
 						"config.log_patterns",
-						"config.tool_bootstrap",
+						"config.log_watch",
+						"config.jqx",
+						"config.native_review",
 					}) do
 						assert(package.loaded[name] == nil, name .. " host adapter loaded before its trigger")
 					end
+					for _, name in ipairs({ "mason", "mason-registry", "mason-lspconfig" }) do
+						assert(package.loaded[name] == nil, name .. " loaded during ordinary file startup")
+					end
+					assert(
+						package.loaded["oil-git-status"] == nil,
+						"oil-git-status loaded before the first OilEnter event"
+					)
 
 					for _, command in ipairs({
 						"MenuOpen",
 						"DiagramShow",
+						"MarkdownView",
 						"LogHlAdd",
 						"LogHlRegex",
 						"LogHlClear",
 						"LogWatchCurrentFile",
+						"JqxList",
+						"JqxQuery",
 						"Scratch",
 						"CoverageLoad",
 						"CoverageSummary",
@@ -83,6 +103,10 @@ vim.api.nvim_create_autocmd("User", {
 						"JustImportLast",
 						"ClangdSetCompileCommands",
 						"NvimConfigToolsInstall",
+						"ReviewOpen",
+						"ReviewPanel",
+						"ReviewComment",
+						"ReviewClose",
 					}) do
 						assert(vim.fn.exists(":" .. command) == 2, command .. " was not registered by its host facade")
 					end

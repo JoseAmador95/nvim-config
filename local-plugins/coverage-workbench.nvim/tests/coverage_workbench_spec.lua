@@ -40,7 +40,13 @@ local coverage = require("coverage_workbench")
 
 test("lifecycle defaults are copied and rejected setup is non-mutating", function()
 	local defaults = coverage.effective_config()
-	equal({ max_report_bytes = 50 * 1024 * 1024, signs = "all", stale = "hide" }, defaults)
+	equal({
+		max_report_bytes = 50 * 1024 * 1024,
+		max_source_bytes = 16 * 1024 * 1024,
+		max_model_bytes = 64 * 1024 * 1024,
+		signs = "all",
+		stale = "hide",
+	}, defaults)
 	assert(coverage.status().configured == false)
 	defaults.max_report_bytes = 1
 	equal(50 * 1024 * 1024, coverage.effective_config().max_report_bytes, "effective config leaked state")
@@ -54,6 +60,30 @@ test("lifecycle defaults are copied and rejected setup is non-mutating", functio
 end)
 
 assert(coverage.setup())
+
+test("setup enforces hard byte caps transactionally", function()
+	assert(coverage.setup({
+		max_report_bytes = 256 * 1024 * 1024,
+		max_source_bytes = 16 * 1024 * 1024,
+		max_model_bytes = 64 * 1024 * 1024,
+	}))
+	local before = coverage.status()
+	for _, options in ipairs({
+		{ max_report_bytes = 256 * 1024 * 1024 + 1 },
+		{ max_report_bytes = 0 },
+		{ max_source_bytes = 16 * 1024 * 1024 + 1 },
+		{ max_source_bytes = 0 },
+		{ max_model_bytes = 64 * 1024 * 1024 + 1 },
+		{ max_source_bytes = 1.5 },
+		{ max_model_bytes = 0 },
+		{ max_model_bytes = "64" },
+	}) do
+		local ok, err = coverage.setup(options)
+		assert(ok == nil and type(err) == "string", "invalid byte limits were accepted")
+		equal(before, coverage.status(), "rejected byte limits mutated setup state")
+	end
+	assert(coverage.setup())
+end)
 
 local function json(format, files)
 	local meta = { version = "fixture" }
@@ -88,6 +118,171 @@ test("accepts legacy and known Coverage.py JSON formats", function()
 		assert(model.files[source].executed_lines[1] == 1)
 		assert(model.totals.percent_covered == 50)
 	end
+end)
+
+test("Coverage.py line classifications must be pairwise disjoint", function()
+	for _, overlap in ipairs({
+		{ left = "executed_lines", right = "missing_lines" },
+		{ left = "executed_lines", right = "excluded_lines" },
+		{ left = "missing_lines", right = "excluded_lines" },
+	}) do
+		local entry = { executed_lines = {}, missing_lines = {}, excluded_lines = {} }
+		entry[overlap.left] = { 1 }
+		entry[overlap.right] = { 1 }
+		local model, err = coverage.parse_coverage_json(fixture, json(3, { ["src/probe.py"] = entry }))
+		assert(model == nil and err:find(overlap.left, 1, true) and err:find(overlap.right, 1, true), err)
+	end
+end)
+
+test("canonical JSON and LCOV duplicates are rejected before a second read or hash", function()
+	local alias = fixture .. "/src/probe-alias.py"
+	assert(vim.uv.fs_symlink(source, alias))
+	local original_read = vim.uv.fs_read
+	local original_sha256 = vim.fn.sha256
+	local reads = 0
+	local hashes = 0
+	vim.uv.fs_read = function(...)
+		reads = reads + 1
+		return original_read(...)
+	end
+	vim.fn.sha256 = function(...)
+		hashes = hashes + 1
+		return original_sha256(...)
+	end
+	local call_ok, model, err = pcall(
+		coverage.parse_coverage_json,
+		fixture,
+		json(3, {
+			["src/probe.py"] = { executed_lines = { 1 }, missing_lines = {}, excluded_lines = {} },
+			["src/probe-alias.py"] = { executed_lines = { 1 }, missing_lines = {}, excluded_lines = {} },
+		})
+	)
+	assert(call_ok, model)
+	assert(model == nil and err:find("duplicate canonical source", 1, true), err)
+	equal(1, reads, "canonical duplicate source was read twice")
+	equal(1, hashes, "canonical duplicate source was hashed twice")
+
+	reads, hashes = 0, 0
+	call_ok, model, err = pcall(
+		coverage.parse_lcov,
+		fixture,
+		table.concat({
+			"SF:src/probe.py",
+			"DA:1,1",
+			"end_of_record",
+			"SF:src/probe-alias.py",
+			"DA:1,1",
+			"end_of_record",
+		}, "\n")
+	)
+	vim.uv.fs_read = original_read
+	vim.fn.sha256 = original_sha256
+	vim.fn.delete(alias)
+	assert(call_ok, model)
+	assert(model == nil and err:find("duplicate LCOV source record", 1, true), err)
+	equal(1, reads, "canonical LCOV duplicate source was read twice")
+	equal(1, hashes, "canonical LCOV duplicate source was hashed twice")
+end)
+
+test("source and aggregate caps reject from descriptor sizes before read or hash", function()
+	local original_read = vim.uv.fs_read
+	local original_sha256 = vim.fn.sha256
+	local reads = 0
+	local hashes = 0
+	vim.uv.fs_read = function(...)
+		reads = reads + 1
+		return original_read(...)
+	end
+	vim.fn.sha256 = function(...)
+		hashes = hashes + 1
+		return original_sha256(...)
+	end
+	assert(coverage.setup({ max_source_bytes = 1, max_model_bytes = 1 }))
+	local call_ok, model, err = pcall(coverage.parse_coverage_json, fixture, json(3))
+	vim.uv.fs_read = original_read
+	vim.fn.sha256 = original_sha256
+	assert(call_ok, model)
+	assert(model == nil and err:find("source exceeds 1 bytes", 1, true), err)
+	equal(0, reads, "oversized source was read")
+	equal(0, hashes, "oversized source was hashed")
+
+	local first_size = assert(vim.uv.fs_stat(source)).size
+	assert(coverage.setup({ max_source_bytes = first_size, max_model_bytes = 1024 * 1024 }))
+	assert(coverage.parse_coverage_json(fixture, json(3)), "source exactly at both byte limits was rejected")
+
+	local first_large = fixture .. "/src/first-large.py"
+	local second = fixture .. "/src/second-large.py"
+	vim.fn.writefile({ string.rep("a", 2047) }, first_large, "b")
+	vim.fn.writefile({ string.rep("b", 2047) }, second, "b")
+	local first_large_size = assert(vim.uv.fs_stat(first_large)).size
+	local second_size = assert(vim.uv.fs_stat(second)).size
+	local both_sources = {
+		["src/first-large.py"] = { executed_lines = { 1 }, missing_lines = {}, excluded_lines = {} },
+		["src/second-large.py"] = { executed_lines = { 1 }, missing_lines = {}, excluded_lines = {} },
+	}
+	assert(coverage.setup({
+		max_source_bytes = math.max(first_large_size, second_size),
+		max_model_bytes = first_large_size + second_size,
+	}))
+	assert(coverage.parse_coverage_json(fixture, json(3, both_sources)), "aggregate exact byte limit was rejected")
+	assert(coverage.setup({
+		max_source_bytes = math.max(first_large_size, second_size),
+		max_model_bytes = first_large_size + second_size - 1,
+	}))
+	reads, hashes = 0, 0
+	vim.uv.fs_read = function(...)
+		reads = reads + 1
+		return original_read(...)
+	end
+	vim.fn.sha256 = function(...)
+		hashes = hashes + 1
+		return original_sha256(...)
+	end
+	call_ok, model, err = pcall(coverage.parse_coverage_json, fixture, json(3, both_sources))
+	vim.uv.fs_read = original_read
+	vim.fn.sha256 = original_sha256
+	vim.fn.delete(first_large)
+	vim.fn.delete(second)
+	assert(coverage.setup())
+	assert(call_ok, model)
+	assert(model == nil and err:find("coverage sources exceed", 1, true), err)
+	equal(1, reads, "aggregate overflow read the source that exceeded the remaining descriptor budget")
+	equal(1, hashes, "aggregate overflow hashed the source that exceeded the remaining descriptor budget")
+end)
+
+test("normalized model entries consume the independent model budget", function()
+	local empty = fixture .. "/src/empty.py"
+	vim.fn.writefile({}, empty, "b")
+	local lines = {}
+	for line = 1, 10000 do
+		lines[line] = line
+	end
+	assert(coverage.setup({ max_source_bytes = 1, max_model_bytes = 1024 }))
+	local model, err = coverage.parse_coverage_json(
+		fixture,
+		json(3, {
+			["src/empty.py"] = { executed_lines = lines, missing_lines = {}, excluded_lines = {} },
+		})
+	)
+	vim.fn.delete(empty)
+	assert(coverage.setup())
+	assert(model == nil and err:find("coverage model exceeds", 1, true), err)
+end)
+
+test("line numbers outside the sign API range are rejected without publishing state", function()
+	local report = fixture .. "/oversized-line.json"
+	vim.fn.writefile({
+		json(3, {
+			["src/probe.py"] = { executed_lines = { 2147483648 }, missing_lines = {}, excluded_lines = {} },
+		}),
+	}, report)
+	local called, loaded, err = pcall(coverage.load, { root = fixture, path = report })
+	assert(called, loaded)
+	assert(loaded == nil and err:find("invalid line", 1, true), err)
+	assert(coverage.snapshot(fixture) == nil, "rejected line number published a registry generation")
+	local lcov, lcov_err = coverage.parse_lcov(fixture, "SF:src/probe.py\nDA:2147483648,1\nend_of_record")
+	assert(lcov == nil and lcov_err:find("invalid LCOV line", 1, true), lcov_err)
+	vim.fn.delete(report)
 end)
 
 test("rejects future, malformed, and escaping Coverage.py data", function()
@@ -207,6 +402,151 @@ test("source edits and replacements hide stale signs and failed refresh never re
 	assert(coverage.clear(fixture))
 	vim.api.nvim_buf_delete(buf, { force = true })
 	vim.fn.writefile({ "value = 1", "print(value)" }, source)
+	vim.fn.delete(report)
+end)
+
+test("repeated text events use the indexed dirty-state fast path", function()
+	assert(coverage.setup())
+	vim.fn.writefile({ "value = 1", "print(value)" }, source)
+	local report = fixture .. "/event-cost-coverage.json"
+	vim.fn.writefile({ json(3) }, report)
+	local buf = vim.fn.bufadd(source)
+	vim.fn.bufload(buf)
+	assert(coverage.load({ root = fixture, path = report }))
+	assert(#owned_signs(buf) == 2)
+	vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "value = 2" })
+
+	local originals = {
+		lstat = vim.uv.fs_lstat,
+		open = vim.uv.fs_open,
+		read = vim.uv.fs_read,
+		realpath = vim.uv.fs_realpath,
+		sha256 = vim.fn.sha256,
+		place = vim.fn.sign_place,
+		unplace = vim.fn.sign_unplace,
+	}
+	local counts = { lstat = 0, open = 0, read = 0, realpath = 0, sha256 = 0, place = 0, unplace = 0 }
+	vim.uv.fs_lstat = function(...)
+		counts.lstat = counts.lstat + 1
+		return originals.lstat(...)
+	end
+	vim.uv.fs_open = function(...)
+		counts.open = counts.open + 1
+		return originals.open(...)
+	end
+	vim.uv.fs_read = function(...)
+		counts.read = counts.read + 1
+		return originals.read(...)
+	end
+	vim.uv.fs_realpath = function(...)
+		counts.realpath = counts.realpath + 1
+		return originals.realpath(...)
+	end
+	vim.fn.sha256 = function(...)
+		counts.sha256 = counts.sha256 + 1
+		return originals.sha256(...)
+	end
+	vim.fn.sign_place = function(...)
+		counts.place = counts.place + 1
+		return originals.place(...)
+	end
+	vim.fn.sign_unplace = function(...)
+		counts.unplace = counts.unplace + 1
+		return originals.unplace(...)
+	end
+	local call_ok, call_err = xpcall(function()
+		for _ = 1, 32 do
+			vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf, modeline = false })
+			vim.api.nvim_exec_autocmds("TextChangedI", { buffer = buf, modeline = false })
+		end
+	end, debug.traceback)
+	vim.uv.fs_lstat = originals.lstat
+	vim.uv.fs_open = originals.open
+	vim.uv.fs_read = originals.read
+	vim.uv.fs_realpath = originals.realpath
+	vim.fn.sha256 = originals.sha256
+	vim.fn.sign_place = originals.place
+	vim.fn.sign_unplace = originals.unplace
+	assert(call_ok, call_err)
+	equal({ lstat = 0, open = 0, read = 0, realpath = 0, sha256 = 0, place = 0, unplace = 1 }, counts)
+	equal(0, #owned_signs(buf), "dirty fast path restored coverage signs")
+
+	assert(coverage.clear(fixture))
+	vim.api.nvim_buf_delete(buf, { force = true })
+	vim.fn.delete(report)
+	vim.fn.writefile({ "value = 1", "print(value)" }, source)
+end)
+
+test("buffer events revalidate only the directly indexed project", function()
+	assert(coverage.setup())
+	local other_root = fixture .. "/other-project"
+	local other_source = other_root .. "/src/probe.py"
+	assert(vim.fn.mkdir(other_root .. "/src", "p", tonumber("700", 8)) == 1)
+	assert(vim.fn.writefile({ "other = true" }, other_source) == 0)
+	local report = fixture .. "/indexed-coverage.json"
+	local other_report = other_root .. "/coverage.json"
+	assert(vim.fn.writefile({ json(3) }, report) == 0)
+	assert(vim.fn.writefile({ json(3) }, other_report) == 0)
+	local buf = vim.fn.bufadd(source)
+	vim.fn.bufload(buf)
+	assert(coverage.load({ root = fixture, path = report }))
+	assert(coverage.load({ root = other_root, path = other_report }))
+
+	local original_lstat = vim.uv.fs_lstat
+	local source_stats = 0
+	local other_stats = 0
+	vim.uv.fs_lstat = function(path, ...)
+		if path == source then
+			source_stats = source_stats + 1
+		elseif path == other_source then
+			other_stats = other_stats + 1
+		end
+		return original_lstat(path, ...)
+	end
+	local call_ok, call_err = xpcall(function()
+		vim.api.nvim_exec_autocmds("BufEnter", { buffer = buf, modeline = false })
+	end, debug.traceback)
+	vim.uv.fs_lstat = original_lstat
+	assert(call_ok, call_err)
+	equal(2, source_stats, "current source metadata was not checked exactly once")
+	equal(0, other_stats, "unrelated registered project was scanned for a buffer event")
+
+	assert(coverage.clear(fixture))
+	assert(coverage.clear(other_root))
+	vim.api.nvim_buf_delete(buf, { force = true })
+	vim.fn.delete(report)
+	vim.fn.delete(other_root, "rf")
+end)
+
+test("reload after an atomic symlink retarget releases signs from the old source", function()
+	assert(coverage.setup())
+	local alias = fixture .. "/retarget.py"
+	local first = fixture .. "/retarget-a.py"
+	local second = fixture .. "/retarget-b.py"
+	local replacement = fixture .. "/retarget.next"
+	local report = fixture .. "/retarget.info"
+	assert(vim.fn.writefile({ "first = true" }, first) == 0)
+	assert(vim.fn.writefile({ "second = true" }, second) == 0)
+	assert(vim.uv.fs_symlink(vim.fs.basename(first), alias))
+	assert(vim.fn.writefile({ "SF:retarget.py", "DA:1,1", "end_of_record" }, report) == 0)
+	local buf = vim.fn.bufadd(alias)
+	vim.fn.bufload(buf)
+	assert(coverage.load({ root = fixture, path = report, format = "lcov" }))
+	equal(1, #owned_signs(buf), "coverage was not rendered for the original symlink target")
+
+	assert(vim.uv.fs_symlink(vim.fs.basename(second), replacement))
+	assert(vim.uv.fs_rename(replacement, alias))
+	vim.api.nvim_buf_call(buf, function()
+		vim.cmd("edit!")
+	end)
+	equal({ "second = true" }, vim.api.nvim_buf_get_lines(buf, 0, -1, false))
+	equal(0, #owned_signs(buf), "old-target coverage survived a symlink retarget and reload")
+
+	assert(coverage.clear(fixture))
+	vim.api.nvim_buf_delete(buf, { force = true })
+	vim.fn.delete(alias)
+	vim.fn.delete(first)
+	vim.fn.delete(second)
 	vim.fn.delete(report)
 end)
 

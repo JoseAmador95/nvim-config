@@ -1,6 +1,7 @@
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 vim.o.hidden = true
+vim.o.timeoutlen = 300
 
 local repo = vim.fn.getcwd()
 local plugin = repo .. "/local-plugins/tab-first.nvim"
@@ -171,28 +172,143 @@ local function chunk_highlight(value, needle)
 	return nil
 end
 
-local function invoke_cycle_and_assert_insert(mapping, message)
-	assert(mapping.buffer == 1 and type(mapping.callback) == "function", message .. " mapping is missing")
-	local queued
-	local original_schedule = vim.schedule
-	vim.schedule = function(callback)
-		queued = callback
+local function type_cycle_mappings(message)
+	local tab = vim.fn.maparg("<Tab>", "n", false, true)
+	local backtab = vim.fn.maparg("<S-Tab>", "n", false, true)
+	for lhs, mapping in pairs({ ["<Tab>"] = tab, ["<S-Tab>"] = backtab }) do
+		assert(
+			mapping.buffer == 1 and type(mapping.callback) == "function",
+			message .. " " .. lhs .. " mapping is missing"
+		)
+		assert(mapping.expr == 0, message .. " " .. lhs .. " mapping unexpectedly uses expr")
+		assert(mapping.noremap == 1, message .. " " .. lhs .. " mapping may fall through to another mapping")
+		assert(mapping.silent == 1, message .. " " .. lhs .. " mapping is not silent")
+		assert(vim.fn.maparg(lhs, "i", false, true).buffer ~= 1, message .. " " .. lhs .. " intercepted Insert mode")
 	end
+	return tab, backtab
+end
+
+local function wait_until(predicate, message)
+	assert(vim.wait(1000, predicate, 10), message)
+end
+
+local function compose_with_input_listener(options, callback)
+	local original_on_key = vim.on_key
+	local listener
+	vim.on_key = function(fn, namespace, opts)
+		if type(fn) == "function" then
+			listener = fn
+		end
+		return original_on_key(fn, namespace, opts)
+	end
+	local ok, opened = xpcall(function()
+		return review_editor.compose(options, callback)
+	end, debug.traceback)
+	vim.on_key = original_on_key
+	assert(ok, opened)
+	assert(opened and type(listener) == "function", "composer input listener was not captured")
+	return listener
+end
+
+local function invoke_input_listener(listener, key, typed, mode)
+	local original_get_mode = vim.api.nvim_get_mode
+	vim.api.nvim_get_mode = function()
+		return { mode = mode, blocking = false }
+	end
+	local ok, err = xpcall(function()
+		listener(vim.keycode(key), vim.keycode(typed))
+	end, debug.traceback)
+	vim.api.nvim_get_mode = original_get_mode
+	assert(ok, err)
+end
+
+local function dispatch_normal(listener, lhs)
+	invoke_input_listener(listener, lhs, lhs, "n")
+	local mapping = vim.fn.maparg(lhs, "n", false, true)
+	assert(mapping.buffer == 1 and type(mapping.callback) == "function", lhs .. " mapping is missing")
 	mapping.callback()
-	vim.schedule = original_schedule
-	assert(type(queued) == "function", message .. " did not schedule its Insert transition")
-	local entered_insert = false
+end
+
+local function with_fake_defer(callback)
+	local original_defer = vim.defer_fn
+	local timers = {}
+	vim.defer_fn = function(deferred, delay)
+		local timer = {
+			callback = deferred,
+			closed = false,
+			delay = delay,
+			stopped = false,
+		}
+		function timer:stop()
+			self.stopped = true
+		end
+		function timer:is_closing()
+			return self.closed
+		end
+		function timer:close()
+			self.closed = true
+		end
+		function timer:fire()
+			self.closed = true
+			self.callback()
+		end
+		timers[#timers + 1] = timer
+		return timer
+	end
+	local ok, err = xpcall(function()
+		callback(timers)
+	end, debug.traceback)
+	if not ok and review_editor.has_active() then
+		for _, win in ipairs(vim.api.nvim_list_wins()) do
+			local window_config = vim.api.nvim_win_get_config(win)
+			local window_buf = vim.api.nvim_win_get_buf(win)
+			if window_config.relative ~= "" and vim.bo[window_buf].filetype == "markdown" then
+				pcall(vim.api.nvim_win_close, win, true)
+			end
+		end
+		pcall(review_editor.has_active)
+	end
+	vim.defer_fn = original_defer
+	assert(ok, err)
+end
+
+local function discard_active()
+	local mapping = vim.fn.maparg("<Esc>", "n", false, true)
+	assert(mapping.buffer == 1 and type(mapping.callback) == "function", "composer discard mapping is missing")
+	mapping.callback()
+	mapping.callback()
+end
+
+local function invoke_cycle_and_assert_normal(mapping, message)
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_get_current_buf()
+	local cursor = vim.api.nvim_win_get_cursor(win)
+	local mode = vim.api.nvim_get_mode().mode
+	assert(mode:sub(1, 1) == "n", message .. " was not invoked from Normal mode")
+	local scheduled = 0
+	local startinsert = 0
+	local original_schedule = vim.schedule
+	vim.schedule = function()
+		scheduled = scheduled + 1
+	end
 	local original_cmd = vim.cmd
 	vim.cmd = function(command)
 		if command == "startinsert" then
-			entered_insert = true
+			startinsert = startinsert + 1
 			return
 		end
 		return original_cmd(command)
 	end
-	queued()
+	local ok, err = xpcall(mapping.callback, debug.traceback)
+	vim.schedule = original_schedule
 	vim.cmd = original_cmd
-	assert(entered_insert, message .. " did not request Insert mode")
+	assert(ok, err)
+	assert(scheduled == 0, message .. " scheduled a mode transition")
+	assert(startinsert == 0, message .. " requested Insert mode")
+	assert(vim.api.nvim_get_current_win() == win, message .. " changed the current window")
+	assert(vim.api.nvim_get_current_buf() == buf, message .. " changed the current buffer")
+	equal(cursor, vim.api.nvim_win_get_cursor(win), message .. " changed the cursor")
+	assert(vim.api.nvim_get_mode().mode == mode, message .. " changed the current mode")
 end
 
 local function namespace_marks(buf)
@@ -205,6 +321,68 @@ local function namespace_windows()
 	end
 	return nil
 end
+
+test("composer respects explicit Normal opening while keeping Insert default", function()
+	reset_editor()
+	local source_win = review_source_fixture()
+	local original_cmd = vim.cmd
+	local startinsert = 0
+	local stopinsert = 0
+	vim.cmd = function(command)
+		if command == "startinsert" then
+			startinsert = startinsert + 1
+			return
+		elseif command == "stopinsert" then
+			stopinsert = stopinsert + 1
+			return
+		end
+		return original_cmd(command)
+	end
+	local ok, err = xpcall(function()
+		assert(review_editor.compose({
+			title = "Edit",
+			body = "Existing comment",
+			start_in_insert = false,
+			source_win = source_win,
+			anchor = { kind = "general" },
+		}, function()
+			return true
+		end))
+		equal(0, startinsert, "Normal composer requested Insert mode")
+		equal(1, stopinsert, "Normal composer did not request Normal mode")
+		discard_active()
+
+		assert(review_editor.compose({
+			title = "New",
+			body = "New comment",
+			source_win = source_win,
+			anchor = { kind = "general" },
+		}, function()
+			return true
+		end))
+		equal(1, startinsert, "default composer stopped opening in Insert mode")
+		equal(1, stopinsert, "default composer requested an extra Normal transition")
+		discard_active()
+
+		assert(review_editor.compose({
+			title = "Reply",
+			body = "Reply body",
+			start_in_insert = true,
+			source_win = source_win,
+			anchor = { kind = "general" },
+		}, function()
+			return true
+		end))
+		equal(2, startinsert, "explicit Insert composer did not request Insert mode")
+		equal(1, stopinsert, "explicit Insert composer requested Normal mode")
+		discard_active()
+	end, debug.traceback)
+	vim.cmd = original_cmd
+	if review_editor.has_active() then
+		pcall(discard_active)
+	end
+	assert(ok, err)
+end)
 
 test("range composer uses a focused body and separate reserved footer", function()
 	reset_editor()
@@ -240,13 +418,14 @@ test("range composer uses a focused body and separate reserved footer", function
 	assert(vim.wo[footer].wrap == false and vim.bo[buf].filetype == "markdown")
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "composer mutated source text")
 	assert(window_text(footer):find("Fixture", 1, true) and window_text(footer):find("<C-s> / <CR><CR> save", 1, true))
+	assert(window_text(footer):find("<Esc><Esc> discard", 1, true))
 	assert(not window_text(footer):find("<Tab> type", 1, true))
 	assert(vim.fn.strdisplaywidth(window_text(footer)) <= config.width)
 	assert(#namespace_marks(buf) == 0, "inline instructions still overlap the Markdown body")
-	for _, mapping in ipairs({ "q", "<Esc>", "<C-s>", "<CR><CR>" }) do
+	for _, mapping in ipairs({ "q", "<Esc>", "<C-s>", "<CR>" }) do
 		assert(vim.fn.maparg(mapping, "n", false, true).buffer == 1, mapping .. " is not buffer-local")
 	end
-	assert(vim.fn.maparg("<CR><CR>", "n", false, true).nowait == 0, "double Enter unexpectedly uses nowait")
+	assert(vim.fn.maparg("<C-s>", "i", false, true).buffer == 1, "Insert Ctrl-S mapping is missing")
 	assert(vim.fn.maparg("<CR>", "i", false, true).buffer ~= 1, "Insert Enter stopped being an ordinary newline")
 	vim.api.nvim_win_close(win, true)
 	assert(result == "Draft" and interrupted and not vim.api.nvim_buf_is_valid(buf))
@@ -277,15 +456,26 @@ test("card composer owns one inline float with type-colored chrome and two reser
 	assert(#reservation(source_buf)[4].virt_lines == config.height + 2)
 	assert(chunk_highlight(config.title, "issue") == "NvimReviewCommentIssue")
 	assert(chunk_highlight(config.footer, "issue") == "NvimReviewCommentIssue")
+	assert(border_text(config.footer):find("N:<Tab>/<S-Tab> type", 1, true))
+	assert(border_text(config.footer):find("<Esc><Esc> discard", 1, true))
 	assert(config.border[1][2] == "NvimReviewCommentIssue" and config.border[8][2] == "NvimReviewCommentIssue")
 	vim.cmd("stopinsert")
-	invoke_cycle_and_assert_insert(vim.fn.maparg("<Tab>", "n", false, true), "Normal-mode card Tab")
+	vim.fn.maparg("<Esc>", "n", false, true).callback()
+	config = vim.api.nvim_win_get_config(composer)
+	assert(border_text(config.title):find("New (Press <Esc> again to discard)", 1, true))
+	assert(chunk_highlight(config.title, "issue") == "NvimReviewCommentIssue")
+	local tab, backtab = type_cycle_mappings("card composer")
+	invoke_cycle_and_assert_normal(tab, "Normal-mode card Tab")
 	config = vim.api.nvim_win_get_config(composer)
 	assert(chunk_highlight(config.title, "suggestion") == "NvimReviewCommentSuggestion")
 	assert(chunk_highlight(config.footer, "suggestion") == "NvimReviewCommentSuggestion")
 	assert(config.border[1][2] == "NvimReviewCommentSuggestion")
-	vim.cmd("stopinsert")
-	vim.fn.maparg("q", "n", false, true).callback()
+	invoke_cycle_and_assert_normal(backtab, "Normal-mode card Shift-Tab")
+	config = vim.api.nvim_win_get_config(composer)
+	assert(chunk_highlight(config.title, "issue") == "NvimReviewCommentIssue")
+	assert(chunk_highlight(config.footer, "issue") == "NvimReviewCommentIssue")
+	assert(config.border[1][2] == "NvimReviewCommentIssue")
+	discard_active()
 	assert(not review_editor.has_active() and not reservation(source_buf))
 end)
 
@@ -310,7 +500,7 @@ test("range reservation renders only in its source window", function()
 	end
 	assert(reservation(source_buf), "scoped inline reservation is missing")
 	vim.cmd("stopinsert")
-	vim.fn.maparg("q", "n", false, true).callback()
+	discard_active()
 	local unscoped = namespace_windows()
 	if unscoped then
 		equal({}, unscoped, "inline teardown retained its source-window namespace scope")
@@ -415,18 +605,22 @@ test("rejected review save keeps the editor and reservation until acceptance", f
 	end))
 	vim.cmd("stopinsert")
 	local submit = vim.fn.maparg("<C-s>", "n", false, true).callback
-	local submit_double_enter = vim.fn.maparg("<CR><CR>", "n", false, true).callback
+	local submit_enter = vim.fn.maparg("<CR>", "n", false, true).callback
 	assert(type(submit) == "function")
-	assert(type(submit_double_enter) == "function")
+	assert(type(submit_enter) == "function")
 	local before = assert(reservation(source_buf))[1]
 	submit()
 	assert(calls == 1 and review_editor.has_active())
 	assert(reservation(source_buf)[1] == before, "rejected save discarded or replaced its reservation")
-	submit_double_enter()
+	submit_enter()
+	assert(calls == 1 and review_editor.has_active(), "first Enter submitted instead of arming")
+	submit_enter()
 	assert(calls == 2 and review_editor.has_active())
 	assert(reservation(source_buf)[1] == before, "rejected double-Enter save discarded its reservation")
 	accept = true
-	submit_double_enter()
+	submit_enter()
+	assert(calls == 2 and review_editor.has_active(), "rejected confirmation remained armed")
+	submit_enter()
 	assert(calls == 3 and not review_editor.has_active() and not reservation(source_buf))
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "save mutated source text")
 end)
@@ -451,14 +645,333 @@ test("empty double-Enter save keeps the editor and reservation", function()
 	end))
 	vim.cmd("stopinsert")
 	local buf = vim.api.nvim_get_current_buf()
-	local submit_double_enter = vim.fn.maparg("<CR><CR>", "n", false, true).callback
-	submit_double_enter()
+	local submit_enter = vim.fn.maparg("<CR>", "n", false, true).callback
+	submit_enter()
 	assert(calls == 0 and review_editor.has_active() and reservation(source_buf))
 	assert(notifications[#notifications] == "Review comment cannot be empty")
+	assert(
+		not border_text(vim.api.nvim_win_get_config(vim.api.nvim_get_current_win()).title):find(
+			"Press <Enter>",
+			1,
+			true
+		)
+	)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "accepted" })
-	submit_double_enter()
+	submit_enter()
+	assert(calls == 0 and review_editor.has_active())
+	submit_enter()
 	vim.notify = original_notify
 	assert(calls == 1 and not review_editor.has_active() and not reservation(source_buf))
+end)
+
+test("physical Insert Esc input arms discard and mapped jj input does not", function()
+	with_fake_defer(function(timers)
+		reset_editor()
+		local source_win, source_buf = review_source_fixture()
+		local listeners = vim.on_key()
+		local cancelled = "pending"
+		local input_listener = compose_with_input_listener({
+			title = "New",
+			body = "Physical escape draft",
+			style = "card",
+			source_win = source_win,
+			anchor = { kind = "range", start_line = 3, end_line = 3 },
+		}, function(body)
+			cancelled = body
+			return true
+		end)
+		local composer = vim.api.nvim_get_current_win()
+		assert(vim.on_key() == listeners + 1, "composer did not install exactly one input listener")
+		assert(vim.fn.maparg("<Esc>", "i", false, true).buffer ~= 1, "composer installed an Insert Esc mapping")
+		invoke_input_listener(input_listener, "<Esc>", "<Esc>", "i")
+		wait_until(function()
+			return border_text(vim.api.nvim_win_get_config(composer).title):find(
+				"New (Press <Esc> again to discard)",
+				1,
+				true
+			)
+		end, "physical Insert Esc input did not arm discard")
+		assert(#timers == 1 and timers[1].delay == 300, "discard did not capture the configured timeoutlen")
+		assert(cancelled == "pending" and review_editor.has_active() and reservation(source_buf))
+		vim.api.nvim_exec_autocmds("TextChanged", { buffer = vim.api.nvim_win_get_buf(composer), modeline = false })
+		assert(
+			border_text(vim.api.nvim_win_get_config(composer).title):find("(Press <Esc> again to discard)", 1, true),
+			"the delayed TextChanged emitted while leaving Insert cleared discard confirmation"
+		)
+		dispatch_normal(input_listener, "<Esc>")
+		assert(not review_editor.has_active(), "second consecutive Esc did not discard")
+		assert(cancelled == nil and vim.on_key() == listeners, "discard leaked the input listener")
+		assert(timers[1].stopped and timers[1].closed, "discard timer was not closed")
+
+		cancelled = "pending"
+		input_listener = compose_with_input_listener({
+			title = "Reply",
+			body = "Mapped escape draft",
+			style = "minimal",
+			source_win = source_win,
+			anchor = { kind = "range", start_line = 4, end_line = 4 },
+		}, function(body)
+			cancelled = body
+			return true
+		end)
+		composer = vim.api.nvim_get_current_win()
+		local footer = assert(inline_footer(source_win, composer))
+		vim.keymap.set("i", "jj", "<Esc>", { buffer = vim.api.nvim_get_current_buf(), silent = true })
+		invoke_input_listener(input_listener, "<Esc>", "jj", "i")
+		assert(#timers == 1, "mapped jj was counted as a physical Esc")
+		assert(not window_text(footer):find("Press <Esc>", 1, true), "mapped jj armed discard")
+
+		local notifications = {}
+		local original_notify = vim.notify
+		vim.notify = function(message)
+			notifications[#notifications + 1] = tostring(message)
+		end
+		dispatch_normal(input_listener, "q")
+		vim.notify = original_notify
+		assert(#notifications == 1, "q did not provide non-destructive feedback")
+		assert(review_editor.has_active() and cancelled == "pending", "q discarded non-empty text")
+		assert(notifications[1]:find("press <Esc> twice", 1, true), "q feedback did not explain discard")
+		dispatch_normal(input_listener, "<Esc>")
+		assert(window_text(footer):find("Press <Esc> again to discard", 1, true), "first Normal Esc did not arm")
+		dispatch_normal(input_listener, "<Esc>")
+		assert(not review_editor.has_active(), "second Normal Esc did not discard after mapped jj")
+		assert(cancelled == nil and vim.on_key() == listeners)
+
+		cancelled = "pending"
+		input_listener = compose_with_input_listener({
+			title = "Empty reply",
+			source_win = source_win,
+			anchor = { kind = "general" },
+		}, function(body)
+			cancelled = body
+			return true
+		end)
+		vim.cmd("stopinsert")
+		dispatch_normal(input_listener, "q")
+		assert(not review_editor.has_active(), "q did not close an empty composer")
+		assert(cancelled == nil and vim.on_key() == listeners)
+	end)
+end)
+
+test("explicit Enter confirmation resets on opposite, intervening, changed, expired, and rejected actions", function()
+	with_fake_defer(function(timers)
+		reset_editor()
+		local source_win, source_buf = review_source_fixture()
+		vim.cmd("vsplit")
+		local sibling = vim.api.nvim_get_current_win()
+		vim.api.nvim_set_current_win(source_win)
+		local source_textoff = vim.fn.getwininfo(source_win)[1].textoff or 0
+		vim.api.nvim_win_set_width(source_win, source_textoff + 38)
+		local accepted = false
+		local calls = 0
+		local input_listener = compose_with_input_listener({
+			title = "A deliberately long custom title",
+			body = "Draft",
+			style = "minimal",
+			type_cycle = true,
+			selected_type = "issue",
+			source_win = source_win,
+			anchor = { kind = "range", start_line = 5, end_line = 5 },
+		}, function(body)
+			assert(body == "Changed draft")
+			calls = calls + 1
+			return accepted
+		end)
+		local composer = vim.api.nvim_get_current_win()
+		local buf = vim.api.nvim_get_current_buf()
+		local footer = assert(inline_footer(source_win, composer))
+		vim.cmd("stopinsert")
+
+		dispatch_normal(input_listener, "<CR>")
+		assert(window_text(footer):find("Press <Enter> again to save", 1, true), "first Enter did not arm save")
+		assert(not window_text(footer):find("<C-s>", 1, true), "compact confirmation did not prioritize its prompt")
+		assert(#timers == 1 and timers[1].delay == 300 and calls == 0)
+		local exact_suffix = " (Press <Enter> again to save)"
+		vim.api.nvim_win_set_width(source_win, source_textoff + vim.fn.strdisplaywidth(exact_suffix))
+		vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+		assert(window_text(footer) == exact_suffix, "exact-width confirmation lost its parentheses")
+		vim.api.nvim_win_set_width(source_win, source_textoff + 38)
+		vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+		dispatch_normal(input_listener, "<Esc>")
+		assert(window_text(footer):find("Press <Esc> again to discard", 1, true), "Esc after Enter did not arm")
+		assert(timers[1].stopped and timers[1].closed and calls == 0)
+		dispatch_normal(input_listener, "<CR>")
+		assert(window_text(footer):find("Press <Enter> again to save", 1, true), "Enter after Esc did not arm")
+		invoke_input_listener(input_listener, "l", "l", "n")
+		wait_until(function()
+			return not window_text(footer):find("Press <", 1, true)
+		end, "intervening key did not clear save confirmation")
+		assert(timers[3].stopped and timers[3].closed and review_editor.has_active())
+
+		dispatch_normal(input_listener, "<CR>")
+		assert(window_text(footer):find("Press <Enter> again to save", 1, true), "save did not re-arm")
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Changed draft" })
+		vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf, modeline = false })
+		assert(not window_text(footer):find("Press <", 1, true), "text change did not clear confirmation")
+		assert(timers[4].stopped and timers[4].closed)
+
+		dispatch_normal(input_listener, "<CR>")
+		assert(#timers == 5, "save did not arm before expiration")
+		timers[5]:fire()
+		assert(review_editor.has_active() and not window_text(footer):find("Press <", 1, true))
+		dispatch_normal(input_listener, "<CR>")
+		assert(#timers == 6, "expired save did not require a fresh first Enter")
+		dispatch_normal(input_listener, "<CR>")
+		assert(calls == 1, "confirmed save did not reach the callback")
+		assert(review_editor.has_active() and not window_text(footer):find("Press <", 1, true))
+		dispatch_normal(input_listener, "<CR>")
+		assert(#timers == 7, "rejected save did not require a fresh first Enter")
+		accepted = true
+		dispatch_normal(input_listener, "<CR>")
+		assert(not review_editor.has_active(), "fresh confirmed save was not accepted")
+		assert(calls == 2 and not reservation(source_buf))
+		vim.api.nvim_win_close(sibling, true)
+	end)
+end)
+
+test("a changed draft cannot confirm before its TextChanged autocmd runs", function()
+	with_fake_defer(function(timers)
+		reset_editor()
+		local source_win = review_source_fixture()
+		local calls = 0
+		assert(review_editor.compose({
+			title = "New",
+			body = "Draft",
+			source_win = source_win,
+			anchor = { kind = "general" },
+		}, function(body)
+			equal("Changed draft", body, "save callback received stale text")
+			calls = calls + 1
+			return true
+		end))
+		vim.cmd("stopinsert")
+		local buf = vim.api.nvim_get_current_buf()
+		local submit_enter = vim.fn.maparg("<CR>", "n", false, true).callback
+		assert(type(submit_enter) == "function")
+
+		submit_enter()
+		assert(#timers == 1 and calls == 0, "first Enter did not arm save")
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Changed draft" })
+		submit_enter()
+		assert(calls == 0 and review_editor.has_active(), "changed draft reused stale confirmation")
+		assert(timers[1].stopped and timers[1].closed, "stale confirmation timer remained active")
+		assert(#timers == 2, "changed draft did not require a fresh first Enter")
+
+		submit_enter()
+		assert(calls == 1 and not review_editor.has_active(), "fresh double-Enter did not save changed draft")
+	end)
+end)
+
+test("focus and completion boundaries cancel discard confirmation", function()
+	with_fake_defer(function(timers)
+		reset_editor()
+		local source_win = review_source_fixture()
+		assert(review_editor.compose({
+			title = "New",
+			body = "Draft",
+			style = "card",
+			source_win = source_win,
+			anchor = { kind = "range", start_line = 3, end_line = 3 },
+		}, function()
+			return true
+		end))
+		local composer = vim.api.nvim_get_current_win()
+		local buf = vim.api.nvim_get_current_buf()
+		local discard = vim.fn.maparg("<Esc>", "n", false, true).callback
+		assert(type(discard) == "function")
+		vim.cmd("stopinsert")
+
+		local function assert_cancelled(event, index)
+			vim.api.nvim_exec_autocmds(event, { buffer = buf, modeline = false })
+			assert(timers[index].stopped and timers[index].closed, event .. " did not close the pending timer")
+			assert(
+				not border_text(vim.api.nvim_win_get_config(composer).title):find("Press <Esc>", 1, true),
+				event .. " did not clear the discard prompt"
+			)
+			discard()
+			assert(review_editor.has_active(), "one Esc after " .. event .. " discarded the draft")
+			assert(#timers == index + 1, "one Esc after " .. event .. " did not start a fresh confirmation")
+		end
+
+		discard()
+		vim.api.nvim_exec_autocmds("FocusLost", { modeline = false })
+		assert(timers[1].stopped and timers[1].closed, "FocusLost did not close the pending timer")
+		assert(not border_text(vim.api.nvim_win_get_config(composer).title):find("Press <Esc>", 1, true))
+		discard()
+		assert(review_editor.has_active() and #timers == 2, "one Esc after FocusLost did not start fresh")
+
+		assert_cancelled("WinLeave", 2)
+		assert_cancelled("CompleteDone", 3)
+		discard()
+		assert(not review_editor.has_active(), "fresh second Esc did not discard after completion boundary")
+	end)
+end)
+
+test("stale confirmation expiry cannot affect a replacement modal composer", function()
+	with_fake_defer(function(timers)
+		reset_editor()
+		local source_win = review_source_fixture()
+		local listeners = vim.on_key()
+		local interrupted = 0
+		local input_listener = compose_with_input_listener({
+			title = "Edit custom title",
+			body = "Old draft",
+			source_win = source_win,
+			anchor = { kind = "general" },
+		}, function(body, was_interrupted)
+			assert(body == "Old draft" and was_interrupted == true)
+			interrupted = interrupted + 1
+			return true
+		end)
+		local old_win = vim.api.nvim_get_current_win()
+		local initial_width = vim.api.nvim_win_get_width(old_win)
+		vim.cmd("stopinsert")
+		dispatch_normal(input_listener, "<CR>")
+		assert(
+			border_text(vim.api.nvim_win_get_config(old_win).title):find(
+				"Edit custom title (Press <Enter> again to save)",
+				1,
+				true
+			),
+			"modal did not render its save confirmation beside the title"
+		)
+		local stale = timers[1]
+		assert(vim.api.nvim_win_get_width(old_win) >= initial_width, "modal shrank while showing confirmation")
+		vim.api.nvim_win_close(old_win, true)
+		assert(interrupted == 1 and not review_editor.has_active() and vim.on_key() == listeners)
+		assert(stale.stopped and stale.closed, "external close did not close the pending timer")
+
+		local saved
+		input_listener = compose_with_input_listener({
+			title = "Reply custom title",
+			body = "Replacement draft",
+			source_win = source_win,
+			anchor = { kind = "general" },
+		}, function(body)
+			saved = body
+			return true
+		end)
+		local replacement = vim.api.nvim_get_current_win()
+		vim.cmd("stopinsert")
+		dispatch_normal(input_listener, "<Esc>")
+		assert(
+			border_text(vim.api.nvim_win_get_config(replacement).title):find(
+				"Reply custom title (Press <Esc> again to discard)",
+				1,
+				true
+			),
+			"replacement modal did not arm discard"
+		)
+		stale:fire()
+		assert(review_editor.has_active() and vim.on_key() == listeners + 1)
+		assert(
+			border_text(vim.api.nvim_win_get_config(replacement).title):find("Press <Esc> again to discard", 1, true),
+			"stale expiry changed replacement chrome"
+		)
+		dispatch_normal(input_listener, "<Esc>")
+		assert(not review_editor.has_active(), "replacement discard did not complete")
+		assert(saved == nil and vim.on_key() == listeners)
+	end)
 end)
 
 test("review composer persists synchronously and recovers one rejected teardown", function()
@@ -536,7 +1049,7 @@ test("prepare close vetoes teardown until a nonempty draft is saved or recovered
 	assert(submitted == 2 and recovered == 2 and not review_editor.has_active())
 end)
 
-test("minimal composer cycles type in Normal and Insert modes and preserves the colored badge", function()
+test("minimal composer cycles type only in Normal mode and preserves the colored badge", function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local submitted_type
@@ -563,16 +1076,11 @@ test("minimal composer cycles type in Normal and Insert modes and preserves the 
 	local buf = vim.api.nvim_get_current_buf()
 	local footer = assert(inline_footer(source_win, win))
 	vim.cmd("stopinsert")
-	local tab = vim.fn.maparg("<Tab>", "n", false, true)
-	local insert_tab = vim.fn.maparg("<Tab>", "i", false, true)
-	local insert_backtab = vim.fn.maparg("<S-Tab>", "i", false, true)
-	assert(tab.buffer == 1 and type(tab.callback) == "function")
-	assert(insert_tab.buffer == 1 and type(insert_tab.callback) == "function")
-	assert(insert_backtab.buffer == 1 and type(insert_backtab.callback) == "function")
-	invoke_cycle_and_assert_insert(tab, "Normal-mode Tab")
+	local tab, backtab = type_cycle_mappings("minimal composer")
+	invoke_cycle_and_assert_normal(tab, "Normal-mode minimal Tab")
 	assert(
 		window_text(footer):find("New ◆ suggestion", 1, true)
-			and window_text(footer):find("<Tab>/<S-Tab> type", 1, true)
+			and window_text(footer):find("N:<Tab>/<S-Tab> type", 1, true)
 	)
 	local marks = vim.api.nvim_buf_get_extmarks(
 		vim.api.nvim_win_get_buf(footer),
@@ -582,9 +1090,9 @@ test("minimal composer cycles type in Normal and Insert modes and preserves the 
 		{ details = true }
 	)
 	assert(#marks == 1 and marks[1][4].hl_group == "NvimReviewCommentSuggestion")
-	invoke_cycle_and_assert_insert(insert_backtab, "Insert-mode Shift-Tab")
+	invoke_cycle_and_assert_normal(backtab, "Normal-mode minimal Shift-Tab")
 	assert(window_text(footer):find("New ● issue", 1, true))
-	invoke_cycle_and_assert_insert(insert_tab, "Insert-mode Tab")
+	invoke_cycle_and_assert_normal(tab, "Normal-mode minimal Tab")
 	assert(window_text(footer):find("New ◆ suggestion", 1, true))
 	assert(review_editor.persist_active())
 	assert(submitted_type == "suggestion" and recovered_type == "suggestion")
@@ -639,7 +1147,7 @@ test("review composer grows from one to six screen rows and scrolls overflow", f
 	assert(view.topline > 1, "content beyond six rows did not scroll")
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "resize mutated source text")
 	vim.cmd("stopinsert")
-	vim.fn.maparg("<Esc>", "n", false, true).callback()
+	discard_active()
 	assert(not review_editor.has_active() and not reservation(source_buf))
 end)
 
@@ -647,7 +1155,8 @@ test("inline resize keeps a compact footer below the body and footer closure tea
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	vim.cmd("vsplit")
-	vim.api.nvim_win_set_width(source_win, 42)
+	local source_textoff = vim.fn.getwininfo(source_win)[1].textoff or 0
+	vim.api.nvim_win_set_width(source_win, source_textoff + 46)
 	local callbacks = 0
 	assert(review_editor.compose({
 		title = "A deliberately long review title",
@@ -665,7 +1174,14 @@ test("inline resize keeps a compact footer below the body and footer closure tea
 	local body_win = vim.api.nvim_get_current_win()
 	local footer = assert(inline_footer(source_win, body_win))
 	local before = vim.api.nvim_win_get_config(body_win)
-	vim.api.nvim_win_set_width(source_win, 28)
+	assert(window_text(footer):find("N:<Tab>/<S-Tab> type", 1, true), "full fallback lost its Normal-mode hint")
+	vim.api.nvim_win_set_width(source_win, source_textoff + 38)
+	vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+	assert(window_text(footer):find("N:Tab/S-Tab:type", 1, true), "compact fallback lost its Normal-mode hint")
+	vim.api.nvim_win_set_width(source_win, source_textoff + 35)
+	vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+	assert(window_text(footer):find("N:Tab:type", 1, true), "essential fallback lost its Normal-mode hint")
+	vim.api.nvim_win_set_width(source_win, source_textoff + 28)
 	vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
 	local body_config = vim.api.nvim_win_get_config(body_win)
 	local footer_config = vim.api.nvim_win_get_config(footer)
@@ -732,7 +1248,7 @@ test("three-row EOF composer keeps its realized body and footer adjacent through
 	vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
 	assert_eof_geometry(1)
 	vim.cmd("stopinsert")
-	vim.fn.maparg("<Esc>", "n", false, true).callback()
+	discard_active()
 	assert(not review_editor.has_active() and not reservation(source_buf))
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "EOF resize mutated source text")
 	local unscoped = namespace_windows()
@@ -774,8 +1290,9 @@ test("file and general anchors use one centered rounded modal without source res
 	assert(initial.row == math.floor((vim.o.lines - initial.height - 2) / 2))
 	assert(initial.col == math.floor((vim.o.columns - initial.width - 2) / 2))
 	assert(border_text(initial.title):find("Edit", 1, true) and border_text(initial.title):find("issue", 1, true))
-	assert(border_text(initial.footer):find("<Tab>/<S-Tab> type", 1, true))
+	assert(border_text(initial.footer):find("N:<Tab>/<S-Tab> type", 1, true))
 	assert(border_text(initial.footer):find("<C-s>/↵↵ save", 1, true))
+	assert(border_text(initial.footer):find("<Esc><Esc> discard", 1, true))
 	assert(vim.bo[buf].filetype == "markdown" and not inline_footer(source_win, modal))
 	assert(not reservation(source_buf) and #namespace_marks(source_buf) == 1)
 	assert(namespace_marks(source_buf)[1][1] == sentinel, "modal creation replaced the source namespace")
@@ -785,12 +1302,14 @@ test("file and general anchors use one centered rounded modal without source res
 	)
 
 	vim.cmd("stopinsert")
-	local tab = vim.fn.maparg("<Tab>", "n", false, true)
-	assert(tab.buffer == 1 and type(tab.callback) == "function")
-	assert(vim.fn.maparg("<Tab>", "i", false, true).buffer == 1)
-	tab.callback()
+	local tab, backtab = type_cycle_mappings("modal composer")
+	invoke_cycle_and_assert_normal(tab, "Normal-mode modal Tab")
 	local cycled_title = border_text(vim.api.nvim_win_get_config(modal).title)
 	assert(cycled_title:find("Edit", 1, true) and cycled_title:find("suggestion", 1, true))
+	invoke_cycle_and_assert_normal(backtab, "Normal-mode modal Shift-Tab")
+	cycled_title = border_text(vim.api.nvim_win_get_config(modal).title)
+	assert(cycled_title:find("Edit", 1, true) and cycled_title:find("issue", 1, true))
+	invoke_cycle_and_assert_normal(tab, "Normal-mode modal Tab")
 	vim.fn.maparg("<C-s>", "n", false, true).callback()
 	assert(calls == 1 and selected == "suggestion" and review_editor.has_active())
 	assert(not reservation(source_buf) and namespace_marks(source_buf)[1][1] == sentinel)
@@ -803,13 +1322,17 @@ test("file and general anchors use one centered rounded modal without source res
 	vim.api.nvim_exec_autocmds("TextChanged", { buffer = buf, modeline = false })
 	vim.api.nvim_exec_autocmds("VimResized", { modeline = false })
 	local expanded = vim.api.nvim_win_get_config(modal)
-	assert(expanded.relative == "editor" and expanded.width > initial.width and expanded.width <= 88)
+	assert(
+		expanded.relative == "editor" and expanded.width > initial.width and expanded.width <= 88,
+		("modal did not grow within its width cap: initial=%d expanded=%d"):format(initial.width, expanded.width)
+	)
 	assert(expanded.height > initial.height and expanded.height <= 18)
 	assert(expanded.col >= 0 and expanded.col + expanded.width + 2 <= vim.o.columns)
 	assert(expanded.row >= 0 and expanded.row + expanded.height + 2 <= vim.o.lines)
 	assert(not reservation(source_buf) and namespace_marks(source_buf)[1][1] == sentinel)
 	accepted = true
-	vim.fn.maparg("<CR><CR>", "n", false, true).callback()
+	vim.fn.maparg("<CR>", "n", false, true).callback()
+	vim.fn.maparg("<CR>", "n", false, true).callback()
 	assert(calls == 2 and selected == "suggestion" and not review_editor.has_active())
 	assert(not reservation(source_buf) and namespace_marks(source_buf)[1][1] == sentinel)
 
@@ -831,9 +1354,20 @@ test("file and general anchors use one centered rounded modal without source res
 	assert(chunk_highlight(reply_config.footer, "suggestion") == "NvimReviewCommentSuggestion")
 	assert(vim.fn.maparg("<Tab>", "n", false, true).buffer ~= 1)
 	assert(vim.fn.maparg("<Tab>", "i", false, true).buffer ~= 1)
+	assert(vim.fn.maparg("<S-Tab>", "n", false, true).buffer ~= 1)
+	assert(vim.fn.maparg("<S-Tab>", "i", false, true).buffer ~= 1)
 	assert(not inline_footer(source_win, general_modal) and not reservation(source_buf))
 	vim.cmd("stopinsert")
+	local notifications = {}
+	local original_notify = vim.notify
+	vim.notify = function(message)
+		notifications[#notifications + 1] = tostring(message)
+	end
 	vim.fn.maparg("q", "n", false, true).callback()
+	vim.notify = original_notify
+	assert(review_editor.has_active() and cancelled == "pending", "q discarded a non-empty general comment")
+	assert(notifications[#notifications]:find("press <Esc> twice", 1, true), "q did not explain safe discard")
+	discard_active()
 	assert(cancelled == nil and not review_editor.has_active())
 	assert(#namespace_marks(source_buf) == 1 and namespace_marks(source_buf)[1][1] == sentinel)
 	vim.api.nvim_buf_del_extmark(source_buf, review_editor._namespace, sentinel)

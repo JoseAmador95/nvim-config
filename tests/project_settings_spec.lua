@@ -7,6 +7,7 @@ package.path = table.concat({ checkout .. "/lua/?.lua", checkout .. "/lua/?/init
 require("config.local_plugins").setup()
 
 local project_settings = require("config.project_settings")
+local lsp_neoconf = require("config.lsp_neoconf")
 local failures = {}
 local count = 0
 
@@ -45,23 +46,22 @@ local function harness(root, globals)
 	local current_source
 	local approvals = {}
 	local notifications = {}
+	local counts = { approve = 0, approval = 0, register = 0, root = 0 }
 	local authority = {}
 	function authority.register_source(source)
+		counts.register = counts.register + 1
 		current_source = vim.deepcopy(source)
 		current_source.repo = current_source.workspace.repo_identity
 		return true
 	end
-	function authority.status(workspace)
-		local source = vim.deepcopy(current_source)
-		if not source then
-			return { sources = {} }
-		end
-		assert(vim.deep_equal(workspace, source.workspace))
-		source.approved = approvals[source.repo] == source.fingerprint
-		source.pending = source.enabled and not source.approved
-		return { sources = { source } }
+	function authority.has_approval(spec)
+		counts.approval = counts.approval + 1
+		assert(current_source.id == spec.source and vim.deep_equal(current_source.workspace, spec.workspace))
+		assert(current_source.fingerprint == spec.fingerprint and current_source.enabled)
+		return approvals[spec.workspace.repo_identity] == spec.fingerprint
 	end
 	function authority.approve(spec)
+		counts.approve = counts.approve + 1
 		assert(current_source.id == spec.source and vim.deep_equal(current_source.workspace, spec.workspace))
 		assert(current_source.fingerprint == spec.fingerprint and current_source.enabled)
 		approvals[spec.workspace.repo_identity] = spec.fingerprint
@@ -69,6 +69,7 @@ local function harness(root, globals)
 	end
 	local repo = {
 		root = function(start)
+			counts.root = counts.root + 1
 			if start == "outside" then
 				return nil, "not inside a Git repository: fixture"
 			end
@@ -95,6 +96,7 @@ local function harness(root, globals)
 	return {
 		authority = authority,
 		approvals = approvals,
+		counts = counts,
 		notifications = notifications,
 		source = function()
 			return vim.deepcopy(current_source)
@@ -160,6 +162,75 @@ test("approval gates JSONC and any lexical change revokes current use", function
 	vim.fn.delete(root, "rf")
 end)
 
+test("batch lookup reads each file once and returns isolated values", function()
+	local root = temp_dir()
+	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
+	local neoconf_path = vim.fs.joinpath(root, ".neoconf.json")
+	local vscode_path = vim.fs.joinpath(root, ".vscode/settings.json")
+	write(neoconf_path, [[{ "lspconfig.ty": { "ty.configurationFile": "project.toml" } }]])
+	write(vscode_path, [[{ "ty.disableLanguageServices": false }]])
+	local state = harness(root, {
+		vscode = { global = { enabled = true } },
+		["lspconfig.ty"] = { globalServer = true },
+	})
+	assert(project_settings.approve(root))
+	for name in pairs(state.counts) do
+		state.counts[name] = 0
+	end
+
+	local original_open = vim.uv.fs_open
+	local reads = { [neoconf_path] = 0, [vscode_path] = 0 }
+	vim.uv.fs_open = function(path, ...)
+		if reads[path] ~= nil then
+			reads[path] = reads[path] + 1
+		end
+		return original_open(path, ...)
+	end
+	local ok, values, lookup_err = xpcall(function()
+		return project_settings.get_many({ vscode = {}, ["lspconfig.ty"] = {} }, root)
+	end, debug.traceback)
+	vim.uv.fs_open = original_open
+	assert(ok, values)
+	assert(lookup_err == nil, lookup_err)
+	equal(1, reads[neoconf_path], "batch lookup reread .neoconf.json")
+	equal(1, reads[vscode_path], "batch lookup reread .vscode/settings.json")
+	equal(1, state.counts.root, "batch lookup resolved the repository root more than once")
+	equal(1, state.counts.register, "batch lookup registered more than one candidate")
+	equal(1, state.counts.approval, "batch lookup performed more than one durable approval lookup")
+	equal(0, state.counts.approve, "batch lookup mutated project approval")
+	equal(false, values.vscode.ty.disableLanguageServices, "batch lookup lost VSCode project settings")
+	equal(true, values.vscode.global.enabled, "batch lookup lost global VSCode settings")
+	equal("project.toml", values["lspconfig.ty"].ty.configurationFile, "batch lookup lost server settings")
+	equal(true, values["lspconfig.ty"].globalServer, "batch lookup lost global server settings")
+
+	values.vscode.ty.disableLanguageServices = true
+	values["lspconfig.ty"].ty.configurationFile = "mutated.toml"
+	local fresh = assert(project_settings.get_many({ vscode = {}, ["lspconfig.ty"] = {} }, root))
+	equal(false, fresh.vscode.ty.disableLanguageServices, "batch result shared nested VSCode state")
+	equal("project.toml", fresh["lspconfig.ty"].ty.configurationFile, "batch result shared server state")
+	local snapshot = assert(project_settings.snapshot(root))
+	snapshot.values.vscode.ty.disableLanguageServices = true
+	equal(
+		false,
+		project_settings.snapshot(root).values.vscode.ty.disableLanguageServices,
+		"snapshot returned mutable adapter state"
+	)
+
+	vim.fn.delete(root, "rf")
+end)
+
+test("single lookup preserves an explicit nil default", function()
+	local root = temp_dir()
+	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
+	write(vim.fs.joinpath(root, ".vscode/settings.json"), '{ "ty.disableLanguageServices": false }')
+	harness(root, {})
+	assert(project_settings.approve(root))
+	local value, err = project_settings.get("vscode", nil, root)
+	assert(err == nil, err)
+	equal(false, value.ty.disableLanguageServices, "nil default discarded the approved single setting")
+	vim.fn.delete(root, "rf")
+end)
+
 test("approved Neoconf settings preserve dotted-key expansion", function()
 	local root = temp_dir()
 	write(
@@ -222,21 +293,128 @@ test("a file change between approval lookup and consumption fails closed", funct
 	write(path, '{ "python.analysis.typeCheckingMode": "strict" }')
 	local state = harness(root, { vscode = { safe = true } })
 	assert(project_settings.approve(root))
-	local original_status = state.authority.status
+	local original_has_approval = state.authority.has_approval
 	local changed = false
-	state.authority.status = function(...)
-		local status = original_status(...)
+	state.authority.has_approval = function(...)
+		local approved = original_has_approval(...)
 		if not changed then
 			changed = true
 			write(path, '{ "python.analysis.typeCheckingMode": "basic" }')
 		end
-		return status
+		return approved
 	end
 	local value, err = project_settings.get("vscode", {}, root)
 	equal({ safe = true }, value, "TOCTOU mutation reached the consumer")
 	assert(err == "project settings changed during fingerprint validation")
 	assert(not project_settings.snapshot(root).approved, "changed candidate remained approved")
 	vim.fn.delete(root, "rf")
+end)
+
+test("a same-size ctime change fails metadata-only revalidation", function()
+	local root = temp_dir()
+	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
+	local path = vim.fs.joinpath(root, ".vscode/settings.json")
+	local original = '{ "python.analysis.typeCheckingMode": "strict" }'
+	local replacement = '{ "python.analysis.typeCheckingMode": "normal" }'
+	equal(#original, #replacement, "ctime fixture did not preserve file size")
+	write(path, original)
+	local state = harness(root, { vscode = { safe = true } })
+	assert(project_settings.approve(root))
+
+	local original_has_approval = state.authority.has_approval
+	local original_lstat = vim.uv.fs_lstat
+	local spoof_metadata = false
+	local before
+	state.authority.has_approval = function(...)
+		local approved = original_has_approval(...)
+		before = assert(original_lstat(path))
+		vim.uv.sleep(2)
+		write(path, replacement)
+		local after = assert(original_lstat(path))
+		equal(before.dev, after.dev, "same-size mutation moved devices")
+		equal(before.ino, after.ino, "same-size mutation replaced the inode")
+		equal(before.size, after.size, "same-size mutation changed size")
+		equal(before.mode, after.mode, "same-size mutation changed mode")
+		assert(
+			before.ctime.sec ~= after.ctime.sec or before.ctime.nsec ~= after.ctime.nsec,
+			"same-size mutation did not advance ctime"
+		)
+		spoof_metadata = true
+		return approved
+	end
+	vim.uv.fs_lstat = function(candidate, ...)
+		local info, err = original_lstat(candidate, ...)
+		if spoof_metadata and candidate == path and info then
+			info = vim.deepcopy(info)
+			-- Hide the mtime change so this assertion specifically exercises ctime.
+			info.mtime = vim.deepcopy(before.mtime)
+		end
+		return info, err
+	end
+	local ok, values, err = xpcall(function()
+		return project_settings.get_many({ vscode = {} }, root)
+	end, debug.traceback)
+	vim.uv.fs_lstat = original_lstat
+	state.authority.has_approval = original_has_approval
+	assert(ok, values)
+	equal({ safe = true }, values.vscode, "ctime mutation reached the consumer")
+	equal("project settings changed during fingerprint validation", err, "ctime mutation did not fail closed")
+
+	vim.fn.delete(root, "rf")
+end)
+
+test("durable approval is reread after metadata validation", function()
+	local parent = temp_dir()
+	local root = vim.fs.joinpath(parent, "project")
+	local state_root = vim.fs.joinpath(parent, "trust-state")
+	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
+	write(vim.fs.joinpath(root, ".vscode/settings.json"), '{ "ty.disableLanguageServices": false }')
+
+	local module_path =
+		vim.fs.joinpath(checkout, "local-plugins", "trusted-workspace.nvim", "lua", "trusted_workspace", "init.lua")
+	local authority_a = assert(loadfile(module_path))()
+	local authority_b = assert(loadfile(module_path))()
+	assert(authority_a.setup({ state_root = state_root, mode = "full" }))
+	project_settings.setup({
+		active = true,
+		command = false,
+		authority = authority_a,
+		repo = {
+			root = function()
+				return root
+			end,
+		},
+		neoconf = {
+			get = function(_, default)
+				return vim.deepcopy(default)
+			end,
+		},
+		notify = function() end,
+	})
+
+	local approval = assert(project_settings.approve(root))
+	local approved = assert(project_settings.get_many({ vscode = { safe = true } }, root))
+	equal(false, approved.vscode.ty.disableLanguageServices, "durably approved settings were not consumed")
+	assert(authority_b.setup({ state_root = state_root, mode = "full" }))
+	assert(authority_b.revoke_approval(root, project_settings.SOURCE_ID))
+	equal(
+		approval.fingerprint,
+		authority_a.approvals(root)[project_settings.SOURCE_ID],
+		"second instance unexpectedly refreshed the first instance cache"
+	)
+	local revoked, revoked_err = project_settings.get_many({ vscode = { safe = true } }, root)
+	equal({ safe = true }, revoked.vscode, "durably revoked settings reached the consumer")
+	equal("project settings are not approved", revoked_err, "durable revocation was not reported")
+
+	assert(project_settings.approve(root))
+	local state_path = vim.fs.joinpath(state_root, "trusted-workspace.json")
+	write(state_path, "{")
+	local corrupt, corrupt_err = project_settings.get_many({ vscode = { safe = true } }, root)
+	equal({ safe = true }, corrupt.vscode, "corrupt durable approval state reached the consumer")
+	assert(tostring(corrupt_err):find("corrupt", 1, true), tostring(corrupt_err))
+	equal("{", table.concat(vim.fn.readfile(state_path), "\n"), "approval observation repaired corrupt state")
+
+	vim.fn.delete(parent, "rf")
 end)
 
 test("invalid oversized and hostile files fail closed without consuming approval", function()
@@ -346,6 +524,42 @@ test("read warnings deduplicate while every successful command approval notifies
 	assert(state.notifications[2] == state.notifications[3], "success notification text drifted between approvals")
 	vim.api.nvim_del_user_command("NvimConfigTrustProjectSettings")
 	vim.fn.delete(root, "rf")
+end)
+
+test("LSP settings merge requests one batch for VSCode and server values", function()
+	local original_get_many = project_settings.get_many
+	local calls = 0
+	local requested
+	local requested_start
+	project_settings.get_many = function(defaults, start)
+		calls = calls + 1
+		requested = vim.deepcopy(defaults)
+		requested_start = start
+		return {
+			vscode = { ty = { disableLanguageServices = false } },
+			["lspconfig.ty"] = { ty = { configuration = { environment = { python = "/repo/.venv" } } } },
+		}
+	end
+	local ok, err = xpcall(function()
+		local config = { root_dir = "/repo", settings = { ty = { baseline = true } } }
+		lsp_neoconf.wrap_before_init("ty")({}, config)
+		equal(1, calls, "LSP merge split one operation into multiple project lookups")
+		equal(
+			{ vscode = {}, ["lspconfig.ty"] = {} },
+			requested,
+			"LSP merge did not request the exact VSCode/server batch"
+		)
+		equal("/repo", requested_start, "LSP merge lost its project root")
+		equal(true, config.settings.ty.baseline, "LSP batch merge lost baseline settings")
+		equal(false, config.settings.ty.disableLanguageServices, "LSP batch merge lost VSCode settings")
+		equal(
+			"/repo/.venv",
+			config.settings.ty.configuration.environment.python,
+			"LSP batch merge lost server settings"
+		)
+	end, debug.traceback)
+	project_settings.get_many = original_get_many
+	assert(ok, err)
 end)
 
 if #failures > 0 then

@@ -24,11 +24,20 @@ local REQUIRED = {
 	},
 }
 
+local function default_clipboard()
+	return {
+		available = function()
+			return vim.fn.has("clipboard") == 1
+		end,
+		setreg = vim.fn.setreg,
+	}
+end
+
 function M.setup(opts)
 	assert(type(opts) == "table", "native-review setup options must be a table")
 	for name in pairs(opts) do
 		assert(
-			REQUIRED[name] or name == "lsp_navigation" or name == "config" or name == "event",
+			REQUIRED[name] or name == "clipboard" or name == "lsp_navigation" or name == "config" or name == "event",
 			"unknown native-review adapter: " .. name
 		)
 	end
@@ -43,9 +52,22 @@ function M.setup(opts)
 		end
 	end
 	assert(type(opts.lsp_navigation) == "table", "native-review adapter lsp_navigation must be a table")
+	if opts.clipboard ~= nil then
+		assert(type(opts.clipboard) == "table", "native-review adapter clipboard must be a table")
+		for _, method in ipairs({ "available", "setreg" }) do
+			assert(
+				type(opts.clipboard[method]) == "function",
+				"native-review adapter clipboard." .. method .. " must be a function"
+			)
+		end
+	end
 	assert(type(opts.config) == "table", "native-review config must be a table")
 	assert(opts.event == nil or type(opts.event) == "function", "native-review event adapter must be a function")
-	values = opts
+	values = {}
+	for name, value in pairs(opts) do
+		values[name] = value
+	end
+	values.clipboard = opts.clipboard or default_clipboard()
 end
 
 function M.get(name)

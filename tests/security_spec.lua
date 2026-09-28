@@ -52,7 +52,7 @@ local function create_real_lazy_fixture(root, appname)
 	local config_root = root .. "/config"
 	local config_lua = config_root .. "/lua/config"
 	assert(vim.fn.mkdir(config_lua, "p") == 1, "could not create minimal config fixture")
-	for _, name in ipairs({ "fs.lua", "lazy.lua", "lazy_lock.lua" }) do
+	for _, name in ipairs({ "fs.lua", "lazy.lua", "lazy_attestation.lua", "lazy_lock.lua" }) do
 		assert(
 			vim.fn.writefile(vim.fn.readfile(repo .. "/lua/config/" .. name), config_lua .. "/" .. name) == 0,
 			"could not copy " .. name
@@ -126,7 +126,9 @@ local function write_pinned_fake_git(root)
 		[[  elif [ -f "$repo/.fake-head" ]; then cat "$repo/.fake-head"; else printf '%s\n' "$FAKE_LAZY_COMMIT"; fi]],
 		[[  exit 0]],
 		[[fi]],
-		[[if [ "$operation" = "ls-files" ] || [ "$operation" = "diff-index" ] || [ "$operation" = "status" ] || [ "$operation" = "symbolic-ref" ]; then]],
+		[[if [ "$operation" = "ls-files" ]; then printf '%s' "${FAKE_FLAGS_OUTPUT:-}"; exit 0; fi]],
+		[[if [ "$operation" = "status" ]; then printf '%s' "${FAKE_STATUS_OUTPUT:-}"; exit 0; fi]],
+		[[if [ "$operation" = "diff-index" ] || [ "$operation" = "symbolic-ref" ]; then]],
 		[[  exit 0]],
 		[[fi]],
 		[[if [ "$operation" = "remote" ]; then]],
@@ -137,6 +139,56 @@ local function write_pinned_fake_git(root)
 	}, fake_git) == 0, "could not write pinned fake git")
 	assert(vim.fn.setfperm(fake_git, "rwxr-xr-x") == 1, "could not make pinned fake git executable")
 	return bin
+end
+
+local function write_logging_git(root)
+	local bin = root .. "/logging-bin"
+	assert(vim.fn.mkdir(bin, "p") == 1, "could not create logging Git directory")
+	local wrapper = bin .. "/git"
+	assert(vim.fn.writefile({
+		"#!/bin/sh",
+		[[printf '%s\n' "$*" >> "$LAZY_GIT_LOG"]],
+		[[exec "$REAL_GIT" "$@"]],
+	}, wrapper) == 0, "could not write logging Git wrapper")
+	assert(vim.fn.setfperm(wrapper, "rwxr-xr-x") == 1, "could not make logging Git executable")
+	return bin
+end
+
+local function logged_command(path, operation)
+	for _, line in ipairs(vim.fn.readfile(path)) do
+		if line:find(" " .. operation .. " ", 1, true) or line:sub(-#operation - 1) == " " .. operation then
+			return true
+		end
+	end
+	return false
+end
+
+local function run_lazy_fixture(root, config_root, appname, bin, log)
+	local cache_root = vim.uv.fs_realpath(root .. "/cache") or root .. "/cache"
+	return vim.system({
+		vim.v.progpath,
+		"--headless",
+		"-u",
+		"NONE",
+		"--cmd",
+		"set runtimepath^=" .. config_root,
+		"--cmd",
+		"set runtimepath+=" .. repo,
+		"-c",
+		"lua require('config.local_plugins').setup(); local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
+	}, {
+		text = true,
+		env = {
+			PATH = bin .. ":" .. (vim.env.PATH or ""),
+			REAL_GIT = vim.fn.exepath("git"),
+			LAZY_GIT_LOG = log,
+			NVIM_LOG_FILE = root .. "/child-nvim.log",
+			XDG_CACHE_HOME = cache_root,
+			XDG_DATA_HOME = root .. "/data",
+			NVIM_APPNAME = appname,
+			NVIM_CONFIG_FILE = root .. "/no-local-config.lua",
+		},
+	}):wait(10000)
 end
 
 local function write_bootstrap_fake_nvim(root)
@@ -237,6 +289,9 @@ test("native review hunk context accepts only bounded integers and is present in
 	local local_config = require("config.local_config")
 
 	assert(local_config.plugin("native_review").hunk_context == 3)
+	assert(local_config.plugin("native_review").max_files == 2000)
+	assert(local_config.plugin("native_review").max_file_bytes == 4 * 1024 * 1024)
+	assert(local_config.plugin("native_review").max_model_bytes == 64 * 1024 * 1024)
 	assert(#local_config.errors() == 0)
 
 	assert(vim.fn.writefile({ "return { plugins = { native_review = { hunk_context = 0 } } }" }, config_path) == 0)
@@ -266,6 +321,9 @@ test("native review hunk context accepts only bounded integers and is present in
 	local generated = table.concat(vim.fn.readfile(config_path), "\n")
 	assert(generated:find("native_review = {", 1, true), "generated template omitted native review")
 	assert(generated:find("hunk_context = 3", 1, true), "generated template omitted review context")
+	assert(generated:find("max_files = 2000", 1, true), "generated template omitted review file limit")
+	assert(generated:find("max_file_bytes = 4 %* 1024 %* 1024"), "generated template omitted per-file limit")
+	assert(generated:find("max_model_bytes = 64 %* 1024 %* 1024"), "generated template omitted model limit")
 	assert(vim.fn.getfperm(config_path) == "rw-------", "generated local config is not owner-only")
 
 	vim.notify = original_notify
@@ -422,9 +480,106 @@ test("lazy bootstrap checks out the exact lock commit before loading", function(
 		"locked branch was not cloned"
 	)
 	assert(commands:find("checkout --detach " .. locked.commit, 1, true), "locked commit was not checked out")
-	assert(commands:find("rev-parse HEAD", 1, true), "bootstrap checkout was not verified")
+	assert(
+		commands:find("rev-parse --show-toplevel --verify HEAD^{commit}", 1, true),
+		"bootstrap checkout was not verified"
+	)
 	assert(vim.fn.isdirectory(destination) == 1, "verified bootstrap was not promoted")
 	assert(vim.fn.glob(destination .. ".bootstrap.*") == "", "bootstrap staging directory leaked")
+	vim.fn.delete(root, "rf")
+end)
+
+test("lazy bootstrap validates the complete staging checkout before promotion", function()
+	local root = temp_dir()
+	local bin = write_pinned_fake_git(root)
+	local log = root .. "/git.log"
+	local locked = assert(require("config.lazy_lock").plugin(repo, "lazy.nvim"))
+	local appname = "nvim-security-staging-attestation"
+	local destination = root .. "/data/" .. appname .. "/lazy/lazy.nvim"
+
+	local result = vim.system({
+		vim.v.progpath,
+		"--headless",
+		"-u",
+		"NONE",
+		"--cmd",
+		"set runtimepath^=" .. repo,
+		"-c",
+		"lua require('config.local_plugins').setup(); local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
+	}, {
+		text = true,
+		env = {
+			PATH = bin .. ":" .. (vim.env.PATH or ""),
+			NVIM_LOG_FILE = root .. "/child-nvim.log",
+			XDG_DATA_HOME = root .. "/data",
+			NVIM_APPNAME = appname,
+			NVIM_CONFIG_FILE = root .. "/no-local-config.lua",
+			FAKE_GIT_LOG = log,
+			FAKE_LAZY_COMMIT = locked.commit,
+			FAKE_STATUS_OUTPUT = "?? injected.lua",
+			NVIM_CONFIG_BOOTSTRAP = "1",
+		},
+	}):wait(10000)
+
+	local output = (result.stdout or "") .. "\n" .. (result.stderr or "")
+	assert(result.code ~= 0, "dirty staging checkout unexpectedly loaded")
+	assert(output:find("Refusing to promote", 1, true), "staging rejection was not actionable")
+	assert(output:find("injected.lua", 1, true), "staging rejection omitted the dirty path")
+	assert(vim.uv.fs_lstat(destination) == nil, "invalid staging checkout was promoted")
+	assert(vim.fn.glob(destination .. ".bootstrap.*") == "", "invalid staging checkout was not cleaned")
+	vim.fn.delete(root, "rf")
+end)
+
+test("lazy cache attests only a stable complete checkout", function()
+	local root = temp_dir()
+	local appname = "nvim-security-index-attestation"
+	local config_root, checkout = create_real_lazy_fixture(root, appname)
+	local bin = write_logging_git(root)
+	local log = root .. "/git.log"
+	assert(vim.fn.mkdir(root .. "/cache", "p") == 1, "could not create isolated cache root")
+	assert(vim.fn.writefile({}, log) == 0, "could not create Git invocation log")
+
+	local first = run_lazy_fixture(root, config_root, appname, bin, log)
+	assert(first.code == 0, (first.stdout or "") .. (first.stderr or ""))
+	assert(logged_command(log, "rev-parse"), "first startup skipped repository identity")
+	assert(logged_command(log, "status"), "first startup skipped worktree status")
+	assert(logged_command(log, "ls-files"), "first startup did not inspect index flags")
+	local cache_root = assert(vim.uv.fs_realpath(root .. "/cache"))
+	local index_cache = cache_root .. "/" .. appname .. "/nvim-config/lazy-index-flags-v2.json"
+	local checkout_cache = cache_root .. "/" .. appname .. "/nvim-config/lazy-checkout-v1.json"
+	assert(vim.fn.filereadable(index_cache) == 1, "positive hidden-flag attestation was not cached")
+	assert(vim.fn.filereadable(checkout_cache) == 1, "positive checkout attestation was not cached")
+
+	assert(vim.fn.writefile({}, log) == 0, "could not reset Git invocation log")
+	local second = run_lazy_fixture(root, config_root, appname, bin, log)
+	assert(second.code == 0, (second.stdout or "") .. (second.stderr or ""))
+	assert(not logged_command(log, "rev-parse"), "cached startup repeated the attested repository identity check")
+	assert(not logged_command(log, "status"), "cached startup repeated the attested worktree scan")
+	assert(not logged_command(log, "ls-files"), "cached startup repeated the attested flag scan")
+
+	assert(vim.fn.writefile({ "return { compromised = true }" }, checkout .. "/lua/lazy/init.lua") == 0)
+	assert(vim.fn.writefile({}, log) == 0, "could not reset Git invocation log")
+	local dirty = run_lazy_fixture(root, config_root, appname, bin, log)
+	local dirty_output = (dirty.stdout or "") .. (dirty.stderr or "")
+	assert(dirty.code ~= 0 and dirty_output:find("Refusing modified", 1, true), "cached status accepted drift")
+	assert(
+		logged_command(log, "rev-parse") and logged_command(log, "status"),
+		"cached drift bypassed mandatory Git checks"
+	)
+
+	assert(vim.fn.writefile({
+		"return { setup = function(_, options) vim.g.fake_lazy_setup = options.lockfile end }",
+	}, checkout .. "/lua/lazy/init.lua") == 0)
+	real_git({ "-C", checkout, "update-index", "--skip-worktree", "lua/lazy/init.lua" })
+	assert(vim.fn.writefile({}, log) == 0, "could not reset Git invocation log")
+	local hidden = run_lazy_fixture(root, config_root, appname, bin, log)
+	local hidden_output = (hidden.stdout or "") .. (hidden.stderr or "")
+	assert(
+		hidden.code ~= 0 and hidden_output:find("hidden index flags", 1, true),
+		"stale attestation hid skip-worktree"
+	)
+	assert(logged_command(log, "rev-parse") and logged_command(log, "status"), "hidden flags bypassed mandatory checks")
+	assert(logged_command(log, "ls-files"), "changed index did not invalidate the positive attestation")
 	vim.fn.delete(root, "rf")
 end)
 
