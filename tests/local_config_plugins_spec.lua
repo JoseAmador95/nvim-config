@@ -95,6 +95,19 @@ test("canonical plugin schema exposes all products and host-only top-level value
 	)
 	equal(
 		{
+			"Proposed improvement.",
+			"Challenge to an approach or decision.",
+			"Request for clarification.",
+			"Minor detail or style nit.",
+			"Positive feedback.",
+		},
+		vim.tbl_map(function(definition)
+			return definition.description
+		end, config.plugins.native_review.comment_types),
+		"native review type descriptions changed"
+	)
+	equal(
+		{
 			"NvimReviewCommentSuggestion",
 			"NvimReviewCommentObjection",
 			"NvimReviewCommentQuestion",
@@ -297,11 +310,13 @@ local function configured_review_types(definitions)
 end
 
 test("additional native review comment types keep order and default INFO severity", function()
-	local definitions = "{{ id = 'objection!', icon = '!', highlight = 'NvimReviewCommentObjection', default_link = 'Special', rail_rank = 4 }, "
+	local definitions = "{{ id = 'objection!', icon = '!', description = 'Challenge to a decision.', highlight = 'NvimReviewCommentObjection', default_link = 'Special', rail_rank = 4 }, "
 		.. "{ id = 'insight', icon = '◆', highlight = 'NvimReviewCommentInsight', default_link = 'DiagnosticSignInfo', rail_rank = 2, severity = 4 }}"
 	local types, errors = configured_review_types(definitions)
 	equal({}, errors, "valid review types produced a diagnostic")
 	equal({ "objection!", "insight" }, { types[1].id, types[2].id }, "configured type order changed")
+	equal("Challenge to a decision.", types[1].description, "configured type description was lost")
+	equal(nil, types[2].description, "optional type description became mandatory")
 	equal(vim.diagnostic.severity.INFO, types[1].severity, "review type INFO default changed")
 	equal(vim.diagnostic.severity.HINT, types[2].severity, "review type severity was ignored")
 	types[1].id = "mutated"
@@ -350,6 +365,30 @@ test("host type list can select issue-only and rejects invalid replacements atom
 		{
 			"{{ id = 'odd', icon = '!', highlight = 'ReviewOdd', default_link = 'Special', rail_rank = 4, severity = 5 }}",
 			"severity",
+		},
+		{
+			"{{ id = 'odd', icon = '!', description = string.char(10), highlight = 'ReviewOdd', default_link = 'Special', rail_rank = 4 }}",
+			"description",
+		},
+		{
+			"{{ id = 'odd', icon = '!', description = string.char(9), highlight = 'ReviewOdd', default_link = 'Special', rail_rank = 4 }}",
+			"description",
+		},
+		{
+			"{{ id = 'odd', icon = '!', description = string.char(127), highlight = 'ReviewOdd', default_link = 'Special', rail_rank = 4 }}",
+			"description",
+		},
+		{
+			"{{ id = 'odd', icon = '!', description = string.rep('x', 161), highlight = 'ReviewOdd', default_link = 'Special', rail_rank = 4 }}",
+			"description",
+		},
+		{
+			"{{ id = 'odd', icon = '!', description = string.char(255), highlight = 'ReviewOdd', default_link = 'Special', rail_rank = 4 }}",
+			"description",
+		},
+		{
+			"{{ id = 'odd', icon = '!', description = '   ', highlight = 'ReviewOdd', default_link = 'Special', rail_rank = 4 }}",
+			"description",
 		},
 		{ "{ [2] = " .. valid .. " }", "dense list" },
 	}

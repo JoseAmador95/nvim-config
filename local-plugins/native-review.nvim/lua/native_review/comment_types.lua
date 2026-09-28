@@ -9,10 +9,12 @@ local ISSUE = {
 	default_link = "DiagnosticSignError",
 	rail_rank = 1,
 	severity = vim.diagnostic.severity.ERROR,
+	description = "Defect or concern that needs action.",
 }
 local MAX_EXTRA_TYPES = 32
 local MAX_ID_BYTES = 64
 local MAX_HIGHLIGHT_BYTES = 80
+local MAX_DESCRIPTION_BYTES = 160
 local ALLOWED_FIELDS = {
 	id = true,
 	icon = true,
@@ -20,6 +22,7 @@ local ALLOWED_FIELDS = {
 	default_link = true,
 	rail_rank = true,
 	severity = true,
+	description = true,
 }
 
 local definitions = {}
@@ -49,6 +52,53 @@ local function valid_icon(icon)
 	return utf8_ok and width_ok and width >= 1 and width <= 2
 end
 
+local function valid_description(value)
+	if type(value) ~= "string" or value == "" or #value > MAX_DESCRIPTION_BYTES or not value:find("%S") then
+		return false
+	end
+	local index = 1
+	while index <= #value do
+		local first = value:byte(index)
+		if first < 0x20 or first == 0x7F then
+			return false
+		end
+		local length
+		if first <= 0x7F then
+			length = 1
+		elseif first >= 0xC2 and first <= 0xDF then
+			length = 2
+		elseif first >= 0xE0 and first <= 0xEF then
+			length = 3
+		elseif first >= 0xF0 and first <= 0xF4 then
+			length = 4
+		else
+			return false
+		end
+		if index + length - 1 > #value then
+			return false
+		end
+		for offset = 1, length - 1 do
+			local continuation = value:byte(index + offset)
+			if continuation < 0x80 or continuation > 0xBF then
+				return false
+			end
+		end
+		local second = value:byte(index + 1)
+		if
+			(first == 0xC2 and second <= 0x9F)
+			or (first == 0xE0 and second < 0xA0)
+			or (first == 0xED and second > 0x9F)
+			or (first == 0xF0 and second < 0x90)
+			or (first == 0xF4 and second > 0x8F)
+			or (first == 0xE2 and second == 0x80 and (value:byte(index + 2) == 0xA8 or value:byte(index + 2) == 0xA9))
+		then
+			return false
+		end
+		index = index + length
+	end
+	return true
+end
+
 function M.validate(extras)
 	if extras == nil then
 		extras = {}
@@ -69,6 +119,10 @@ function M.validate(extras)
 		assert(valid_icon(definition.icon), label .. ".icon must occupy one or two display cells")
 		assert(valid_group(definition.highlight), label .. ".highlight must be a highlight group name")
 		assert(valid_group(definition.default_link), label .. ".default_link must be a highlight group name")
+		assert(
+			definition.description == nil or valid_description(definition.description),
+			label .. ".description must be a printable, single-line UTF-8 string of at most 160 bytes"
+		)
 		assert(
 			type(definition.rail_rank) == "number" and definition.rail_rank % 1 == 0 and definition.rail_rank > 1,
 			label .. ".rail_rank must be an integer above the issue priority of 1"
@@ -91,6 +145,7 @@ function M.validate(extras)
 			default_link = definition.default_link,
 			rail_rank = definition.rail_rank,
 			severity = severity,
+			description = definition.description,
 		}
 	end
 	return normalized

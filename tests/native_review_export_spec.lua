@@ -21,6 +21,7 @@ local function test(name, callback)
 end
 
 local exporter = require("config.native_review").export
+local comment_types = require("native_review.comment_types")
 local oid = string.rep("a", 40)
 
 local function session()
@@ -66,6 +67,13 @@ end
 test("Markdown includes exact scope, compact anchors, status, and replies", function()
 	local markdown, ids = assert(exporter.render(session()))
 	assert(markdown:find("Commit: `" .. oid .. "`", 1, true))
+	local legend = assert(markdown:find("## Message type legend", 1, true))
+	assert(legend < assert(markdown:find("## OBJECTION!", 1, true)), "type legend follows the comments")
+	for _, definition in ipairs(comment_types.all()) do
+		if definition.description then
+			assert(markdown:find("`" .. definition.id .. "` — " .. definition.description, legend, true))
+		end
+	end
 	assert(markdown:find("## OBJECTION! — lua/config/example.lua:8 [NEW]", 1, true))
 	assert(not markdown:find("lua/config/example.lua:8-8", 1, true))
 	assert(markdown:find("_draft_", 1, true))
@@ -75,6 +83,46 @@ test("Markdown includes exact scope, compact anchors, status, and replies", func
 	assert(not markdown:find("right, historical", 1, true))
 	assert(markdown:find("### Reply: OBJECTION! — lua/config/example.lua:8 [NEW]", 1, true))
 	assert(vim.deep_equal(ids, { "root", "reply" }))
+end)
+
+test("type legend follows configuration and labels retired types used in the review", function()
+	local original = comment_types.all()
+	table.remove(original, 1)
+	for _, definition in ipairs(original) do
+		definition.cycle_rank = nil
+	end
+	local ok, err = xpcall(function()
+		comment_types.configure({
+			{
+				id = "custom",
+				icon = "*",
+				highlight = "ReviewCustom",
+				default_link = "Special",
+				rail_rank = 2,
+				description = "A configured explanation.",
+			},
+		})
+		local value = session()
+		value.items[1].type = "custom"
+		value.items[2].type = "archived"
+		local markdown = assert(exporter.render(value))
+		local legend = assert(markdown:match("## Message type legend\n\n(.-)\n\n##"))
+		assert(legend:find("`issue` — Defect or concern that needs action.", 1, true))
+		assert(legend:find("\\* `custom` — A configured explanation.", 1, true))
+		assert(legend:find("`archived` — no longer configured", 1, true))
+		assert(not legend:find("`suggestion`", 1, true), "legend retained a replaced host type")
+		comment_types.reset()
+		local issue_only = assert(exporter.render(value))
+		local issue_legend = assert(issue_only:match("## Message type legend\n\n(.-)\n\n##"))
+		assert(issue_legend:find("`issue`", 1, true))
+		assert(issue_legend:find("`custom` — no longer configured", 1, true))
+		assert(not issue_legend:find("A configured explanation.", 1, true))
+		local recovery = assert(exporter.render_recovery(vim.tbl_extend("force", session(), { items = {} })))
+		assert(recovery:find("## Message type legend", 1, true))
+		assert(recovery:find("## Empty live review state", 1, true))
+	end, debug.traceback)
+	comment_types.configure(original)
+	assert(ok, err)
 end)
 
 test("Markdown renders old multiline anchors without source context", function()
@@ -169,6 +217,7 @@ test("clipboard failure previews without returning ids to lock", function()
 		end,
 	}))
 	assert(result.previewed and #result.ids == 0 and previewed == result.markdown)
+	assert(result.markdown:find("## Message type legend", 1, true))
 
 	local copied
 	result = assert(exporter.deliver(session(), false, {
@@ -178,6 +227,7 @@ test("clipboard failure previews without returning ids to lock", function()
 		end,
 	}))
 	assert(not result.previewed and copied[1] == "+" and #result.ids == 0)
+	assert(copied[2]:find("## Message type legend", 1, true))
 
 	result = assert(exporter.deliver(session(), false, {
 		has_clipboard = true,

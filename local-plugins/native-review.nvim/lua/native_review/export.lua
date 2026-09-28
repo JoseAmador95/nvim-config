@@ -1,6 +1,7 @@
 -- Deterministic Markdown export for standalone native review sessions.
 local M = {}
 
+local comment_types = require("native_review.comment_types")
 local review_lsp = require("native_review.lsp")
 local review_store = require("native_review.store")
 
@@ -56,6 +57,37 @@ local function append_item(lines, item, force, session_stale, heading)
 	lines[#lines + 1] = ""
 end
 
+local function append_type_legend(lines, items)
+	lines[#lines + 1] = "## Message type legend"
+	lines[#lines + 1] = ""
+	local configured = {}
+	for _, definition in ipairs(comment_types.all()) do
+		configured[definition.id] = true
+		local entry = "- " .. vim.fn.escape(definition.icon, [[\`*_{}[]()#+-.!|>]]) .. " `" .. definition.id .. "`"
+		if definition.description then
+			entry = entry .. " — " .. definition.description
+		end
+		lines[#lines + 1] = entry
+	end
+	local retired = {}
+	for _, item in ipairs(items) do
+		if not configured[item.type] then
+			retired[item.type] = true
+		end
+	end
+	local retired_ids = vim.tbl_keys(retired)
+	table.sort(retired_ids)
+	for _, id in ipairs(retired_ids) do
+		local definition = comment_types.get(id)
+		lines[#lines + 1] = "- "
+			.. vim.fn.escape(definition.icon, [[\`*_{}[]()#+-.!|>]])
+			.. " `"
+			.. id
+			.. "` — no longer configured"
+	end
+	lines[#lines + 1] = ""
+end
+
 local function render(session, force, allow_empty)
 	local items = session.items
 	if #items == 0 and not allow_empty then
@@ -79,6 +111,7 @@ local function render(session, force, allow_empty)
 		lines[#lines + 1] = "- " .. field
 	end
 	lines[#lines + 1] = ""
+	append_type_legend(lines, items)
 	if #items == 0 then
 		lines[#lines + 1] = "## Empty live review state"
 		lines[#lines + 1] = ""

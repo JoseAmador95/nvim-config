@@ -58,6 +58,7 @@ local additional_comment_types = {
 		default_link = "DiagnosticSignWarn",
 		rail_rank = 2,
 		severity = vim.diagnostic.severity.WARN,
+		description = "A useful alternative, not a defect.",
 	},
 	{
 		id = "objection!",
@@ -155,9 +156,10 @@ test("lifecycle defaults are copied and unknown setup options do not mutate stat
 	equal(before, native_review.status(), "rejected setup mutated status")
 end)
 
-test("plugin defaults to issue and configured types own cycle, rail, icon, and severity", function()
+test("plugin defaults to issue and configured types own cycle, rail, icon, severity, and description", function()
 	local catalogue = native_review.comment_types or require("native_review.comment_types")
 	equal({ "issue" }, catalogue.ids(), "issue must be the only plugin default")
+	equal("Defect or concern that needs action.", catalogue.get("issue").description, "issue description")
 	equal({ "issue" }, catalogue.rail_ids(), "issue must be the only default rail type")
 	equal("issue", catalogue.cycle("issue", 1), "single-type forward cycle")
 	equal("issue", catalogue.cycle("issue", -1), "single-type reverse cycle")
@@ -182,6 +184,8 @@ test("plugin defaults to issue and configured types own cycle, rail, icon, and s
 	equal("objection!", catalogue.canonical("rationale"), "saved type compatibility")
 	equal("!", catalogue.get("objection!").icon, "objection badge")
 	equal(vim.diagnostic.severity.INFO, catalogue.get("objection!").severity, "optional severity default")
+	equal("A useful alternative, not a defect.", catalogue.get("suggestion").description, "configured description")
+	assert(catalogue.get("objection!").description == nil, "description unexpectedly required")
 	equal("suggestion", catalogue.cycle("issue", 1), "forward cycle")
 	equal("praise", catalogue.cycle("issue", -1), "reverse cycle")
 	local config = native_review.effective_config()
@@ -196,7 +200,13 @@ test("plugin defaults to issue and configured types own cycle, rail, icon, and s
 	equal("suggestion", native_review.effective_config().comment_types[1].id, "effective config leaked types")
 	local definitions = catalogue.all()
 	definitions[2].id = "mutated"
+	definitions[2].description = "mutated"
 	equal("suggestion", catalogue.ids()[2], "catalogue leaked mutable definitions")
+	equal(
+		"A useful alternative, not a defect.",
+		catalogue.get("suggestion").description,
+		"catalogue leaked description"
+	)
 	local before = native_review.status()
 	for _, bad in ipairs({
 		{ id = "rationale", icon = "!", highlight = "ReviewRationale", default_link = "Special", rail_rank = 2 },
@@ -207,6 +217,27 @@ test("plugin defaults to issue and configured types own cycle, rail, icon, and s
 		assert(not ok, "invalid comment type was accepted")
 		equal(before, native_review.status(), "rejected type changed active review config")
 	end
+	for _, invalid_description in ipairs({
+		"",
+		"   ",
+		string.rep("a", 161),
+		"first\nsecond",
+		"first\rsecond",
+		"control" .. string.char(0xC2, 0x85),
+		"separator" .. string.char(0xE2, 0x80, 0xA8),
+		string.char(0xC3, 0x28),
+		42,
+	}) do
+		local definition = vim.deepcopy(additional_comment_types[1])
+		definition.description = invalid_description
+		local ok, err = pcall(setup, { comment_types = { definition } })
+		assert(not ok and tostring(err):find(".description", 1, true), "invalid description was accepted")
+		equal(before, native_review.status(), "rejected description changed active review config")
+	end
+	local described = vim.deepcopy(additional_comment_types[1])
+	described.description = "Análisis útil " .. string.rep("a", 144)
+	setup({ comment_types = { described } })
+	equal(described.description, catalogue.get("suggestion").description, "valid UTF-8 description was changed")
 	setup()
 	equal({ "issue" }, catalogue.ids(), "repeated setup retained stale custom types")
 end)
