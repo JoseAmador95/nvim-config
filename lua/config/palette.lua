@@ -114,9 +114,22 @@ local function apply_markdown(colors)
 	vim.api.nvim_set_hl(0, "MdRenderCodeBlockBackground", { bg = block_bg })
 	vim.api.nvim_set_hl(0, "MdRenderCodeBlockLabel", { fg = colors.foreground, bg = block_bg, bold = true })
 	for level = 1, 6 do
-		local heading_bg = value("@markup.heading." .. level .. ".markdown", "fg", colors.rainbow[level])
-		local heading_fg = contrast(0xffffff, heading_bg) >= contrast(0x000000, heading_bg) and 0xffffff or 0x000000
-		vim.api.nvim_set_hl(0, "MdRenderH" .. level, { fg = heading_fg, bg = heading_bg, bold = true })
+		local accent = value("@markup.heading." .. level .. ".markdown", "fg", colors.rainbow[level])
+		local light = vim.o.background == "light"
+		local pill_bg = blend(colors.background, accent, light and 0.28 or 0.46)
+		local band_bg = blend(colors.background, accent, light and 0.07 or 0.1)
+		local pill_fg = colors.foreground
+		if contrast(pill_fg, pill_bg) < 4.5 then
+			pill_fg = contrast(0xffffff, pill_bg) >= contrast(0x000000, pill_bg) and 0xffffff or 0x000000
+		end
+		local band_fg = colors.foreground
+		if contrast(band_fg, band_bg) < 4.5 then
+			band_fg = contrast(0xffffff, band_bg) >= contrast(0x000000, band_bg) and 0xffffff or 0x000000
+		end
+		local heading = "MdRenderH" .. level
+		vim.api.nvim_set_hl(0, heading, { fg = pill_fg, bg = pill_bg, bold = true })
+		vim.api.nvim_set_hl(0, heading .. "Band", { fg = band_fg, bg = band_bg, bold = true })
+		vim.api.nvim_set_hl(0, heading .. "Edge", { fg = pill_bg, bg = band_bg })
 	end
 end
 

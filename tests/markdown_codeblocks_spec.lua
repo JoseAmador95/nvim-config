@@ -104,5 +104,111 @@ assert(not find(3, function(details)
 	return details.hl_group == "MdRenderCodeBlockBackground"
 end), "rebuild kept a stale code background")
 
-print("markdown_codeblocks_spec: labels and bounded code backgrounds passed")
+local heading_lines = {
+	"      Heading [link]",
+	"      " .. string.rep("x", 29),
+	"    No leading cell",
+	"      " .. string.rep("y", 30),
+}
+vim.api.nvim_buf_set_lines(buf, 0, -1, false, heading_lines)
+local link_metadata = { { line = 0, col_start = 15, col_end = 19, url = "#target" } }
+local original_link_metadata = vim.deepcopy(link_metadata)
+assert(heading_lines[1]:sub(link_metadata[1].col_start + 1, link_metadata[1].col_end) == "link")
+local heading_session = {
+	buf = buf,
+	opts = { nvim_config_page_margin = 4, nvim_config_page_width = 32 },
+	content = {
+		lines = heading_lines,
+		highlights = {
+			{ line = 0, groups = { { col = 6, end_col = #heading_lines[1], hl = "MdRenderH1" } } },
+			{ line = 1, groups = { { col = 6, end_col = #heading_lines[2], hl = "MdRenderH2" } } },
+			{ line = 2, groups = { { col = 4, end_col = #heading_lines[3], hl = "MdRenderH3" } } },
+			{ line = 3, groups = { { col = 6, end_col = #heading_lines[4], hl = "MdRenderH4" } } },
+		},
+		link_metadata = link_metadata,
+	},
+}
+codeblocks.decorate(heading_session)
+local band = assert(
+	find(0, function(details)
+		return details.hl_group == "MdRenderH1Band"
+	end),
+	"pill row has no soft page band"
+)
+assert(band[3] == 4 and band[4].end_col == 6, "pill band escaped the page or covered heading text")
+local left = assert(
+	find(0, function(details)
+		return details.virt_text_pos == "overlay"
+	end),
+	"pill lost its left cap"
+)
+assert(left[3] == 5 and left[4].virt_text[1][1] == "", "left cap moved the heading text")
+assert(vim.api.nvim_strwidth(left[4].virt_text[1][1]) == 1, "left cap is not one cell")
+local right = assert(
+	find(0, function(details)
+		return details.virt_text_pos == "inline"
+	end),
+	"pill lost its right cap"
+)
+assert(right[3] == #heading_lines[1] and right[4].virt_text[1][1] == "", "right cap is not at heading end")
+assert(right[4].virt_text[2][2] == "MdRenderH1Band", "right-side fill lost its soft band")
+assert(
+	vim.fn.strdisplaywidth(heading_lines[1])
+			+ vim.api.nvim_strwidth(right[4].virt_text[1][1])
+			+ #right[4].virt_text[2][1]
+		== 36,
+	"right cap and band exceed the page boundary"
+)
+local edge = assert(
+	find(1, function(details)
+		return details.virt_text_pos == "inline"
+	end),
+	"one-cell spare width should fit a right cap"
+)
+assert(edge[4].virt_text[1][1] == "" and edge[4].virt_text[2][1] == "", "edge cap exceeded the page")
+assert(not find(2, function(details)
+	return details.virt_text and details.virt_text[1][1] == ""
+end), "heading without a leading cell gained half a pill")
+assert(
+	find(2, function(details)
+		return details.hl_group == "MdRenderH3Band" and details.end_col == #heading_lines[3]
+	end),
+	"heading without a leading cell did not fall back to the soft band"
+)
+assert(not find(3, function(details)
+	return details.virt_text and details.virt_text[1][1] == ""
+end), "heading at the page edge drew a cap past the boundary")
+assert(
+	find(3, function(details)
+		return details.hl_group == "MdRenderH4Band" and details.end_col == #heading_lines[4]
+	end),
+	"heading at the page edge did not fall back to the soft band"
+)
+assert(
+	vim.deep_equal(heading_session.content.link_metadata, original_link_metadata),
+	"pill decoration changed link byte ranges"
+)
+assert(vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), heading_lines), "pill changed rendered lines")
+
+heading_session.rebuild = function(self)
+	local updated = { "      Updated", "ordinary" }
+	vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, updated)
+	self.content = {
+		lines = updated,
+		highlights = { { line = 0, groups = { { col = 6, end_col = #updated[1], hl = "MdRenderH4" } } } },
+	}
+end
+codeblocks.protect_rebuild(heading_session)
+heading_session:rebuild()
+assert(
+	find(0, function(details)
+		return details.virt_text_pos == "overlay" and details.virt_text[1][2] == "MdRenderH4Edge"
+	end),
+	"rebuild lost the pastel pill"
+)
+assert(not find(1, function(details)
+	return details.virt_text_pos == "inline" and details.virt_text[1][2] == "MdRenderH2Edge"
+end), "rebuild kept a stale pill")
+
+print("markdown_codeblocks_spec: labels, shaded code, and bounded heading pills passed")
 vim.cmd("quitall!")

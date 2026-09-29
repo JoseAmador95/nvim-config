@@ -174,8 +174,10 @@ is centered at 90% of the available width, capped at 120 columns. The
 viewer uses the exact `md-render.nvim` v3.10.3 pin; automatic media is disabled,
 so Mermaid and PlantUML fences stay code blocks and render only through
 `:DiagramShow`/`<leader>md`. Fenced code shows its language above a shaded
-block; the light theme uses a pale gray background. Headings have solid
-page-width color bands, and the cursor stays inside the centered page. Lines
+block; the light theme uses a pale gray background. Headings use pastel pills
+over softly tinted page-width bands; the renderer's experimental terminal text
+scaling is disabled so their rounded ends stay aligned. The cursor stays inside
+the centered page. Lines
 wrap instead of shifting the reading view horizontally. `<leader>mp` still
 opens the browser preview.
 Tables open expanded with outer vertical borders. When the columns cannot fit,
