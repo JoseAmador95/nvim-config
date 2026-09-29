@@ -31,7 +31,9 @@ function M.center_content(content, opts)
 	margin = math.floor(margin)
 	local padding = string.rep(" ", margin)
 	for index, line in ipairs(content.lines) do
-		content.lines[index] = padding .. line
+		-- A blank rendered row still needs one page cell: normal-mode cursors
+		-- cannot rest one column past the end of the margin's spaces.
+		content.lines[index] = padding .. (line == "" and " " or line)
 	end
 	for _, entry in ipairs(content.highlights or {}) do
 		for _, group in ipairs(entry.groups) do

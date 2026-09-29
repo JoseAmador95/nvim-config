@@ -1,5 +1,5 @@
--- Add reading-view decoration around md-render's code lines without changing
--- its content, source-line map, or pinned checkout.
+-- Decorate code blocks and headings in the reading view without changing
+-- md-render's content, source-line map, or pinned checkout.
 local M = {}
 
 local namespace = vim.api.nvim_create_namespace("nvim_config_markdown_codeblocks")
@@ -42,21 +42,44 @@ local function language_label(language)
 	return label
 end
 
-local function shade_line(buf, row, line, from_col, right_col)
+local function shade_line(buf, row, line, from_col, right_col, group)
+	group = group or background_group
 	local line_end = #line
 	if line_end > from_col then
 		vim.api.nvim_buf_set_extmark(buf, namespace, row, from_col, {
 			end_col = line_end,
-			hl_group = background_group,
+			hl_group = group,
 			priority = 4100,
 		})
 	end
 	local padding = right_col - vim.fn.strdisplaywidth(line)
 	if padding > 0 then
 		vim.api.nvim_buf_set_extmark(buf, namespace, row, line_end, {
-			virt_text = { { string.rep(" ", padding), background_group } },
-			virt_text_pos = "eol",
+			virt_text = { { string.rep(" ", padding), group } },
+			-- `eol` leaves one unshaded cell between the last character and
+			-- virtual text. At the line end, `inline` has no such separator.
+			virt_text_pos = "inline",
 		})
+	end
+end
+
+local function shade_headings(buf, content, lines, left, right)
+	local decorated = {}
+	for _, entry in ipairs(content.highlights or {}) do
+		local row = entry.line
+		if type(row) == "number" and row >= 0 and row < #lines and not decorated[row] then
+			for _, group in ipairs(entry.groups or {}) do
+				local level = type(group.hl) == "string" and group.hl:match("^MdRenderH([1-6])$")
+				if level then
+					local line = lines[row + 1]
+					if #line > left then
+						shade_line(buf, row, line, left, right, "MdRenderH" .. level)
+					end
+					decorated[row] = true
+					break
+				end
+			end
+		end
 	end
 end
 
@@ -71,6 +94,7 @@ function M.decorate(session)
 	local lines = content.lines or {}
 	local left, right = page_region(session)
 	vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
+	shade_headings(buf, content, lines, left, right)
 
 	for _, block in ipairs(content.code_blocks or {}) do
 		local label = language_label(block.language)

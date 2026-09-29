@@ -51,6 +51,180 @@ local function has_ellipsis(lines)
 	return false
 end
 
+-- A literal ellipsis in a cell is content, not evidence of truncation.
+-- Probe a same-width, same-byte-length copy only when the rendered table
+-- contains one; any remaining ellipsis was inserted by md-render.
+local function generated_ellipsis(parsed, lines, indent, max_width, expanded, buf_dir, original_render)
+	if not has_ellipsis(lines) then
+		return false
+	end
+	local substitute = "⋯"
+	if vim.api.nvim_strwidth("…") ~= vim.api.nvim_strwidth(substitute) then
+		return true
+	end
+	local copy = vim.deepcopy(parsed)
+	for _, cell in ipairs(copy.headers) do
+		cell.text = cell.text:gsub("…", substitute)
+	end
+	for _, row in ipairs(copy.rows) do
+		for _, cell in ipairs(row) do
+			cell.text = cell.text:gsub("…", substitute)
+		end
+	end
+	local probe_lines = original_render(copy, indent, max_width, expanded, buf_dir)
+	return has_ellipsis(probe_lines)
+end
+
+local function exceeds_width(lines, max_width)
+	for _, line in ipairs(lines) do
+		if vim.api.nvim_strwidth(line) > max_width then
+			return true
+		end
+	end
+	return false
+end
+
+-- A narrow table can have more columns than md-render can fit even when
+-- every cell is wrapped. Reflow each source row as bounded key/value rows.
+-- Slice parsed cells by byte offset so their inline highlights and links
+-- retain the exact ranges supplied by md-render's Markdown parser.
+local function slice_cell(cell, first, last)
+	local sliced = { text = cell.text:sub(first + 1, last), highlights = {}, links = {} }
+	for _, highlight in ipairs(cell.highlights) do
+		local ending = highlight.end_col == -1 and #cell.text or highlight.end_col
+		local start = math.max(first, highlight.col)
+		local finish = math.min(last, ending)
+		if start < finish then
+			local copy = vim.deepcopy(highlight)
+			copy.col = start - first
+			copy.end_col = finish - first
+			table.insert(sliced.highlights, copy)
+		end
+	end
+	for _, link in ipairs(cell.links) do
+		local start = math.max(first, link.col_start)
+		local finish = math.min(last, link.col_end)
+		if start < finish then
+			local copy = vim.deepcopy(link)
+			copy.col_start = start - first
+			copy.col_end = finish - first
+			table.insert(sliced.links, copy)
+		end
+	end
+	return sliced
+end
+
+local function grapheme_clusters(text)
+	local clusters = {}
+	local pending = ""
+	for char in text:gmatch("[%z\1-\127\194-\253][\128-\191]*") do
+		if pending ~= "" and vim.fn.strchars(pending .. char, 1) > 1 then
+			table.insert(clusters, pending)
+			pending = char
+		else
+			pending = pending .. char
+		end
+	end
+	if pending ~= "" then
+		table.insert(clusters, pending)
+	end
+	return clusters
+end
+
+local function split_cell(cell, width)
+	if cell.text == "" then
+		return { slice_cell(cell, 0, 0) }
+	end
+	local slices = {}
+	local first = 0
+	local cursor = 0
+	local display_width = 0
+	local last_space
+	for _, cluster in ipairs(grapheme_clusters(cell.text)) do
+		local cluster_width = vim.api.nvim_strwidth(cluster)
+		if display_width + cluster_width > width and cursor > first then
+			local finish = last_space and last_space > first and last_space or cursor
+			table.insert(slices, slice_cell(cell, first, finish))
+			first = finish
+			display_width = vim.api.nvim_strwidth(cell.text:sub(first + 1, cursor))
+			last_space = nil
+		end
+		cursor = cursor + #cluster
+		display_width = display_width + cluster_width
+		if cluster:match("%s") then
+			last_space = cursor
+		end
+	end
+	if first < #cell.text then
+		table.insert(slices, slice_cell(cell, first, #cell.text))
+	end
+	return slices
+end
+
+local function empty_cell()
+	return { text = "", highlights = {}, links = {} }
+end
+
+local function stacked_table(parsed, indent, max_width, buf_dir, original_render)
+	local content_width = max_width - vim.api.nvim_strwidth(indent) - 7
+	if content_width < 4 then
+		return nil
+	end
+	local header_width = 0
+	for _, header in ipairs(parsed.headers) do
+		header_width = math.max(header_width, vim.api.nvim_strwidth(header.text))
+	end
+	local key_width = math.min(content_width - 2, math.max(2, math.min(header_width, math.floor(content_width / 3))))
+	local value_width = content_width - key_width
+	local result_lines, result_highlights, result_links, result_images, result_offsets = {}, {}, {}, {}, {}
+	local row_count = math.max(1, #parsed.rows)
+	for row_index = 1, row_count do
+		local original_row = parsed.rows[row_index]
+		local card_rows = {}
+		for column, header in ipairs(parsed.headers) do
+			local value = original_row and original_row[column] or empty_cell()
+			local keys = split_cell(header, key_width)
+			local values = split_cell(value, value_width)
+			for part = 1, math.max(#keys, #values) do
+				table.insert(card_rows, { keys[part] or empty_cell(), values[part] or empty_cell() })
+			end
+		end
+		local card = {
+			headers = { empty_cell(), empty_cell() },
+			alignments = { "left", "left" },
+			rows = card_rows,
+			col_widths = { key_width, value_width },
+			_raw_lines = {},
+			empty_header = true,
+		}
+		local lines, highlights, links, images = original_render(card, indent, nil, false, buf_dir)
+		local base_line = #result_lines
+		for index, line in ipairs(lines) do
+			table.insert(result_lines, line)
+			table.insert(result_highlights, highlights[index])
+			table.insert(result_links, links[index])
+			table.insert(result_offsets, original_row and row_index + 1 or 0)
+		end
+		for _, image in ipairs(images or {}) do
+			image.line_offset = image.line_offset + base_line
+			table.insert(result_images, image)
+		end
+		if row_index < row_count then
+			local border = indent
+				.. "│"
+				.. string.rep("─", key_width + 2)
+				.. "│"
+				.. string.rep("─", value_width + 2)
+				.. "│"
+			table.insert(result_lines, border)
+			table.insert(result_highlights, { { col = #indent, end_col = #border, hl = "FloatBorder" } })
+			table.insert(result_links, {})
+			table.insert(result_offsets, row_index + 1)
+		end
+	end
+	return result_lines, result_highlights, result_links, result_images, result_offsets
+end
+
 local function restore_link_text(cell, raw_line)
 	for _, link in ipairs(cell.links) do
 		local first = link.col_start
@@ -119,7 +293,7 @@ function M.protect_rebuild(session)
 			vim.bo[self.buf].readonly = was_readonly
 			for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
 				if vim.api.nvim_win_is_valid(win) then
-					vim.wo[win].wrap = false
+					vim.wo[win].wrap = true
 				end
 			end
 		end
@@ -190,10 +364,21 @@ function M.configure(preview, wrap, markdown_table, postprocess)
 	local function render_table(parsed, indent, max_width, expanded, buf_dir)
 		local lines, highlights, links, images, source_offsets =
 			original_render_table(parsed, indent, max_width, expanded, buf_dir)
-		if expanded and max_width and has_ellipsis(lines) then
-			-- An indivisible glyph or token can still defeat upstream wrapping.
-			-- Keep the full table in the buffer and allow horizontal scrolling.
-			return original_render_table(parsed, indent, nil, false, buf_dir)
+		if
+			max_width
+			and (
+				exceeds_width(lines, max_width)
+				or (
+					expanded
+					and generated_ellipsis(parsed, lines, indent, max_width, expanded, buf_dir, original_render_table)
+				)
+			)
+		then
+			local card_lines, card_highlights, card_links, card_images, card_offsets =
+				stacked_table(parsed, indent, max_width, buf_dir, original_render_table)
+			if card_lines then
+				return card_lines, card_highlights, card_links, card_images, card_offsets
+			end
 		end
 		return lines, highlights, links, images, source_offsets
 	end

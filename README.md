@@ -174,11 +174,13 @@ is centered at 90% of the available width, capped at 120 columns. The
 viewer uses the exact `md-render.nvim` v3.10.3 pin; automatic media is disabled,
 so Mermaid and PlantUML fences stay code blocks and render only through
 `:DiagramShow`/`<leader>md`. Fenced code shows its language above a shaded
-block; the light theme uses a pale gray background. `<leader>mp` still opens
-the browser preview.
-Tables open expanded so their cells and bare URLs remain complete. Press `<CR>`
-or `za` on a table to switch to its compact view; use `zh`/`zl` to read columns
-when a table is wider than the reading page.
+block; the light theme uses a pale gray background. Headings have solid
+page-width color bands, and the cursor stays inside the centered page. Lines
+wrap instead of shifting the reading view horizontally. `<leader>mp` still
+opens the browser preview.
+Tables open expanded with outer vertical borders. When the columns cannot fit,
+the viewer shows bounded `field │ value` rows so every cell and link remains
+visible. Press `<CR>` or `za` on a table to switch to its compact view.
 In `nvimpager`, Markdown renders automatically, and `<leader>mv` toggles back
 to the original source. `:SetFileType` and the diagram viewer operate on that
 source even while the reading view is displayed.
@@ -187,8 +189,10 @@ through the tab-aware editor adapter, sends headings, fragments, and reference
 links to Marksman, and opens HTTP(S)/email targets through the host UI. Under
 SSH, external targets are copied through the bounded clipboard adapter
 instead of launching a remote browser. Plain Markdown text falls back to the
-ordinary LSP/native definition path. This mapping is absent from `nvimpager`
-and VSCode Neovim and remains fail-closed in historical review buffers.
+ordinary LSP/native definition path. In the rendered tab, `gd` follows the
+link under the cursor with the same source policy and jumps to local headings
+inside the reading view. This mapping is absent from `nvimpager` and VSCode
+Neovim and remains fail-closed in historical review buffers.
 
 Every local product exposes a strict setup contract plus copied `status()` and
 `effective_config()` snapshots. `:checkhealth nvimconfig` aggregates those 17
