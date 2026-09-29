@@ -31,6 +31,7 @@ local opts = {
 			"Trouble",
 			"lazy",
 			"mason",
+			"md-render",
 			"notify",
 			"snacks_terminal",
 		},
