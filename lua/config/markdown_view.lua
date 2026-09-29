@@ -4,6 +4,7 @@ local M = {}
 
 local deferred = require("config.deferred")
 local lazy_lock = require("config.lazy_lock")
+local markdown_tables = require("config.markdown_tables")
 local pager = require("config.pager")
 
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve Markdown view host")
@@ -18,6 +19,7 @@ local notified_error
 local previews = {}
 local pager_source_requested = {}
 local pager_filetype_pending = {}
+local render_winhighlight_var = "nvim_config_md_render_winhighlight"
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.WARN, { title = "Markdown" })
@@ -101,7 +103,8 @@ function M.configure_renderer()
 	end
 	local ok_image, image_module = deferred.try("md-render.image")
 	local ok_renderer, render_module = deferred.try("md-render")
-	if not ok_image or not ok_renderer then
+	local ok_wrap, wrap_module = deferred.try("md-render.wrap")
+	if not ok_image or not ok_renderer or not ok_wrap then
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: md-render.nvim could not load")
 	end
@@ -112,6 +115,7 @@ function M.configure_renderer()
 		or type(render_module.preview.split) ~= "function"
 		or type(render_module.preview.toggle) ~= "function"
 		or type(render_module.preview._toggle_sessions) ~= "table"
+		or type(render_module.MarkdownTable) ~= "table"
 	then
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: v3.10.3 media guard contract changed")
@@ -132,6 +136,12 @@ function M.configure_renderer()
 	if not installed then
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: could not disable automatic media: " .. tostring(install_err))
+	end
+	local tables_ready, tables_err =
+		markdown_tables.configure(render_module.preview, wrap_module, render_module.MarkdownTable)
+	if not tables_ready then
+		disable_upstream_entrypoints()
+		return fail("Markdown reading view unavailable: " .. tables_err)
 	end
 	image = image_module
 	renderer = render_module
@@ -170,13 +180,54 @@ local function source_for_window(win)
 	return state and state.source_buf or vim.api.nvim_win_get_buf(win), state
 end
 
-local function protect_render_buffer(win)
+local function render_winhighlight(value)
+	local mappings = {}
+	for mapping in value:gmatch("[^,]+") do
+		if not mapping:match("^String:") then
+			mappings[#mappings + 1] = mapping
+		end
+	end
+	mappings[#mappings + 1] = "String:MdRenderCodeBlock"
+	return table.concat(mappings, ",")
+end
+
+local function apply_render_winhighlight(win, source_winhighlight)
+	local current = vim.api.nvim_get_option_value("winhighlight", { win = win })
+	local ok, original = pcall(vim.api.nvim_win_get_var, win, render_winhighlight_var)
+	if not ok then
+		original = source_winhighlight or current
+		vim.api.nvim_win_set_var(win, render_winhighlight_var, original)
+	end
+	local applied = render_winhighlight(original)
+	if current ~= applied then
+		vim.api.nvim_set_option_value("winhighlight", applied, { win = win })
+	end
+end
+
+local function restore_render_winhighlight(win)
+	local ok, original = pcall(vim.api.nvim_win_get_var, win, render_winhighlight_var)
+	if not ok then
+		return
+	end
+	vim.api.nvim_set_option_value("winhighlight", original, { win = win })
+	vim.api.nvim_win_del_var(win, render_winhighlight_var)
+end
+
+local function protect_render_buffer(win, source_winhighlight)
 	local state = win_state(win)
 	if not state then
 		return nil
 	end
+	local session = renderer.preview._toggle_sessions[state.source_buf]
+	if session then
+		markdown_tables.protect_rebuild(session)
+	end
 	vim.bo[state.render_buf].modifiable = false
 	vim.bo[state.render_buf].readonly = true
+	-- Expanded tables may be wider than a narrow split. Keep their rows intact
+	-- so the ordinary zh/zl keys can reveal every column.
+	vim.wo[win].wrap = false
+	apply_render_winhighlight(win, source_winhighlight)
 	return state
 end
 
@@ -284,7 +335,10 @@ local function pager_toggle()
 	local source_buf, state = source_for_window(win)
 	if state then
 		preview_api.toggle()
-		pager_source_requested[source_buf] = true
+		if vim.api.nvim_win_get_buf(win) == source_buf then
+			restore_render_winhighlight(win)
+			pager_source_requested[source_buf] = true
+		end
 		return
 	end
 	if vim.bo[source_buf].filetype ~= "markdown" then
@@ -292,8 +346,9 @@ local function pager_toggle()
 		return
 	end
 	pager_source_requested[source_buf] = nil
+	local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
 	preview_api.toggle()
-	protect_render_buffer(win)
+	protect_render_buffer(win, source_winhighlight)
 end
 
 function M.toggle()
@@ -315,6 +370,9 @@ function M.pager_show_source(win)
 			return nil
 		end
 		vim.api.nvim_win_call(win, preview_api.toggle)
+		if vim.api.nvim_win_get_buf(win) == source_buf then
+			restore_render_winhighlight(win)
+		end
 	end
 	return source_buf
 end
@@ -339,8 +397,9 @@ function M.pager_filetype_changed(buf)
 		end
 		for _, win in ipairs(vim.fn.win_findbuf(buf)) do
 			if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_config(win).relative == "" then
+				local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
 				vim.api.nvim_win_call(win, preview_api.toggle)
-				protect_render_buffer(win)
+				protect_render_buffer(win, source_winhighlight)
 			end
 		end
 	end)

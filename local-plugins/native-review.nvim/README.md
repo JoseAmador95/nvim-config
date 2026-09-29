@@ -148,14 +148,17 @@ text. The standalone plugin continues to use the host's `vim.ui.select` with
 The standalone plugin has one selectable type by default: `issue`. Pass an
 ordered `comment_types` list to `setup()` to add types. Each entry requires
 `id`, `icon`, `highlight`, `default_link`, and `rail_rank`; `severity` is an
-optional diagnostic severity (default `INFO`) for Trouble. The list order is
+optional diagnostic severity (default `INFO`) for Trouble. `description` is an
+optional, printable, single-line UTF-8 explanation of at most 160 bytes for
+the Markdown export's type legend. The list order is
 the composer cycle order; ascending `rail_rank` sets sign-rail priority after
 `issue` (rank 1). For example:
 
 ```lua
 comment_types = {
   { id = "objection!", icon = "!", highlight = "NvimReviewCommentObjection",
-    default_link = "Special", rail_rank = 2 },
+    default_link = "Special", rail_rank = 2,
+    description = "A concern that challenges an assumption." },
 }
 ```
 
@@ -168,6 +171,10 @@ They cannot be selected for new comments. Saved `rationale` comments load as
 `objection!` and are rewritten with the new type on the next save.
 Panels and passive previews color only that badge, leaving locations, status,
 and comment bodies neutral.
+
+`:ReviewExport` includes a `Message type legend` with the descriptions of
+configured types. Types found in saved comments but no longer configured are
+listed as unconfigured, so the exported Markdown remains readable.
 
 The default `card` composer is one rounded inline float with a type-colored left
 rail and badge in its chunked title/footer. It reserves the body plus two chrome

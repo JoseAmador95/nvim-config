@@ -22,6 +22,19 @@ local function blend(left, right, amount)
 	)
 end
 
+local function luminance(color)
+	local function linear(value)
+		value = value / 255
+		return value <= 0.04045 and value / 12.92 or ((value + 0.055) / 1.055) ^ 2.4
+	end
+	return 0.2126 * linear(channel(color, 16)) + 0.7152 * linear(channel(color, 8)) + 0.0722 * linear(channel(color, 0))
+end
+
+local function contrast(left, right)
+	local first, second = luminance(left), luminance(right)
+	return (math.max(first, second) + 0.05) / (math.min(first, second) + 0.05)
+end
+
 local function value(group, attribute, fallback)
 	return highlight(group)[attribute] or fallback
 end
@@ -79,6 +92,24 @@ end
 function M.apply()
 	local colors = M.current()
 	vim.api.nvim_set_hl(0, "IblIndent", { fg = colors.indent, nocombine = true })
+	-- md-render falls back to a dark inline-code background when both Normal
+	-- and NormalFloat are transparent, including the VSCode light theme.
+	local code_bg = blend(colors.background, colors.muted, 0.2)
+	local string_fg = value("String", "fg", colors.foreground)
+	local code_fg = string_fg
+	if contrast(code_fg, code_bg) < 4.5 then
+		code_fg = colors.foreground
+	end
+	vim.api.nvim_set_hl(0, "MdRenderInlineCode", {
+		fg = code_fg,
+		bg = code_bg,
+	})
+	-- Rendered code blocks use String over Normal, which is too faint in Latte.
+	local block_fg = string_fg
+	if contrast(block_fg, colors.background) < 4.5 then
+		block_fg = colors.foreground
+	end
+	vim.api.nvim_set_hl(0, "MdRenderCodeBlock", { fg = block_fg })
 	local delimiter_groups = {
 		"RainbowDelimiterYellow",
 		"RainbowDelimiterBlue",

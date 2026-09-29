@@ -80,6 +80,7 @@ local REVIEW_COMMENT_TYPE_DEFAULTS = {
 	{
 		id = "suggestion",
 		icon = "◆",
+		description = "Proposed improvement.",
 		highlight = "NvimReviewCommentSuggestion",
 		default_link = "DiagnosticSignWarn",
 		rail_rank = 2,
@@ -88,6 +89,7 @@ local REVIEW_COMMENT_TYPE_DEFAULTS = {
 	{
 		id = "objection!",
 		icon = "!",
+		description = "Challenge to an approach or decision.",
 		highlight = "NvimReviewCommentObjection",
 		default_link = "Special",
 		rail_rank = 4,
@@ -96,6 +98,7 @@ local REVIEW_COMMENT_TYPE_DEFAULTS = {
 	{
 		id = "question",
 		icon = "?",
+		description = "Request for clarification.",
 		highlight = "NvimReviewCommentQuestion",
 		default_link = "DiagnosticSignInfo",
 		rail_rank = 3,
@@ -104,6 +107,7 @@ local REVIEW_COMMENT_TYPE_DEFAULTS = {
 	{
 		id = "pedantic",
 		icon = "·",
+		description = "Minor detail or style nit.",
 		highlight = "NvimReviewCommentPedantic",
 		default_link = "DiagnosticSignHint",
 		rail_rank = 5,
@@ -112,6 +116,7 @@ local REVIEW_COMMENT_TYPE_DEFAULTS = {
 	{
 		id = "praise",
 		icon = "♥",
+		description = "Positive feedback.",
 		highlight = "NvimReviewCommentPraise",
 		default_link = "DiagnosticSignOk",
 		rail_rank = 6,
@@ -123,6 +128,62 @@ local function safe_highlight_name(value)
 	return type(value) == "string" and #value <= 80 and value:match("^[A-Za-z][A-Za-z0-9_]*$") ~= nil
 end
 
+local function valid_review_description(value)
+	if type(value) ~= "string" or value == "" or #value > 160 or not value:find("%S") then
+		return false
+	end
+	local index = 1
+	while index <= #value do
+		local first = value:byte(index)
+		local width
+		local second_min, second_max = 0x80, 0xBF
+		if first >= 0x20 and first <= 0x7E then
+			width = 1
+		elseif first >= 0xC2 and first <= 0xDF then
+			width = 2
+		elseif first >= 0xE0 and first <= 0xEF then
+			width = 3
+			if first == 0xE0 then
+				second_min = 0xA0
+			elseif first == 0xED then
+				second_max = 0x9F
+			end
+		elseif first >= 0xF0 and first <= 0xF4 then
+			width = 4
+			if first == 0xF0 then
+				second_min = 0x90
+			elseif first == 0xF4 then
+				second_max = 0x8F
+			end
+		else
+			return false
+		end
+		if index + width - 1 > #value then
+			return false
+		end
+		if width > 1 then
+			local second = value:byte(index + 1)
+			if second < second_min or second > second_max or (first == 0xC2 and second <= 0x9F) then
+				return false
+			end
+			for continuation = index + 2, index + width - 1 do
+				local byte = value:byte(continuation)
+				if byte < 0x80 or byte > 0xBF then
+					return false
+				end
+			end
+			if first == 0xE2 and second == 0x80 then
+				local third = value:byte(index + 2)
+				if third == 0xA8 or third == 0xA9 then
+					return false
+				end
+			end
+		end
+		index = index + width
+	end
+	return true
+end
+
 local function validate_review_comment_type(value, path, errors)
 	if type(value.id) == "string" and (#value.id > 64 or not value.id:match("^[a-z][a-z0-9_!%-]*$")) then
 		errors[#errors + 1] = path .. ".id: expected a lowercase ASCII token of at most 64 bytes"
@@ -132,6 +193,12 @@ local function validate_review_comment_type(value, path, errors)
 		local width_ok, width = pcall(vim.fn.strdisplaywidth, value.icon)
 		if #value.icon > 16 or value.icon:find("%c") or not utf8_ok or not width_ok or width < 1 or width > 2 then
 			errors[#errors + 1] = path .. ".icon: expected a UTF-8 icon of one or two display cells without controls"
+		end
+	end
+	if type(value.description) == "string" then
+		if not valid_review_description(value.description) then
+			errors[#errors + 1] = path
+				.. ".description: expected a single-line printable UTF-8 string of at most 160 bytes"
 		end
 	end
 	for _, field in ipairs({ "highlight", "default_link" }) do
@@ -193,6 +260,7 @@ local SCHEMA = {
 							fields = {
 								id = { type = "string", required = true },
 								icon = { type = "string", required = true },
+								description = { type = "string" },
 								highlight = { type = "string", required = true },
 								default_link = { type = "string", required = true },
 								rail_rank = { type = "number", required = true, finite = true, integer = true, min = 1 },
