@@ -88,10 +88,7 @@ function M.current()
 	}
 end
 
----Paint the shared indent and delimiter roles from one semantic palette.
-function M.apply()
-	local colors = M.current()
-	vim.api.nvim_set_hl(0, "IblIndent", { fg = colors.indent, nocombine = true })
+local function apply_markdown(colors)
 	-- md-render falls back to a dark inline-code background when both Normal
 	-- and NormalFloat are transparent, including the VSCode light theme.
 	local code_bg = blend(colors.background, colors.muted, 0.2)
@@ -104,12 +101,30 @@ function M.apply()
 		fg = code_fg,
 		bg = code_bg,
 	})
-	-- Rendered code blocks use String over Normal, which is too faint in Latte.
+	-- Give rendered code a bounded gray region. The host's code-block extmarks
+	-- use the same background to fill each line without tinting side margins.
+	local block_bg = blend(colors.background, colors.foreground, vim.o.background == "light" and 0.07 or 0.06)
 	local block_fg = string_fg
-	if contrast(block_fg, colors.background) < 4.5 then
+	if contrast(block_fg, block_bg) < 4.5 then
 		block_fg = colors.foreground
 	end
+	-- String is window-mapped across the rendered buffer, so its role must
+	-- remain foreground-only. The code-block adapter supplies bounded bg spans.
 	vim.api.nvim_set_hl(0, "MdRenderCodeBlock", { fg = block_fg })
+	vim.api.nvim_set_hl(0, "MdRenderCodeBlockBackground", { bg = block_bg })
+	vim.api.nvim_set_hl(0, "MdRenderCodeBlockLabel", { fg = colors.foreground, bg = block_bg, bold = true })
+end
+
+---Paint Markdown-only roles, including in the slim pager profile.
+function M.apply_markdown()
+	apply_markdown(M.current())
+end
+
+---Paint the shared indent and delimiter roles from one semantic palette.
+function M.apply()
+	local colors = M.current()
+	vim.api.nvim_set_hl(0, "IblIndent", { fg = colors.indent, nocombine = true })
+	apply_markdown(colors)
 	local delimiter_groups = {
 		"RainbowDelimiterYellow",
 		"RainbowDelimiterBlue",

@@ -4,8 +4,11 @@ local M = {}
 
 local deferred = require("config.deferred")
 local lazy_lock = require("config.lazy_lock")
+local markdown_codeblocks = require("config.markdown_codeblocks")
+local markdown_layout = require("config.markdown_layout")
 local markdown_tables = require("config.markdown_tables")
 local pager = require("config.pager")
+local palette = require("config.palette")
 
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve Markdown view host")
 local repo_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
@@ -63,16 +66,16 @@ end
 
 local function checkout_ok(image_module, render_module)
 	local image_source = debug.getinfo(image_module._set_kitty_supported, "S")
-	local split_source = debug.getinfo(render_module.preview.split, "S")
+	local toggle_source = debug.getinfo(render_module.preview.toggle, "S")
 	local image_path = image_source and image_source.source:match("^@(.+)$")
-	local split_path = split_source and split_source.source:match("^@(.+)$")
-	if not image_path or not split_path then
+	local toggle_path = toggle_source and toggle_source.source:match("^@(.+)$")
+	if not image_path or not toggle_path then
 		return nil, "renderer source path is unavailable"
 	end
 	local root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(image_path))))
 	if
 		vim.fs.normalize(image_path) ~= vim.fs.joinpath(root, "lua", "md-render", "image.lua")
-		or vim.fs.normalize(split_path) ~= vim.fs.joinpath(root, "lua", "md-render", "preview.lua")
+		or vim.fs.normalize(toggle_path) ~= vim.fs.joinpath(root, "lua", "md-render", "preview.lua")
 	then
 		return nil, "renderer modules came from different checkouts"
 	end
@@ -112,7 +115,6 @@ function M.configure_renderer()
 		type(image_module._set_kitty_supported) ~= "function"
 		or type(image_module.set_download_fn) ~= "function"
 		or type(render_module.preview) ~= "table"
-		or type(render_module.preview.split) ~= "function"
 		or type(render_module.preview.toggle) ~= "function"
 		or type(render_module.preview._toggle_sessions) ~= "table"
 		or type(render_module.MarkdownTable) ~= "table"
@@ -137,14 +139,19 @@ function M.configure_renderer()
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: could not disable automatic media: " .. tostring(install_err))
 	end
-	local tables_ready, tables_err =
-		markdown_tables.configure(render_module.preview, wrap_module, render_module.MarkdownTable)
+	local tables_ready, tables_err = markdown_tables.configure(
+		render_module.preview,
+		wrap_module,
+		render_module.MarkdownTable,
+		markdown_layout.center_content
+	)
 	if not tables_ready then
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: " .. tables_err)
 	end
 	image = image_module
 	renderer = render_module
+	palette.apply_markdown()
 	ready = true
 	return true
 end
@@ -221,48 +228,88 @@ local function protect_render_buffer(win, source_winhighlight)
 	local session = renderer.preview._toggle_sessions[state.source_buf]
 	if session then
 		markdown_tables.protect_rebuild(session)
+		markdown_codeblocks.protect_rebuild(session)
 	end
 	vim.bo[state.render_buf].modifiable = false
 	vim.bo[state.render_buf].readonly = true
-	-- Expanded tables may be wider than a narrow split. Keep their rows intact
+	-- Expanded tables may be wider than the page. Keep their rows intact
 	-- so the ordinary zh/zl keys can reveal every column.
 	vim.wo[win].wrap = false
 	apply_render_winhighlight(win, source_winhighlight)
+	palette.apply_markdown()
+	if session then
+		markdown_codeblocks.decorate(session)
+	end
 	return state
 end
 
-local function tracked_preview(tab)
-	local preview = previews[tab]
+local function tracked_preview(source_buf)
+	local preview = previews[source_buf]
 	if not preview then
 		return nil
 	end
 	if
 		not vim.api.nvim_win_is_valid(preview.win)
-		or not vim.api.nvim_tabpage_is_valid(tab)
-		or vim.api.nvim_win_get_tabpage(preview.win) ~= tab
+		or not vim.api.nvim_tabpage_is_valid(preview.tab)
+		or vim.api.nvim_win_get_tabpage(preview.win) ~= preview.tab
 		or not win_state(preview.win)
+		or win_state(preview.win).source_buf ~= source_buf
 	then
-		previews[tab] = nil
+		previews[source_buf] = nil
 		return nil
 	end
 	return preview
 end
 
-local function find_render_win(tab, source_buf)
-	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
-		local state = win_state(win)
-		if state and state.source_buf == source_buf then
-			return win
+local function close_preview(preview)
+	previews[preview.source_buf] = nil
+	if not vim.api.nvim_tabpage_is_valid(preview.tab) then
+		return
+	end
+	vim.api.nvim_set_current_tabpage(preview.tab)
+	if #vim.api.nvim_tabpage_list_wins(preview.tab) > 1 then
+		-- A user-created split belongs to the user, even inside our tab.
+		vim.api.nvim_win_close(preview.win, true)
+	elseif vim.api.nvim_tabpage_is_valid(preview.source_tab) and vim.api.nvim_list_tabpages()[2] then
+		vim.cmd("tabclose")
+	else
+		-- The user may have closed the source tab manually. Keep this tab and
+		-- restore its editable source instead of losing the document.
+		renderer.preview.toggle()
+		restore_render_winhighlight(preview.win)
+	end
+	if vim.api.nvim_tabpage_is_valid(preview.source_tab) then
+		vim.api.nvim_set_current_tabpage(preview.source_tab)
+		if
+			vim.api.nvim_win_is_valid(preview.source_win)
+			and vim.api.nvim_win_get_buf(preview.source_win) == preview.source_buf
+		then
+			vim.api.nvim_set_current_win(preview.source_win)
 		end
 	end
-	return nil
 end
 
-local function close_preview(preview)
-	previews[preview.tab] = nil
-	if vim.api.nvim_win_is_valid(preview.win) then
-		vim.api.nvim_win_close(preview.win, true)
+local function reflow_preview(preview)
+	if not tracked_preview(preview.source_buf) then
+		return
 	end
+	local session = renderer.preview._toggle_sessions[preview.source_buf]
+	if not session then
+		return
+	end
+	local page_width, margin = markdown_layout.measure(preview.win)
+	local render_width = markdown_layout.render_width(page_width)
+	if
+		session.opts.max_width ~= render_width
+		or session.opts.nvim_config_page_width ~= page_width
+		or session.opts.nvim_config_page_margin ~= margin
+	then
+		session.opts.max_width = render_width
+		session.opts.nvim_config_page_width = page_width
+		session.opts.nvim_config_page_margin = margin
+		session:rebuild()
+	end
+	vim.wo[preview.win].wrap = false
 end
 
 local function editor_toggle()
@@ -270,58 +317,71 @@ local function editor_toggle()
 	if not preview_api then
 		return
 	end
-	local tab = vim.api.nvim_get_current_tabpage()
 	local current_win = vim.api.nvim_get_current_win()
-	local source_buf = source_for_window(current_win)
-	local existing = tracked_preview(tab)
-	if existing then
-		close_preview(existing)
-		if existing.source_buf == source_buf then
-			return
+	local source_buf, state = source_for_window(current_win)
+	if state then
+		local current_preview = tracked_preview(source_buf)
+		if current_preview and current_preview.win == current_win then
+			close_preview(current_preview)
+		else
+			preview_api.toggle()
+			restore_render_winhighlight(current_win)
 		end
-	end
-	local untracked = find_render_win(tab, source_buf)
-	if untracked then
-		vim.api.nvim_win_close(untracked, true)
 		return
 	end
 	if vim.bo[source_buf].filetype ~= "markdown" then
 		notify("MarkdownView requires a Markdown source buffer")
 		return
 	end
-	local source_win = current_win
-	if win_state(current_win) then
-		for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
-			if vim.api.nvim_win_get_buf(win) == source_buf then
-				source_win = win
-				break
-			end
-		end
-	end
-	if not vim.api.nvim_win_is_valid(source_win) or vim.api.nvim_win_get_buf(source_win) ~= source_buf then
-		notify("Open the Markdown source before creating its reading view")
+	local existing = tracked_preview(source_buf)
+	if existing then
+		vim.api.nvim_set_current_tabpage(existing.tab)
+		vim.api.nvim_set_current_win(existing.win)
+		reflow_preview(existing)
 		return
 	end
-	local old_win = vim.api.nvim_get_current_win()
-	vim.api.nvim_set_current_win(source_win)
-	local ok, err = pcall(preview_api.split, { mods = { vertical = true, split = "belowright" } })
+	local source_tab = vim.api.nvim_get_current_tabpage()
+	local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = current_win })
+	local ok, err = pcall(vim.cmd, "tab split")
 	if not ok then
-		vim.api.nvim_set_current_win(old_win)
 		fail("Could not open Markdown reading view: " .. tostring(err))
 		return
 	end
-	local render_win = find_render_win(tab, source_buf)
-	if not render_win then
-		fail("Could not identify Markdown reading view after opening the split")
+	local render_tab = vim.api.nvim_get_current_tabpage()
+	local render_win = vim.api.nvim_get_current_win()
+	local page_width, margin = markdown_layout.measure(render_win)
+	local toggled, toggle_err = pcall(preview_api.toggle, {
+		max_width = markdown_layout.render_width(page_width),
+		nvim_config_page_width = page_width,
+		nvim_config_page_margin = margin,
+	})
+	if not toggled or not win_state(render_win) then
+		vim.cmd("tabclose")
+		fail("Could not open Markdown reading view: " .. tostring(toggle_err or "renderer did not create a view"))
 		return
 	end
-	protect_render_buffer(render_win)
+	protect_render_buffer(render_win, source_winhighlight)
 	vim.keymap.set("n", "<leader>mv", M.toggle, {
 		buffer = vim.api.nvim_win_get_buf(render_win),
 		desc = "Close Markdown reading view",
 	})
-	previews[tab] = { tab = tab, source_buf = source_buf, win = render_win }
-	vim.api.nvim_set_current_win(source_win)
+	vim.keymap.set("n", "<leader>md", "<cmd>DiagramShow<cr>", {
+		buffer = vim.api.nvim_win_get_buf(render_win),
+		desc = "Show diagram (SVG/ASCII)",
+	})
+	vim.keymap.set("x", "<leader>md", ":<C-U>'<,'>DiagramShow<CR>", {
+		buffer = vim.api.nvim_win_get_buf(render_win),
+		desc = "Show selected diagram",
+	})
+	local preview = {
+		tab = render_tab,
+		win = render_win,
+		source_buf = source_buf,
+		source_tab = source_tab,
+		source_win = current_win,
+	}
+	previews[source_buf] = preview
+	reflow_preview(preview)
 end
 
 -- The pager uses md-render's same-window toggle so its source buffer remains
@@ -438,6 +498,10 @@ function M.setup()
 	if vim.g.vscode then
 		return
 	end
+	vim.api.nvim_create_autocmd("ColorScheme", {
+		group = vim.api.nvim_create_augroup("MarkdownViewPalette", { clear = true }),
+		callback = palette.apply_markdown,
+	})
 	vim.api.nvim_create_user_command("MarkdownView", M.toggle, { desc = "Toggle rendered Markdown reading view" })
 	if pager.active then
 		pager.set_markdown_view(M)
@@ -455,6 +519,14 @@ function M.setup()
 			callback = M.pager_initial_render,
 		})
 	else
+		vim.api.nvim_create_autocmd({ "WinResized", "VimResized", "TabEnter" }, {
+			group = vim.api.nvim_create_augroup("MarkdownViewReflow", { clear = true }),
+			callback = function()
+				for _, preview in pairs(previews) do
+					reflow_preview(preview)
+				end
+			end,
+		})
 		local function map(buf)
 			vim.keymap.set("n", "<leader>mv", M.toggle, { buffer = buf, desc = "Toggle Markdown reading view" })
 		end

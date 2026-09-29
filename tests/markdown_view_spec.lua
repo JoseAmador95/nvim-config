@@ -56,20 +56,29 @@ local function table_text(buf)
 	return table.concat(parts)
 end
 
-local function rendered_window(source_win)
-	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-		if win ~= source_win and vim.b[vim.api.nvim_win_get_buf(win)].md_render then
-			return win
-		end
-	end
-	return nil
-end
-
 local function has_highlight(buf, group)
 	for _, ns in pairs(vim.api.nvim_get_namespaces()) do
 		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
 			if mark[4].hl_group == group then
 				return true
+			end
+		end
+	end
+	return false
+end
+
+local function has_code_label(buf, language)
+	local ns = vim.api.nvim_get_namespaces().nvim_config_markdown_codeblocks
+	assert(ns, "code-block decoration namespace is missing")
+	for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
+		local detail = mark[4]
+		if detail.virt_lines then
+			for _, row in ipairs(detail.virt_lines) do
+				for _, chunk in ipairs(row) do
+					if chunk[1]:find(language, 1, true) then
+						return true
+					end
+				end
 			end
 		end
 	end
@@ -97,7 +106,8 @@ test("pinned renderer installs a media-free reading mode", function()
 	assert(vim.fn.exists(":MarkdownView") == 2, "MarkdownView command is missing")
 end)
 
-test("editor keeps raw source focused and one live right-side read-only view", function()
+test("editor opens one focused, live, read-only tab and preserves the editable source", function()
+	vim.cmd("tabonly")
 	vim.cmd("only")
 	local source = vim.api.nvim_create_buf(true, false)
 	vim.api.nvim_set_current_buf(source)
@@ -112,6 +122,7 @@ test("editor keeps raw source focused and one live right-side read-only view", f
 	vim.bo[source].filetype = "markdown"
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>mv", "n", false, true)), "source view mapping is missing")
 	local source_win = vim.api.nvim_get_current_win()
+	local source_tab = vim.api.nvim_get_current_tabpage()
 	local prior_winhighlight = vim.wo[source_win].winhighlight
 	local source_winhighlight = "Normal:NormalFloat,String:ErrorMsg,StatusLine:StatusLineNC"
 	vim.wo[source_win].winhighlight = source_winhighlight
@@ -125,23 +136,31 @@ test("editor keeps raw source focused and one live right-side read-only view", f
 	end
 
 	view.toggle()
-	local wins = vim.api.nvim_tabpage_list_wins(0)
-	assert(#wins == 2, "MarkdownView did not create exactly one split")
-	assert(vim.api.nvim_get_current_win() == source_win, "preview stole source focus")
+	assert(#vim.api.nvim_list_tabpages() == 2, "MarkdownView did not create exactly one new tab")
+	local render_tab = vim.api.nvim_get_current_tabpage()
+	assert(render_tab ~= source_tab, "reading view did not get its own tab")
+	assert(#vim.api.nvim_tabpage_list_wins(render_tab) == 1, "reading view created a split")
+	assert(#vim.api.nvim_tabpage_list_wins(source_tab) == 1, "reading view split the source tab")
 	assert(vim.api.nvim_win_get_buf(source_win) == source, "source buffer was replaced")
 	assert(vim.bo[source].modifiable, "source became noneditable")
-	local render_win = wins[1] == source_win and wins[2] or wins[1]
+	local render_win = vim.api.nvim_get_current_win()
 	local render_buf = vim.api.nvim_win_get_buf(render_win)
-	assert(vim.b[render_buf].md_render, "split does not show md-render output")
+	assert(vim.b[render_buf].md_render, "tab does not show md-render output")
 	assert(not vim.bo[render_buf].modifiable and vim.bo[render_buf].readonly, "reading view is editable")
 	assert(vim.wo[source_win].winhighlight == source_winhighlight, "render changed the editable source highlights")
 	assert_render_winhighlight(render_win)
 	assert(vim.wo[render_win].winhighlight:find("StatusLine:StatusLineNC", 1, true), "render lost another mapping")
 	assert(has_highlight(render_buf, "String"), "rendered code block does not use the String highlight")
-	assert(
-		vim.api.nvim_win_get_position(render_win)[2] > vim.api.nvim_win_get_position(source_win)[2],
-		"reading view is not on the right"
-	)
+	assert(has_highlight(render_buf, "MdRenderCodeBlockBackground"), "rendered code has no shaded background")
+	assert(has_code_label(render_buf, "mermaid"), "rendered code lost the fence language")
+	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>mv", "n", false, true)), "render close mapping is missing")
+	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>md", "n", false, true)), "render diagram mapping is missing")
+	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>md", "x", false, true)), "render selection mapping is missing")
+
+	vim.api.nvim_set_current_tabpage(source_tab)
+	view.toggle()
+	assert(vim.api.nvim_get_current_tabpage() == render_tab, "source invocation did not focus its existing view")
+	assert(#vim.api.nvim_list_tabpages() == 2, "source invocation created another view")
 
 	vim.api.nvim_buf_set_lines(source, 0, 1, false, { "# Updated heading" })
 	vim.api.nvim_exec_autocmds("TextChanged", { buffer = source })
@@ -154,17 +173,14 @@ test("editor keeps raw source focused and one live right-side read-only view", f
 	assert(#external_media == 0, "render started an automatic npx/curl job")
 
 	view.toggle()
-	assert(#vim.api.nvim_tabpage_list_wins(0) == 1, "second toggle did not close the view")
+	assert(#vim.api.nvim_list_tabpages() == 1, "second toggle did not close the view")
+	assert(vim.api.nvim_get_current_tabpage() == source_tab, "closing render did not return to source tab")
+	assert(vim.api.nvim_get_current_win() == source_win, "closing render did not restore source focus")
 	assert(vim.wo[source_win].winhighlight == source_winhighlight, "closing render changed source highlights")
 	view.toggle()
-	assert(#vim.api.nvim_tabpage_list_wins(0) == 2, "reopening created the wrong number of splits")
-	local reopened
-	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-		if win ~= source_win then
-			reopened = win
-		end
-	end
-	assert(reopened, "reopened render window is missing")
+	assert(#vim.api.nvim_list_tabpages() == 2, "reopening created the wrong number of tabs")
+	local reopened = vim.api.nvim_get_current_win()
+	assert(vim.b[vim.api.nvim_win_get_buf(reopened)].md_render, "reopened render window is missing")
 	assert_render_winhighlight(reopened)
 	view.toggle()
 	assert(vim.wo[source_win].winhighlight == source_winhighlight, "reopening changed source highlights")
@@ -173,7 +189,129 @@ test("editor keeps raw source focused and one live right-side read-only view", f
 	vim.api.nvim_buf_delete(source, { force = true })
 end)
 
+test("manual tab close can reopen the live view", function()
+	vim.cmd("tabonly")
+	local source = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(source)
+	vim.api.nvim_buf_set_lines(source, 0, -1, false, { "# Reopen me" })
+	vim.bo[source].filetype = "markdown"
+	local source_tab = vim.api.nvim_get_current_tabpage()
+	view.toggle()
+	assert(#vim.api.nvim_list_tabpages() == 2, "reading tab did not open")
+	vim.cmd("tabclose")
+	assert(vim.api.nvim_get_current_tabpage() == source_tab, "manual tab close did not return to source")
+	view.toggle()
+	assert(#vim.api.nvim_list_tabpages() == 2, "reading tab did not reopen")
+	assert(contains(vim.api.nvim_get_current_buf(), "Reopen me"), "reopened tab lost the source text")
+	view.toggle()
+	vim.api.nvim_buf_delete(source, { force = true })
+end)
+
+test("centered page reflows on resize and keeps links aligned", function()
+	vim.cmd("tabonly")
+	local columns = vim.o.columns
+	vim.o.columns = 180
+	local source = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(source)
+	vim.api.nvim_buf_set_lines(source, 0, -1, false, {
+		"---",
+		"title: Centered",
+		"---",
+		"",
+		"A paragraph with [a link](https://example.com/centered).",
+		"",
+		"```lua",
+		"print('hello')",
+		"```",
+		"",
+		"---",
+	})
+	vim.bo[source].filetype = "markdown"
+	local source_tab = vim.api.nvim_get_current_tabpage()
+	view.toggle()
+	local render_tab = vim.api.nvim_get_current_tabpage()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_get_current_buf()
+	local session = assert(require("md-render").preview._toggle_sessions[source])
+	local layout = require("config.markdown_layout")
+	local expected_width, expected_margin = layout.measure(win)
+	assert(expected_width == 120, "wide page did not cap at 120 columns")
+	assert(session.opts.max_width == layout.render_width(expected_width), "renderer used the wrong page width")
+	assert(session.opts.nvim_config_page_margin == expected_margin, "page has the wrong left margin")
+	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		assert(line:sub(1, expected_margin) == string.rep(" ", expected_margin), "page line is not centered")
+		assert(vim.api.nvim_strwidth(line) <= expected_margin + expected_width, "render exceeded the 120-column page")
+	end
+	local link = assert(session.content.link_metadata[1], "rendered link has no metadata")
+	assert(link.col_start >= expected_margin, "link metadata omitted the page margin")
+	local function assert_link_extmark()
+		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, session.ns, 0, -1, { details = true })) do
+			if mark[4].url == "https://example.com/centered" then
+				assert(mark[3] == session.content.link_metadata[1].col_start, "clickable link misses rendered text")
+				return
+			end
+		end
+		error("clickable link extmark is missing")
+	end
+	assert_link_extmark()
+	-- A user-created split narrows the render window without replacing the
+	-- source tab. It also exercises ownership-safe preview closure below.
+	vim.cmd("vnew")
+	local user_win = vim.api.nvim_get_current_win()
+	vim.api.nvim_win_set_width(win, 100)
+	vim.api.nvim_set_current_win(win)
+	vim.api.nvim_exec_autocmds("WinResized", {})
+	expected_width, expected_margin = layout.measure(win)
+	assert(expected_width < 120, "test split did not narrow the reading page")
+	assert(session.opts.max_width == layout.render_width(expected_width), "resize did not update renderer width")
+	assert(session.opts.nvim_config_page_margin == expected_margin, "resize did not recenter the page")
+	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		assert(line:sub(1, expected_margin) == string.rep(" ", expected_margin), "resize lost centering")
+		assert(vim.api.nvim_strwidth(line) <= expected_margin + expected_width, "resize exceeded the page width")
+	end
+	assert_link_extmark()
+	assert(has_code_label(buf, "lua"), "language label vanished after reflow")
+	view.toggle()
+	assert(vim.api.nvim_get_current_tabpage() == source_tab, "closing render did not return to source")
+	assert(vim.api.nvim_tabpage_is_valid(render_tab), "closing render discarded a user-created split")
+	assert(vim.api.nvim_win_is_valid(user_win), "closing render discarded the user's window")
+	vim.api.nvim_set_current_tabpage(render_tab)
+	vim.cmd("tabclose")
+	vim.api.nvim_set_current_tabpage(source_tab)
+	vim.api.nvim_buf_delete(source, { force = true })
+	vim.o.columns = columns
+end)
+
+test("page padding shifts every byte-column metadata field", function()
+	local layout = require("config.markdown_layout")
+	local content = {
+		lines = { "abc", "xyz" },
+		highlights = { { line = 0, groups = { { col = 0, end_col = 3 }, { col = 0, end_col = -1 } } } },
+		link_metadata = { { line = 0, col_start = 1, col_end = 3 } },
+		code_blocks = { { start_line = 1, end_line = 1, prefix_len = 2, source_lines = { "raw" } } },
+		image_placements = { { line = 0, col = 1 } },
+		text_placements = { { line = 0, col = 1, icon_col = 0 } },
+		source_line_map = { 4, 5 },
+		heading_anchors = { heading = 1 },
+	}
+	layout.center_content(content, { nvim_config_page_margin = 7 })
+	assert(content.lines[1] == "       abc" and content.lines[2] == "       xyz", "text was not padded")
+	assert(content.highlights[1].groups[1].col == 7, "highlight start was not shifted")
+	assert(content.highlights[1].groups[1].end_col == 10, "highlight end was not shifted")
+	assert(content.highlights[1].groups[2].end_col == -1, "end-of-line sentinel was changed")
+	assert(content.link_metadata[1].col_start == 8 and content.link_metadata[1].col_end == 10, "link was not shifted")
+	assert(content.code_blocks[1].prefix_len == 9, "Tree-sitter prefix was not shifted")
+	assert(content.code_blocks[1].source_lines[1] == "raw", "original code source was changed")
+	assert(content.image_placements[1].col == 8, "image column was not shifted")
+	assert(
+		content.text_placements[1].col == 8 and content.text_placements[1].icon_col == 7,
+		"scaled text was not shifted"
+	)
+	assert(content.source_line_map[1] == 4 and content.heading_anchors.heading == 1, "row metadata changed")
+end)
+
 test("wide tables open without losing cell text and still allow manual collapse", function()
+	vim.cmd("tabonly")
 	vim.cmd("only")
 	local columns = vim.o.columns
 	vim.o.columns = 68
@@ -187,8 +325,10 @@ test("wide tables open without losing cell text and still allow manual collapse"
 	})
 	vim.bo[source].filetype = "markdown"
 	local source_win = vim.api.nvim_get_current_win()
+	local source_tab = vim.api.nvim_get_current_tabpage()
 	view.toggle()
-	local win = assert(rendered_window(source_win), "reading view did not open")
+	local win = vim.api.nvim_get_current_win()
+	assert(vim.b[vim.api.nvim_win_get_buf(win)].md_render, "reading view did not open")
 	local buf = vim.api.nvim_win_get_buf(win)
 	local session = assert(require("md-render").preview._toggle_sessions[source])
 	assert(session.expand_state[1] == true, "table did not expand by default: " .. vim.inspect(session.expand_state))
@@ -213,10 +353,7 @@ test("wide tables open without losing cell text and still allow manual collapse"
 	)
 	assert(not contains(buf, "…"), "expanded table still contains an ellipsis")
 	assert(not vim.wo[win].wrap, "wide table cannot scroll horizontally")
-	local text_width = vim.api.nvim_win_get_width(win) - vim.fn.getwininfo(win)[1].textoff
-	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
-		assert(vim.api.nvim_strwidth(line) <= text_width, "two-column table overflowed the reading split")
-	end
+	assert(#vim.api.nvim_tabpage_list_wins(0) == 1, "table view opened beside the source")
 
 	local row
 	for i, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
@@ -240,7 +377,8 @@ test("wide tables open without losing cell text and still allow manual collapse"
 	assert(contains(buf, "…"), "manual table collapse did not take effect")
 	toggle()
 	assert(not contains(buf, "…"), "manual table expansion did not restore full content")
-	vim.api.nvim_set_current_win(source_win)
+	vim.api.nvim_set_current_tabpage(source_tab)
+	assert(vim.api.nvim_get_current_win() == source_win, "table view changed the source window")
 
 	vim.api.nvim_buf_set_lines(source, 3, 4, false, { "| U | https://example.com/updated/fully |" })
 	vim.api.nvim_exec_autocmds("TextChanged", { buffer = source })
@@ -250,6 +388,7 @@ test("wide tables open without losing cell text and still allow manual collapse"
 		end),
 		"live update did not preserve the complete edited table cell"
 	)
+	vim.api.nvim_set_current_win(win)
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
@@ -407,9 +546,9 @@ test("missing private media guard fails closed", function()
 	image._set_kitty_supported = nil
 	local configured = view.configure_renderer()
 	assert(configured == nil, "view accepted a renderer without the media guard")
-	local before = #vim.api.nvim_tabpage_list_wins(0)
+	local before = #vim.api.nvim_list_tabpages()
 	view.toggle()
-	assert(#vim.api.nvim_tabpage_list_wins(0) == before, "view opened after media guard failure")
+	assert(#vim.api.nvim_list_tabpages() == before, "view opened after media guard failure")
 	image._set_kitty_supported = guard
 end)
 

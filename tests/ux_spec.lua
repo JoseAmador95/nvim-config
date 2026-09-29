@@ -247,8 +247,20 @@ local light_code = vim.api.nvim_get_hl(0, { name = "MdRenderInlineCode", link = 
 assert(light_code.fg == 0xa31515, "light inline code lost the theme's String color")
 assert(light_code.bg and contrast(light_code.fg, light_code.bg) >= 4.5, "light inline code has poor contrast")
 local light_block = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlock", link = false })
-assert(light_block.fg == 0xa31515 and not light_block.bg, "light code block lost the theme's String color")
-assert(contrast(light_block.fg, 0xffffff) >= 4.5, "light code block has poor contrast")
+local light_block_bg = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlockBackground", link = false }).bg
+assert(light_block.fg == 0xa31515 and not light_block.bg, "light code text must retain foreground-only mapping")
+assert(light_block_bg and luminance(light_block_bg) < luminance(0xffffff), "light code background is not shaded")
+assert(contrast(light_block.fg, light_block_bg) >= 4.5, "light code block has poor contrast")
+assert(
+	vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlockLabel", link = false }).bg == light_block_bg,
+	"code language label differs from code region"
+)
+vim.api.nvim_set_hl(0, "IblIndent", { fg = 0x123456 })
+palette.apply_markdown()
+assert(
+	vim.api.nvim_get_hl(0, { name = "IblIndent", link = false }).fg == 0x123456,
+	"Markdown-only palette update changed indent highlights"
+)
 
 vim.api.nvim_set_hl(0, "Normal", { fg = 0x4c4f69, bg = 0xeff1f5 })
 vim.api.nvim_set_hl(0, "NormalFloat", { fg = 0x4c4f69, bg = 0xeff1f5 })
@@ -259,8 +271,10 @@ local latte_code = vim.api.nvim_get_hl(0, { name = "MdRenderInlineCode", link = 
 assert(latte_code.fg == 0x4c4f69, "low-contrast String color was not replaced with Normal text")
 assert(latte_code.bg and contrast(latte_code.fg, latte_code.bg) >= 4.5, "Latte inline code has poor contrast")
 local latte_block = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlock", link = false })
+local latte_block_bg = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlockBackground", link = false }).bg
 assert(latte_block.fg == 0x4c4f69 and not latte_block.bg, "Latte code block did not replace low-contrast String")
-assert(contrast(latte_block.fg, 0xeff1f5) >= 4.5, "Latte code block has poor contrast")
+assert(luminance(latte_block_bg) < luminance(0xeff1f5), "Latte code background is not shaded")
+assert(contrast(latte_block.fg, latte_block_bg) >= 4.5, "Latte code block has poor contrast")
 
 vim.o.background = "dark"
 vim.api.nvim_set_hl(0, "Normal", { fg = 0xd4d4d4 })
@@ -273,8 +287,10 @@ assert(dark_code.fg == 0xce9178, "dark inline code retained the light theme colo
 assert(dark_code.bg and contrast(dark_code.fg, dark_code.bg) >= 4.5, "dark inline code has poor contrast")
 assert(luminance(dark_code.bg) < luminance(light_code.bg), "inline code did not follow the background")
 local dark_block = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlock", link = false })
+local dark_block_bg = vim.api.nvim_get_hl(0, { name = "MdRenderCodeBlockBackground", link = false }).bg
 assert(dark_block.fg == 0xce9178 and not dark_block.bg, "dark code block lost the theme's String color")
-assert(contrast(dark_block.fg, 0x1e1e1e) >= 4.5, "dark code block has poor contrast")
+assert(contrast(dark_block.fg, dark_block_bg) >= 4.5, "dark code block has poor contrast")
+assert(luminance(dark_block_bg) < luminance(light_block_bg), "code background did not follow the theme")
 
 print("ux_spec: sessions, dashboard, and semantic palette passed")
 vim.cmd("quitall!")
