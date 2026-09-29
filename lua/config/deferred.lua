@@ -26,6 +26,7 @@ local allowed = {
 	["log_workbench.matches"] = true,
 	["md-render"] = true,
 	["md-render.image"] = true,
+	["md-render.wrap"] = true,
 	["nvim-jqx.config"] = true,
 	["oil-git-status"] = true,
 	["project_python"] = true,

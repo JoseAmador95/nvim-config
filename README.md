@@ -171,6 +171,9 @@ It follows unsaved source changes and keeps the source window focused. The
 viewer uses the exact `md-render.nvim` v3.10.3 pin; automatic media is disabled,
 so Mermaid and PlantUML fences stay code blocks and render only through
 `:DiagramShow`/`<leader>md`. `<leader>mp` still opens the browser preview.
+Tables open expanded so their cells and bare URLs remain complete. Press `<CR>`
+or `za` on a table to switch to its compact view; use `zh`/`zl` to read columns
+when a table is wider than the reading window.
 In `nvimpager`, Markdown renders automatically, and `<leader>mv` toggles back
 to the original source. `:SetFileType` and the diagram viewer operate on that
 source even while the reading view is displayed.

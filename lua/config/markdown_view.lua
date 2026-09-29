@@ -4,6 +4,7 @@ local M = {}
 
 local deferred = require("config.deferred")
 local lazy_lock = require("config.lazy_lock")
+local markdown_tables = require("config.markdown_tables")
 local pager = require("config.pager")
 
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve Markdown view host")
@@ -102,7 +103,8 @@ function M.configure_renderer()
 	end
 	local ok_image, image_module = deferred.try("md-render.image")
 	local ok_renderer, render_module = deferred.try("md-render")
-	if not ok_image or not ok_renderer then
+	local ok_wrap, wrap_module = deferred.try("md-render.wrap")
+	if not ok_image or not ok_renderer or not ok_wrap then
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: md-render.nvim could not load")
 	end
@@ -113,6 +115,7 @@ function M.configure_renderer()
 		or type(render_module.preview.split) ~= "function"
 		or type(render_module.preview.toggle) ~= "function"
 		or type(render_module.preview._toggle_sessions) ~= "table"
+		or type(render_module.MarkdownTable) ~= "table"
 	then
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: v3.10.3 media guard contract changed")
@@ -133,6 +136,12 @@ function M.configure_renderer()
 	if not installed then
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: could not disable automatic media: " .. tostring(install_err))
+	end
+	local tables_ready, tables_err =
+		markdown_tables.configure(render_module.preview, wrap_module, render_module.MarkdownTable)
+	if not tables_ready then
+		disable_upstream_entrypoints()
+		return fail("Markdown reading view unavailable: " .. tables_err)
 	end
 	image = image_module
 	renderer = render_module
@@ -209,8 +218,15 @@ local function protect_render_buffer(win, source_winhighlight)
 	if not state then
 		return nil
 	end
+	local session = renderer.preview._toggle_sessions[state.source_buf]
+	if session then
+		markdown_tables.protect_rebuild(session)
+	end
 	vim.bo[state.render_buf].modifiable = false
 	vim.bo[state.render_buf].readonly = true
+	-- Expanded tables may be wider than a narrow split. Keep their rows intact
+	-- so the ordinary zh/zl keys can reveal every column.
+	vim.wo[win].wrap = false
 	apply_render_winhighlight(win, source_winhighlight)
 	return state
 end
