@@ -166,14 +166,19 @@ disable that in `~/.nvim-local.lua` with
 `plugins = { action_palette = { recent_limit = 5 } }` (`0..20`).
 
 Markdown stays raw and editable in the full editor, including native review.
-`:MarkdownView` or `<leader>mv` toggles a right-hand, read-only reading view.
-It follows unsaved source changes and keeps the source window focused. The
+`:MarkdownView` or `<leader>mv` opens a focused, read-only reading view in a
+new tab. The editable source stays in its original tab, and unsaved changes
+update the render live. Invoke the command from the source to focus its existing
+reading tab, or from the render to close it and return to the source. The page
+is centered at 90% of the available width, capped at 120 columns. The
 viewer uses the exact `md-render.nvim` v3.10.3 pin; automatic media is disabled,
 so Mermaid and PlantUML fences stay code blocks and render only through
-`:DiagramShow`/`<leader>md`. `<leader>mp` still opens the browser preview.
+`:DiagramShow`/`<leader>md`. Fenced code shows its language above a shaded
+block; the light theme uses a pale gray background. `<leader>mp` still opens
+the browser preview.
 Tables open expanded so their cells and bare URLs remain complete. Press `<CR>`
 or `za` on a table to switch to its compact view; use `zh`/`zl` to read columns
-when a table is wider than the reading window.
+when a table is wider than the reading page.
 In `nvimpager`, Markdown renders automatically, and `<leader>mv` toggles back
 to the original source. `:SetFileType` and the diagram viewer operate on that
 source even while the reading view is displayed.

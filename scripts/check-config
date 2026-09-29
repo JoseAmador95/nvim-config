@@ -317,6 +317,7 @@ for pure_spec in lazy_lock_spec lazy_attestation_spec local_plugins_spec local_c
 	run_pure_test "$pure_spec"
 done
 run_pure_test markdown_view_spec
+run_pure_test markdown_codeblocks_spec
 
 run_config_test startup_spec "$repo_root/tests/startup_spec.lua"
 hex_binary="$check_tmp/initial.bin"

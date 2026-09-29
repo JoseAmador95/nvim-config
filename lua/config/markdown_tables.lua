@@ -130,12 +130,13 @@ function M.protect_rebuild(session)
 	session.nvim_config_readonly_rebuild = true
 end
 
-function M.configure(preview, wrap, markdown_table)
+function M.configure(preview, wrap, markdown_table, postprocess)
 	if installed then
 		if
 			installed.preview == preview
 			and installed.wrap == wrap
 			and installed.markdown_table == markdown_table
+			and installed.postprocess == postprocess
 			and preview.build_content == installed.build_content
 			and wrap.split_ascii_syllables == installed.split_characters
 			and markdown_table.parse == installed.parse_table
@@ -150,6 +151,7 @@ function M.configure(preview, wrap, markdown_table)
 		or type(wrap.split_ascii_syllables) ~= "function"
 		or type(markdown_table.parse) ~= "function"
 		or type(markdown_table.render) ~= "function"
+		or (postprocess ~= nil and type(postprocess) ~= "function")
 	then
 		return nil, "v3.10.3 table adapter contract changed"
 	end
@@ -169,22 +171,21 @@ function M.configure(preview, wrap, markdown_table)
 	local function build_content(lines, opts)
 		local content = original_build_content(lines, opts)
 		local state = opts and opts.expand_state
-		if type(state) ~= "table" then
-			return content
-		end
-		local changed = false
-		local offset = frontmatter_offset(lines)
-		for _, region in ipairs(content.expandable_regions or {}) do
-			local block_id = region.block_id
-			if state[block_id] == nil and table_start(lines, block_id, offset) then
-				state[block_id] = true
-				changed = true
+		if type(state) == "table" then
+			local changed = false
+			local offset = frontmatter_offset(lines)
+			for _, region in ipairs(content.expandable_regions or {}) do
+				local block_id = region.block_id
+				if state[block_id] == nil and table_start(lines, block_id, offset) then
+					state[block_id] = true
+					changed = true
+				end
+			end
+			if changed then
+				content = original_build_content(lines, opts)
 			end
 		end
-		if changed then
-			return original_build_content(lines, opts)
-		end
-		return content
+		return postprocess and postprocess(content, opts) or content
 	end
 	local function render_table(parsed, indent, max_width, expanded, buf_dir)
 		local lines, highlights, links, images, source_offsets =
@@ -209,6 +210,7 @@ function M.configure(preview, wrap, markdown_table)
 		preview = preview,
 		wrap = wrap,
 		markdown_table = markdown_table,
+		postprocess = postprocess,
 		build_content = build_content,
 		split_characters = split_characters,
 		parse_table = parse_table,
