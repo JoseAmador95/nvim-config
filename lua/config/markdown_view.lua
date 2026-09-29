@@ -430,6 +430,7 @@ local function editor_toggle()
 		max_width = markdown_layout.render_width(page_width),
 		nvim_config_page_width = page_width,
 		nvim_config_page_margin = margin,
+		text_scale = false,
 	})
 	if not toggled or not win_state(render_win) then
 		vim.cmd("tabclose")
@@ -485,7 +486,7 @@ local function pager_toggle()
 	pager_source_requested[source_buf] = nil
 	local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
 	remember_source_window_options(win)
-	preview_api.toggle()
+	preview_api.toggle({ text_scale = false })
 	if not protect_render_buffer(win, source_winhighlight) then
 		restore_render_window(win)
 	end
@@ -539,7 +540,9 @@ function M.pager_filetype_changed(buf)
 			if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_config(win).relative == "" then
 				local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
 				remember_source_window_options(win)
-				vim.api.nvim_win_call(win, preview_api.toggle)
+				vim.api.nvim_win_call(win, function()
+					preview_api.toggle({ text_scale = false })
+				end)
 				if not protect_render_buffer(win, source_winhighlight) then
 					restore_render_window(win)
 				end

@@ -237,12 +237,41 @@ local function contrast(foreground, background)
 	return (math.max(first, second) + 0.05) / (math.min(first, second) + 0.05)
 end
 
+local function color_distance(left, right)
+	local function channel(color, shift)
+		return math.floor(color / (2 ^ shift)) % 256
+	end
+	return math.abs(channel(left, 16) - channel(right, 16))
+		+ math.abs(channel(left, 8) - channel(right, 8))
+		+ math.abs(channel(left, 0) - channel(right, 0))
+end
+
+local function assert_heading_palette(background, accent)
+	for level = 1, 6 do
+		local heading = "MdRenderH" .. level
+		local pill = vim.api.nvim_get_hl(0, { name = heading, link = false })
+		local band = vim.api.nvim_get_hl(0, { name = heading .. "Band", link = false })
+		local edge = vim.api.nvim_get_hl(0, { name = heading .. "Edge", link = false })
+		assert(pill.bg and pill.fg and contrast(pill.fg, pill.bg) >= 4.5, heading .. " text lacks contrast")
+		assert(
+			band.bg and color_distance(band.bg, background) < color_distance(pill.bg, background),
+			heading .. " band is not softer"
+		)
+		assert(band.fg and contrast(band.fg, band.bg) >= 4.5, heading .. " band text lacks contrast")
+		assert(edge.fg == pill.bg and edge.bg == band.bg, heading .. " rounded cap does not join the pill and band")
+	end
+	local pill_bg = vim.api.nvim_get_hl(0, { name = "MdRenderH1", link = false }).bg
+	assert(color_distance(pill_bg, background) < color_distance(accent, background), "heading color is not pastel")
+end
+
 vim.o.background = "light"
-vim.api.nvim_set_hl(0, "Normal", { fg = 0x1f2328 })
+vim.api.nvim_set_hl(0, "Normal", { fg = 0x1f2328, bg = 0xffffff })
 vim.api.nvim_set_hl(0, "NormalFloat", { fg = 0x1f2328 })
 vim.api.nvim_set_hl(0, "Comment", { fg = 0x008000 })
 vim.api.nvim_set_hl(0, "String", { fg = 0xa31515 })
+vim.api.nvim_set_hl(0, "@markup.heading.1.markdown", { fg = 0x005fb8 })
 palette.apply()
+assert_heading_palette(0xffffff, 0x005fb8)
 local light_code = vim.api.nvim_get_hl(0, { name = "MdRenderInlineCode", link = false })
 assert(light_code.fg == 0xa31515, "light inline code lost the theme's String color")
 assert(light_code.bg and contrast(light_code.fg, light_code.bg) >= 4.5, "light inline code has poor contrast")
@@ -277,11 +306,13 @@ assert(luminance(latte_block_bg) < luminance(0xeff1f5), "Latte code background i
 assert(contrast(latte_block.fg, latte_block_bg) >= 4.5, "Latte code block has poor contrast")
 
 vim.o.background = "dark"
-vim.api.nvim_set_hl(0, "Normal", { fg = 0xd4d4d4 })
+vim.api.nvim_set_hl(0, "Normal", { fg = 0xd4d4d4, bg = 0x1e1e1e })
 vim.api.nvim_set_hl(0, "NormalFloat", { fg = 0xd4d4d4 })
 vim.api.nvim_set_hl(0, "Comment", { fg = 0x888888 })
 vim.api.nvim_set_hl(0, "String", { fg = 0xce9178 })
+vim.api.nvim_set_hl(0, "@markup.heading.1.markdown", { fg = 0x8aadf4 })
 palette.apply()
+assert_heading_palette(0x1e1e1e, 0x8aadf4)
 local dark_code = vim.api.nvim_get_hl(0, { name = "MdRenderInlineCode", link = false })
 assert(dark_code.fg == 0xce9178, "dark inline code retained the light theme color")
 assert(dark_code.bg and contrast(dark_code.fg, dark_code.bg) >= 4.5, "dark inline code has poor contrast")

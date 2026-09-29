@@ -7,6 +7,8 @@ local background_group = "MdRenderCodeBlockBackground"
 local label_group = "MdRenderCodeBlockLabel"
 local max_label_length = 32
 local max_region_width = 160
+local left_cap = ""
+local right_cap = ""
 
 local function nonnegative_integer(value, fallback)
 	if type(value) ~= "number" or value ~= value then
@@ -72,8 +74,43 @@ local function shade_headings(buf, content, lines, left, right)
 				local level = type(group.hl) == "string" and group.hl:match("^MdRenderH([1-6])$")
 				if level then
 					local line = lines[row + 1]
-					if #line > left then
-						shade_line(buf, row, line, left, right, "MdRenderH" .. level)
+					local band = "MdRenderH" .. level .. "Band"
+					local edge = "MdRenderH" .. level .. "Edge"
+					local start_col = group.col
+					local end_col = group.end_col
+					local padding = right - vim.fn.strdisplaywidth(line)
+					local has_caps = type(start_col) == "number"
+						and type(end_col) == "number"
+						and start_col > left
+						and start_col <= #line
+						and end_col == #line
+						and line:sub(start_col, start_col) == " "
+						and padding >= 1
+						and vim.api.nvim_strwidth(left_cap) == 1
+						and vim.api.nvim_strwidth(right_cap) == 1
+					if has_caps then
+						-- The left cap covers existing indentation and the right cap
+						-- uses spare page width. Neither changes renderer byte columns.
+						vim.api.nvim_buf_set_extmark(buf, namespace, row, left, {
+							end_col = start_col,
+							hl_group = band,
+							priority = 4100,
+						})
+						vim.api.nvim_buf_set_extmark(buf, namespace, row, start_col - 1, {
+							virt_text = { { left_cap, edge } },
+							virt_text_pos = "overlay",
+							priority = 4200,
+						})
+						vim.api.nvim_buf_set_extmark(buf, namespace, row, #line, {
+							virt_text = {
+								{ right_cap, edge },
+								{ string.rep(" ", padding - 1), band },
+							},
+							virt_text_pos = "inline",
+						})
+					elseif #line > left then
+						-- Wrapped or edge-aligned headings cannot contain both caps.
+						shade_line(buf, row, line, left, right, band)
 					end
 					decorated[row] = true
 					break

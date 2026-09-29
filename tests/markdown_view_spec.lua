@@ -79,6 +79,22 @@ local function has_inline_fill(buf, group)
 	return false
 end
 
+local function has_heading_cap(buf, cap, position)
+	local ns = assert(vim.api.nvim_get_namespaces().nvim_config_markdown_codeblocks)
+	for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
+		local details = mark[4]
+		if
+			details.virt_text_pos == position
+			and details.virt_text
+			and details.virt_text[1][1] == cap
+			and details.virt_text[1][2] == "MdRenderH1Edge"
+		then
+			return true
+		end
+	end
+	return false
+end
+
 local function has_code_label(buf, language)
 	local ns = vim.api.nvim_get_namespaces().nvim_config_markdown_codeblocks
 	assert(ns, "code-block decoration namespace is missing")
@@ -178,12 +194,19 @@ test("editor opens one focused, live, read-only tab and preserves the editable s
 	assert(has_highlight(render_buf, "String"), "rendered code block does not use the String highlight")
 	assert(has_highlight(render_buf, "MdRenderCodeBlockBackground"), "rendered code has no shaded background")
 	assert(has_inline_fill(render_buf, "MdRenderCodeBlockBackground"), "code shading leaves a gap after the last cell")
-	assert(has_highlight(render_buf, "MdRenderH1"), "heading does not have a solid page-width background")
+	assert(has_highlight(render_buf, "MdRenderH1"), "heading text is not highlighted")
+	assert(has_highlight(render_buf, "MdRenderH1Band"), "heading has no soft page-width band")
+	assert(
+		has_heading_cap(render_buf, "", "overlay") and has_heading_cap(render_buf, "", "inline"),
+		"heading lost its rounded ends"
+	)
 	assert(has_code_label(render_buf, "mermaid"), "rendered code lost the fence language")
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>mv", "n", false, true)), "render close mapping is missing")
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>md", "n", false, true)), "render diagram mapping is missing")
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>md", "x", false, true)), "render selection mapping is missing")
 	local session = assert(require("md-render").preview._toggle_sessions[source])
+	assert(session.opts.text_scale == false, "editor heading scale misaligns the pastel pill")
+	assert(#session.content.text_placements == 0, "editor heading still paints terminal-scaled text")
 	local anchor_link
 	for _, link in ipairs(session.content.link_metadata) do
 		if link.url == "#original-heading" then
@@ -595,6 +618,13 @@ test("pager keeps the source for filetype changes and diagram extraction", funct
 	assert(vim.bo[rendered].readonly and not vim.bo[rendered].modifiable, "pager render is editable")
 	assert_render_winhighlight(win)
 	assert(has_highlight(rendered, "String"), "pager code block does not use the String highlight")
+	assert(has_highlight(rendered, "MdRenderH1Band"), "pager heading lost its soft band")
+	assert(
+		has_heading_cap(rendered, "", "overlay") and has_heading_cap(rendered, "", "inline"),
+		"pager heading lost its rounded ends"
+	)
+	local session = assert(require("md-render").preview._toggle_sessions[source])
+	assert(session.opts.text_scale == false and #session.content.text_placements == 0, "pager scaled its heading")
 	view.toggle()
 	assert(vim.api.nvim_win_get_buf(win) == source, "pager manual toggle did not restore source")
 	assert(vim.wo[win].winhighlight == source_winhighlight, "pager manual toggle did not restore highlights")
@@ -619,6 +649,10 @@ test("pager keeps the source for filetype changes and diagram extraction", funct
 		"Markdown filetype change did not restore the reading view"
 	)
 	assert_render_winhighlight(win)
+	assert(
+		require("md-render").preview._toggle_sessions[source].opts.text_scale == false,
+		"auto-render scaled its heading"
+	)
 	vim.cmd("SetFileType text")
 	assert(vim.api.nvim_win_get_buf(win) == source, "SetFileType did not recover the rendered source")
 	assert(vim.wo[win].winhighlight == source_winhighlight, "SetFileType did not restore source highlights")
