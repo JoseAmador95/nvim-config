@@ -431,6 +431,7 @@ test("wide tables open without losing cell text and still allow manual collapse"
 	assert(labelled.rows[1][1].text == "https://example…", "an intentional short link label was changed")
 	local direct = require("md-render").MarkdownTable.render(parsed, "", nil, false)
 	assert(table.concat(direct):find("spaces", 1, true), "natural table shortened URL: " .. table.concat(direct))
+	assert(direct[1]:match("^┌") and direct[#direct]:match("^└"), "compact table lacks its horizontal caps")
 	local text = table_text(buf)
 	assert(text:find("Acompletesentencethatcontinuesuntiltheveryend", 1, true), "prose cell was shortened: " .. text)
 	assert(
@@ -438,6 +439,7 @@ test("wide tables open without losing cell text and still allow manual collapse"
 		"URL cell was shortened: " .. text
 	)
 	assert(not contains(buf, "…"), "expanded table still contains an ellipsis")
+	assert(contains(buf, "┌") and contains(buf, "└"), "expanded table lacks its horizontal caps")
 	assert(vim.wo[win].wrap, "wide table can scroll horizontally")
 	vim.cmd("normal! 30zl")
 	assert(vim.fn.winsaveview().leftcol == 0, "wide table shifted out of the reading area")
@@ -463,6 +465,7 @@ test("wide tables open without losing cell text and still allow manual collapse"
 	vim.api.nvim_win_set_cursor(win, { row, 0 })
 	toggle()
 	assert(contains(buf, "…"), "manual table collapse did not take effect")
+	assert(contains(buf, "┌") and contains(buf, "└"), "collapsed table lost its horizontal caps")
 	toggle()
 	assert(not contains(buf, "…"), "manual table expansion did not restore full content")
 	vim.api.nvim_set_current_tabpage(source_tab)
@@ -476,6 +479,7 @@ test("wide tables open without losing cell text and still allow manual collapse"
 		end),
 		"live update did not preserve the complete edited table cell"
 	)
+	assert(contains(buf, "┌") and contains(buf, "└"), "updated table lost its horizontal caps")
 	vim.api.nvim_set_current_win(win)
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
@@ -490,10 +494,16 @@ test("narrow tables keep full linked cells and outer borders", function()
 		"| --- | --- | --- | --- | --- | --- | --- | --- |",
 		"| first | [" .. url .. "](" .. url .. ") | 長い日本語 | D | E | F | G | H |",
 	}))
-	local lines, _, links, _, offsets = tables.render(parsed, "  ", 30, true)
+	local lines, highlights, links, _, offsets = tables.render(parsed, "  ", 30, true)
+	assert(lines[1]:match("^  ┌") and lines[#lines]:match("^  └"), "stacked table lacks horizontal caps")
+	assert(lines[1]:match("┐$") and lines[#lines]:match("┘$"), "stacked table caps are incomplete")
+	assert(offsets[1] == 0 and offsets[#offsets] == 2, "stacked table cap source offsets are wrong")
+	assert(highlights[1][1].hl == "FloatBorder" and highlights[#lines][1].hl == "FloatBorder")
+	assert(#links[1] == 0 and #links[#links] == 0, "stacked table caps contain links")
 	local linked = {}
 	local seen = {}
-	for row, line in ipairs(lines) do
+	for row = 2, #lines - 1 do
+		local line = lines[row]
 		assert(vim.api.nvim_strwidth(line) <= 30, "narrow table extends beyond its width")
 		assert(line:match("^  │") and line:match("│$"), "narrow table lost its outer borders")
 		assert(offsets[row] == 2, "narrow table lost the source-row mapping")
@@ -513,7 +523,79 @@ test("narrow tables keep full linked cells and outer borders", function()
 		"| x… | " .. url .. " |",
 	}))
 	local _, _, _, _, literal_offsets = tables.render(literal, "", 25, true)
-	assert(literal_offsets[1] == 0, "literal ellipsis incorrectly triggered the stacked layout")
+	assert(literal_offsets[2] == 0, "literal ellipsis incorrectly triggered the stacked layout")
+end)
+
+test("table caps follow highlighted borders and preserve shifted metadata", function()
+	local line = "  │ A │ literal │ text │"
+	local borders = {}
+	local next_byte = 1
+	while true do
+		local byte = line:find("│", next_byte, true)
+		if not byte then
+			break
+		end
+		borders[#borders + 1] = byte
+		next_byte = byte + #"│"
+	end
+	assert(#borders == 4, "test fixture must contain one literal border glyph")
+	local row_highlights = {
+		{ col = borders[1] - 1, end_col = borders[1] - 1 + #"│ ", hl = "FloatBorder" },
+		{ col = borders[2] - 1, end_col = borders[2] - 1 + #"│ ", hl = "FloatBorder" },
+		{ col = borders[4] - 1, end_col = borders[4] - 1 + #"│", hl = "FloatBorder" },
+	}
+	local link = { col_start = borders[2] + #"│ ", col_end = borders[2] + #"│ " + 7, url = "example" }
+	local adapter = dofile(repo .. "/lua/config/markdown_tables.lua")
+	local fake_preview = {
+		build_content = function()
+			return {}
+		end,
+	}
+	local fake_wrap = {
+		split_ascii_syllables = function()
+			return {}
+		end,
+	}
+	local fake_table = {
+		parse = function()
+			return {}
+		end,
+		render = function(parsed)
+			if parsed.empty then
+				return {}, {}, {}, {}, {}
+			end
+			return { line, line }, { row_highlights, row_highlights }, { { link }, {} }, {
+				{ line_offset = 0 },
+				{ line_offset = 1 },
+			}, { 0, 2 }
+		end,
+	}
+	assert(adapter.configure(fake_preview, fake_wrap, fake_table), "fake table adapter could not initialize")
+	local lines, highlights, links, images, offsets = fake_table.render({}, "  ", nil, true)
+	assert(lines[1]:match("^  ┌") and lines[1]:match("┐$"), "top cap has wrong corners")
+	assert(lines[#lines]:match("^  └") and lines[#lines]:match("┘$"), "bottom cap has wrong corners")
+	local _, junctions = lines[1]:gsub("┬", "")
+	assert(junctions == 1 and lines[#lines]:find("┴", 1, true), "literal │ became a column junction")
+	assert(vim.api.nvim_strwidth(lines[1]) == vim.api.nvim_strwidth(line), "top cap changed table width")
+	assert(vim.api.nvim_strwidth(lines[#lines]) == vim.api.nvim_strwidth(line), "bottom cap changed table width")
+	assert(#links[1] == 0 and #links[#links] == 0 and links[2][1] == link, "cap shifted link metadata")
+	assert(highlights[1][1].hl == "FloatBorder" and highlights[#lines][1].hl == "FloatBorder")
+	assert(vim.deep_equal(offsets, { 0, 0, 2, 2 }), "cap source offsets are wrong")
+	assert(images[1].line_offset == 1 and images[2].line_offset == 2, "image placements did not shift")
+	local previous_ambiwidth = vim.o.ambiwidth
+	vim.o.ambiwidth = "double"
+	local double_ok, double_error = pcall(function()
+		local double_lines = fake_table.render({}, "  ", nil, true)
+		assert(vim.api.nvim_strwidth(double_lines[1]) == vim.api.nvim_strwidth(line), "double-width top cap shifted")
+		assert(
+			vim.api.nvim_strwidth(double_lines[#double_lines]) == vim.api.nvim_strwidth(line),
+			"double-width bottom cap shifted"
+		)
+	end)
+	vim.o.ambiwidth = previous_ambiwidth
+	assert(double_ok, double_error)
+	local empty_lines = fake_table.render({ empty = true }, "  ", nil, true)
+	assert(#empty_lines == 0, "empty renderer output acquired a cap")
 end)
 
 test("pager opens wide Markdown tables with their complete cells", function()
@@ -553,6 +635,7 @@ test("pager opens wide Markdown tables with their complete cells", function()
 		"frontmatter table did not expand"
 	)
 	assert(not contains(buf, "…"), "pager table still contains an ellipsis")
+	assert(contains(buf, "┌") and contains(buf, "└"), "pager table lacks horizontal caps")
 	assert(vim.wo[win].wrap, "pager table can scroll horizontally")
 	vim.cmd("normal! 30zl")
 	assert(vim.fn.winsaveview().leftcol == 0, "pager table shifted out of the reading area")
@@ -584,6 +667,7 @@ test("pager opens wide Markdown tables with their complete cells", function()
 	vim.cmd("normal! 30zl")
 	assert(vim.fn.winsaveview().leftcol == 0, "adapted table scrolled horizontally")
 	assert(not contains(buf, "…"), "wide table lost cell text")
+	assert(contains(buf, "┌") and contains(buf, "└"), "pager update lost horizontal caps")
 	view.toggle()
 	assert(vim.api.nvim_win_get_buf(win) == source, "pager did not restore its source")
 	assert(vim.wo[win].wrap == source_wrap, "pager changed the source wrap setting")

@@ -180,7 +180,8 @@ scaling is disabled so their rounded ends stay aligned. The cursor stays inside
 the centered page. Lines
 wrap instead of shifting the reading view horizontally. `<leader>mp` still
 opens the browser preview.
-Tables open expanded with outer vertical borders. When the columns cannot fit,
+Tables open expanded with top and bottom rules and outer vertical borders.
+When the columns cannot fit,
 the viewer shows bounded `field │ value` rows so every cell and link remains
 visible. Press `<CR>` or `za` on a table to switch to its compact view.
 In `nvimpager`, Markdown renders automatically, and `<leader>mv` toggles back
