@@ -426,6 +426,17 @@ local function follow_target(bufnr, row, byte_column, target)
 	return open_file_target(bufnr, value)
 end
 
+---Check whether the editable source may be used for rendered navigation.
+---@param bufnr integer
+---@return boolean
+function M.rendered_allowed(bufnr)
+	return configured ~= nil
+		and vim.api.nvim_buf_is_valid(bufnr)
+		and vim.bo[bufnr].filetype == "markdown"
+		and configured.eligible(bufnr)
+		and configured.allowed(bufnr, "Markdown navigation")
+end
+
 ---Follow a Markdown target, falling back to LSP or native `gd` when absent.
 ---@param bufnr? integer
 ---@return boolean
@@ -446,6 +457,26 @@ function M.follow(bufnr)
 		return configured.definition(bufnr)
 	end
 	return follow_target(bufnr, cursor[1] - 1, cursor[2], target)
+end
+
+---Follow a link selected in a rendered Markdown view using the source's
+---existing destination policy. The caller supplies a source position only
+---for fragment links, which Marksman resolves in the editable source.
+---@param bufnr integer
+---@param row integer Zero-based source row.
+---@param byte_column integer? Zero-based source byte column.
+---@param url string
+---@return boolean
+function M.follow_rendered_link(bufnr, row, byte_column, url)
+	if not M.rendered_allowed(bufnr) then
+		return false
+	end
+	local target = destination_target(url, true)
+	if target.fragment and byte_column == nil then
+		notify("Could not locate the rendered link in its Markdown source")
+		return false
+	end
+	return follow_target(bufnr, row, byte_column or 0, target)
 end
 
 local function current_gd_mapping(bufnr)

@@ -113,6 +113,11 @@ local function apply_markdown(colors)
 	vim.api.nvim_set_hl(0, "MdRenderCodeBlock", { fg = block_fg })
 	vim.api.nvim_set_hl(0, "MdRenderCodeBlockBackground", { bg = block_bg })
 	vim.api.nvim_set_hl(0, "MdRenderCodeBlockLabel", { fg = colors.foreground, bg = block_bg, bold = true })
+	for level = 1, 6 do
+		local heading_bg = value("@markup.heading." .. level .. ".markdown", "fg", colors.rainbow[level])
+		local heading_fg = contrast(0xffffff, heading_bg) >= contrast(0x000000, heading_bg) and 0xffffff or 0x000000
+		vim.api.nvim_set_hl(0, "MdRenderH" .. level, { fg = heading_fg, bg = heading_bg, bold = true })
+	end
 end
 
 ---Paint Markdown-only roles, including in the slim pager profile.

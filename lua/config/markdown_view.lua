@@ -9,6 +9,10 @@ local markdown_layout = require("config.markdown_layout")
 local markdown_tables = require("config.markdown_tables")
 local pager = require("config.pager")
 local palette = require("config.palette")
+local markdown_render_navigation = not pager.active
+		and not vim.g.vscode
+		and require("config.markdown_render_navigation")
+	or nil
 
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve Markdown view host")
 local repo_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
@@ -23,6 +27,7 @@ local previews = {}
 local pager_source_requested = {}
 local pager_filetype_pending = {}
 local render_winhighlight_var = "nvim_config_md_render_winhighlight"
+local render_window_options_var = "nvim_config_md_render_window_options"
 
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.WARN, { title = "Markdown" })
@@ -211,13 +216,72 @@ local function apply_render_winhighlight(win, source_winhighlight)
 	end
 end
 
-local function restore_render_winhighlight(win)
+local function restore_render_window(win)
 	local ok, original = pcall(vim.api.nvim_win_get_var, win, render_winhighlight_var)
-	if not ok then
+	if ok then
+		vim.api.nvim_set_option_value("winhighlight", original, { win = win })
+		vim.api.nvim_win_del_var(win, render_winhighlight_var)
+	end
+	local has_options, options = pcall(vim.api.nvim_win_get_var, win, render_window_options_var)
+	if has_options then
+		for name, value in pairs(options) do
+			vim.api.nvim_set_option_value(name, value, { win = win })
+		end
+		vim.api.nvim_win_del_var(win, render_window_options_var)
+	end
+end
+
+local function keep_cursor_on_page(win, session)
+	if not session or not vim.api.nvim_win_is_valid(win) or vim.api.nvim_win_get_buf(win) ~= session.buf then
 		return
 	end
-	vim.api.nvim_set_option_value("winhighlight", original, { win = win })
-	vim.api.nvim_win_del_var(win, render_winhighlight_var)
+	local margin = session.opts and session.opts.nvim_config_page_margin
+	if type(margin) ~= "number" or margin <= 0 then
+		return
+	end
+	local cursor = vim.api.nvim_win_get_cursor(win)
+	if cursor[2] < margin then
+		vim.api.nvim_win_set_cursor(win, { cursor[1], margin })
+	end
+end
+
+local function remember_source_window_options(win)
+	local has_options = pcall(vim.api.nvim_win_get_var, win, render_window_options_var)
+	if not has_options then
+		vim.api.nvim_win_set_var(win, render_window_options_var, {
+			wrap = vim.wo[win].wrap,
+			linebreak = vim.wo[win].linebreak,
+			breakindent = vim.wo[win].breakindent,
+		})
+	end
+end
+
+local function configure_render_window(win)
+	remember_source_window_options(win)
+	vim.wo[win].wrap = true
+	vim.wo[win].linebreak = true
+	vim.wo[win].breakindent = true
+	vim.api.nvim_win_call(win, function()
+		vim.fn.winrestview({ leftcol = 0 })
+	end)
+end
+
+local function protect_cursor_rebuild(session)
+	if session.nvim_config_cursor_rebuild then
+		return
+	end
+	local rebuild = session.rebuild
+	session.rebuild = function(self, ...)
+		local result = rebuild(self, ...)
+		for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
+			if vim.api.nvim_win_is_valid(win) then
+				configure_render_window(win)
+				keep_cursor_on_page(win, self)
+			end
+		end
+		return result
+	end
+	session.nvim_config_cursor_rebuild = true
 end
 
 local function protect_render_buffer(win, source_winhighlight)
@@ -229,16 +293,16 @@ local function protect_render_buffer(win, source_winhighlight)
 	if session then
 		markdown_tables.protect_rebuild(session)
 		markdown_codeblocks.protect_rebuild(session)
+		protect_cursor_rebuild(session)
 	end
 	vim.bo[state.render_buf].modifiable = false
 	vim.bo[state.render_buf].readonly = true
-	-- Expanded tables may be wider than the page. Keep their rows intact
-	-- so the ordinary zh/zl keys can reveal every column.
-	vim.wo[win].wrap = false
+	configure_render_window(win)
 	apply_render_winhighlight(win, source_winhighlight)
 	palette.apply_markdown()
 	if session then
 		markdown_codeblocks.decorate(session)
+		keep_cursor_on_page(win, session)
 	end
 	return state
 end
@@ -276,7 +340,7 @@ local function close_preview(preview)
 		-- The user may have closed the source tab manually. Keep this tab and
 		-- restore its editable source instead of losing the document.
 		renderer.preview.toggle()
-		restore_render_winhighlight(preview.win)
+		restore_render_window(preview.win)
 	end
 	if vim.api.nvim_tabpage_is_valid(preview.source_tab) then
 		vim.api.nvim_set_current_tabpage(preview.source_tab)
@@ -309,7 +373,18 @@ local function reflow_preview(preview)
 		session.opts.nvim_config_page_margin = margin
 		session:rebuild()
 	end
-	vim.wo[preview.win].wrap = false
+	configure_render_window(preview.win)
+	keep_cursor_on_page(preview.win, session)
+end
+
+local function keep_active_cursor_on_page()
+	if not vim.b[vim.api.nvim_get_current_buf()].md_render then
+		return
+	end
+	local win = vim.api.nvim_get_current_win()
+	local state = win_state(win)
+	local session = state and renderer and renderer.preview._toggle_sessions[state.source_buf]
+	keep_cursor_on_page(win, session)
 end
 
 local function editor_toggle()
@@ -325,7 +400,7 @@ local function editor_toggle()
 			close_preview(current_preview)
 		else
 			preview_api.toggle()
-			restore_render_winhighlight(current_win)
+			restore_render_window(current_win)
 		end
 		return
 	end
@@ -350,6 +425,7 @@ local function editor_toggle()
 	local render_tab = vim.api.nvim_get_current_tabpage()
 	local render_win = vim.api.nvim_get_current_win()
 	local page_width, margin = markdown_layout.measure(render_win)
+	remember_source_window_options(render_win)
 	local toggled, toggle_err = pcall(preview_api.toggle, {
 		max_width = markdown_layout.render_width(page_width),
 		nvim_config_page_width = page_width,
@@ -361,6 +437,7 @@ local function editor_toggle()
 		return
 	end
 	protect_render_buffer(render_win, source_winhighlight)
+	markdown_render_navigation.attach(renderer.preview._toggle_sessions[source_buf])
 	vim.keymap.set("n", "<leader>mv", M.toggle, {
 		buffer = vim.api.nvim_win_get_buf(render_win),
 		desc = "Close Markdown reading view",
@@ -396,7 +473,7 @@ local function pager_toggle()
 	if state then
 		preview_api.toggle()
 		if vim.api.nvim_win_get_buf(win) == source_buf then
-			restore_render_winhighlight(win)
+			restore_render_window(win)
 			pager_source_requested[source_buf] = true
 		end
 		return
@@ -407,8 +484,11 @@ local function pager_toggle()
 	end
 	pager_source_requested[source_buf] = nil
 	local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
+	remember_source_window_options(win)
 	preview_api.toggle()
-	protect_render_buffer(win, source_winhighlight)
+	if not protect_render_buffer(win, source_winhighlight) then
+		restore_render_window(win)
+	end
 end
 
 function M.toggle()
@@ -431,7 +511,7 @@ function M.pager_show_source(win)
 		end
 		vim.api.nvim_win_call(win, preview_api.toggle)
 		if vim.api.nvim_win_get_buf(win) == source_buf then
-			restore_render_winhighlight(win)
+			restore_render_window(win)
 		end
 	end
 	return source_buf
@@ -458,8 +538,11 @@ function M.pager_filetype_changed(buf)
 		for _, win in ipairs(vim.fn.win_findbuf(buf)) do
 			if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_config(win).relative == "" then
 				local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
+				remember_source_window_options(win)
 				vim.api.nvim_win_call(win, preview_api.toggle)
-				protect_render_buffer(win, source_winhighlight)
+				if not protect_render_buffer(win, source_winhighlight) then
+					restore_render_window(win)
+				end
 			end
 		end
 	end)
@@ -503,6 +586,10 @@ function M.setup()
 		callback = palette.apply_markdown,
 	})
 	vim.api.nvim_create_user_command("MarkdownView", M.toggle, { desc = "Toggle rendered Markdown reading view" })
+	vim.api.nvim_create_autocmd({ "CursorMoved", "WinEnter", "BufEnter" }, {
+		group = vim.api.nvim_create_augroup("MarkdownViewCursor", { clear = true }),
+		callback = keep_active_cursor_on_page,
+	})
 	if pager.active then
 		pager.set_markdown_view(M)
 		vim.keymap.set("n", "<leader>mv", M.toggle, { desc = "Toggle Markdown reading/source view" })

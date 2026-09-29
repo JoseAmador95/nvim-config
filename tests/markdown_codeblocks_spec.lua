@@ -67,6 +67,7 @@ local padding = assert(
 	"code line has no shaded padding"
 )
 assert(#padding[4].virt_text[1][1] == 36 - vim.fn.strdisplaywidth(first_lines[1]), "code region width is wrong")
+assert(padding[4].virt_text_pos == "inline", "code background leaves a gap after the final character")
 assert(not find(3, function(details)
 	return details.hl_group == "MdRenderCodeBlockBackground"
 end), "non-code String content gained a code background")

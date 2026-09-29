@@ -67,6 +67,18 @@ local function has_highlight(buf, group)
 	return false
 end
 
+local function has_inline_fill(buf, group)
+	for _, ns in pairs(vim.api.nvim_get_namespaces()) do
+		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
+			local details = mark[4]
+			if details.virt_text_pos == "inline" and details.virt_text and details.virt_text[1][2] == group then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local function has_code_label(buf, language)
 	local ns = vim.api.nvim_get_namespaces().nvim_config_markdown_codeblocks
 	assert(ns, "code-block decoration namespace is missing")
@@ -97,6 +109,17 @@ end
 local pager = require("config.pager")
 pager.active = false
 local view = require("config.markdown_view")
+require("config.markdown_navigation").setup({
+	allowed = function()
+		return true
+	end,
+	definition = function()
+		return false
+	end,
+	marksman = function()
+		return false
+	end,
+})
 
 test("pinned renderer installs a media-free reading mode", function()
 	assert(view.PIN == pinned, "host pin drifted")
@@ -113,6 +136,8 @@ test("editor opens one focused, live, read-only tab and preserves the editable s
 	vim.api.nvim_set_current_buf(source)
 	vim.api.nvim_buf_set_lines(source, 0, -1, false, {
 		"# Original heading",
+		"",
+		"[jump](#original-heading)",
 		"",
 		"```mermaid",
 		"graph LR; A-->B",
@@ -152,10 +177,29 @@ test("editor opens one focused, live, read-only tab and preserves the editable s
 	assert(vim.wo[render_win].winhighlight:find("StatusLine:StatusLineNC", 1, true), "render lost another mapping")
 	assert(has_highlight(render_buf, "String"), "rendered code block does not use the String highlight")
 	assert(has_highlight(render_buf, "MdRenderCodeBlockBackground"), "rendered code has no shaded background")
+	assert(has_inline_fill(render_buf, "MdRenderCodeBlockBackground"), "code shading leaves a gap after the last cell")
+	assert(has_highlight(render_buf, "MdRenderH1"), "heading does not have a solid page-width background")
 	assert(has_code_label(render_buf, "mermaid"), "rendered code lost the fence language")
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>mv", "n", false, true)), "render close mapping is missing")
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>md", "n", false, true)), "render diagram mapping is missing")
 	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>md", "x", false, true)), "render selection mapping is missing")
+	local session = assert(require("md-render").preview._toggle_sessions[source])
+	local anchor_link
+	for _, link in ipairs(session.content.link_metadata) do
+		if link.url == "#original-heading" then
+			anchor_link = link
+			break
+		end
+	end
+	assert(anchor_link, "rendered heading link has no metadata")
+	vim.api.nvim_win_set_cursor(render_win, { anchor_link.line + 1, anchor_link.col_start })
+	local gd = vim.fn.maparg("gd", "n", false, true)
+	assert(type(gd.callback) == "function", "rendered gd mapping is missing")
+	gd.callback()
+	assert(
+		vim.api.nvim_win_get_cursor(render_win)[1] == session.content.heading_anchors["original-heading"] + 1,
+		"gd did not follow the heading inside the reading view"
+	)
 
 	vim.api.nvim_set_current_tabpage(source_tab)
 	view.toggle()
@@ -238,10 +282,26 @@ test("centered page reflows on resize and keeps links aligned", function()
 	assert(expected_width == 120, "wide page did not cap at 120 columns")
 	assert(session.opts.max_width == layout.render_width(expected_width), "renderer used the wrong page width")
 	assert(session.opts.nvim_config_page_margin == expected_margin, "page has the wrong left margin")
+	assert(vim.api.nvim_win_get_cursor(win)[2] >= expected_margin, "cursor opened in the empty left margin")
+	assert(vim.wo[win].wrap, "reading view permits horizontal scrolling")
 	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
 		assert(line:sub(1, expected_margin) == string.rep(" ", expected_margin), "page line is not centered")
 		assert(vim.api.nvim_strwidth(line) <= expected_margin + expected_width, "render exceeded the 120-column page")
 	end
+	local blank_row
+	for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		if line:match("^ +$") then
+			blank_row = row
+			assert(#line > expected_margin, "blank row has no cursor cell inside the page")
+			break
+		end
+	end
+	assert(blank_row, "test document has no blank rendered row")
+	vim.api.nvim_win_set_cursor(win, { blank_row, 0 })
+	vim.api.nvim_exec_autocmds("CursorMoved", { buffer = buf })
+	assert(vim.api.nvim_win_get_cursor(win)[2] == expected_margin, "cursor escaped into the blank-row margin")
+	vim.cmd("normal! 30zl")
+	assert(vim.fn.winsaveview().leftcol == 0, "reading view scrolled horizontally")
 	local link = assert(session.content.link_metadata[1], "rendered link has no metadata")
 	assert(link.col_start >= expected_margin, "link metadata omitted the page margin")
 	local function assert_link_extmark()
@@ -265,6 +325,8 @@ test("centered page reflows on resize and keeps links aligned", function()
 	assert(expected_width < 120, "test split did not narrow the reading page")
 	assert(session.opts.max_width == layout.render_width(expected_width), "resize did not update renderer width")
 	assert(session.opts.nvim_config_page_margin == expected_margin, "resize did not recenter the page")
+	assert(vim.api.nvim_win_get_cursor(win)[2] >= expected_margin, "cursor escaped after resizing the page")
+	assert(vim.wo[win].wrap and vim.fn.winsaveview().leftcol == 0, "resize reenabled horizontal scrolling")
 	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
 		assert(line:sub(1, expected_margin) == string.rep(" ", expected_margin), "resize lost centering")
 		assert(vim.api.nvim_strwidth(line) <= expected_margin + expected_width, "resize exceeded the page width")
@@ -285,7 +347,7 @@ end)
 test("page padding shifts every byte-column metadata field", function()
 	local layout = require("config.markdown_layout")
 	local content = {
-		lines = { "abc", "xyz" },
+		lines = { "abc", "xyz", "" },
 		highlights = { { line = 0, groups = { { col = 0, end_col = 3 }, { col = 0, end_col = -1 } } } },
 		link_metadata = { { line = 0, col_start = 1, col_end = 3 } },
 		code_blocks = { { start_line = 1, end_line = 1, prefix_len = 2, source_lines = { "raw" } } },
@@ -296,6 +358,7 @@ test("page padding shifts every byte-column metadata field", function()
 	}
 	layout.center_content(content, { nvim_config_page_margin = 7 })
 	assert(content.lines[1] == "       abc" and content.lines[2] == "       xyz", "text was not padded")
+	assert(content.lines[3] == "        ", "blank row has no cursor cell inside the reading page")
 	assert(content.highlights[1].groups[1].col == 7, "highlight start was not shifted")
 	assert(content.highlights[1].groups[1].end_col == 10, "highlight end was not shifted")
 	assert(content.highlights[1].groups[2].end_col == -1, "end-of-line sentinel was changed")
@@ -352,7 +415,9 @@ test("wide tables open without losing cell text and still allow manual collapse"
 		"URL cell was shortened: " .. text
 	)
 	assert(not contains(buf, "…"), "expanded table still contains an ellipsis")
-	assert(not vim.wo[win].wrap, "wide table cannot scroll horizontally")
+	assert(vim.wo[win].wrap, "wide table can scroll horizontally")
+	vim.cmd("normal! 30zl")
+	assert(vim.fn.winsaveview().leftcol == 0, "wide table shifted out of the reading area")
 	assert(#vim.api.nvim_tabpage_list_wins(0) == 1, "table view opened beside the source")
 
 	local row
@@ -394,6 +459,40 @@ test("wide tables open without losing cell text and still allow manual collapse"
 	vim.o.columns = columns
 end)
 
+test("narrow tables keep full linked cells and outer borders", function()
+	local tables = require("md-render").MarkdownTable
+	local url = "https://example.com/very/long/segment/without/spaces"
+	local parsed = assert(tables.parse({
+		"| A | B | C | D | E | F | G | H |",
+		"| --- | --- | --- | --- | --- | --- | --- | --- |",
+		"| first | [" .. url .. "](" .. url .. ") | 長い日本語 | D | E | F | G | H |",
+	}))
+	local lines, _, links, _, offsets = tables.render(parsed, "  ", 30, true)
+	local linked = {}
+	local seen = {}
+	for row, line in ipairs(lines) do
+		assert(vim.api.nvim_strwidth(line) <= 30, "narrow table extends beyond its width")
+		assert(line:match("^  │") and line:match("│$"), "narrow table lost its outer borders")
+		assert(offsets[row] == 2, "narrow table lost the source-row mapping")
+		for _, link in ipairs(links[row]) do
+			local key = table.concat({ row, link.col_start, link.col_end, link.url }, ":")
+			if not seen[key] then
+				seen[key] = true
+				linked[link.url] = (linked[link.url] or "") .. line:sub(link.col_start + 1, link.col_end)
+			end
+		end
+	end
+	assert(linked[url] == url, "a wrapped table link lost visible text or its clickable byte range")
+	assert(table.concat(lines):find("長い日本語", 1, true), "narrow table lost Unicode cell text")
+	local literal = assert(tables.parse({
+		"| Item | Description |",
+		"| --- | --- |",
+		"| x… | " .. url .. " |",
+	}))
+	local _, _, _, _, literal_offsets = tables.render(literal, "", 25, true)
+	assert(literal_offsets[1] == 0, "literal ellipsis incorrectly triggered the stacked layout")
+end)
+
 test("pager opens wide Markdown tables with their complete cells", function()
 	pager.active = true
 	vim.cmd("only")
@@ -415,6 +514,8 @@ test("pager opens wide Markdown tables with their complete cells", function()
 	vim.bo[source].filetype = "markdown"
 	local win = vim.api.nvim_get_current_win()
 	local source_wrap = vim.wo[win].wrap
+	local source_linebreak = vim.wo[win].linebreak
+	local source_breakindent = vim.wo[win].breakindent
 	view.toggle()
 	local buf = vim.api.nvim_win_get_buf(win)
 	local text = table_text(buf)
@@ -429,7 +530,9 @@ test("pager opens wide Markdown tables with their complete cells", function()
 		"frontmatter table did not expand"
 	)
 	assert(not contains(buf, "…"), "pager table still contains an ellipsis")
-	assert(not vim.wo[win].wrap, "pager table cannot scroll horizontally")
+	assert(vim.wo[win].wrap, "pager table can scroll horizontally")
+	vim.cmd("normal! 30zl")
+	assert(vim.fn.winsaveview().leftcol == 0, "pager table shifted out of the reading area")
 	local headers, separators, values = {}, {}, {}
 	for column = 1, 20 do
 		headers[column] = string.char(64 + column)
@@ -449,24 +552,20 @@ test("pager opens wide Markdown tables with their complete cells", function()
 		"pager did not preserve the last column of a wide table"
 	)
 	local text_width = vim.api.nvim_win_get_width(win) - vim.fn.getwininfo(win)[1].textoff
-	local wider_than_window = false
 	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
-		wider_than_window = wider_than_window or vim.api.nvim_strwidth(line) > text_width
+		assert(vim.api.nvim_strwidth(line) <= text_width, "adapted table extends past the visible window")
+		if line:find("│", 1, true) then
+			assert(line:match("^%s*│") and line:match("│$"), "table lost an outer vertical border")
+		end
 	end
-	assert(
-		wider_than_window and not vim.wo[win].wrap,
-		"wide columns cannot be reached by horizontal scrolling: "
-			.. vim.inspect({
-				width = text_width,
-				wrap = vim.wo[win].wrap,
-				state = require("md-render").preview._toggle_sessions[source].expand_state,
-				lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false),
-			})
-	)
+	vim.cmd("normal! 30zl")
+	assert(vim.fn.winsaveview().leftcol == 0, "adapted table scrolled horizontally")
 	assert(not contains(buf, "…"), "wide table lost cell text")
 	view.toggle()
 	assert(vim.api.nvim_win_get_buf(win) == source, "pager did not restore its source")
 	assert(vim.wo[win].wrap == source_wrap, "pager changed the source wrap setting")
+	assert(vim.wo[win].linebreak == source_linebreak, "pager changed the source line-break setting")
+	assert(vim.wo[win].breakindent == source_breakindent, "pager changed the source continuation indent")
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
 	pager.active = false
