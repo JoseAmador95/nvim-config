@@ -225,6 +225,136 @@ local function stacked_table(parsed, indent, max_width, buf_dir, original_render
 	return result_lines, result_highlights, result_links, result_images, result_offsets
 end
 
+-- The row's FloatBorder spans identify real column boundaries. Cell text can
+-- contain a literal │, so neither scanning the text nor parsed widths are
+-- reliable sources for the corners and junctions.
+local function border_positions(line, highlights, indent)
+	if type(line) ~= "string" or type(highlights) ~= "table" or line:sub(1, #indent) ~= indent then
+		return nil
+	end
+	local positions = {}
+	for _, highlight in ipairs(highlights) do
+		if
+			highlight.hl == "FloatBorder"
+			and type(highlight.col) == "number"
+			and type(highlight.end_col) == "number"
+			and highlight.col >= #indent
+			and highlight.end_col <= #line
+		then
+			local span = line:sub(highlight.col + 1, highlight.end_col)
+			if span == "│ " or span == "│" then
+				table.insert(positions, vim.api.nvim_strwidth(line:sub(1, highlight.col)))
+			end
+		end
+	end
+	local border_width = vim.api.nvim_strwidth("│")
+	if
+		#positions < 2
+		or positions[1] ~= vim.api.nvim_strwidth(indent)
+		or positions[#positions] + border_width ~= vim.api.nvim_strwidth(line)
+	then
+		return nil
+	end
+	for index = 2, #positions do
+		if positions[index] - positions[index - 1] <= border_width then
+			return nil
+		end
+	end
+	return positions
+end
+
+local function cap_line(indent, positions, top)
+	local border_width = vim.api.nvim_strwidth("│")
+	local rule_width = vim.api.nvim_strwidth("─")
+	local narrow_rule_width = vim.api.nvim_strwidth("╌")
+	if
+		border_width < 1
+		or rule_width < 1
+		or narrow_rule_width ~= 1
+		or vim.api.nvim_strwidth(top and "┌" or "└") ~= border_width
+		or vim.api.nvim_strwidth(top and "┬" or "┴") ~= border_width
+		or vim.api.nvim_strwidth(top and "┐" or "┘") ~= border_width
+	then
+		return nil
+	end
+	local parts = { indent, top and "┌" or "└" }
+	for index = 2, #positions do
+		local gap = positions[index] - positions[index - 1] - border_width
+		parts[#parts + 1] = string.rep("─", math.floor(gap / rule_width))
+		if gap % rule_width ~= 0 then
+			parts[#parts + 1] = string.rep("╌", gap % rule_width)
+		end
+		parts[#parts + 1] = index == #positions and (top and "┐" or "┘") or (top and "┬" or "┴")
+	end
+	return table.concat(parts)
+end
+
+local function add_table_caps(lines, highlights, links, images, source_offsets, indent)
+	if
+		type(lines) ~= "table"
+		or #lines == 0
+		or type(highlights) ~= "table"
+		or #highlights ~= #lines
+		or type(links) ~= "table"
+		or #links ~= #lines
+		or type(source_offsets) ~= "table"
+		or #source_offsets ~= #lines
+		or type(source_offsets[#lines]) ~= "number"
+		or type(indent) ~= "string"
+		or (images ~= nil and type(images) ~= "table")
+	then
+		return lines, highlights, links, images, source_offsets
+	end
+	local positions
+	for row, line in ipairs(lines) do
+		if type(highlights[row]) ~= "table" or type(links[row]) ~= "table" then
+			return lines, highlights, links, images, source_offsets
+		end
+		local row_positions = border_positions(line, highlights[row], indent)
+		if row_positions then
+			if positions then
+				if not vim.deep_equal(positions, row_positions) then
+					return lines, highlights, links, images, source_offsets
+				end
+			else
+				positions = row_positions
+			end
+		end
+	end
+	if not positions then
+		return lines, highlights, links, images, source_offsets
+	end
+	for _, image in ipairs(images or {}) do
+		if type(image) ~= "table" or type(image.line_offset) ~= "number" then
+			return lines, highlights, links, images, source_offsets
+		end
+	end
+	local top = cap_line(indent, positions, true)
+	local bottom = cap_line(indent, positions, false)
+	local row_width = positions[#positions] + vim.api.nvim_strwidth("│")
+	if
+		not top
+		or not bottom
+		or vim.api.nvim_strwidth(top) ~= row_width
+		or vim.api.nvim_strwidth(bottom) ~= row_width
+	then
+		return lines, highlights, links, images, source_offsets
+	end
+	local last_offset = source_offsets[#source_offsets]
+	table.insert(lines, 1, top)
+	table.insert(highlights, 1, { { col = #indent, end_col = #top, hl = "FloatBorder" } })
+	table.insert(links, 1, {})
+	table.insert(source_offsets, 1, 0)
+	table.insert(lines, bottom)
+	table.insert(highlights, { { col = #indent, end_col = #bottom, hl = "FloatBorder" } })
+	table.insert(links, {})
+	table.insert(source_offsets, last_offset)
+	for _, image in ipairs(images or {}) do
+		image.line_offset = image.line_offset + 1
+	end
+	return lines, highlights, links, images, source_offsets
+end
+
 local function restore_link_text(cell, raw_line)
 	for _, link in ipairs(cell.links) do
 		local first = link.col_start
@@ -377,10 +507,11 @@ function M.configure(preview, wrap, markdown_table, postprocess)
 			local card_lines, card_highlights, card_links, card_images, card_offsets =
 				stacked_table(parsed, indent, max_width, buf_dir, original_render_table)
 			if card_lines then
-				return card_lines, card_highlights, card_links, card_images, card_offsets
+				lines, highlights, links, images, source_offsets =
+					card_lines, card_highlights, card_links, card_images, card_offsets
 			end
 		end
-		return lines, highlights, links, images, source_offsets
+		return add_table_caps(lines, highlights, links, images, source_offsets, indent)
 	end
 	local function parse_table(...)
 		local parsed = original_parse_table(...)
