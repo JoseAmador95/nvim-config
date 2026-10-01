@@ -294,6 +294,12 @@ run_check "native_review_projection_spec" "$NVIM_BIN" --headless -u NONE -i NONE
 	-l "$repo_root/tests/native_review_projection_spec.lua"
 run_check "native_review_diff_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/native_review_diff_spec.lua"
+run_check "native_review_difftastic_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_difftastic_spec.lua"
+run_check "native_review_engines_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_engines_spec.lua"
+run_check "native_review_engine_presenter_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_engine_presenter_spec.lua"
 run_check "native_review_structural_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/native_review_structural_spec.lua"
 run_check "review_structural_diff_spec" "$NVIM_BIN" --headless -u NONE -i NONE \

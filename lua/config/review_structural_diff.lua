@@ -96,11 +96,11 @@ local function write_snapshot(path, text, owned)
 	return true
 end
 
-local function argv(executable, request, metadata, directory)
+local function argv(executable, request, metadata, directory, analysis)
 	local command = {
 		executable,
-		"--display=side-by-side-show-both",
-		"--color=always",
+		analysis and "--display=json" or "--display=side-by-side-show-both",
+		analysis and "--color=never" or "--color=always",
 		"--background=" .. request.background,
 		"--width=" .. tostring(request.width),
 		"--strip-cr=off",
@@ -125,7 +125,7 @@ local function detail(message)
 end
 
 -- The cancellation handle also suppresses completion already queued for the UI.
-function M.run(request, callback)
+local function execute(request, callback, analysis)
 	local state = { files = {}, stdout = {}, stderr = {}, bytes = 0 }
 	local function cleanup()
 		if state.timer then
@@ -230,15 +230,19 @@ function M.run(request, callback)
 			end
 		end
 	end
-	local spawned, process = pcall(M._system, argv(executable, request, metadata, directory), {
+	local environment = {
+		PATH = vim.fs.dirname(executable) .. ":/usr/bin:/bin",
+		LANG = "C",
+		LC_ALL = "C",
+		TERM = "xterm-256color",
+	}
+	if analysis then
+		environment.DFT_UNSTABLE = "yes"
+	end
+	local spawned, process = pcall(M._system, argv(executable, request, metadata, directory, analysis), {
 		cwd = directory,
 		clear_env = true,
-		env = {
-			PATH = vim.fs.dirname(executable) .. ":/usr/bin:/bin",
-			LANG = "C",
-			LC_ALL = "C",
-			TERM = "xterm-256color",
-		},
+		env = environment,
 		text = false,
 		timeout = TIMEOUT_MS,
 		stdout = capture("stdout"),
@@ -287,6 +291,22 @@ function M.run(request, callback)
 		end
 	end
 	return cancel
+end
+
+-- Keep the human ANSI rendering separate from machine analysis.
+function M.run(request, callback)
+	return execute(request, callback, false)
+end
+
+---Analyze exact snapshots with the pinned unstable JSON contract.
+---@param request table
+---@param callback fun(output: string?, err: string?)
+---@return function cancel
+function M.analyze(request, callback)
+	if type(request) == "table" then
+		request = vim.tbl_extend("keep", request, { width = 80, background = "dark" })
+	end
+	return execute(request, callback, true)
 end
 
 return M

@@ -88,13 +88,16 @@ local function fixture()
 			end,
 		}
 	end
-	function calls:run(input)
-		local cancel = adapter.run(input or request(), function(output, err)
+	function calls:run(input, operation)
+		local cancel = adapter[operation or "run"](input or request(), function(output, err)
 			assert(not vim.in_fast_event(), "adapter callback ran in a fast event")
 			self.callbacks[#self.callbacks + 1] = { output = output, err = err }
 		end)
 		cancellations[#cancellations + 1] = cancel
 		return cancel
+	end
+	function calls:analyze(input)
+		return self:run(input, "analyze")
 	end
 	function calls:wait()
 		assert(
@@ -137,6 +140,7 @@ test("loading the adapter does not activate tool lifecycle or probe a process", 
 	package.preload["config.tool_bootstrap"] = original_preload
 	assert(ok, result)
 	assert(type(result.run) == "function")
+	assert(type(result.analyze) == "function")
 end)
 
 test("explicit execution resolves only the registered difftastic command", function()
@@ -404,6 +408,80 @@ test("timer setup failures terminate the process and clean snapshots", function(
 		calls:run()
 		assert(calls:wait().err:find("injected timer", 1, true))
 		assert(vim.deep_equal(calls.kills, { 9 }))
+		calls:clean()
+	end
+end)
+
+test("JSON analysis defaults geometry and returns raw output in a private environment", function()
+	local _, calls = fixture()
+	local input = request()
+	input.width, input.background = nil, nil
+	calls:analyze(input)
+	assert(input.width == nil and input.background == nil, "analysis mutated its caller's request")
+	assert(calls.argv[2] == "--display=json" and calls.argv[3] == "--color=never")
+	assert(calls.argv[4] == "--background=dark" and calls.argv[5] == "--width=80")
+	assert(calls.argv[6] == "--strip-cr=off")
+	assert(calls.options.clear_env == true and calls.options.env.DFT_UNSTABLE == "yes")
+	assert(vim.deep_equal(calls.options.env, {
+		PATH = "/verified/bin:/usr/bin:/bin",
+		LANG = "C",
+		LC_ALL = "C",
+		TERM = "xterm-256color",
+		DFT_UNSTABLE = "yes",
+	}))
+	assert(read_binary(calls.directory .. "/old") == input.entry.old_text)
+	assert(read_binary(calls.directory .. "/new") == input.entry.new_text)
+	local output = '{"language":"Lua","path":"file.lua","status":"unchanged"}\n'
+	calls.options.stdout(nil, output)
+	calls.exit({ code = 0, signal = 0 })
+	assert(calls:wait().output == output, "host parsed or rewrote plugin-owned JSON")
+	calls:clean()
+end)
+
+test("analysis preserves explicit geometry and rejects invalid requests before resolution", function()
+	local _, calls = fixture()
+	calls:analyze(request({ width = 123, background = "light" }))
+	assert(calls.argv[4] == "--background=light" and calls.argv[5] == "--width=123")
+	calls.exit({ code = 0, signal = 0 })
+	calls:wait()
+	calls:clean()
+	for _, input in ipairs({ false, request({ width = 0 }), request({ background = "auto" }) }) do
+		local adapter, invalid = fixture()
+		local cancel = adapter.analyze(input, function(output, err)
+			invalid.callbacks[#invalid.callbacks + 1] = { output = output, err = err }
+		end)
+		cancellations[#cancellations + 1] = cancel
+		assert(invalid.resolutions == 0 and invalid.argv == nil and invalid.directory == nil)
+		assert(invalid:wait().err)
+	end
+end)
+
+test("analysis shares output bounds deadline cancellation and scheduled-completion suppression", function()
+	for _, scenario in ipairs({ "overflow", "timeout", "cancel", "queued" }) do
+		local _, calls = fixture()
+		local cancel = calls:analyze()
+		if scenario == "overflow" then
+			calls.options.stdout(nil, string.rep("a", 8 * 1024 * 1024))
+			calls.options.stderr(nil, "overflow")
+			assert(calls:wait().err:find("8 MiB", 1, true))
+		elseif scenario == "timeout" then
+			calls.timer.callback()
+			assert(calls:wait().err:find("timed out after 5000 ms", 1, true))
+		elseif scenario == "cancel" then
+			cancel()
+			calls.options.stdout(nil, "late output")
+			calls.exit({ code = 0, signal = 0 })
+		else
+			calls.options.stdout(nil, "ready output")
+			calls.exit({ code = 0, signal = 0 })
+			cancel()
+		end
+		vim.wait(10, function()
+			return false
+		end, 1)
+		assert(#calls.kills == (scenario == "queued" and 0 or 1))
+		assert(#calls.callbacks == ((scenario == "overflow" or scenario == "timeout") and 1 or 0))
+		assert(calls.timer.closed and calls.timer.stopped)
 		calls:clean()
 	end
 end)

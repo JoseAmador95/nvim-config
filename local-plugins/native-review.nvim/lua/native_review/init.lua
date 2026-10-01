@@ -44,6 +44,7 @@ local MODULES = {
 	controller = "native_review.controller",
 	editor = "native_review.editor",
 	export = "native_review.export",
+	engines = "native_review.engines",
 	lsp = "native_review.lsp",
 	mode = "native_review.mode",
 	panel = "native_review.panel",

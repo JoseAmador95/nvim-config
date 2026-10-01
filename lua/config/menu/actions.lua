@@ -178,6 +178,7 @@ local commands = {
 	review_files = { "ReviewFiles" },
 	review_inline_comments = { "ReviewInlineComments" },
 	review_layout = { "ReviewLayout" },
+	review_engine = { "ReviewEngine" },
 	review_mode = { "ReviewMode" },
 	review_next = { "ReviewNext" },
 	review_open = { "ReviewOpen" },

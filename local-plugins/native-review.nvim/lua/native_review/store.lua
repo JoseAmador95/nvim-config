@@ -10,8 +10,10 @@ local uv = vim.uv
 -- The immutable review scope contract stays at v1. Persistence evolves
 -- independently so changing the store never changes scope/session identity.
 local SCOPE_VERSION = 1
-local STORE_VERSION = 2
+local STORE_VERSION = 3
 local LEGACY_STORE_VERSION = 1
+local PREVIOUS_STORE_VERSION = 2
+local OLDER_STORE_VERSIONS = { PREVIOUS_STORE_VERSION, LEGACY_STORE_VERSION }
 local MAX_BYTES = 1024 * 1024
 -- Recovery Markdown adds headings, status, and interruption diagnostics to the
 -- strict JSON payload. Four store payloads leave bounded headroom for that
@@ -23,6 +25,8 @@ local MAX_BODY = 64 * 1024
 local MAX_PATH = 4096
 local MAX_ANCHOR_LAYER = 128
 local MAX_ANCHOR_CONTEXT = 16 * 1024
+local MAX_ENGINE_ID = 64
+local MAX_ENGINE_VERSION = 128
 local MAX_LOCK_BYTES = 1024
 local LOCK_STALE_SECONDS = 30
 local LOCK_OWNER_NAME = "owner.json"
@@ -68,7 +72,7 @@ local SCOPE_KEYS = {
 	default_remote = true,
 }
 local LAYER_KEYS = { head = true, staged = true, unstaged = true, untracked = true }
-local ITEM_KEYS = {
+local PREVIOUS_ITEM_KEYS = {
 	id = true,
 	sequence = true,
 	type = true,
@@ -80,6 +84,8 @@ local ITEM_KEYS = {
 	created_at = true,
 	updated_at = true,
 }
+local ITEM_KEYS = vim.tbl_extend("force", {}, PREVIOUS_ITEM_KEYS, { origin_engine = true })
+local ORIGIN_ENGINE_KEYS = { id = true, version = true }
 local ANCHOR_KEYS = {
 	kind = true,
 	path = true,
@@ -109,8 +115,8 @@ local LEGACY_ITEM_KEYS = {
 local LEGACY_ANCHOR_KEYS = vim.tbl_extend("force", {}, ANCHOR_KEYS)
 LEGACY_ANCHOR_KEYS.kind = nil
 local DELIVERY_KEYS = { backend = true, receipt = true, delivered_at = true }
-local ADD_KEYS = { type = true, body = true, anchor = true }
-local EDIT_KEYS = ADD_KEYS
+local EDIT_KEYS = { type = true, body = true, anchor = true }
+local ADD_KEYS = vim.tbl_extend("force", {}, EDIT_KEYS, { origin_engine = true })
 
 local function object(value)
 	return type(value) == "table" and (next(value) == nil or not vim.islist(value))
@@ -214,6 +220,34 @@ local function bounded_string(value, maximum, label)
 		return nil, string.format("%s exceeds %d bytes", label, maximum)
 	end
 	return true
+end
+
+local function validate_origin_engine(value, label)
+	if value == nil then
+		return nil
+	end
+	if not object(value) then
+		return nil, label .. " must be an object"
+	end
+	local keys_ok, keys_err = exact_keys(value, ORIGIN_ENGINE_KEYS, label)
+	if not keys_ok then
+		return nil, keys_err
+	end
+	local id_ok, id_err = bounded_string(value.id, MAX_ENGINE_ID, label .. ".id")
+	if not id_ok then
+		return nil, id_err
+	end
+	if not value.id:match("^[a-z][a-z0-9_-]*$") then
+		return nil, label .. ".id must be a safe lowercase engine identifier"
+	end
+	local version_ok, version_err = bounded_string(value.version, MAX_ENGINE_VERSION, label .. ".version")
+	if not version_ok then
+		return nil, version_err
+	end
+	if value.version:find("[^ -~]") then
+		return nil, label .. ".version must contain only printable ASCII characters"
+	end
+	return { id = value.id, version = value.version }
 end
 
 local function positive_integer(value, label)
@@ -607,12 +641,12 @@ local function validate_delivery(delivery, seen, index, delivery_index)
 	return vim.deepcopy(delivery)
 end
 
-local function validate_item(item, seen, sequences, deps, index)
+local function validate_item(item, seen, sequences, deps, index, allowed_keys)
 	local label = "items[" .. index .. "]"
 	if not object(item) then
 		return nil, label .. " must be an object"
 	end
-	local keys_ok, keys_err = exact_keys(item, ITEM_KEYS, label)
+	local keys_ok, keys_err = exact_keys(item, allowed_keys or ITEM_KEYS, label)
 	if not keys_ok then
 		return nil, keys_err
 	end
@@ -650,6 +684,10 @@ local function validate_item(item, seen, sequences, deps, index)
 	if not body_ok then
 		return nil, body_err
 	end
+	local origin_engine, origin_err = validate_origin_engine(item.origin_engine, label .. ".origin_engine")
+	if origin_err then
+		return nil, origin_err
+	end
 	local anchor, anchor_err = normalize_anchor(item.anchor, deps, false)
 	if not anchor then
 		return nil, label .. "." .. anchor_err
@@ -675,6 +713,7 @@ local function validate_item(item, seen, sequences, deps, index)
 	sequences[item.sequence] = true
 	local copy = vim.deepcopy(item)
 	copy.type = canonical_type
+	copy.origin_engine = origin_engine
 	copy.anchor = anchor
 	copy.deliveries = {}
 	local delivered = {}
@@ -854,6 +893,14 @@ local function validate_session(session, root, deps)
 	return validate_session_version(session, root, deps, STORE_VERSION, validate_item)
 end
 
+local function validate_previous_item(item, seen, sequences, deps, index)
+	return validate_item(item, seen, sequences, deps, index, PREVIOUS_ITEM_KEYS)
+end
+
+local function validate_previous_session(session, root, deps)
+	return validate_session_version(session, root, deps, PREVIOUS_STORE_VERSION, validate_previous_item)
+end
+
 local function validate_legacy_session(session, root, deps)
 	return validate_session_version(session, root, deps, LEGACY_STORE_VERSION, validate_legacy_item)
 end
@@ -930,6 +977,19 @@ local function session_path(root, scope_id, create, deps, store_version)
 		return nil, directory_err
 	end
 	return vim.fs.joinpath(directory, scope_id .. ".json")
+end
+
+local function older_session_path(root, scope_id, deps)
+	for _, store_version in ipairs(OLDER_STORE_VERSIONS) do
+		local path, path_err = session_path(root, scope_id, false, deps, store_version)
+		if path and deps.uv.fs_lstat(path) then
+			return path, store_version
+		end
+		if not path and path_err ~= "missing" then
+			return nil, path_err
+		end
+	end
+	return nil, "missing"
 end
 
 local function read_lock_owner(lock_path, deps)
@@ -1086,8 +1146,9 @@ local function read_session(root, scope_id, deps)
 	return read_session_version(root, scope_id, deps, STORE_VERSION, validate_session)
 end
 
-local function read_legacy_session(root, scope_id, deps)
-	return read_session_version(root, scope_id, deps, LEGACY_STORE_VERSION, validate_legacy_session)
+local function read_legacy_session(root, scope_id, deps, store_version)
+	local validator = store_version == LEGACY_STORE_VERSION and validate_legacy_session or validate_previous_session
+	return read_session_version(root, scope_id, deps, store_version, validator)
 end
 
 local function migrate_legacy_item(item)
@@ -1123,6 +1184,11 @@ local function migrate_legacy_item(item)
 end
 
 local function migrate_legacy_value(legacy, root, deps)
+	if legacy.version == PREVIOUS_STORE_VERSION then
+		local migrated = vim.deepcopy(legacy)
+		migrated.version = STORE_VERSION
+		return validate_session(migrated, root, deps)
+	end
 	local migrated = {
 		version = STORE_VERSION,
 		revision = legacy.revision,
@@ -1160,11 +1226,11 @@ local function remove_created_file(path, deps)
 	return true
 end
 
-local function migration_backup_path(legacy_path)
-	return legacy_path:sub(1, -6) .. ".v1-backup"
+local function migration_backup_path(legacy_path, store_version)
+	return legacy_path:sub(1, -6) .. ".v" .. store_version .. "-backup"
 end
 
-local function write_migration_backup(path, encoded, deps)
+local function write_migration_backup(path, encoded, deps, store_version)
 	local existing = deps.uv.fs_lstat(path)
 	if existing then
 		local secured, secure_err = secure_file(path, deps)
@@ -1176,7 +1242,7 @@ local function write_migration_backup(path, encoded, deps)
 			return nil, read_err
 		end
 		if previous ~= encoded then
-			return nil, "existing v1 migration backup does not match the legacy session"
+			return nil, "existing v" .. store_version .. " migration backup does not match the legacy session"
 		end
 		return false
 	end
@@ -1185,7 +1251,7 @@ local function write_migration_backup(path, encoded, deps)
 		if deps.uv.fs_lstat(path) then
 			remove_created_file(path, deps)
 		end
-		return nil, "cannot create v1 migration backup: " .. tostring(write_err)
+		return nil, "cannot create v" .. store_version .. " migration backup: " .. tostring(write_err)
 	end
 	local secured, secure_err = secure_file(path, deps)
 	if not secured then
@@ -1203,24 +1269,24 @@ local function encode_session(session)
 	return encoded
 end
 
-local function load_legacy_session(root, scope_id, deps)
-	local legacy, legacy_err = read_legacy_session(root, scope_id, deps)
+local function load_legacy_session(root, scope_id, deps, store_version)
+	local legacy, legacy_err = read_legacy_session(root, scope_id, deps, store_version)
 	if not legacy then
 		return nil, legacy_err
 	end
 	local migrated, migration_err = migrate_legacy_value(legacy, root, deps)
 	if not migrated then
-		return nil, "cannot read v1 review session: " .. tostring(migration_err)
+		return nil, "cannot read v" .. store_version .. " review session: " .. tostring(migration_err)
 	end
-	local path, path_err = session_path(root, scope_id, false, deps, LEGACY_STORE_VERSION)
+	local path, path_err = session_path(root, scope_id, false, deps, store_version)
 	if not path then
 		return nil, path_err
 	end
 	return migrated, path
 end
 
-local function migrate_legacy_session(root, scope_id, deps)
-	local legacy_path, legacy_path_err = session_path(root, scope_id, false, deps, LEGACY_STORE_VERSION)
+local function migrate_legacy_session(root, scope_id, deps, store_version)
+	local legacy_path, legacy_path_err = session_path(root, scope_id, false, deps, store_version)
 	if not legacy_path then
 		return nil, legacy_path_err
 	end
@@ -1232,13 +1298,13 @@ local function migrate_legacy_session(root, scope_id, deps)
 		if deps.uv.fs_lstat(target_path) then
 			return read_session(root, scope_id, deps)
 		end
-		local legacy, legacy_read_err, legacy_encoded = read_legacy_session(root, scope_id, deps)
+		local legacy, legacy_read_err, legacy_encoded = read_legacy_session(root, scope_id, deps, store_version)
 		if not legacy then
 			return nil, legacy_read_err
 		end
 		local migrated, migration_err = migrate_legacy_value(legacy, root, deps)
 		if not migrated then
-			return nil, "cannot migrate v1 review session: " .. tostring(migration_err)
+			return nil, "cannot migrate v" .. store_version .. " review session: " .. tostring(migration_err)
 		end
 		local encoded, encode_err = encode_session(migrated)
 		if not encoded then
@@ -1248,8 +1314,8 @@ local function migrate_legacy_session(root, scope_id, deps)
 			if deps.uv.fs_lstat(target_path) then
 				return read_session(root, scope_id, deps)
 			end
-			local backup_path = migration_backup_path(legacy_path)
-			local backup_created, backup_err = write_migration_backup(backup_path, legacy_encoded, deps)
+			local backup_path = migration_backup_path(legacy_path, store_version)
+			local backup_created, backup_err = write_migration_backup(backup_path, legacy_encoded, deps, store_version)
 			if backup_created == nil then
 				return nil, backup_err
 			end
@@ -1264,9 +1330,9 @@ local function migrate_legacy_session(root, scope_id, deps)
 					rollback_ok = rollback_ok and backup_ok
 				end
 				if not rollback_ok then
-					return nil, "cannot write or roll back migrated v2 review session: " .. tostring(rollback_err)
+					return nil, "cannot write or roll back migrated v3 review session: " .. tostring(rollback_err)
 				end
-				return nil, "cannot write migrated v2 review session: " .. tostring(write_err)
+				return nil, "cannot write migrated v3 review session: " .. tostring(write_err)
 			end
 			local secured, secure_err = secure_file(target_path, deps)
 			if not secured then
@@ -1279,7 +1345,7 @@ local function migrate_legacy_session(root, scope_id, deps)
 					rollback_ok = rollback_ok and backup_ok
 				end
 				if not rollback_ok then
-					return nil, "cannot secure or roll back migrated v2 review session: " .. tostring(rollback_err)
+					return nil, "cannot secure or roll back migrated v3 review session: " .. tostring(rollback_err)
 				end
 				return nil, secure_err
 			end
@@ -1291,6 +1357,7 @@ local function migrate_legacy_session(root, scope_id, deps)
 					if not backup_ok and not rollback_err then
 						rollback_err = backup_remove_err
 					end
+					rollback_ok = rollback_ok and backup_ok
 				end
 				if not rollback_ok then
 					return nil, "migrated review failed reload validation and rollback: " .. tostring(rollback_err)
@@ -1378,17 +1445,14 @@ function M.load(root, scope_id, options)
 	if not path and path_err ~= "missing" then
 		return nil, path_err
 	end
-	local legacy_path, legacy_path_err = session_path(resolved_root, scope_id, false, deps, LEGACY_STORE_VERSION)
+	local legacy_path, version_or_err = older_session_path(resolved_root, scope_id, deps)
 	if not legacy_path then
-		if legacy_path_err == "missing" then
+		if version_or_err == "missing" then
 			return nil, "review state file is missing, a symlink, or non-regular"
 		end
-		return nil, legacy_path_err
+		return nil, version_or_err
 	end
-	if not deps.uv.fs_lstat(legacy_path) then
-		return nil, "review state file is missing, a symlink, or non-regular"
-	end
-	return load_legacy_session(resolved_root, scope_id, deps)
+	return load_legacy_session(resolved_root, scope_id, deps, version_or_err)
 end
 
 function M.save(root, session, options)
@@ -1406,15 +1470,14 @@ function M.save(root, session, options)
 		return nil, path_err
 	end
 	if not deps.uv.fs_lstat(path) then
-		local legacy_path, legacy_path_err =
-			session_path(resolved_root, validated.id, false, deps, LEGACY_STORE_VERSION)
-		if legacy_path and deps.uv.fs_lstat(legacy_path) then
-			local migrated, migration_err = migrate_legacy_session(resolved_root, validated.id, deps)
+		local legacy_path, version_or_err = older_session_path(resolved_root, validated.id, deps)
+		if legacy_path then
+			local migrated, migration_err = migrate_legacy_session(resolved_root, validated.id, deps, version_or_err)
 			if not migrated then
 				return nil, migration_err
 			end
-		elseif not legacy_path and legacy_path_err ~= "missing" then
-			return nil, legacy_path_err
+		elseif version_or_err ~= "missing" then
+			return nil, version_or_err
 		end
 	end
 	return with_session_lock(path, deps, function()
@@ -1501,18 +1564,20 @@ function M.list(root, options)
 		seen[id] = true
 		sessions[#sessions + 1] = session
 	end
-	local legacy_ids, legacy_err = version_session_ids(resolved_root, deps, LEGACY_STORE_VERSION)
-	if not legacy_ids then
-		return nil, legacy_err
-	end
-	for _, id in ipairs(legacy_ids) do
-		if not seen[id] then
-			local session, migration_err = load_legacy_session(resolved_root, id, deps)
-			if not session then
-				return nil, migration_err
+	for _, store_version in ipairs(OLDER_STORE_VERSIONS) do
+		local legacy_ids, legacy_err = version_session_ids(resolved_root, deps, store_version)
+		if not legacy_ids then
+			return nil, legacy_err
+		end
+		for _, id in ipairs(legacy_ids) do
+			if not seen[id] then
+				local session, migration_err = load_legacy_session(resolved_root, id, deps, store_version)
+				if not session then
+					return nil, migration_err
+				end
+				seen[id] = true
+				sessions[#sessions + 1] = session
 			end
-			seen[id] = true
-			sessions[#sessions + 1] = session
 		end
 	end
 	table.sort(sessions, function(left, right)
@@ -1558,6 +1623,7 @@ function M.add(session, values, options)
 			sequence = copy.next_sequence,
 			type = values.type,
 			body = values.body,
+			origin_engine = values.origin_engine,
 			anchor = anchor,
 			reply_to = vim.NIL,
 			resolution = "open",
@@ -1680,6 +1746,7 @@ function M.reply(session, parent_id, values, options)
 			sequence = copy.next_sequence,
 			type = item_type,
 			body = values.body,
+			origin_engine = values.origin_engine,
 			anchor = anchor,
 			reply_to = parent_id,
 			resolution = "open",
@@ -1725,7 +1792,7 @@ end
 ---Return a UI label without adding a persistable derived field.
 ---
 ---Legacy delivery metadata is deliberately inert. It remains part of the
----strict v2 codec but cannot change the native review lifecycle or UI state.
+---strict codec but cannot change the native review lifecycle or UI state.
 function M.item_status(item)
 	if item.resolution == "resolved" then
 		return "resolved"

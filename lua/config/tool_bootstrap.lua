@@ -134,7 +134,7 @@ local function canonical_encode(value, seen)
 	return "{" .. table.concat(pieces, ",") .. "}"
 end
 
-local MANAGED_ONLY = { ["markdown-preview"] = true, ["devcontainers-cli"] = true }
+local MANAGED_ONLY = { ["markdown-preview"] = true, ["devcontainers-cli"] = true, difftastic = true }
 
 local function external_recovery(name, detail)
 	detail = tostring(detail)

@@ -3,7 +3,7 @@
 `native-review.nvim` is the stateful review engine extracted from this Neovim
 configuration. It freezes exact Git scopes, builds immutable OLD/NEW models,
 presents unified-inline and native split views, owns the Files/Commits/Comments
-panel and comment composer, persists owner-only v1/v2 stores, renders complete
+panel and comment composer, persists owner-only v3 stores, reads v1/v2, renders complete
 Markdown exports, reanchors canonical comments, and provides a fail-closed
 CURRENT-only LSP and diagnostic bridge.
 
@@ -89,7 +89,39 @@ characters while retaining syntax foregrounds; theme changes rebuild the
 colors. Inserted/deleted lines retain their line backgrounds. Refinement skips
 blocks over 128 KiB or 8192 remaining graphemes and retains the line diff.
 Only the selected frozen entry's detail is cached across presentation changes.
-Neither canonical hunks, anchors, nor stored review schemas change.
+Canonical Git hunks and anchors remain independent of the display engine.
+
+`:ReviewEngine` or `<leader>rD` opens the numbered engine picker; use
+`:ReviewEngine main` or `:ReviewEngine difftastic` to choose directly. Main is
+the default at startup. Selection belongs to the workspace, travels with its
+layout/context preferences, and is never saved in the review store. Both
+engines use the existing inline and split reviewer, file panel and comments.
+The optional Difftastic engine requires the explicitly installed, verified
+0.71.0 tool; selecting it never installs anything or falls back to a host binary.
+
+Difftastic interprets private copies of the frozen OLD/NEW documents through
+its pinned unstable JSON format. Only structural changes receive backgrounds
+and character ranges. Formatting-only changes show `No structural changes`;
+full context remains commentable and unequal source bytes are kept separately.
+Split panes map aligned display rows to frozen source lines, with unanchorable
+blank filler rows. Scrolling and context visibility share this alignment;
+native diff does not reinterpret structural equivalence.
+Ranges crossing an alignment filler are rejected. When Difftastic reports a
+text fallback (unsupported language or analysis limits), that file uses Main
+and its winbar explains the effective engine; Difftastic remains selected.
+Engine requests prepare before replacing the view, cancel on owner changes,
+and reject malformed output. Failure retains the previous view. Engine changes
+are blocked while a composer is active. File presentation retains a synchronous
+API with a bounded, event-pumping wait for uncached analysis.
+
+Each new comment and reply captures `origin_engine = { id, version }` when its
+composer opens, using the effective engine for that file. Main records
+`builtin-v1` and the Neovim runtime version; Difftastic records `0.71.0`.
+Edits, resolution and reanchoring preserve this origin. Older comments show
+`not recorded`. Markdown exports and recovery exports include the origin and
+state that coordinates reference frozen original OLD/NEW sources. V1/v2 loads
+are read-only projections; explicit saves migrate to v3 with an exact backup
+and retain the original file. Scope identities and backend IDs do not change.
 
 The host's `:ReviewStructuralDiff` (also in the Review palette) opens a separate
 read-only float for the selected entry. Install its optional pinned Difftastic
@@ -97,8 +129,8 @@ read-only float for the selected entry. Install its optional pinned Difftastic
 opening a review never install or probe it. The float consumes colored human
 output for private copies of the exact frozen OLD/NEW snapshots, including
 their logical paths and modes; it never reads CURRENT source. `q` or `<Esc>`
-closes it. Binary and metadata-only entries are refused. Structural output has
-no comment coordinates or LSP authority and does not replace the main engine.
+closes it. Binary and metadata-only entries are refused. This auxiliary float has
+no comment coordinates or LSP authority and is independent of engine selection.
 Closing, replacing, refreshing, or tearing down the review cancels the render;
 late completion cannot recreate a closed view. Process output is capped at
 8 MiB, the deadline is 5 seconds, and snapshots are cleaned on every outcome.
@@ -110,6 +142,12 @@ The callback receives `(colored_stdout, nil)` or `(nil, error)` at most once;
 the plugin schedules UI handling and revalidates the owner before showing it.
 The adapter owns process cancellation, temporary files, and cleanup. Without
 this adapter, native review and its character detail remain fully available.
+An optional `analyze({ entry }, callback) -> cancel_function` method supplies
+raw single-file JSON for the integrated engine with the same bounded process
+contract. Parsing and source-coordinate validation belong to the plugin.
+`engines.list()`, `engines.origin(id)` and `engines.register(id, engine)` expose
+the registry; registered engines provide `label`, `version` and a cancellable
+`prepare(entry, callback)` operation. Engines never modify the canonical entry.
 
 ## Safety contracts
 
@@ -157,7 +195,8 @@ this adapter, native review and its character detail remain fully available.
   suspension physically releases review UI; only a successful explicit manual
   session save may request restoration.
 - Stores and recovery files use bounded input, atomic writes and owner-only
-  permissions. V1 and v2 stores are read without mass migration.
+  permissions. V1 and v2 stores are read without mass migration; v3 adds only
+  optional per-item engine provenance, not workspace preferences.
 - Every asynchronous comment workflow carries an immutable workspace-generation
   token, plus the item ID when applicable. Cancelled pickers are no-ops; a
   refreshed/replaced workspace or changed item fails closed before any later

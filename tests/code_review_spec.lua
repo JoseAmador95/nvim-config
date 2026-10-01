@@ -80,6 +80,7 @@ test("host registration and neutral observers preserve the first-action boundary
 		"ReviewPrev",
 		"ReviewRefresh",
 		"ReviewStructuralDiff",
+		"ReviewEngine",
 		"ReviewLayout",
 		"ReviewContext",
 		"ReviewInlineComments",
@@ -99,7 +100,7 @@ test("host registration and neutral observers preserve the first-action boundary
 	}) do
 		assert(vim.fn.exists(":" .. command) == 2, command .. " was not registered lazily")
 	end
-	assert(#review.mapping_specs() == 25, "host mapping catalogue is incomplete")
+	assert(#review.mapping_specs() == 26, "host mapping catalogue is incomplete")
 	require("config.statusline").refresh_buffer(0)
 	require("plugins.auto-session")
 	require("plugins.navic")
@@ -173,6 +174,7 @@ test("mapping table uses only the approved lowercase review vocabulary", functio
 		"<leader>rh",
 		"<leader>rl",
 		"<leader>rv",
+		"<leader>rD",
 		"<leader>rw",
 		"<leader>ri",
 		"<leader>rg",

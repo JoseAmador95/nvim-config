@@ -443,15 +443,16 @@ end)
 
 test("session preferences override normalized defaults", function()
 	equal(
-		{ layout = "inline", context = "hunks", inline_comments = true },
+		{ layout = "inline", context = "hunks", engine = "main", inline_comments = true },
 		native_review.controller._workspace_preferences(nil, nil),
 		"normalized defaults"
 	)
 	equal(
-		{ layout = "split", context = "full", inline_comments = false },
+		{ layout = "split", context = "full", engine = "difftastic", inline_comments = false },
 		native_review.controller._workspace_preferences(nil, {
 			layout = "split",
 			context = "full",
+			engine = "difftastic",
 			inline_comments = false,
 		}),
 		"session preference override"

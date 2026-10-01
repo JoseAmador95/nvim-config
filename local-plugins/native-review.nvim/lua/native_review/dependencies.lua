@@ -73,6 +73,10 @@ function M.setup(opts)
 			type(opts.structural_diff.run) == "function",
 			"native-review adapter structural_diff.run must be a function"
 		)
+		assert(
+			opts.structural_diff.analyze == nil or type(opts.structural_diff.analyze) == "function",
+			"native-review adapter structural_diff.analyze must be a function"
+		)
 	end
 	assert(opts.event == nil or type(opts.event) == "function", "native-review event adapter must be a function")
 	values = {}

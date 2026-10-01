@@ -1012,6 +1012,29 @@ test("Mason receipt tamper becomes drift without registry refresh", function()
 	assert(registry_refresh_count == 1, "local attestation refreshed the Mason registry")
 end)
 
+test("difftastic is managed-only at explicit installation and runtime resolution", function()
+	local external_difft = write_executable(host .. "/difft")
+	external.difftastic = { external_difft }
+	local probes = 0
+	bootstrap._system = function()
+		probes = probes + 1
+		return {
+			wait = function()
+				return { code = 0, stdout = "Difftastic 0.71.0", stderr = "" }
+			end,
+		}
+	end
+	local spec = assert(bootstrap.spec("difftastic"))
+	assert(spec.force_managed)
+	local before = release_install_count
+	assert(bootstrap.install("difftastic", false))
+	assert(release_install_count == before + 1 and probes == 0)
+	local resolved = assert(bootstrap.resolve("difftastic", "difft"))
+	assert(resolved == assert(vim.uv.fs_realpath(managed .. "/bin/difft")))
+	assert(resolved ~= vim.uv.fs_realpath(external_difft) and probes == 0)
+	external.difftastic = nil
+end)
+
 test("markdown-preview is managed-only and bang keeps managed authority", function()
 	local external_markdown = write_executable(host .. "/markdown-preview")
 	external["markdown-preview"] = { external_markdown }
