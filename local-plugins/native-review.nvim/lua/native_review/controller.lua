@@ -4886,7 +4886,8 @@ function M.structural_diff()
 	end
 	local snapshot = entry_snapshot(entry)
 	local generation = workspace.generation
-	local opened, err = review_structural.open(entry, function()
+	-- Model entries are immutable proxies; the snapshot exposes plain data.
+	local opened, err = review_structural.open(snapshot, function()
 		return workspace == current_workspace()
 			and workspace.generation == generation
 			and workspace.mode_on == true

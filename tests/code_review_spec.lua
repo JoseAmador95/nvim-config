@@ -593,6 +593,92 @@ test("comment sign highlights are theme-linked, restored, and user-overridable",
 	assert(vim.api.nvim_get_hl(0, { name = "NvimReviewCommentIssue", link = true }).link == "DiagnosticSignError")
 end)
 
+local function structural_model_regression(workspace, build, structural)
+	local fixture = vim.fn.tempname()
+	assert(vim.fn.mkdir(fixture, "p") == 1)
+	local adapter = package.loaded["config.review_structural_diff"]
+	local previous = { run = adapter.run, model = workspace.model, identity = workspace.entry_identity }
+	local function git(arguments)
+		local argv = { "git", "-C", fixture }
+		vim.list_extend(argv, arguments)
+		local result = vim.system(argv, { text = true }):wait()
+		assert(result.code == 0, result.stderr)
+		return vim.trim(result.stdout)
+	end
+	local ok, err = xpcall(function()
+		git({ "init", "-q" })
+		git({ "config", "user.email", "review@example.invalid" })
+		git({ "config", "user.name", "Review Fixture" })
+		git({ "config", "commit.gpgsign", "false" })
+		git({ "config", "core.filemode", "true" })
+		local old_lines = { "local x = 30", "local stable = true", "return x, stable" }
+		vim.fn.writefile(old_lines, fixture .. "/old.lua")
+		git({ "add", "old.lua" })
+		git({ "commit", "-qm", "base" })
+		local base = git({ "rev-parse", "HEAD" })
+		git({ "mv", "old.lua", "new.lua" })
+		local new_lines = vim.deepcopy(old_lines)
+		new_lines[1] = "local x = 60"
+		vim.fn.writefile(new_lines, fixture .. "/new.lua")
+		assert(vim.uv.fs_chmod(fixture .. "/new.lua", 493))
+		git({ "add", "new.lua" })
+		git({ "commit", "-qm", "rename and change" })
+		local model, model_err = build(fixture, {
+			kind = "range",
+			root = vim.uv.fs_realpath(fixture),
+			from_oid = base,
+			to_oid = git({ "rev-parse", "HEAD" }),
+		})
+		assert(model, vim.inspect(model_err))
+		local frozen = assert(model.entries[1])
+		assert(#model.entries == 1 and getmetatable(frozen) == false and next(frozen) == nil)
+		assert(frozen.renamed and frozen.old_path == "old.lua" and frozen.new_path == "new.lua")
+		assert(frozen.old_mode == "100644" and frozen.new_mode == "100755")
+		workspace.model = model
+		workspace.entry_identity = frozen.identity
+		local pending
+		adapter.run = function(request, callback)
+			pending = { request = request, callback = callback }
+			return function()
+				pending.cancelled = true
+			end
+		end
+		local origin = vim.api.nvim_get_current_win()
+		vim.cmd("ReviewStructuralDiff")
+		assert(pending, "structural command did not reach the adapter for an immutable Git entry")
+		local snapshot = pending.request.entry
+		assert(getmetatable(snapshot) == nil and snapshot ~= frozen)
+		for _, field in ipairs({ "path", "old_path", "new_path", "old_oid", "new_oid", "old_mode", "new_mode" }) do
+			assert(snapshot[field] == frozen[field], "structural snapshot changed " .. field)
+		end
+		assert(snapshot.old_text == table.concat(old_lines, "\n") .. "\n")
+		assert(snapshot.new_text == table.concat(new_lines, "\n") .. "\n")
+		assert(vim.deep_equal(snapshot.hunks, frozen.hunks) and #snapshot.hunks > 0)
+		snapshot.old_text = "adapter mutation"
+		snapshot.hunks[1][1] = 999
+		assert(frozen.old_text == table.concat(old_lines, "\n") .. "\n" and frozen.hunks[1][1] ~= 999)
+		local buf = vim.api.nvim_get_current_buf()
+		pending.callback("OLD 30   NEW 60\n", nil)
+		assert(
+			vim.wait(500, function()
+				return vim.api.nvim_buf_is_valid(buf)
+					and vim.bo[buf].buftype == "terminal"
+					and vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] == "OLD 30   NEW 60"
+			end, 1),
+			"structural float did not display the immutable entry's result"
+		)
+		structural.close()
+		assert(pending.cancelled and not vim.api.nvim_buf_is_valid(buf))
+		assert(vim.api.nvim_get_current_win() == origin)
+	end, debug.traceback)
+	structural.close()
+	adapter.run = previous.run
+	workspace.model = previous.model
+	workspace.entry_identity = previous.identity
+	vim.fn.delete(fixture, "rf")
+	assert(ok, err)
+end
+
 test("open owns one reusable review tab and preserves its ordinary invocation", function()
 	local native_review = require("config.native_review")
 	local review_lsp = native_review.lsp
@@ -1092,6 +1178,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 			)
 			structural.open = structural_open
 		end
+		structural_model_regression(workspace, originals.build, native_review.structural)
 		assert(workspace.inline_comments == true and workspace.session.inline_comments == nil)
 		assert(review.inline_comments("off") and workspace.inline_comments == false)
 		workspace = assert(review.open({ kind = "commit", rev = "HEAD" }, repository))
