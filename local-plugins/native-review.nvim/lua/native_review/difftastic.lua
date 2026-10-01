@@ -148,9 +148,13 @@ local function add_changes(result, side, record, lines, owners, seen)
 	if not source or not owners[side][line] then
 		return nil, "Difftastic chunk line is outside the original alignment"
 	elseif seen[side][line] then
-		return nil, "Difftastic chunks repeat a source line"
+		-- Overlapping JSON chunks can repeat the same complete line record.
+		-- Reuse its validated ranges while still checking the paired alignment.
+		if not vim.deep_equal(seen[side][line], record.changes) then
+			return nil, "Difftastic chunks disagree on a repeated source line"
+		end
+		return owners[side][line]
 	end
-	seen[side][line] = true
 	for _, change in ipairs(record.changes) do
 		if
 			not object(change)
@@ -173,6 +177,7 @@ local function add_changes(result, side, record, lines, owners, seen)
 			result.intraline[side][#result.intraline[side] + 1] = { line = line, start_col = first, end_col = last }
 		end
 	end
+	seen[side][line] = record.changes
 	return owners[side][line]
 end
 

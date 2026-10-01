@@ -167,6 +167,47 @@ test("unsorted chunks and ranges produce ordered structural hunks independent of
 	assert(value.projection.rows[1].hunk_index == nil)
 end)
 
+test("overlapping chunks reuse identical source records without duplicating ranges or anchors", function()
+	local model = entry("keep\na1b2\nold\n", "keep\na3b4\nnew\n")
+	local decoded = json("changed", { { 0, 0 }, { 1, 1 }, { 2, 2 }, { 3, 3 } }, {
+		{
+			{ lhs = side(0), rhs = side(0) },
+			{
+				lhs = side(1, { change(1, 2, "1"), change(3, 4, "2") }),
+				rhs = side(1, { change(1, 2, "3"), change(3, 4, "4") }),
+			},
+		},
+		{ { lhs = side(2, { change(0, 3, "old") }), rhs = side(2, { change(0, 3, "new") }) } },
+	})
+	local expected = normalize(model, decoded)
+	local original = vim.deepcopy(model)
+	table.insert(decoded.chunks[2], 1, vim.deepcopy(decoded.chunks[1][2]))
+	table.insert(decoded.chunks[2], 1, vim.deepcopy(decoded.chunks[1][1]))
+	-- A chunk can also repeat just one side of an aligned row.
+	decoded.chunks[3] = { { lhs = vim.deepcopy(decoded.chunks[1][2].lhs) } }
+	local value = normalize(model, decoded)
+	assert(vim.deep_equal(value, expected), "overlapping chunks changed the normalized presentation")
+	assert(vim.deep_equal(model, original), "overlapping chunks changed the frozen sources")
+end)
+
+test("repeated chunk records still validate contents and their opposite alignment", function()
+	local model = entry("keep\nold\n", "keep\nnew\n")
+	local decoded = json("changed", { { 0, 0 }, { 1, 1 }, { 2, 2 } }, {
+		{ { lhs = side(1, { change(0, 3, "old") }), rhs = side(1, { change(0, 3, "new") }) } },
+	})
+	for _, changes in ipairs({ {}, { change(0, 3, "forged") }, { change(0, 2, "ol") } }) do
+		local invalid = vim.deepcopy(decoded)
+		invalid.chunks[2] = { { lhs = side(1, changes) } }
+		rejects(model, invalid)
+	end
+	local reversed = vim.deepcopy(decoded)
+	table.insert(reversed.chunks, 1, { { lhs = side(1) } })
+	rejects(model, reversed, "disagree on a repeated source line")
+	local invalid = vim.deepcopy(decoded)
+	invalid.chunks[2] = { { lhs = vim.deepcopy(decoded.chunks[1][1].lhs), rhs = side(0) } }
+	rejects(model, invalid, "disagree with aligned_lines")
+end)
+
 test("nullable one-sided alignment covers originals and omits virtual EOF", function()
 	local model = entry("keep\nold", "keep\nextra\nnew\n")
 	local decoded = vim.json.decode(
@@ -316,7 +357,7 @@ test("alignment rejects missing repeated reversed virtual out-of-range and nonin
 	end
 end)
 
-test("chunks reject inconsistent alignment repeated records virtual EOF and malformed side maps", function()
+test("chunks reject inconsistent alignment conflicting repeats virtual EOF and malformed side maps", function()
 	local model = entry("keep\nold\n", "keep\nnew\n")
 	local alignment = { { 0, 0 }, { 1, 1 }, { 2, 2 } }
 	for _, chunks in ipairs({
