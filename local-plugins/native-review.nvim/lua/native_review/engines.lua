@@ -1,7 +1,10 @@
 -- Engines interpret frozen sources; they never own Git identities or anchors.
 local dependencies = require("native_review.dependencies")
 local difftastic = require("native_review.difftastic")
+local textual = require("native_review.textual")
+local gumtree = require("native_review.gumtree")
 local structural = dependencies.get("structural_diff")
+local gumtree_adapter = dependencies.get("gumtree")
 
 local M = {}
 local registry = {}
@@ -44,6 +47,13 @@ function M.prepare(id, entry, callback)
 		return function() end
 	end
 	return engine.prepare(entry, function(result, err)
+		if result and result.fallback_reason then
+			local reason = result.fallback_reason
+			result, err = textual.main(entry)
+			if result then
+				result.fallback_reason = reason
+			end
+		end
 		if result then
 			result.selected_engine = id
 			result.origin_engine = M.origin(result.fallback_reason and "main" or id)
@@ -55,11 +65,28 @@ end
 local runtime = vim.version()
 M.register("main", {
 	label = "Main",
-	version = ("builtin-v1 / Neovim %d.%d.%d"):format(runtime.major, runtime.minor, runtime.patch),
-	prepare = function(_, callback)
+	version = ("builtin-v2 / Neovim %d.%d.%d"):format(runtime.major, runtime.minor, runtime.patch),
+	prepare = function(entry, callback)
 		-- The presenter owns Main's selected-entry refinement cache.
-		callback({})
+		callback(textual.main(entry))
 		return function() end
+	end,
+})
+
+M.register("patience", {
+	label = "Patience",
+	version = ("builtin-v1 / Neovim %d.%d.%d"):format(runtime.major, runtime.minor, runtime.patch),
+	prepare = function(entry, callback)
+		callback(textual.patience(entry))
+		return function() end
+	end,
+})
+
+M.register("gumtree", {
+	label = "GumTree",
+	version = "4.0.0 / gumtree-simple / nvim-ts-v1",
+	prepare = function(entry, callback)
+		return gumtree.prepare(entry, gumtree_adapter, callback)
 	end,
 })
 

@@ -9,6 +9,7 @@ local review_lsp = require("native_review.lsp")
 local review_mode = require("native_review.mode")
 local review_projection = require("native_review.projection")
 local review_diff = require("native_review.diff")
+local review_relations = require("native_review.relations")
 
 local BAND_HIGHLIGHT = "NvimReviewNativeHunkBand"
 local OLD_LINE_HIGHLIGHT = "NvimReviewNativeDiffOld"
@@ -91,6 +92,7 @@ local function stronger_background(base, accent)
 end
 
 local function define_band_highlight()
+	review_relations.highlights()
 	vim.api.nvim_set_hl(0, BAND_HIGHLIGHT, { default = true, link = "StatusLine" })
 	vim.api.nvim_set_hl(0, OLD_NUMBER_HIGHLIGHT, { default = true, link = "DiffDelete" })
 	vim.api.nvim_set_hl(0, NEW_NUMBER_HIGHLIGHT, { default = true, link = "DiffAdd" })
@@ -552,7 +554,7 @@ end
 
 local function containing_symbol(presentation, side, hunk_index)
 	local probe
-	if presentation.structural then
+	if presentation.projected then
 		local projection = presentation.projection or presentation.split_projections[side]
 		local hunk = projection.hunks[hunk_index]
 		for line = hunk.first, hunk.last do
@@ -611,9 +613,9 @@ local function section_band_edges(presentation, section)
 	if section.first > section.last then
 		return false, false
 	end
-	-- Native diff inserts edge fillers; structural panes already align every
+	-- Native diff inserts edge fillers; projected panes already align every
 	-- display row and their section indices belong to the projection, not Git.
-	if presentation.structural or presentation.layout ~= "split" or not presentation.right then
+	if presentation.projected or presentation.layout ~= "split" or not presentation.right then
 		return true, true
 	end
 	local show_start = true
@@ -849,6 +851,9 @@ local function review_winbar(state, entry, side, layout, context)
 	if presentation.structural and presentation.structural.status == "unchanged" then
 		values[#values + 1] = "No structural changes"
 	end
+	if presentation.relations_limited then
+		values[#values + 1] = "Move analysis limited"
+	end
 	if type(comments) == "boolean" then
 		values[#values + 1] = "comments:" .. (comments and "on" or "off")
 	end
@@ -1025,6 +1030,7 @@ local function decorate(state, entry, buf, win, side, context, inline)
 		end
 	end
 	decorate_intraline(presentation, item, side, projected)
+	review_relations.decorate(presentation.relations, item, side, projected)
 	if presentation.structural and presentation.structural.status == "unchanged" then
 		add_band(item, 0, true, " No structural changes ")
 	end
@@ -1423,12 +1429,12 @@ function M.show(state, entry, options)
 	end
 	local previous_inline_view = capture_inline_view(state, entry)
 	local engine_result = options.engine_result or {}
-	local structural = engine_result.origin_engine and engine_result.origin_engine.id ~= "main" and engine_result or nil
+	local projected = engine_result.presentation == "projected" and engine_result or nil
 	local projection
 	if layout == "inline" and not entry.metadata_only then
 		local projection_err
-		if structural then
-			projection = structural.projection
+		if projected then
+			projection = projected.projection
 		else
 			projection, projection_err = review_projection.build(entry)
 		end
@@ -1437,19 +1443,19 @@ function M.show(state, entry, options)
 		end
 	end
 	local intraline, intraline_err
-	if structural then
-		intraline = structural.intraline
+	if projected then
+		intraline = projected.intraline
 	else
 		intraline, intraline_err = review_diff.for_entry(state, entry)
 	end
 	if not intraline then
 		return nil, "Could not refine review changes: " .. tostring(intraline_err)
 	end
-	local split_projections = structural
+	local split_projections = projected
 			and layout == "split"
 			and {
-				old = split_projection(structural, "old"),
-				new = split_projection(structural, "new"),
+				old = split_projection(projected, "old"),
+				new = split_projection(projected, "new"),
 			}
 		or nil
 	M.clear(state)
@@ -1465,16 +1471,19 @@ function M.show(state, entry, options)
 	local old_line_count = #text_lines(entry.old_text or "")
 	local new_line_count = #text_lines(entry.new_text or "")
 	local logical_old_line_count = entry.metadata_only and 0
-		or structural and structural.projection.sources.old.line_count
+		or projected and projected.projection.sources.old.line_count
 		or source_line_count(entry.old_text or "")
 	local logical_new_line_count = entry.metadata_only and 0
-		or structural and structural.projection.sources.new.line_count
+		or projected and projected.projection.sources.new.line_count
 		or source_line_count(entry.new_text or "")
 	local presentation = {
 		cursor_guards = {},
 		entry = entry,
 		intraline = intraline,
-		structural = structural,
+		projected = projected,
+		structural = engine_result.structural_only and projected or nil,
+		relations = engine_result.relations or {},
+		relations_limited = engine_result.relations_limited,
 		selected_engine = engine_result.selected_engine or "main",
 		origin_engine = engine_result.origin_engine,
 		fallback_reason = engine_result.fallback_reason,
@@ -1541,7 +1550,7 @@ function M.show(state, entry, options)
 		put_buffer(state.origin.win, left_buf)
 		if not entry.deleted then
 			local right_buf, real
-			if structural then
+			if projected then
 				right_buf, real =
 					unified_scratch(entry, split_projections.new, presentation.generation, state, "new"), false
 			else
@@ -1557,7 +1566,7 @@ function M.show(state, entry, options)
 			}
 			remember_owned(presentation, right_buf)
 			local scrollopt = vim.o.scrollopt
-			if structural then
+			if projected then
 				vim.wo[state.origin.win].scrollbind = false
 				vim.wo[right_win].scrollbind = false
 				vim.wo[state.origin.win].wrap = false

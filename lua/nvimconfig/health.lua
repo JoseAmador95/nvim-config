@@ -423,7 +423,8 @@ local function check_managed_release_eligibility()
 	local results = {}
 	for _, name in ipairs(toolchain.managed_order) do
 		local entry = toolchain.managed_tools[name]
-		local asset, target = toolchain.asset_for(entry, uname.sysname, uname.machine)
+		local release = entry.backend == "maven-release" and entry.jre or entry
+		local asset, target = toolchain.asset_for(release, uname.sysname, uname.machine)
 		results[#results + 1] = toolchain.identity(name, entry) .. "=" .. (asset and target or "unsupported")
 	end
 	health.info("Managed release platform/prerequisites (manifest only; no planning): " .. table.concat(results, ", "))

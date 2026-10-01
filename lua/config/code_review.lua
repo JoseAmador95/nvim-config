@@ -165,7 +165,9 @@ local function setup_commands()
 	end, {
 		nargs = "?",
 		complete = function()
-			return { "main", "difftastic" }
+			return vim.tbl_map(function(engine)
+				return engine.id
+			end, activate().engines.list())
 		end,
 	})
 	command("ReviewLayout", function(value)

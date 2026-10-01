@@ -1,4 +1,6 @@
 -- Structural split geometry must preserve canonical sources and screen rows.
+-- Run with -c 'lua dofile(...)': changing screen dimensions under -l precedes
+-- Neovim's screen allocation and can make redraw index the wrong grid size.
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 vim.o.hidden = true
@@ -11,6 +13,7 @@ package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.pa
 require("config.local_plugins").setup()
 local review = require("config.native_review")
 local difftastic = require("native_review.difftastic")
+local textual = require("native_review.textual")
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p", 448) == 1)
 local failures, count = {}, 0
@@ -247,6 +250,86 @@ test("CR-only bytes retain canonical single-line split coordinates", function()
 	assert(location.line == 1 and location.col == 19)
 	review.mode.disable(state)
 end)
+test("textual moves survive every layout/context with exact anchors and labels", function()
+	local block = "local alpha = 1\nlocal beta = 2\nreturn alpha + beta\n"
+	local context = {}
+	for line = 1, 20 do
+		context[line] = "-- shared context " .. line .. "\n"
+	end
+	local middle = table.concat(context)
+	local value = entry(block .. middle, middle .. block)
+	local original = vim.deepcopy(value)
+	local diffopt = vim.o.diffopt
+	for _, id in ipairs({ "main", "patience", "gumtree" }) do
+		local analysis = assert(id == "patience" and textual.patience(value) or textual.main(value))
+		assert(#analysis.relations == 1)
+		analysis.origin_engine = { id = id, version = "fixture" }
+		analysis.selected_engine = id
+		local state = review.mode.new({ root = fixture, model = { entries = { value } } })
+		assert(review.mode.enable(state))
+		local ok, err = xpcall(function()
+			for _, layout in ipairs({ "inline", "split" }) do
+				for _, visibility in ipairs({ "hunks", "full" }) do
+					assert(
+						review.presenter.show(
+							state,
+							value,
+							{ layout = layout, context = visibility, engine_result = analysis }
+						)
+					)
+					local p = state.presentation
+					assert(not p.structural)
+					assert((p.projected ~= nil) == (id == "patience"))
+					assert(vim.o.diffopt == diffopt and vim.deep_equal(original, value))
+					local labels = {}
+					for _, decoration in ipairs(p.decorations) do
+						for _, mark in
+							ipairs(
+								vim.api.nvim_buf_get_extmarks(
+									decoration.buf,
+									decoration.namespace,
+									0,
+									-1,
+									{ details = true }
+								)
+							)
+						do
+							for _, text in ipairs(mark[4].virt_text or {}) do
+								labels[#labels + 1] = text[1]
+							end
+						end
+					end
+					local joined = table.concat(labels, "\n")
+					assert(
+						joined:find("M1 move → NEW 21:1", 1, true) and joined:find("M1 move → OLD 1:1", 1, true),
+						joined
+					)
+					for _, side in ipairs({ "old", "new" }) do
+						local pane = layout == "inline" and p.inline or side == "old" and p.left or p.right
+						local mapping = layout == "inline" and p.projection or pane.projection
+						local source_line = side == "old" and 1 or 21
+						local display = mapping and mapping.by_source[side][source_line] or source_line
+						vim.api.nvim_set_current_win(pane.win)
+						vim.api.nvim_win_set_cursor(pane.win, { display, 0 })
+						vim.cmd("redraw!")
+						local location = assert(review.presenter.capture_location(state))
+						assert(location.line == source_line and location.side == side)
+						if mapping then
+							local range = assert(
+								review.presenter.resolve_range(state, display, display, p.generation, side, pane.win)
+							)
+							assert(range.start_line == source_line and range.end_line == source_line)
+						end
+						assert(vim.fn.screenpos(pane.win, display, 1).row > 0)
+					end
+				end
+			end
+		end, debug.traceback)
+		review.mode.disable(state)
+		assert(ok, err)
+	end
+end)
+
 vim.fn.delete(fixture, "rf")
 if #failures > 0 then
 	for _, failure in ipairs(failures) do

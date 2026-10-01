@@ -2102,9 +2102,6 @@ end
 -- asynchronous and the bounded wait pumps events, allowing owner cancellation.
 local function prepared_engine(workspace, entry)
 	local id = workspace.engine or "main"
-	if id == "main" then
-		return { selected_engine = id, origin_engine = review_engines.origin(id) }
-	end
 	local snapshot = entry_snapshot(entry)
 	local cache = workspace.engine_prepared
 	if cache and cache.id == id and entry_matches_snapshot(entry, cache.snapshot) then

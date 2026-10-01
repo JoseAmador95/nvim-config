@@ -11,6 +11,7 @@ M.versions = {
 	tree_sitter = "0.26.11",
 	mmdflux = "2.6.0",
 	difftastic = "0.71.0",
+	gumtree = "4.0.0",
 	plantuml = "1.2026.6",
 	["markdown-preview"] = "0.0.10",
 }
@@ -130,8 +131,256 @@ M.validation_tools = {
 	}),
 }
 
-M.managed_order = { "mmdflux", "plantuml", "markdown-preview", "difftastic" }
+M.managed_order = { "mmdflux", "plantuml", "markdown-preview", "difftastic", "gumtree" }
 M.managed_tools = {
+	-- Complete compile/runtime closure of core, client, and client.diff 4.0.0,
+	-- resolved from their published Maven POMs and inherited dependencyManagement.
+	-- Test/provided/optional dependencies and language generators are excluded.
+	-- SLF4J 2.0.18 wins the Spark 1.7.25 conflict, matching upstream Gradle.
+	gumtree = {
+		backend = "maven-release",
+		repository = "GumTreeDiff/gumtree",
+		tag = "v4.0.0",
+		executable = "gumtree",
+		executables = { gumtree = "gumtree" },
+		version_probe = "gumtree",
+		main_class = "com.github.gumtreediff.client.Run",
+		launcher_version = 1,
+		jars = {
+			{
+				coordinate = "com.fifesoft:rsyntaxtextarea:4.0.1",
+				file = "rsyntaxtextarea-4.0.1.jar",
+				url = "https://repo.maven.apache.org/maven2/com/fifesoft/rsyntaxtextarea/4.0.1/rsyntaxtextarea-4.0.1.jar",
+				sha256 = "fbe88919231bc468f9dddbd4450ef30634612a6e2ef3f84dff4f2789c8fc508e",
+			},
+			{
+				coordinate = "com.github.gumtreediff:client.diff:4.0.0",
+				file = "client.diff-4.0.0.jar",
+				url = "https://repo.maven.apache.org/maven2/com/github/gumtreediff/client.diff/4.0.0/client.diff-4.0.0.jar",
+				sha256 = "c45290fa282b9ca5648ad432afa38d453d51b73e80b274eb0eb61e92941a7b7d",
+			},
+			{
+				coordinate = "com.github.gumtreediff:client:4.0.0",
+				file = "client-4.0.0.jar",
+				url = "https://repo.maven.apache.org/maven2/com/github/gumtreediff/client/4.0.0/client-4.0.0.jar",
+				sha256 = "b321d5be56699860d9c25732a4c3bd850c6c0ddedac2c795342e6bc304a7f5c7",
+			},
+			{
+				coordinate = "com.github.gumtreediff:core:4.0.0",
+				file = "core-4.0.0.jar",
+				url = "https://repo.maven.apache.org/maven2/com/github/gumtreediff/core/4.0.0/core-4.0.0.jar",
+				sha256 = "6dc49e1b87e1b261f8edfd74e741120b6b6f6dd993d04ce6914e73081c92f174",
+			},
+			{
+				coordinate = "com.github.mpkorstanje:simmetrics-core:4.1.1",
+				file = "simmetrics-core-4.1.1.jar",
+				url = "https://repo.maven.apache.org/maven2/com/github/mpkorstanje/simmetrics-core/4.1.1/simmetrics-core-4.1.1.jar",
+				sha256 = "8c7ee773956ad0fab4369c99f575736d862bc295ae14fe3c90ffa5e257cca729",
+			},
+			{
+				coordinate = "com.google.code.gson:gson:2.14.0",
+				file = "gson-2.14.0.jar",
+				url = "https://repo.maven.apache.org/maven2/com/google/code/gson/gson/2.14.0/gson-2.14.0.jar",
+				sha256 = "2cbd119bf1961c28788310963dc80ba65f58cdeec1dd139c8bdb1240faa2c36f",
+			},
+			{
+				coordinate = "com.google.errorprone:error_prone_annotations:2.48.0",
+				file = "error_prone_annotations-2.48.0.jar",
+				url = "https://repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.48.0/error_prone_annotations-2.48.0.jar",
+				sha256 = "b49c5c958316ed67a09c699dda9aa749caf434d51d863dea599ef36a49b9c855",
+			},
+			{
+				coordinate = "com.google.guava:guava:19.0",
+				file = "guava-19.0.jar",
+				url = "https://repo.maven.apache.org/maven2/com/google/guava/guava/19.0/guava-19.0.jar",
+				sha256 = "58d4cc2e05ebb012bbac568b032f75623be1cb6fb096f3c60c72a86f7f057de4",
+			},
+			{
+				coordinate = "com.j2html:j2html:1.6.0",
+				file = "j2html-1.6.0.jar",
+				url = "https://repo.maven.apache.org/maven2/com/j2html/j2html/1.6.0/j2html-1.6.0.jar",
+				sha256 = "fa77bd6436340394ffd913d3528775522afd2dcd836eb7057f1f7605cc608bae",
+			},
+			{
+				coordinate = "com.sparkjava:spark-core:2.9.4",
+				file = "spark-core-2.9.4.jar",
+				url = "https://repo.maven.apache.org/maven2/com/sparkjava/spark-core/2.9.4/spark-core-2.9.4.jar",
+				sha256 = "99f4717695184e29ace24735bc539a7497775452b381b8080335adae3a985c3a",
+			},
+			{
+				coordinate = "commons-codec:commons-codec:1.10",
+				file = "commons-codec-1.10.jar",
+				url = "https://repo.maven.apache.org/maven2/commons-codec/commons-codec/1.10/commons-codec-1.10.jar",
+				sha256 = "4241dfa94e711d435f29a4604a3e2de5c4aa3c165e23bd066be6fc1fc4309569",
+			},
+			{
+				coordinate = "it.unimi.dsi:fastutil:8.5.19",
+				file = "fastutil-8.5.19.jar",
+				url = "https://repo.maven.apache.org/maven2/it/unimi/dsi/fastutil/8.5.19/fastutil-8.5.19.jar",
+				sha256 = "c767a6bdcb7cb52fe1315ca1f4891389a75e63b2a15a6629865d7740dd3a8cf2",
+			},
+			{
+				coordinate = "javax.servlet:javax.servlet-api:3.1.0",
+				file = "javax.servlet-api-3.1.0.jar",
+				url = "https://repo.maven.apache.org/maven2/javax/servlet/javax.servlet-api/3.1.0/javax.servlet-api-3.1.0.jar",
+				sha256 = "af456b2dd41c4e82cf54f3e743bc678973d9fe35bd4d3071fa05c7e5333b8482",
+			},
+			{
+				coordinate = "org.apfloat:apfloat:1.14.0",
+				file = "apfloat-1.14.0.jar",
+				url = "https://repo.maven.apache.org/maven2/org/apfloat/apfloat/1.14.0/apfloat-1.14.0.jar",
+				sha256 = "14fa3dee487b9d8de6d0ff7c39526159405c0879a65c817f959c9575e4b14820",
+			},
+			{
+				coordinate = "org.atteo.classindex:classindex:3.13",
+				file = "classindex-3.13.jar",
+				url = "https://repo.maven.apache.org/maven2/org/atteo/classindex/classindex/3.13/classindex-3.13.jar",
+				sha256 = "8e537601db7d761bd0010834fb364be2372c2a67c5c86f16ccc3ff47a08eeea4",
+			},
+			{
+				coordinate = "org.eclipse.jetty.websocket:websocket-api:9.4.48.v20220622",
+				file = "websocket-api-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/websocket/websocket-api/9.4.48.v20220622/websocket-api-9.4.48.v20220622.jar",
+				sha256 = "87fb052324d6c5e22f58fb729169913bb318d97921115640c3dca453c7eb19e1",
+			},
+			{
+				coordinate = "org.eclipse.jetty.websocket:websocket-client:9.4.48.v20220622",
+				file = "websocket-client-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/websocket/websocket-client/9.4.48.v20220622/websocket-client-9.4.48.v20220622.jar",
+				sha256 = "432d9d85734be8acbdbc3656200d2b1d540574c9bebe0b4f75a3f8bbe402a2f1",
+			},
+			{
+				coordinate = "org.eclipse.jetty.websocket:websocket-common:9.4.48.v20220622",
+				file = "websocket-common-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/websocket/websocket-common/9.4.48.v20220622/websocket-common-9.4.48.v20220622.jar",
+				sha256 = "1f630339e7e7f6de5d7f47f9496495d7689ad41fc11565aaf11ce9e22ff6ccda",
+			},
+			{
+				coordinate = "org.eclipse.jetty.websocket:websocket-server:9.4.48.v20220622",
+				file = "websocket-server-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/websocket/websocket-server/9.4.48.v20220622/websocket-server-9.4.48.v20220622.jar",
+				sha256 = "32ad18b3c610a5036c33d2e6bdf76eb46759fb8e067483d7a96f94e3909a4285",
+			},
+			{
+				coordinate = "org.eclipse.jetty.websocket:websocket-servlet:9.4.48.v20220622",
+				file = "websocket-servlet-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/websocket/websocket-servlet/9.4.48.v20220622/websocket-servlet-9.4.48.v20220622.jar",
+				sha256 = "28aeea9ac33a3f6d22e31ed2a6079abc35ce3ec1d5c80e1cc13859f536680b25",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-client:9.4.48.v20220622",
+				file = "jetty-client-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-client/9.4.48.v20220622/jetty-client-9.4.48.v20220622.jar",
+				sha256 = "7f89fe0900d36b296275999992a6ad76d523be35487d613d8fb56434c34d1d15",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-http:9.4.48.v20220622",
+				file = "jetty-http-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-http/9.4.48.v20220622/jetty-http-9.4.48.v20220622.jar",
+				sha256 = "c99914804c25288fde0470530411258ee4bab83b69ad764149c816c984f8175e",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-io:9.4.48.v20220622",
+				file = "jetty-io-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-io/9.4.48.v20220622/jetty-io-9.4.48.v20220622.jar",
+				sha256 = "4d2f60a0348905a0a70bb266d1eb23a29959281391aba54d17d4a3a0460b8b47",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-security:9.4.48.v20220622",
+				file = "jetty-security-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-security/9.4.48.v20220622/jetty-security-9.4.48.v20220622.jar",
+				sha256 = "43039b0f58a156a7f1b9b7750ad82f7fcdd5dba81717b970c381cb1b8618ff73",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-server:9.4.48.v20220622",
+				file = "jetty-server-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-server/9.4.48.v20220622/jetty-server-9.4.48.v20220622.jar",
+				sha256 = "dbb2b64216b0f10db591319c313979c1389249a196afb9690c022a923c0f0f77",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-servlet:9.4.48.v20220622",
+				file = "jetty-servlet-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-servlet/9.4.48.v20220622/jetty-servlet-9.4.48.v20220622.jar",
+				sha256 = "eabc36f43fb4080b7d02e1fbcad0b437e035d3adc7bfd7a89b3cdeb22247e682",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-util-ajax:9.4.48.v20220622",
+				file = "jetty-util-ajax-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-util-ajax/9.4.48.v20220622/jetty-util-ajax-9.4.48.v20220622.jar",
+				sha256 = "b5d4b40be3cf9f48b3d5f8e5918066724a620cb901684939c9f1dd7ec1b930cb",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-util:9.4.48.v20220622",
+				file = "jetty-util-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-util/9.4.48.v20220622/jetty-util-9.4.48.v20220622.jar",
+				sha256 = "24cafd449ca4b4bea9c2792b28fc6fe1c43beb628c0c1a0a72ee33afeac82b87",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-webapp:9.4.48.v20220622",
+				file = "jetty-webapp-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-webapp/9.4.48.v20220622/jetty-webapp-9.4.48.v20220622.jar",
+				sha256 = "bdb33dd7e9a30ea428f301010d08c7f69b37ec75dda340b79a86e95149fec0b2",
+			},
+			{
+				coordinate = "org.eclipse.jetty:jetty-xml:9.4.48.v20220622",
+				file = "jetty-xml-9.4.48.v20220622.jar",
+				url = "https://repo.maven.apache.org/maven2/org/eclipse/jetty/jetty-xml/9.4.48.v20220622/jetty-xml-9.4.48.v20220622.jar",
+				sha256 = "fe94705c7f49fe56194abfc16050fafc44be0faf691a2e6dca13c5d343a2bea5",
+			},
+			{
+				coordinate = "org.jgrapht:jgrapht-core:1.5.3",
+				file = "jgrapht-core-1.5.3.jar",
+				url = "https://repo.maven.apache.org/maven2/org/jgrapht/jgrapht-core/1.5.3/jgrapht-core-1.5.3.jar",
+				sha256 = "a026a34523286e1bf510e4bd4625935e3c97ce0fc40e1891f4262309f3b64c3e",
+			},
+			{
+				coordinate = "org.jheaps:jheaps:0.14",
+				file = "jheaps-0.14.jar",
+				url = "https://repo.maven.apache.org/maven2/org/jheaps/jheaps/0.14/jheaps-0.14.jar",
+				sha256 = "49a9898da3758659388f1333c53ccadb6fbd142a7d18aa7b1a33577090684279",
+			},
+			{
+				coordinate = "org.slf4j:slf4j-api:2.0.18",
+				file = "slf4j-api-2.0.18.jar",
+				url = "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/2.0.18/slf4j-api-2.0.18.jar",
+				sha256 = "44508fd1576500688c790b190acdd16fec4f8c79a3e0b900afd70503cf055f55",
+			},
+			{
+				coordinate = "org.slf4j:slf4j-nop:2.0.18",
+				file = "slf4j-nop-2.0.18.jar",
+				url = "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-nop/2.0.18/slf4j-nop-2.0.18.jar",
+				sha256 = "40e6be27d583d884183ca466cd20203112691f2a075a650e9e8d5c2e51aa5f49",
+			},
+		},
+		jre = {
+			version = "17.0.20.1+1",
+			repository = "adoptium/temurin17-binaries",
+			tag = "jdk-17.0.20.1%2B1",
+			archive_root = "jdk-17.0.20.1+1-jre",
+			assets = {
+				["darwin-arm64"] = {
+					archive = "OpenJDK17U-jre_aarch64_mac_hotspot_17.0.20.1_1.tar.gz",
+					java = "Contents/Home/bin/java",
+					sha256 = "190480874ccceb358cbc840393207f77ac3e63a4c5f8129d0e23e9518b96ad05",
+				},
+				["darwin-x86_64"] = {
+					archive = "OpenJDK17U-jre_x64_mac_hotspot_17.0.20.1_1.tar.gz",
+					java = "Contents/Home/bin/java",
+					sha256 = "333cb81123c36568586646c73c8fa2326dab8badc43f5ea388a90fff59c9df27",
+				},
+				["linux-arm64"] = {
+					archive = "OpenJDK17U-jre_aarch64_linux_hotspot_17.0.20.1_1.tar.gz",
+					java = "bin/java",
+					sha256 = "b8efcd5acc9109fe8d35bed132499643048a257b4f6042906ece37d03c839d77",
+				},
+				["linux-x86_64"] = {
+					archive = "OpenJDK17U-jre_x64_linux_hotspot_17.0.20.1_1.tar.gz",
+					java = "bin/java",
+					sha256 = "0b2b640e3046b64c8ec504de0ab9d91bb5610182bda21fad454681ce54d45a62",
+				},
+			},
+		},
+	},
 	difftastic = release("Wilfred/difftastic", "0.71.0", "difft", {
 		["darwin-arm64"] = {
 			archive = "difft-0.71.0-aarch64-apple-darwin.tar.gz",

@@ -139,30 +139,6 @@ local function normalized_alignment(values, sources)
 	return result, nil, owners
 end
 
-local function canonical_alignment(canonical)
-	local result = {}
-	local index = 1
-	while index <= #canonical.rows do
-		local row = canonical.rows[index]
-		if row.old_line and row.new_line then
-			result[#result + 1] = { old_line = row.old_line, new_line = row.new_line }
-		elseif row.hunk_index then
-			local hunk = canonical.hunks[row.hunk_index]
-			for offset = 0, math.max(hunk.old_count, hunk.new_count) - 1 do
-				result[#result + 1] = {
-					old_line = offset < hunk.old_count and hunk.old_start + offset or nil,
-					new_line = offset < hunk.new_count and hunk.new_start + offset or nil,
-				}
-			end
-			while canonical.rows[index + 1] and canonical.rows[index + 1].hunk_index == row.hunk_index do
-				index = index + 1
-			end
-		end
-		index = index + 1
-	end
-	return result
-end
-
 local function add_changes(result, side, record, lines, owners, seen)
 	if not object(record) or not integer(record.line_number) or not list(record.changes) then
 		return nil, "Difftastic chunk side has invalid line_number or changes"
@@ -365,7 +341,7 @@ local function local_status(result, canonical, decoded)
 			return nil, "Difftastic " .. result.status .. " output must omit alignment and chunks"
 		end
 	end
-	result.aligned_lines = canonical_alignment(canonical)
+	result.aligned_lines = projection.alignment(canonical)
 	if result.status == "created" or result.status == "deleted" then
 		local side = result.status == "created" and "new" or "old"
 		local other = side == "old" and "new" or "old"
@@ -417,6 +393,9 @@ function M.normalize(entry, decoded)
 		return nil, lines_err
 	end
 	local result = {
+		presentation = "projected",
+		structural_only = true,
+		relations = {},
 		aligned_lines = {},
 		intraline = { old = {}, new = {} },
 		language = decoded.language,

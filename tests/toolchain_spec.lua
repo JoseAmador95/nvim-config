@@ -41,6 +41,7 @@ test("toolchain manifest is pinned and independent of Neovim", function()
 		tree_sitter = "0.26.11",
 		mmdflux = "2.6.0",
 		difftastic = "0.71.0",
+		gumtree = "4.0.0",
 		plantuml = "1.2026.6",
 		["markdown-preview"] = "0.0.10",
 	}
@@ -71,13 +72,15 @@ end)
 
 test("managed releases are prebuilt and target-aware", function()
 	local toolchain = require("config.toolchain")
-	assert(vim.deep_equal(toolchain.managed_order, { "mmdflux", "plantuml", "markdown-preview", "difftastic" }))
+	assert(
+		vim.deep_equal(toolchain.managed_order, { "mmdflux", "plantuml", "markdown-preview", "difftastic", "gumtree" })
+	)
 	for _, name in ipairs(toolchain.managed_order) do
 		local entry = assert(toolchain.managed_tools[name], name)
 		assert(entry.version == toolchain.versions[name])
 		assert(entry.repository and entry.tag and entry.executable)
 		assert(vim.deep_equal(toolchain.executable_map(entry), { [entry.executable] = entry.executable }))
-		for _, asset in pairs(entry.assets) do
+		for _, asset in pairs(entry.assets or {}) do
 			assert(asset.archive and asset.sha256 and #asset.sha256 == 64)
 			local layout = toolchain.release_layout(entry, asset)
 			assert(layout.commands[entry.executable] == "bin/" .. entry.executable)

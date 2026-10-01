@@ -3884,6 +3884,9 @@ local function normalize_relative(value, label)
 end
 
 function runtime_authority.normalize_bundle_receipt_header(identity, value)
+	if identity.backend == "maven-release" then
+		return runtime_authority.normalize_maven_receipt_header(identity, value)
+	end
 	if
 		type(value) ~= "table"
 		or not exact_keys(value, {
@@ -3920,6 +3923,108 @@ function runtime_authority.normalize_bundle_receipt_header(identity, value)
 		or value.bin.devcontainer ~= "devcontainer.js"
 	then
 		return nil, "npm bundle receipt header is invalid"
+	end
+	return copy(value)
+end
+
+function runtime_authority.normalize_maven_receipt_header(identity, value)
+	if
+		type(value) ~= "table"
+		or not exact_keys(value, {
+			schema = true,
+			kind = true,
+			name = true,
+			version = true,
+			target = true,
+			source_sha256 = true,
+			source = true,
+		})
+		or value.schema ~= 1
+		or value.kind ~= "verified-maven-bundle-receipt"
+		or value.name ~= identity.name
+		or value.version ~= identity.version
+		or value.target ~= identity.target
+		or not valid_sha256(value.source_sha256)
+		or identity.digest ~= "sha256:" .. value.source_sha256
+	then
+		return nil, "Maven bundle receipt header is invalid"
+	end
+	local source = value.source
+	if
+		type(source) ~= "table"
+		or not exact_keys(source, {
+			schema = true,
+			backend = true,
+			name = true,
+			version = true,
+			target = true,
+			jars = true,
+			jre = true,
+			main_class = true,
+			launcher_version = true,
+		})
+		or source.schema ~= 1
+		or source.backend ~= "maven-release"
+		or source.name ~= identity.name
+		or source.version ~= identity.version
+		or source.target ~= identity.target
+		or type(source.main_class) ~= "string"
+		or not source.main_class:match("^[%w_.]+$")
+		or source.launcher_version ~= 1
+		or type(source.jars) ~= "table"
+		or not vim.islist(source.jars)
+		or #source.jars == 0
+		or #source.jars > 128
+	then
+		return nil, "Maven bundle source contract is invalid"
+	end
+	local seen = {}
+	for _, jar in ipairs(source.jars) do
+		if
+			type(jar) ~= "table"
+			or not exact_keys(jar, { coordinate = true, file = true, url = true, sha256 = true })
+			or type(jar.coordinate) ~= "string"
+			or type(jar.file) ~= "string"
+			or not valid_sha256(jar.sha256)
+		then
+			return nil, "Maven JAR contract is invalid"
+		end
+		local group, name, version = jar.coordinate:match("^([%w_.-]+):([%w_.-]+):([%w_.+-]+)$")
+		if
+			not group
+			or jar.file ~= name .. "-" .. version .. ".jar"
+			or seen[jar.file]
+			or jar.url
+				~= ("https://repo.maven.apache.org/maven2/%s/%s/%s/%s"):format(
+					group:gsub("%.", "/"),
+					name,
+					version,
+					jar.file
+				)
+		then
+			return nil, "Maven JAR URL or filename is not canonical"
+		end
+		seen[jar.file] = true
+	end
+	local jre = source.jre
+	if
+		type(jre) ~= "table"
+		or not exact_keys(jre, { version = true, url = true, sha256 = true, java = true, archive_root = true })
+		or type(jre.version) ~= "string"
+		or not jre.version:match("^[%d.+]+$")
+		or not valid_sha256(jre.sha256)
+		or type(jre.url) ~= "string"
+		or not jre.url:match(
+			"^https://github%.com/adoptium/temurin17%-binaries/releases/download/[^/]+/OpenJDK17U%-jre_[%w_.-]+%.tar%.gz$"
+		)
+		or not normalize_relative(jre.java, "private Java")
+		or not normalize_relative(jre.archive_root, "JRE archive root")
+	then
+		return nil, "private JRE contract is invalid"
+	end
+	local encoded = canonical_encode(source)
+	if not encoded or hash(encoded) ~= value.source_sha256 then
+		return nil, "Maven source digest differs from its exact artifacts"
 	end
 	return copy(value)
 end
@@ -3997,7 +4102,7 @@ local function normalize_integrity(identity, manifest, executables)
 			artifacts = sorted_keys(artifacts),
 		}
 	end
-	if identity.backend == "npm-release" then
+	if identity.backend == "npm-release" or identity.backend == "maven-release" then
 		if
 			not exact_keys(integrity, {
 				kind = true,
@@ -4010,7 +4115,7 @@ local function normalize_integrity(identity, manifest, executables)
 			or not valid_sha256(integrity.source_sha256)
 			or identity.digest ~= "sha256:" .. integrity.source_sha256
 		then
-			return nil, "npm bundle integrity manifest is invalid"
+			return nil, "bundle integrity manifest is invalid"
 		end
 		local receipt = runtime_authority.normalize_bundle_receipt_header(identity, integrity.receipt)
 		local receipt_path = type(integrity.receipt_path) == "string" and vim.fs.normalize(integrity.receipt_path)
@@ -4024,7 +4129,7 @@ local function normalize_integrity(identity, manifest, executables)
 			or vim.fs.basename(receipt_path) ~= integrity.source_sha256 .. ".json"
 			or contained(receipt_path, identity.install_root)
 		then
-			return nil, "npm bundle receipt authority is invalid"
+			return nil, "bundle receipt authority is invalid"
 		end
 		return {
 			kind = "bundle-sha256",
@@ -4624,33 +4729,17 @@ function runtime_authority.normalize_bundle_entries(value)
 end
 
 function runtime_authority.normalize_bundle_receipt(plan, value)
-	if
-		type(value) ~= "table"
-		or not exact_keys(value, {
-			schema = true,
-			kind = true,
-			name = true,
-			package = true,
-			version = true,
-			target = true,
-			source_tarball = true,
-			source_integrity = true,
-			source_sha256 = true,
-			node_version = true,
-			node_archive_sha256 = true,
-			bin = true,
-			bytes = true,
-			entries = true,
-			closure_sha256 = true,
-		})
-	then
+	if type(value) ~= "table" then
 		return nil, "bundle receipt envelope is invalid"
 	end
 	local header = copy(value)
 	header.bytes = nil
 	header.entries = nil
 	header.closure_sha256 = nil
-	if not vim.deep_equal(header, plan.manifest.integrity.receipt) then
+	if
+		not runtime_authority.normalize_bundle_receipt_header(plan.identity, header)
+		or not vim.deep_equal(header, plan.manifest.integrity.receipt)
+	then
 		return nil, "bundle receipt header differs from the manifest"
 	end
 	local entries, total = runtime_authority.normalize_bundle_entries(value.entries)
@@ -4667,6 +4756,30 @@ function runtime_authority.normalize_bundle_receipt(plan, value)
 	local encoded = canonical_encode(entries)
 	if not encoded or hash(encoded) ~= value.closure_sha256 then
 		return nil, "bundle receipt closure digest is invalid"
+	end
+	if plan.identity.backend == "maven-release" then
+		local files = {}
+		for _, entry in ipairs(entries) do
+			if entry.kind == "file" then
+				files[entry.path] = entry
+			end
+		end
+		for _, jar in ipairs(header.source.jars) do
+			local file = files["payload/lib/" .. jar.file]
+			if not file or file.mode ~= PRIVATE_FILE_MODE or file.sha256 ~= jar.sha256 then
+				return nil, "Maven closure differs from its pinned JAR source"
+			end
+		end
+		local java = files["payload/jre/" .. header.source.jre.java]
+		local launcher = files["payload/bin/gumtree"]
+		if
+			not java
+			or java.mode ~= PRIVATE_DIRECTORY_MODE
+			or not launcher
+			or launcher.mode ~= PRIVATE_DIRECTORY_MODE
+		then
+			return nil, "Maven closure lacks its private runtime or launcher"
+		end
 	end
 	return { bytes = total, entries = entries, sha256 = value.closure_sha256 }
 end
@@ -4795,6 +4908,12 @@ function runtime_authority.fingerprint_bundle(root)
 		return nil, recheck_err
 	end
 	return { bytes = aggregate.bytes, entries = entries, sha256 = hash(encoded) }
+end
+
+-- Backends may fingerprint private staging with exactly the runtime verifier.
+-- This reads files only; it neither writes authority nor grants a tool proof.
+function M.fingerprint_bundle(root)
+	return runtime_authority.fingerprint_bundle(root)
 end
 
 function runtime_authority.validate_bundle_receipt(plan, expected_receipt_sha256)

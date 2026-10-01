@@ -16,6 +16,7 @@ closed and never fall through to `$PATH` or a project-local `node_modules/.bin`.
 | nvim-lint | A copied linter definition receives a command function that resolves immediately before `uv.spawn`. |
 | DAP | debugpy and codelldb resolve after durable `debug` authority and immediately before the adapter callback receives its launch command. |
 | Diagrams | Managed mmdflux and PlantUML resolve for each render request before the cancellable stage pipeline is built. |
+| Review engines | Difftastic and GumTree resolve immediately before analysis. GumTree's launcher, fixed Maven JAR closure and private JRE are one attested bundle; host Java is never selected. |
 | JQX / JsonTree | The host adapter resolves jq for each request and invokes it as an argv vector with buffer content on stdin. The pinned `nvim-jqx` package supplies visual defaults only; its shell-string commands, completion functions, mapping, and autocmd are synchronously reclaimed. |
 
 Loading the consumer modules does not resolve, probe, install, repair, or start a

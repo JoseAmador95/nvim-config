@@ -41,6 +41,7 @@ function M.setup(opts)
 				or name == "clipboard"
 				or name == "lsp_navigation"
 				or name == "structural_diff"
+				or name == "gumtree"
 				or name == "config"
 				or name == "event",
 			"unknown native-review adapter: " .. name
@@ -67,6 +68,10 @@ function M.setup(opts)
 		end
 	end
 	assert(type(opts.config) == "table", "native-review config must be a table")
+	if opts.gumtree ~= nil then
+		assert(type(opts.gumtree) == "table", "native-review adapter gumtree must be a table")
+		assert(type(opts.gumtree.analyze) == "function", "native-review adapter gumtree.analyze must be a function")
+	end
 	if opts.structural_diff ~= nil then
 		assert(type(opts.structural_diff) == "table", "native-review adapter structural_diff must be a table")
 		assert(
@@ -84,6 +89,13 @@ function M.setup(opts)
 		values[name] = value
 	end
 	values.clipboard = opts.clipboard or default_clipboard()
+	values.gumtree = opts.gumtree
+		or {
+			analyze = function(_, callback)
+				callback(nil, "No GumTree adapter is configured")
+				return function() end
+			end,
+		}
 	values.structural_diff = opts.structural_diff
 		or {
 			run = function(_, callback)
