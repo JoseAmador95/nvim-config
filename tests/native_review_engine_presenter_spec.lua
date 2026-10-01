@@ -43,7 +43,7 @@ end
 local function line_change(line, text)
 	return { line_number = line - 1, changes = { { start = 0, ["end"] = #text, content = text, highlight = "normal" } } }
 end
-local function verify_case(old, new, alignment, chunks, matched)
+local function verify_case(old, new, alignment, chunks, matched, from_inline)
 	vim.cmd("enew!")
 	local value = entry(old, new)
 	local analysis = assert(difftastic.normalize(value, {
@@ -59,11 +59,25 @@ local function verify_case(old, new, alignment, chunks, matched)
 	assert(review.mode.enable(state))
 	local ok, err = xpcall(function()
 		for _, context in ipairs({ "full", "hunks" }) do
-			assert(
-				review.presenter.show(state, value, { layout = "split", context = context, engine_result = analysis })
-			)
+			assert(review.presenter.show(state, value, {
+				layout = from_inline and "inline" or "split",
+				context = context,
+				engine_result = analysis,
+			}))
+			if from_inline then
+				assert(review.presenter.toggle_layout(state))
+			end
 			local p = state.presentation
 			assert(#p.visibility.old == #p.visibility.new, "split panes disagree on structural section count")
+			if from_inline then
+				assert(#p.entry.hunks == 1 and #p.left.projection.hunks == 2 and #p.right.projection.hunks == 2)
+				if context == "hunks" then
+					assert(#p.visibility.old == 2 and #p.visibility.new == 2)
+					for _, decoration in ipairs(p.decorations) do
+						assert(#decoration.bands == 4, "both structural sections need start and end bands")
+					end
+				end
+			end
 			for _, pane in ipairs({ p.left, p.right }) do
 				assert(not vim.wo[pane.win].diff and not vim.wo[pane.win].wrap)
 				vim.wo[pane.win].scrolloff = 0
@@ -179,6 +193,21 @@ test("separate insertion and deletion hunks share visible geometry", function()
 		{ { rhs = line_change(10, "local extra = 1") }, { lhs = line_change(25, common[25]) } },
 		{ { 9, 9 }, { 10, 11 }, { 24, 25 }, { 26, 26 } }
 	)
+end)
+test("switching to split keeps structural sections independent of canonical Git hunks", function()
+	local new, alignment = {}, {}
+	for line, value in ipairs(common) do
+		new[line] = value:gsub(" = ", "=")
+		alignment[#alignment + 1] = { line - 1, line - 1 }
+	end
+	new[8], new[28] = "local value_8=80", "local value_28=280"
+	alignment[#alignment + 1] = { #common, #new }
+	local old_text, new_text = text(common), text(new)
+	assert(#entry(old_text, new_text).hunks == 1, "formatting must coalesce canonical Git changes")
+	verify_case(old_text, new_text, alignment, {
+		{ lhs = line_change(8, common[8]), rhs = line_change(8, new[8]) },
+		{ lhs = line_change(28, common[28]), rhs = line_change(28, new[28]) },
+	}, { { 7, 7 }, { 8, 8 }, { 27, 27 }, { 28, 28 } }, true)
 end)
 test("CR-only bytes retain canonical single-line split coordinates", function()
 	local value = entry("local a=1\rlocal b=2\r", "local a=1\rlocal b=3\r")

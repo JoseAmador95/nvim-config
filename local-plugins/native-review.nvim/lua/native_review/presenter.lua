@@ -611,7 +611,9 @@ local function section_band_edges(presentation, section)
 	if section.first > section.last then
 		return false, false
 	end
-	if presentation.layout ~= "split" or not presentation.right then
+	-- Native diff inserts edge fillers; structural panes already align every
+	-- display row and their section indices belong to the projection, not Git.
+	if presentation.structural or presentation.layout ~= "split" or not presentation.right then
 		return true, true
 	end
 	local show_start = true
