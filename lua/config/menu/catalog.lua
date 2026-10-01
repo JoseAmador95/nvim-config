@@ -440,6 +440,7 @@ function M.definitions()
 			palette_item("command.review_reanchor", "Reanchor Review Comment"),
 			palette_item("command.review_export", "Export Complete Review", "<leader>rE"),
 			palette_item("command.review_refresh", "Refresh Review", "<leader>ru"),
+			palette_item("command.review_structural_diff", "Open Structural Diff", nil, nil, { "difftastic", "AST" }),
 			palette_item("command.review_next", "Next Review Comment", "]r"),
 			palette_item("command.review_prev", "Previous Review Comment", "[r"),
 			palette_item("command.review_close", "Close Review", "<leader>rq"),

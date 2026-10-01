@@ -79,6 +79,7 @@ test("host registration and neutral observers preserve the first-action boundary
 		"ReviewNext",
 		"ReviewPrev",
 		"ReviewRefresh",
+		"ReviewStructuralDiff",
 		"ReviewLayout",
 		"ReviewContext",
 		"ReviewInlineComments",
@@ -1073,6 +1074,24 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		status.entry.path = "mutated"
 		review_events[1].entry.path = "also mutated"
 		assert(review.status().entry.path == "new.lua", "status/event data was not detached")
+		do
+			local structural = native_review.structural
+			local structural_open = structural.open
+			structural.open = function(frozen, valid)
+				assert(
+					frozen.identity == entry.identity
+						and frozen.old_text == entry.old_text
+						and frozen.new_text == entry.new_text
+				)
+				calls.structural_valid = valid
+				return true
+			end
+			assert(
+				review.structural_diff() and calls.structural_valid(),
+				"structural command did not bind the frozen owner"
+			)
+			structural.open = structural_open
+		end
 		assert(workspace.inline_comments == true and workspace.session.inline_comments == nil)
 		assert(review.inline_comments("off") and workspace.inline_comments == false)
 		workspace = assert(review.open({ kind = "commit", rev = "HEAD" }, repository))
@@ -1083,6 +1102,7 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 		assert(review.inline_comments("on") and workspace.inline_comments == true)
 		assert(calls.winbars_refreshed == winbars_before_toggle + 1, "inline toggle did not refresh review winbars")
 		assert(review.mode("off") and not workspace.mode_on and not workspace.panel.visible)
+		assert(not calls.structural_valid(), "structural output retained authority after review mode closed")
 		assert(#vim.api.nvim_list_tabpages() == tabs and vim.api.nvim_get_current_tabpage() == invocation_tab)
 		assert(
 			vim.api.nvim_get_current_win() == invocation_win,

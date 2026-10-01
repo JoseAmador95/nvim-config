@@ -40,6 +40,7 @@ test("toolchain manifest is pinned and independent of Neovim", function()
 		actionlint = "1.7.12",
 		tree_sitter = "0.26.11",
 		mmdflux = "2.6.0",
+		difftastic = "0.71.0",
 		plantuml = "1.2026.6",
 		["markdown-preview"] = "0.0.10",
 	}
@@ -70,7 +71,7 @@ end)
 
 test("managed releases are prebuilt and target-aware", function()
 	local toolchain = require("config.toolchain")
-	assert(vim.deep_equal(toolchain.managed_order, { "mmdflux", "plantuml", "markdown-preview" }))
+	assert(vim.deep_equal(toolchain.managed_order, { "mmdflux", "plantuml", "markdown-preview", "difftastic" }))
 	for _, name in ipairs(toolchain.managed_order) do
 		local entry = assert(toolchain.managed_tools[name], name)
 		assert(entry.version == toolchain.versions[name])
@@ -84,6 +85,19 @@ test("managed releases are prebuilt and target-aware", function()
 		end
 	end
 	assert(toolchain.managed_tools.mmdflux.assets["linux-arm64"] == nil, "unsupported binary was invented")
+	local difftastic = toolchain.managed_tools.difftastic
+	assert(difftastic.repository == "Wilfred/difftastic" and difftastic.tag == "0.71.0")
+	assert(difftastic.executable == "difft")
+	local difftastic_digests = {
+		["darwin-arm64"] = "92acf8890543b6d6f436a87a7a5ec64f82a4b8dbe3a7e564c1e5cbfe60823bc7",
+		["darwin-x86_64"] = "390b5299b0bc5059b5617f448eb1f3cb42c689933258fc57770c24d257a5d8a8",
+		["linux-arm64"] = "5f046098b36ff985d0f99fec6f22cf74961db60386ff9d40df39fd99660aae2c",
+		["linux-x86_64"] = "0a65e6715df992b0adae012e606bd9cc74fa6cfe90eaf13bbae165a0a19b3086",
+	}
+	for target, digest in pairs(difftastic_digests) do
+		local asset = assert(difftastic.assets[target])
+		assert(asset.kind == "tar.gz" and asset.member == "difft" and asset.sha256 == digest)
+	end
 	local markdown = toolchain.managed_tools["markdown-preview"]
 	assert(markdown.assets["linux-arm64"] == nil, "unsupported markdown-preview binary was invented")
 	assert(markdown.assets["darwin-arm64"].sha256 == "339f9a968fbbc4197259f811dd3f9780459f9d903532a29befcf16679b97babd")

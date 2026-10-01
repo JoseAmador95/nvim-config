@@ -185,6 +185,7 @@ local commands = {
 	review_prev = { "ReviewPrev" },
 	review_reanchor = { "ReviewReanchor" },
 	review_refresh = { "ReviewRefresh" },
+	review_structural_diff = { "ReviewStructuralDiff" },
 	review_reply = { "ReviewReply" },
 	review_scope = { "ReviewScope" },
 	review_scope_back = { "ReviewScopeBack" },

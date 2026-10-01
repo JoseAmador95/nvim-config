@@ -10,6 +10,7 @@ M.versions = {
 	actionlint = "1.7.12",
 	tree_sitter = "0.26.11",
 	mmdflux = "2.6.0",
+	difftastic = "0.71.0",
 	plantuml = "1.2026.6",
 	["markdown-preview"] = "0.0.10",
 }
@@ -129,8 +130,34 @@ M.validation_tools = {
 	}),
 }
 
-M.managed_order = { "mmdflux", "plantuml", "markdown-preview" }
+M.managed_order = { "mmdflux", "plantuml", "markdown-preview", "difftastic" }
 M.managed_tools = {
+	difftastic = release("Wilfred/difftastic", "0.71.0", "difft", {
+		["darwin-arm64"] = {
+			archive = "difft-0.71.0-aarch64-apple-darwin.tar.gz",
+			kind = "tar.gz",
+			member = "difft",
+			sha256 = "92acf8890543b6d6f436a87a7a5ec64f82a4b8dbe3a7e564c1e5cbfe60823bc7",
+		},
+		["darwin-x86_64"] = {
+			archive = "difft-0.71.0-x86_64-apple-darwin.tar.gz",
+			kind = "tar.gz",
+			member = "difft",
+			sha256 = "390b5299b0bc5059b5617f448eb1f3cb42c689933258fc57770c24d257a5d8a8",
+		},
+		["linux-arm64"] = {
+			archive = "difft-0.71.0-aarch64-unknown-linux-gnu.tar.gz",
+			kind = "tar.gz",
+			member = "difft",
+			sha256 = "5f046098b36ff985d0f99fec6f22cf74961db60386ff9d40df39fd99660aae2c",
+		},
+		["linux-x86_64"] = {
+			archive = "difft-0.71.0-x86_64-unknown-linux-musl.tar.gz",
+			kind = "tar.gz",
+			member = "difft",
+			sha256 = "0a65e6715df992b0adae012e606bd9cc74fa6cfe90eaf13bbae165a0a19b3086",
+		},
+	}),
 	mmdflux = release("kevinswiber/mmdflux", "mmdflux-v2.6.0", "mmdflux", {
 		["darwin-arm64"] = {
 			archive = "mmdflux-v2.6.0-darwin-arm64.tar.gz",

@@ -16,6 +16,7 @@ local review_panel = require("native_review.panel")
 local review_presenter = require("native_review.presenter")
 local review_scope = require("native_review.scope")
 local review_store = require("native_review.store")
+local review_structural = require("native_review.structural")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comments")
 local PREVIEW_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comment_preview")
@@ -204,6 +205,7 @@ local function workspace_for_key(expected)
 end
 
 local function bump_workspace_generation(workspace)
+	review_structural.close()
 	workspace_generation = workspace_generation + 1
 	workspace.generation = workspace_generation
 	return workspace.generation
@@ -387,6 +389,7 @@ local function emit_changed()
 end
 
 local function cancel_pending(reason, emit)
+	review_structural.close()
 	operation_epoch = operation_epoch + 1
 	local pending = pending_operation
 	pending_operation = nil
@@ -2089,6 +2092,7 @@ function M.present(identity, expected, options)
 	if not entry then
 		return nil, "review entry is no longer part of the exact model"
 	end
+	review_structural.close()
 	local selected_entry_snapshot = entry_snapshot(entry)
 	local generation = workspace.generation
 	local previous_identity = workspace.entry_identity
@@ -4870,6 +4874,30 @@ function M.setup()
 	setup_done = true
 	review_lsp.setup()
 	setup_autocmds()
+end
+
+function M.structural_diff()
+	local workspace = current_workspace()
+	local entry = workspace and find_entry(workspace, workspace.entry_identity)
+	if not entry or not workspace.mode_on or not surface_valid() then
+		local err = "Select a file in an active review before opening structural diff"
+		notify(err, vim.log.levels.WARN)
+		return nil, err
+	end
+	local snapshot = entry_snapshot(entry)
+	local generation = workspace.generation
+	local opened, err = review_structural.open(entry, function()
+		return workspace == current_workspace()
+			and workspace.generation == generation
+			and workspace.mode_on == true
+			and surface_valid()
+			and workspace.entry_identity == entry.identity
+			and entry_matches_snapshot(find_entry(workspace, entry.identity), snapshot)
+	end)
+	if not opened then
+		notify(err, vim.log.levels.WARN)
+	end
+	return opened, err
 end
 
 function M.teardown()

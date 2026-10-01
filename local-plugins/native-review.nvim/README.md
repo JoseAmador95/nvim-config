@@ -78,6 +78,39 @@ review until its scope, store, and complete immutable model have succeeded.
 `status()` exposes a copied `pending`/`operation` snapshot only while work is in
 flight.
 
+## Diff detail and structural view
+
+The principal engine keeps its canonical Git hunks and adds character ranges to
+replacement blocks. Histogram matching with `linematch = 60` refines line
+correspondence, then Myers compares graphemes after trimming common edges.
+Ranges use exact OLD/NEW source lines and byte columns in both unified and
+split layouts, with hunks or full context. A stronger background marks changed
+characters while retaining syntax foregrounds; theme changes rebuild the
+colors. Inserted/deleted lines retain their line backgrounds. Refinement skips
+blocks over 128 KiB or 8192 remaining graphemes and retains the line diff.
+Only the selected frozen entry's detail is cached across presentation changes.
+Neither canonical hunks, anchors, nor stored review schemas change.
+
+The host's `:ReviewStructuralDiff` (also in the Review palette) opens a separate
+read-only float for the selected entry. Install its optional pinned Difftastic
+0.71.0 backend explicitly with `:NvimConfigToolsInstall difftastic`. Startup and
+opening a review never install or probe it. The float consumes colored human
+output for private copies of the exact frozen OLD/NEW snapshots, including
+their logical paths and modes; it never reads CURRENT source. `q` or `<Esc>`
+closes it. Binary and metadata-only entries are refused. Structural output has
+no comment coordinates or LSP authority and does not replace the main engine.
+Closing, replacing, refreshing, or tearing down the review cancels the render;
+late completion cannot recreate a closed view. Process output is capped at
+8 MiB, the deadline is 5 seconds, and snapshots are cleaned on every outcome.
+
+Standalone hosts may inject an optional `structural_diff` adapter with
+`run(request, callback) -> cancel_function`. The request contains a detached
+`entry`, the float's integer `width`, and `background` (`dark` or `light`).
+The callback receives `(colored_stdout, nil)` or `(nil, error)` at most once;
+the plugin schedules UI handling and revalidates the owner before showing it.
+The adapter owns process cancellation, temporary files, and cleanup. Without
+this adapter, native review and its character detail remain fully available.
+
 ## Safety contracts
 
 - Historical scopes resolve to full object IDs before a model is built.

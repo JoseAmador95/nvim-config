@@ -8,10 +8,13 @@ local repo = dependencies.get("repo")
 local review_lsp = require("native_review.lsp")
 local review_mode = require("native_review.mode")
 local review_projection = require("native_review.projection")
+local review_diff = require("native_review.diff")
 
 local BAND_HIGHLIGHT = "NvimReviewNativeHunkBand"
 local OLD_LINE_HIGHLIGHT = "NvimReviewNativeDiffOld"
 local NEW_LINE_HIGHLIGHT = "NvimReviewNativeDiffNew"
+local OLD_TEXT_HIGHLIGHT = "NvimReviewNativeDiffOldText"
+local NEW_TEXT_HIGHLIGHT = "NvimReviewNativeDiffNewText"
 local OLD_NUMBER_HIGHLIGHT = "NvimReviewUnifiedOldNumber"
 local NEW_NUMBER_HIGHLIGHT = "NvimReviewUnifiedNewNumber"
 local STATUSCOLUMN = "%!v:lua.require('native_review.presenter').statuscolumn()"
@@ -68,12 +71,47 @@ function M.statuscolumn()
 	})
 end
 
+local function highlight_color(name, field, fallback)
+	local value = vim.api.nvim_get_hl(0, { name = name, link = false })[field]
+	return type(value) == "number" and value or fallback
+end
+
+local function stronger_background(base, accent)
+	local channels = {}
+	for _, shift in ipairs({ 16, 8, 0 }) do
+		local background = math.floor(base / 2 ^ shift) % 256
+		local foreground = math.floor(accent / 2 ^ shift) % 256
+		channels[#channels + 1] = math.floor(background * 0.6 + foreground * 0.4 + 0.5)
+	end
+	local blended = channels[1] * 65536 + channels[2] * 256 + channels[3]
+	if blended == base then
+		return stronger_background(base, base < 0x808080 and 0xFFFFFF or 0x000000)
+	end
+	return blended
+end
+
 local function define_band_highlight()
 	vim.api.nvim_set_hl(0, BAND_HIGHLIGHT, { default = true, link = "StatusLine" })
-	vim.api.nvim_set_hl(0, OLD_LINE_HIGHLIGHT, { link = "DiffDelete" })
-	vim.api.nvim_set_hl(0, NEW_LINE_HIGHLIGHT, { link = "DiffAdd" })
 	vim.api.nvim_set_hl(0, OLD_NUMBER_HIGHLIGHT, { default = true, link = "DiffDelete" })
 	vim.api.nvim_set_hl(0, NEW_NUMBER_HIGHLIGHT, { default = true, link = "DiffAdd" })
+	local background = highlight_color("Normal", "bg", vim.o.background == "light" and 0xFFFFFF or 0x1F2335)
+	for _, side in ipairs({ { OLD_LINE_HIGHLIGHT, "DiffDelete" }, { NEW_LINE_HIGHLIGHT, "DiffAdd" } }) do
+		local theme = vim.api.nvim_get_hl(0, { name = side[2], link = false })
+		vim.api.nvim_set_hl(0, side[1], { bg = theme.bg or background, ctermbg = theme.ctermbg })
+	end
+	for _, side in ipairs({
+		{ OLD_TEXT_HIGHLIGHT, "DiffDelete", "DiagnosticError", 0xF7768E, 1 },
+		{ NEW_TEXT_HIGHLIGHT, "DiffAdd", "DiagnosticOk", 0x9ECE6A, 2 },
+	}) do
+		vim.api.nvim_set_hl(0, side[1], {
+			bg = stronger_background(
+				highlight_color(side[2], "bg", background),
+				highlight_color(side[3], "fg", side[4])
+			),
+			bold = true,
+			ctermbg = side[5],
+		})
+	end
 end
 
 define_band_highlight()
@@ -819,24 +857,33 @@ end
 local function highlight_lines(buf, namespace, first, count, group)
 	for line = first, first + count - 1 do
 		if line >= 1 and line <= vim.api.nvim_buf_line_count(buf) then
-			vim.api.nvim_buf_set_extmark(buf, namespace, line - 1, 0, { line_hl_group = group })
+			vim.api.nvim_buf_set_extmark(buf, namespace, line - 1, 0, {
+				hl_group = group,
+				end_row = line,
+				end_col = 0,
+				hl_eol = true,
+				priority = 80,
+			})
 		end
 	end
 end
 
 local function apply_split_highlight_links(item, side)
 	local real_group = side == "old" and OLD_LINE_HIGHLIGHT or NEW_LINE_HIGHLIGHT
-	local theme_group = side == "old" and "DiffDelete" or "DiffAdd"
 	for _, link in ipairs({
-		{ real_group, theme_group },
+		{ real_group, real_group },
 		{ "DiffDelete", "Normal" },
-		{ "DiffAdd", theme_group },
-		{ "DiffChange", theme_group },
-		{ "DiffTextAdd", theme_group },
-		{ "DiffText", theme_group },
 	}) do
 		local group, target = link[1], link[2]
 		local ok, err = pcall(vim.api.nvim_set_hl, item.namespace, group, { link_global = target })
+		if not ok then
+			return nil, err
+		end
+	end
+	-- Native diff UI backgrounds otherwise override both line and character
+	-- extmarks. Keep diff alignment/fillers, with our ranges owning real rows.
+	for _, group in ipairs({ "DiffAdd", "DiffChange", "DiffTextAdd", "DiffText" }) do
+		local ok, err = pcall(vim.api.nvim_set_hl, item.namespace, group, {})
 		if not ok then
 			return nil, err
 		end
@@ -877,6 +924,23 @@ local function add_band(item, row, above, label)
 	item.bands[#item.bands + 1] = band
 end
 
+local function decorate_intraline(presentation, item, side, unified)
+	local detail = presentation.intraline
+	for _, source_side in ipairs(unified and { "old", "new" } or { side }) do
+		local group = source_side == "old" and OLD_TEXT_HIGHLIGHT or NEW_TEXT_HIGHLIGHT
+		for _, range in ipairs(detail[source_side] or {}) do
+			local line = unified and presentation.projection.by_source[source_side][range.line] or range.line
+			if line and range.end_col > range.start_col then
+				vim.api.nvim_buf_set_extmark(item.buf, item.namespace, line - 1, range.start_col, {
+					end_col = range.end_col,
+					hl_group = group,
+					priority = 150,
+				})
+			end
+		end
+	end
+end
+
 local function decorate(state, entry, buf, win, side, context, inline)
 	if entry.metadata_only then
 		return true
@@ -908,7 +972,7 @@ local function decorate(state, entry, buf, win, side, context, inline)
 	end
 	if unified then
 		for display_line, row in ipairs(presentation.projection.rows) do
-			local group = row.kind == "old" and "DiffDelete" or row.kind == "new" and "DiffAdd" or nil
+			local group = row.kind == "old" and OLD_LINE_HIGHLIGHT or row.kind == "new" and NEW_LINE_HIGHLIGHT or nil
 			if group then
 				highlight_lines(buf, namespace, display_line, 1, group)
 			end
@@ -923,6 +987,7 @@ local function decorate(state, entry, buf, win, side, context, inline)
 			end
 		end
 	end
+	decorate_intraline(presentation, item, side, unified)
 	if context == "hunks" then
 		local visible = unified and presentation.visibility.unified or presentation.visibility[side]
 		if #visible == 0 then
@@ -1233,6 +1298,10 @@ function M.show(state, entry, options)
 			return nil, "Could not build unified review projection: " .. tostring(projection_err)
 		end
 	end
+	local intraline, intraline_err = review_diff.for_entry(state, entry)
+	if not intraline then
+		return nil, "Could not refine review changes: " .. tostring(intraline_err)
+	end
 	M.clear(state)
 	if not valid_win(state.origin.win) or not vim.api.nvim_tabpage_is_valid(state.origin.tab) then
 		return nil, "origin tab or window is no longer valid"
@@ -1250,6 +1319,7 @@ function M.show(state, entry, options)
 	local presentation = {
 		cursor_guards = {},
 		entry = entry,
+		intraline = intraline,
 		generation = presentation_generation,
 		hunk_context = hunk_context,
 		visibility_hunk_context = visibility_hunk_context,

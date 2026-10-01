@@ -24,6 +24,7 @@ local ALLOWED = {
 	tabs = true,
 	clipboard = true,
 	lsp_navigation = true,
+	structural_diff = true,
 	event = true,
 	hunk_context = true,
 	max_files = true,
@@ -50,6 +51,7 @@ local MODULES = {
 	projection = "native_review.projection",
 	scope = "native_review.scope",
 	store = "native_review.store",
+	structural = "native_review.structural",
 }
 
 ---Inject host services and load the standalone review runtime.
@@ -162,6 +164,7 @@ function M.setup(opts)
 		tabs = opts.tabs,
 		clipboard = opts.clipboard,
 		lsp_navigation = opts.lsp_navigation,
+		structural_diff = opts.structural_diff,
 		event = opts.event or function() end,
 		config = config,
 	})
