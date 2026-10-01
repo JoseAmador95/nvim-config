@@ -2192,15 +2192,15 @@ end)
 
 local function intraline_entry()
 	local value = entry()
-	value.old_text = "one\nlocal timeout = 30; retry = 2\nthree\n"
-	value.new_text = "one\nlocal enabled = true\nlocal timeout = 60; retry = 4\nthree\n"
+	value.old_text = "one\nlocal timeout = 30; control = 2\nthree\n"
+	value.new_text = "one\nlocal enabled = true\nlocal timeout = 60; array = 4\nthree\n"
 	value.hunks = vim.text.diff(value.old_text, value.new_text, { result_type = "indices" })
 	return value
 end
 
 for _, layout in ipairs({ "inline", "split" }) do
 	for _, context in ipairs({ "full", "hunks" }) do
-		test(layout .. "/" .. context .. " maps precise characters to canonical OLD/NEW coordinates", function()
+		test(layout .. "/" .. context .. " maps character and word detail to canonical OLD/NEW coordinates", function()
 			local state = setup_state()
 			local value = intraline_entry()
 			local hunks = vim.deepcopy(value.hunks)
@@ -2229,7 +2229,10 @@ for _, layout in ipairs({ "inline", "split" }) do
 					end
 				end
 			end
-			assert(vim.deep_equal(found, { old = { "3", "2" }, new = { "6", "4" } }), vim.inspect(found))
+			assert(
+				vim.deep_equal(found, { old = { "3", "control", "2" }, new = { "6", "array", "4" } }),
+				vim.inspect(found)
+			)
 			assert(vim.deep_equal(value.hunks, hunks) and vim.o.diffopt == diffopt)
 			local cached = state.intraline_cache
 			assert(presenter.show(state, value, { layout = layout, context = context == "full" and "hunks" or "full" }))
@@ -2295,6 +2298,12 @@ test("rendered changed characters remain distinct across themes and resizing", f
 						changed.foreground == 0xC0FFEE and unchanged.foreground == 0xC0FFEE,
 						"diff replaced syntax foreground"
 					)
+					for column = mark[3] + 1, mark[4].end_col do
+						assert(
+							attribute(item.win, mark[2] + 1, column).background == changed.background,
+							"whole-word emphasis left an unhighlighted letter"
+						)
+					end
 				end
 			end
 		end

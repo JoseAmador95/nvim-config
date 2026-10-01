@@ -83,6 +83,10 @@ flight.
 The principal engine keeps its canonical Git hunks and adds character ranges to
 replacement blocks. Histogram matching with `linematch = 60` refines line
 correspondence, then Myers compares graphemes after trimming common edges.
+When a word has at least two changed graphemes and only one unchanged grapheme,
+the textual detail highlights the whole word; smaller edits retain character
+precision. Word boundaries follow letters with case, ASCII digits and underscores,
+independently of the active buffer's `iskeyword` setting.
 Ranges use exact OLD/NEW source lines and byte columns in both unified and
 split layouts, with hunks or full context. A stronger background marks changed
 characters while retaining syntax foregrounds; theme changes rebuild the

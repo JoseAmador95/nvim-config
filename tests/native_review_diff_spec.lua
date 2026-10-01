@@ -45,6 +45,50 @@ test("separated changes highlight only their differing characters", function()
 	equal({ { 1, "6" }, { 1, "4" } }, changed(value, "new"))
 end)
 
+test("mostly replaced words include the single surviving grapheme at any position", function()
+	for _, pair in ipairs({ { "control", "array" }, { "cable", "crown" }, { "limit", "reset" } }) do
+		local value = entry('message = "' .. pair[1] .. '"\n', 'message = "' .. pair[2] .. '"\n')
+		local original = vim.deepcopy(value)
+		equal({ { 1, pair[1] } }, changed(value, "old"))
+		equal({ { 1, pair[2] } }, changed(value, "new"))
+		equal(original, value)
+	end
+end)
+
+test("whole-word emphasis preserves separators and small or substantial matching portions", function()
+	local value = entry("control(cable) + limit\n", "array(crown) + reset\n")
+	equal({ { 1, "control" }, { 1, "cable" }, { 1, "limit" } }, changed(value, "old"))
+	equal({ { 1, "array" }, { 1, "crown" }, { 1, "reset" } }, changed(value, "new"))
+	equal({ { 1, "a" }, { 1, "c" } }, changed(entry("abcd\n", "wbyd\n"), "old"))
+	equal({ { 1, "s" } }, changed(entry("item\n", "items\n"), "new"))
+	equal({ { 1, "b" } }, changed(entry("ab\n", "ac\n"), "old"))
+end)
+
+test("whole-word emphasis counts graphemes while retaining UTF-8 byte boundaries", function()
+	for _, pair in ipairs({ { "café", "tôté" }, { "caé", "rué" } }) do
+		local value = entry('"' .. pair[1] .. '"\r\n', '"' .. pair[2] .. '"')
+		for _, side in ipairs({ "old", "new" }) do
+			local word = side == "old" and pair[1] or pair[2]
+			local ranges, result = changed(value, side)
+			equal({ { 1, word } }, ranges)
+			equal({ { line = 1, start_col = 1, end_col = 1 + #word } }, result[side])
+		end
+	end
+end)
+
+test("word boundaries do not inherit the current buffer's keyword option", function()
+	local previous = vim.bo.iskeyword
+	local value = entry("control(cable)\n", "array(crown)\n")
+	local expected = assert(diff.refine(value))
+	for _, setting in ipairs({ "", "@,48-57,_,(,)" }) do
+		vim.bo.iskeyword = setting
+		local result, err = diff.refine(value)
+		vim.bo.iskeyword = previous
+		assert(result, err)
+		equal(expected, result)
+	end
+end)
+
 test("inserted lines do not displace replacement matching", function()
 	local value = entry(
 		"local timeout = 30\nlocal retries = 2\nreturn run(timeout, retries)\n",

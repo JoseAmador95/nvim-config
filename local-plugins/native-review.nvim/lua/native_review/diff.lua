@@ -34,7 +34,7 @@ local function slice(source, first, count)
 end
 
 local function tokens(source, first, count)
-	local result = { values = {}, positions = {} }
+	local result = { values = {}, positions = {}, changed = {} }
 	for line = first, first + count - 1 do
 		local column = 0
 		for _, value in ipairs(vim.fn.split(source[line], "\\zs")) do
@@ -76,6 +76,37 @@ local function append_ranges(target, sequence, first, count)
 	end
 end
 
+local function word_grapheme(value)
+	-- Fixed spelling rules keep frozen detail independent of buffer 'iskeyword'.
+	return value:match("^[A-Za-z0-9_]") ~= nil or vim.fn.tolower(value) ~= vim.fn.toupper(value)
+end
+
+local function append_word_ranges(target, sequence)
+	local index = 1
+	while index <= #sequence.values do
+		if word_grapheme(sequence.values[index]) then
+			local first, changed = index, 0
+			repeat
+				changed = changed + (sequence.changed[index] and 1 or 0)
+				index = index + 1
+			until index > #sequence.values or not word_grapheme(sequence.values[index])
+			-- A single surviving letter is noise when the rest of the word changed.
+			if changed >= 2 and index - first - changed == 1 then
+				for selected = first, index - 1 do
+					sequence.changed[selected] = true
+				end
+			end
+		else
+			index = index + 1
+		end
+	end
+	for selected = 1, #sequence.values do
+		if sequence.changed[selected] then
+			append_ranges(target, sequence, selected, 1)
+		end
+	end
+end
+
 local function refine_characters(result, old_source, new_source, old_first, old_count, new_first, new_count)
 	if old_count == 0 or new_count == 0 then
 		return
@@ -102,9 +133,15 @@ local function refine_characters(result, old_source, new_source, old_first, old_
 	for _, hunk in
 		ipairs(vim.text.diff(encoded(old, first, old_last), encoded(new, first, new_last), CHARACTER_OPTIONS))
 	do
-		append_ranges(result.old, old, first + hunk[1] - 1, hunk[2])
-		append_ranges(result.new, new, first + hunk[3] - 1, hunk[4])
+		for index = first + hunk[1] - 1, first + hunk[1] + hunk[2] - 2 do
+			old.changed[index] = true
+		end
+		for index = first + hunk[3] - 1, first + hunk[3] + hunk[4] - 2 do
+			new.changed[index] = true
+		end
 	end
+	append_word_ranges(result.old, old)
+	append_word_ranges(result.new, new)
 end
 
 ---Refine replacements without altering canonical hunks, bytes, or anchors.
