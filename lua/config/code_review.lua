@@ -16,6 +16,7 @@ local MAPPINGS = {
 	{ lhs = "<leader>rh", rhs = "<cmd>ReviewCommits<cr>", desc = "Focus review commits", help = "common" },
 	{ lhs = "<leader>rl", rhs = "<cmd>ReviewComments<cr>", desc = "Focus review comments", help = "common" },
 	{ lhs = "<leader>rv", rhs = "<cmd>ReviewLayout<cr>", desc = "Toggle review layout", help = "common" },
+	{ lhs = "<leader>rD", rhs = "<cmd>ReviewEngine<cr>", desc = "Select review diff engine", help = "common" },
 	{ lhs = "<leader>rw", rhs = "<cmd>ReviewContext<cr>", desc = "Toggle review context", help = "common" },
 	{ lhs = "<leader>ri", rhs = "<cmd>ReviewInlineComments<cr>", desc = "Toggle inline comments", help = "common" },
 	{ lhs = "<leader>rg", rhs = "<cmd>ReviewCode<cr>", desc = "Focus reviewed code", help = "common" },
@@ -156,6 +157,19 @@ local function setup_commands()
 	command("ReviewRefresh", function()
 		controller().refresh_async()
 	end)
+	command("ReviewStructuralDiff", function()
+		controller().structural_diff()
+	end)
+	command("ReviewEngine", function(value)
+		controller().engine(value.args ~= "" and value.args or nil)
+	end, {
+		nargs = "?",
+		complete = function()
+			return vim.tbl_map(function(engine)
+				return engine.id
+			end, activate().engines.list())
+		end,
+	})
 	command("ReviewLayout", function(value)
 		controller().layout(value.args ~= "" and value.args or nil)
 	end, {

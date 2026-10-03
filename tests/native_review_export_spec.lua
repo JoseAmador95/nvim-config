@@ -26,7 +26,7 @@ local oid = string.rep("a", 40)
 
 local function session()
 	return {
-		version = 2,
+		version = 3,
 		revision = 9,
 		repo_root = "/tmp/review-export",
 		stale = false,
@@ -83,6 +83,67 @@ test("Markdown includes exact scope, compact anchors, status, and replies", func
 	assert(not markdown:find("right, historical", 1, true))
 	assert(markdown:find("### Reply: OBJECTION! — lua/config/example.lua:8 [NEW]", 1, true))
 	assert(vim.deep_equal(ids, { "root", "reply" }))
+end)
+
+test("regular and recovery exports label each comment and reply with its own engine", function()
+	local value = session()
+	value.items[1].origin_engine = { id = "main", version = "builtin-v1 / Neovim 0.12.0" }
+	value.items[1].anchor.side = "left"
+	value.items[2].origin_engine = { id = "difftastic", version = "0.71.0" }
+	value.items[3] = vim.deepcopy(value.items[2])
+	value.items[3].id = "nested"
+	value.items[3].reply_to = "reply"
+	value.items[3].origin_engine = nil
+	value.items[3].body = "An older reply with no recorded engine."
+	local before = vim.deepcopy(value)
+	local markdown, ids = assert(exporter.render(value))
+	local recovery, recovery_ids = assert(exporter.render_recovery(value))
+	assert(markdown == recovery and vim.deep_equal(ids, recovery_ids))
+	local main_origin = "Origin engine: `main`; version: `builtin-v1 / Neovim 0.12.0`"
+	local diff_origin = "Origin engine: `difftastic`; version: `0.71.0`"
+	local root_heading = assert(markdown:find("## OBJECTION! — lua/config/example.lua:8 [OLD]", 1, true))
+	local reply_heading = assert(markdown:find("### Reply: OBJECTION! — lua/config/example.lua:8 [NEW]", 1, true))
+	local nested_heading = assert(markdown:find("#### Reply: OBJECTION! — lua/config/example.lua:8 [NEW]", 1, true))
+	local main_position = assert(markdown:find(main_origin, root_heading, true))
+	local diff_position = assert(markdown:find(diff_origin, reply_heading, true))
+	local unrecorded_position = assert(markdown:find("Origin engine: not recorded", nested_heading, true))
+	assert(main_position < reply_heading and diff_position < nested_heading and unrecorded_position > nested_heading)
+	assert(
+		markdown:find(
+			"Coordinates use the frozen original OLD/NEW documents, regardless of the display engine.",
+			1,
+			true
+		)
+	)
+	assert(vim.deep_equal(ids, { "root", "reply", "nested" }) and vim.deep_equal(value, before))
+	local previewed
+	local result = assert(exporter.deliver(value, false, {
+		has_clipboard = false,
+		preview = function(text)
+			previewed = text
+		end,
+	}))
+	assert(result.previewed and previewed == markdown, "fallback preview omitted per-item origins")
+end)
+
+test("missing origins are reported without inventing a main engine", function()
+	local value = session()
+	local before = vim.deepcopy(value)
+	local regular = assert(exporter.render(value))
+	local recovery = assert(exporter.render_recovery(value))
+	for _, markdown in ipairs({ regular, recovery }) do
+		local _, labels = markdown:gsub("Origin engine: not recorded", "")
+		assert(labels == 2)
+		assert(not markdown:find("Origin engine: `main`", 1, true))
+	end
+	assert(vim.deep_equal(value, before))
+end)
+
+test("printable version punctuation remains inside a safe Markdown code span", function()
+	local value = session()
+	value.items[1].origin_engine = { id = "future_engine", version = "v1 `build` **release**" }
+	local markdown = assert(exporter.render(value))
+	assert(markdown:find("Origin engine: `future_engine`; version: `` v1 `build` **release** ``", 1, true))
 end)
 
 test("type legend follows configuration and labels retired types used in the review", function()

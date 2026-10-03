@@ -1,5 +1,7 @@
 local local_config = require("config.local_config")
 local navigation = require("config.lsp_navigation")
+local structural_diff = require("config.review_structural_diff")
+local gumtree = require("config.review_gumtree")
 local configured = local_config.plugin("native_review", {
 	hunk_context = 3,
 	max_files = 2000,
@@ -19,6 +21,8 @@ return require("native_review").setup(vim.tbl_extend("force", configured, {
 	tabs = require("config.tabs"),
 	clipboard = require("config.clipboard"),
 	lsp_navigation = navigation,
+	structural_diff = structural_diff,
+	gumtree = gumtree,
 	event = function(status)
 		vim.api.nvim_exec_autocmds("User", {
 			pattern = "NvimConfigReviewChanged",

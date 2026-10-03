@@ -8,10 +8,14 @@ local repo = dependencies.get("repo")
 local review_lsp = require("native_review.lsp")
 local review_mode = require("native_review.mode")
 local review_projection = require("native_review.projection")
+local review_diff = require("native_review.diff")
+local review_relations = require("native_review.relations")
 
 local BAND_HIGHLIGHT = "NvimReviewNativeHunkBand"
 local OLD_LINE_HIGHLIGHT = "NvimReviewNativeDiffOld"
 local NEW_LINE_HIGHLIGHT = "NvimReviewNativeDiffNew"
+local OLD_TEXT_HIGHLIGHT = "NvimReviewNativeDiffOldText"
+local NEW_TEXT_HIGHLIGHT = "NvimReviewNativeDiffNewText"
 local OLD_NUMBER_HIGHLIGHT = "NvimReviewUnifiedOldNumber"
 local NEW_NUMBER_HIGHLIGHT = "NvimReviewUnifiedNewNumber"
 local STATUSCOLUMN = "%!v:lua.require('native_review.presenter').statuscolumn()"
@@ -68,12 +72,48 @@ function M.statuscolumn()
 	})
 end
 
+local function highlight_color(name, field, fallback)
+	local value = vim.api.nvim_get_hl(0, { name = name, link = false })[field]
+	return type(value) == "number" and value or fallback
+end
+
+local function stronger_background(base, accent)
+	local channels = {}
+	for _, shift in ipairs({ 16, 8, 0 }) do
+		local background = math.floor(base / 2 ^ shift) % 256
+		local foreground = math.floor(accent / 2 ^ shift) % 256
+		channels[#channels + 1] = math.floor(background * 0.6 + foreground * 0.4 + 0.5)
+	end
+	local blended = channels[1] * 65536 + channels[2] * 256 + channels[3]
+	if blended == base then
+		return stronger_background(base, base < 0x808080 and 0xFFFFFF or 0x000000)
+	end
+	return blended
+end
+
 local function define_band_highlight()
+	review_relations.highlights()
 	vim.api.nvim_set_hl(0, BAND_HIGHLIGHT, { default = true, link = "StatusLine" })
-	vim.api.nvim_set_hl(0, OLD_LINE_HIGHLIGHT, { link = "DiffDelete" })
-	vim.api.nvim_set_hl(0, NEW_LINE_HIGHLIGHT, { link = "DiffAdd" })
 	vim.api.nvim_set_hl(0, OLD_NUMBER_HIGHLIGHT, { default = true, link = "DiffDelete" })
 	vim.api.nvim_set_hl(0, NEW_NUMBER_HIGHLIGHT, { default = true, link = "DiffAdd" })
+	local background = highlight_color("Normal", "bg", vim.o.background == "light" and 0xFFFFFF or 0x1F2335)
+	for _, side in ipairs({ { OLD_LINE_HIGHLIGHT, "DiffDelete" }, { NEW_LINE_HIGHLIGHT, "DiffAdd" } }) do
+		local theme = vim.api.nvim_get_hl(0, { name = side[2], link = false })
+		vim.api.nvim_set_hl(0, side[1], { bg = theme.bg or background, ctermbg = theme.ctermbg })
+	end
+	for _, side in ipairs({
+		{ OLD_TEXT_HIGHLIGHT, "DiffDelete", "DiagnosticError", 0xF7768E, 1 },
+		{ NEW_TEXT_HIGHLIGHT, "DiffAdd", "DiagnosticOk", 0x9ECE6A, 2 },
+	}) do
+		vim.api.nvim_set_hl(0, side[1], {
+			bg = stronger_background(
+				highlight_color(side[2], "bg", background),
+				highlight_color(side[3], "fg", side[4])
+			),
+			bold = true,
+			ctermbg = side[5],
+		})
+	end
 end
 
 define_band_highlight()
@@ -314,7 +354,7 @@ local function side_buffer(state, entry, side)
 	return scratch(entry, side, state), false
 end
 
-local function unified_scratch(entry, projection, generation, state)
+local function unified_scratch(entry, projection, generation, state, side)
 	local buf = vim.api.nvim_create_buf(false, true)
 	local metadata = {
 		bridge = true,
@@ -325,7 +365,8 @@ local function unified_scratch(entry, projection, generation, state)
 		navigation = lsp_navigation,
 		projection = projection,
 		root = state.workspace.root,
-		visible_sections = state.presentation.context == "hunks" and state.presentation.visibility.unified or nil,
+		visible_sections = state.presentation.context == "hunks" and state.presentation.visibility[side or "unified"]
+			or nil,
 		definition_options = function(win)
 			return definition_options(state, buf, win, generation, "unified")
 		end,
@@ -353,7 +394,7 @@ local function unified_scratch(entry, projection, generation, state)
 		pcall(vim.api.nvim_buf_delete, buf, { force = true })
 		error("Could not mark unified review projection before FileType")
 	end
-	set_filetype(buf, entry.new_path or entry.old_path)
+	set_filetype(buf, side == "old" and entry.old_path or entry.new_path or entry.old_path)
 	local protected, protect_err = review_mode.protect_transient(state, buf)
 	if not protected then
 		pcall(vim.api.nvim_buf_delete, buf, { force = true })
@@ -489,12 +530,14 @@ local function collect_symbol_candidates(presentation, side)
 end
 
 local function line_is_visible(presentation, side, line)
-	if presentation.layout == "inline" and presentation.projection then
-		local display_line = presentation.projection.by_source[side][line]
+	local projection = presentation.projection
+		or presentation.split_projections and presentation.split_projections[side]
+	if projection then
+		local display_line = projection.by_source[side][line]
 		if not display_line then
 			return false
 		end
-		for _, section in ipairs(presentation.visibility.unified or {}) do
+		for _, section in ipairs(presentation.visibility[presentation.projection and "unified" or side] or {}) do
 			if display_line >= section.first and display_line <= section.last then
 				return true
 			end
@@ -510,10 +553,22 @@ local function line_is_visible(presentation, side, line)
 end
 
 local function containing_symbol(presentation, side, hunk_index)
-	local hunk = presentation.entry.hunks[hunk_index]
-	local start = side == "old" and hunk[1] or hunk[3]
-	local count = side == "old" and hunk[2] or hunk[4]
-	local probe = math.max(1, start + math.max(0, count - 1))
+	local probe
+	if presentation.projected then
+		local projection = presentation.projection or presentation.split_projections[side]
+		local hunk = projection.hunks[hunk_index]
+		for line = hunk.first, hunk.last do
+			probe = projection.rows[line][side .. "_line"] or probe
+		end
+	else
+		local hunk = presentation.entry.hunks[hunk_index]
+		local start = side == "old" and hunk[1] or hunk[3]
+		local count = side == "old" and hunk[2] or hunk[4]
+		probe = math.max(1, start + math.max(0, count - 1))
+	end
+	if not probe then
+		return nil
+	end
 	local best
 	for _, candidate in ipairs(collect_symbol_candidates(presentation, side)) do
 		if probe >= candidate.first and probe <= candidate.last and (not best or candidate.size < best.size) then
@@ -558,7 +613,9 @@ local function section_band_edges(presentation, section)
 	if section.first > section.last then
 		return false, false
 	end
-	if presentation.layout ~= "split" or not presentation.right then
+	-- Native diff inserts edge fillers; projected panes already align every
+	-- display row and their section indices belong to the projection, not Git.
+	if presentation.projected or presentation.layout ~= "split" or not presentation.right then
 		return true, true
 	end
 	local show_start = true
@@ -784,6 +841,19 @@ local function review_winbar(state, entry, side, layout, context)
 		layer,
 		layout .. "/" .. context,
 	}
+	local presentation = state.presentation or {}
+	local origin = presentation.origin_engine
+	local selected = presentation.selected_engine or "main"
+	values[#values + 1] = "engine:" .. selected
+	if origin and origin.id ~= selected then
+		values[#values + 1] = "effective:" .. origin.id .. " (" .. (presentation.fallback_reason or "fallback") .. ")"
+	end
+	if presentation.structural and presentation.structural.status == "unchanged" then
+		values[#values + 1] = "No structural changes"
+	end
+	if presentation.relations_limited then
+		values[#values + 1] = "Move analysis limited"
+	end
 	if type(comments) == "boolean" then
 		values[#values + 1] = "comments:" .. (comments and "on" or "off")
 	end
@@ -819,24 +889,33 @@ end
 local function highlight_lines(buf, namespace, first, count, group)
 	for line = first, first + count - 1 do
 		if line >= 1 and line <= vim.api.nvim_buf_line_count(buf) then
-			vim.api.nvim_buf_set_extmark(buf, namespace, line - 1, 0, { line_hl_group = group })
+			vim.api.nvim_buf_set_extmark(buf, namespace, line - 1, 0, {
+				hl_group = group,
+				end_row = line,
+				end_col = 0,
+				hl_eol = true,
+				priority = 80,
+			})
 		end
 	end
 end
 
 local function apply_split_highlight_links(item, side)
 	local real_group = side == "old" and OLD_LINE_HIGHLIGHT or NEW_LINE_HIGHLIGHT
-	local theme_group = side == "old" and "DiffDelete" or "DiffAdd"
 	for _, link in ipairs({
-		{ real_group, theme_group },
+		{ real_group, real_group },
 		{ "DiffDelete", "Normal" },
-		{ "DiffAdd", theme_group },
-		{ "DiffChange", theme_group },
-		{ "DiffTextAdd", theme_group },
-		{ "DiffText", theme_group },
 	}) do
 		local group, target = link[1], link[2]
 		local ok, err = pcall(vim.api.nvim_set_hl, item.namespace, group, { link_global = target })
+		if not ok then
+			return nil, err
+		end
+	end
+	-- Native diff UI backgrounds otherwise override both line and character
+	-- extmarks. Keep diff alignment/fillers, with our ranges owning real rows.
+	for _, group in ipairs({ "DiffAdd", "DiffChange", "DiffTextAdd", "DiffText" }) do
+		local ok, err = pcall(vim.api.nvim_set_hl, item.namespace, group, {})
 		if not ok then
 			return nil, err
 		end
@@ -877,12 +956,33 @@ local function add_band(item, row, above, label)
 	item.bands[#item.bands + 1] = band
 end
 
+local function decorate_intraline(presentation, item, side, projected)
+	local detail = presentation.intraline
+	for _, source_side in ipairs(projected and { "old", "new" } or { side }) do
+		local group = source_side == "old" and OLD_TEXT_HIGHLIGHT or NEW_TEXT_HIGHLIGHT
+		for _, range in ipairs(detail[source_side] or {}) do
+			local line = projected and projected.by_source[source_side][range.line] or not projected and range.line
+			if line and range.end_col > range.start_col then
+				vim.api.nvim_buf_set_extmark(item.buf, item.namespace, line - 1, range.start_col, {
+					end_col = range.end_col,
+					hl_group = group,
+					priority = 150,
+				})
+			end
+		end
+	end
+end
+
 local function decorate(state, entry, buf, win, side, context, inline)
 	if entry.metadata_only then
 		return true
 	end
 	local presentation = state.presentation
-	local unified = inline and presentation.projection ~= nil
+	local projected = presentation.inline and presentation.inline.buf == buf and presentation.projection
+		or presentation.left and presentation.left.buf == buf and presentation.left.projection
+		or presentation.right and presentation.right.buf == buf and presentation.right.projection
+		or nil
+	local unified = projected ~= nil
 	local namespace = vim.api.nvim_create_namespace(("nvim_review_native_%d_%d"):format(win, buf))
 	local scoped = false
 	if not unified then
@@ -907,24 +1007,36 @@ local function decorate(state, entry, buf, win, side, context, inline)
 		end
 	end
 	if unified then
-		for display_line, row in ipairs(presentation.projection.rows) do
-			local group = row.kind == "old" and "DiffDelete" or row.kind == "new" and "DiffAdd" or nil
+		for display_line, row in ipairs(projected.rows) do
+			local group = row.kind == "old" and OLD_LINE_HIGHLIGHT or row.kind == "new" and NEW_LINE_HIGHLIGHT or nil
 			if group then
 				highlight_lines(buf, namespace, display_line, 1, group)
 			end
 		end
 	else
 		local line_highlight = side == "old" and OLD_LINE_HIGHLIGHT or NEW_LINE_HIGHLIGHT
-		for _, hunk in ipairs(entry.hunks or {}) do
-			if side == "old" then
-				highlight_lines(buf, namespace, hunk[1], hunk[2], line_highlight)
-			else
-				highlight_lines(buf, namespace, hunk[3], hunk[4], line_highlight)
+		if presentation.structural then
+			for line in pairs(presentation.structural.line_changes[side]) do
+				highlight_lines(buf, namespace, line, 1, line_highlight)
+			end
+		else
+			for _, hunk in ipairs(entry.hunks or {}) do
+				if side == "old" then
+					highlight_lines(buf, namespace, hunk[1], hunk[2], line_highlight)
+				else
+					highlight_lines(buf, namespace, hunk[3], hunk[4], line_highlight)
+				end
 			end
 		end
 	end
+	decorate_intraline(presentation, item, side, projected)
+	review_relations.decorate(presentation.relations, item, side, projected)
+	if presentation.structural and presentation.structural.status == "unchanged" then
+		add_band(item, 0, true, " No structural changes ")
+	end
 	if context == "hunks" then
-		local visible = unified and presentation.visibility.unified or presentation.visibility[side]
+		local visible = projected and (inline and presentation.visibility.unified or presentation.visibility[side])
+			or presentation.visibility[side]
 		if #visible == 0 then
 			return true
 		end
@@ -1074,8 +1186,9 @@ local function prepare_review_window(win, layout)
 	end
 end
 
-local function configure_unified_gutter(presentation, win, buf)
-	local width = presentation.projection.gutter_digits * 2 + 3
+local function configure_unified_gutter(presentation, win, buf, projection)
+	projection = projection or presentation.projection
+	local width = projection.gutter_digits * 2 + 3
 	vim.wo[win].number = true
 	vim.wo[win].relativenumber = false
 	vim.wo[win].numberwidth = math.max(1, math.min(20, width))
@@ -1083,19 +1196,18 @@ local function configure_unified_gutter(presentation, win, buf)
 		buf = buf,
 		generation = presentation.generation,
 		presentation = presentation,
-		projection = presentation.projection,
+		projection = projection,
 	}
 	vim.wo[win].statuscolumn = STATUSCOLUMN
 end
 
 local function release_unified_gutter(presentation)
-	local inline = presentation and presentation.inline
-	if not inline then
-		return
-	end
-	local gutter = gutters[inline.win]
-	if gutter and gutter.presentation == presentation then
-		gutters[inline.win] = nil
+	for _, name in ipairs({ "inline", "left", "right" }) do
+		local target = presentation and presentation[name]
+		local gutter = target and gutters[target.win]
+		if gutter and gutter.presentation == presentation then
+			gutters[target.win] = nil
+		end
 	end
 end
 
@@ -1195,6 +1307,97 @@ local function remember_owned(presentation, buf)
 	presentation.owned_buffers[buf] = vim.bo[buf].buftype == "nofile"
 end
 
+local function split_projection(analysis, side)
+	local source = analysis.projection.sources[side]
+	local value = {
+		sources = analysis.projection.sources,
+		rows = {},
+		hunks = {},
+		by_source = { old = {}, new = {} },
+		gutter_digits = analysis.projection.gutter_digits,
+	}
+	local hunk
+	for index, pair in ipairs(analysis.aligned_lines) do
+		local line = pair[side .. "_line"]
+		local record = line and source.lines[line]
+		local changed = pair.old_line and analysis.line_changes.old[pair.old_line]
+			or pair.new_line and analysis.line_changes.new[pair.new_line]
+		local row = {
+			display_line = index,
+			anchor_side = side,
+			anchorable = line ~= nil,
+			kind = line and (analysis.line_changes[side][line] and side or "context") or "filler",
+			path = source.path,
+			source_line = line or 0,
+			text = record and record.text or "",
+			terminator = record and record.terminator or "",
+		}
+		row[side .. "_line"], row[side .. "_path"] = line, source.path
+		if line then
+			value.by_source[side][line] = index
+		end
+		if changed then
+			if not hunk then
+				hunk = { first = index, last = index }
+				value.hunks[#value.hunks + 1] = hunk
+			end
+			hunk.last, row.hunk_index = index, #value.hunks
+		else
+			hunk = nil
+		end
+		value.rows[#value.rows + 1] = row
+	end
+	if #value.rows == 0 then
+		value.rows[1] = {
+			display_line = 1,
+			anchor_side = side,
+			anchorable = false,
+			kind = "empty",
+			path = source.path,
+			source_line = 0,
+			text = "",
+			terminator = "",
+		}
+		value.rows[1][side .. "_path"] = source.path
+	end
+	return value
+end
+
+local function bind_projected_scroll(state, presentation)
+	presentation.scroll_sync_autocmd = vim.api.nvim_create_autocmd("WinScrolled", {
+		callback = function(event)
+			if state.presentation ~= presentation or presentation.syncing_scroll then
+				return
+			end
+			local win = tonumber(event.match)
+			local from = win == presentation.left.win and presentation.left
+				or win == presentation.right.win and presentation.right
+				or nil
+			if not from then
+				return
+			end
+			local to = from == presentation.left and presentation.right or presentation.left
+			if
+				not valid_win(from.win)
+				or not valid_win(to.win)
+				or vim.api.nvim_win_get_buf(from.win) ~= from.buf
+				or vim.api.nvim_win_get_buf(to.win) ~= to.buf
+			then
+				return
+			end
+			local view = vim.api.nvim_win_call(from.win, vim.fn.winsaveview)
+			presentation.syncing_scroll = true
+			vim.api.nvim_win_call(to.win, function()
+				local target = vim.fn.winsaveview()
+				target.topline, target.topfill, target.leftcol = view.topline, view.topfill, view.leftcol
+				target.lnum = math.max(view.topline, target.lnum)
+				vim.fn.winrestview(target)
+			end)
+			presentation.syncing_scroll = false
+		end,
+	})
+end
+
 ---Render one entry in the state's origin tab without creating a tab.
 ---@param state table
 ---@param entry table
@@ -1225,14 +1428,36 @@ function M.show(state, entry, options)
 		return nil, "review mode is not enabled"
 	end
 	local previous_inline_view = capture_inline_view(state, entry)
+	local engine_result = options.engine_result or {}
+	local projected = engine_result.presentation == "projected" and engine_result or nil
 	local projection
 	if layout == "inline" and not entry.metadata_only then
 		local projection_err
-		projection, projection_err = review_projection.build(entry)
+		if projected then
+			projection = projected.projection
+		else
+			projection, projection_err = review_projection.build(entry)
+		end
 		if not projection then
 			return nil, "Could not build unified review projection: " .. tostring(projection_err)
 		end
 	end
+	local intraline, intraline_err
+	if projected then
+		intraline = projected.intraline
+	else
+		intraline, intraline_err = review_diff.for_entry(state, entry)
+	end
+	if not intraline then
+		return nil, "Could not refine review changes: " .. tostring(intraline_err)
+	end
+	local split_projections = projected
+			and layout == "split"
+			and {
+				old = split_projection(projected, "old"),
+				new = split_projection(projected, "new"),
+			}
+		or nil
 	M.clear(state)
 	if not valid_win(state.origin.win) or not vim.api.nvim_tabpage_is_valid(state.origin.tab) then
 		return nil, "origin tab or window is no longer valid"
@@ -1245,11 +1470,25 @@ function M.show(state, entry, options)
 	local visibility_hunk_context = layout == "split" and math.max(1, hunk_context) or hunk_context
 	local old_line_count = #text_lines(entry.old_text or "")
 	local new_line_count = #text_lines(entry.new_text or "")
-	local logical_old_line_count = entry.metadata_only and 0 or source_line_count(entry.old_text or "")
-	local logical_new_line_count = entry.metadata_only and 0 or source_line_count(entry.new_text or "")
+	local logical_old_line_count = entry.metadata_only and 0
+		or projected and projected.projection.sources.old.line_count
+		or source_line_count(entry.old_text or "")
+	local logical_new_line_count = entry.metadata_only and 0
+		or projected and projected.projection.sources.new.line_count
+		or source_line_count(entry.new_text or "")
 	local presentation = {
 		cursor_guards = {},
 		entry = entry,
+		intraline = intraline,
+		projected = projected,
+		structural = engine_result.structural_only and projected or nil,
+		relations = engine_result.relations or {},
+		relations_limited = engine_result.relations_limited,
+		selected_engine = engine_result.selected_engine or "main",
+		origin_engine = engine_result.origin_engine,
+		fallback_reason = engine_result.fallback_reason,
+		engine_result = engine_result,
+		split_projections = split_projections,
 		generation = presentation_generation,
 		hunk_context = hunk_context,
 		visibility_hunk_context = visibility_hunk_context,
@@ -1266,8 +1505,10 @@ function M.show(state, entry, options)
 		symbol_candidates = {},
 		symbol_labels = {},
 		visibility = {
-			old = sections(entry, "old", old_line_count, visibility_hunk_context),
-			new = sections(entry, "new", new_line_count, visibility_hunk_context),
+			old = split_projections and review_projection.sections(split_projections.old, visibility_hunk_context)
+				or sections(entry, "old", old_line_count, visibility_hunk_context),
+			new = split_projections and review_projection.sections(split_projections.new, visibility_hunk_context)
+				or sections(entry, "new", new_line_count, visibility_hunk_context),
 			unified = projection and review_projection.sections(projection, visibility_hunk_context) or nil,
 		},
 	}
@@ -1296,20 +1537,50 @@ function M.show(state, entry, options)
 		presentation.target = { entry = entry, side = side, win = state.origin.win, buf = buf }
 		restore_inline_view(presentation.inline, previous_inline_view)
 	else
-		local left_buf = side_buffer(state, entry, "old")
-		presentation.left = { win = state.origin.win, buf = left_buf, side = "old" }
+		local left_buf = split_projections
+				and unified_scratch(entry, split_projections.old, presentation.generation, state, "old")
+			or side_buffer(state, entry, "old")
+		presentation.left = {
+			win = state.origin.win,
+			buf = left_buf,
+			side = "old",
+			projection = split_projections and split_projections.old,
+		}
 		remember_owned(presentation, left_buf)
 		put_buffer(state.origin.win, left_buf)
 		if not entry.deleted then
-			local right_buf, real = side_buffer(state, entry, "new")
+			local right_buf, real
+			if projected then
+				right_buf, real =
+					unified_scratch(entry, split_projections.new, presentation.generation, state, "new"), false
+			else
+				right_buf, real = side_buffer(state, entry, "new")
+			end
 			local right_win = create_split(state, right_buf)
-			presentation.right = { win = right_win, buf = right_buf, side = "new", real = real }
+			presentation.right = {
+				win = right_win,
+				buf = right_buf,
+				side = "new",
+				real = real,
+				projection = split_projections and split_projections.new,
+			}
 			remember_owned(presentation, right_buf)
 			local scrollopt = vim.o.scrollopt
-			enable_native_diff(state.origin.win, right_win)
+			if projected then
+				vim.wo[state.origin.win].scrollbind = false
+				vim.wo[right_win].scrollbind = false
+				vim.wo[state.origin.win].wrap = false
+				vim.wo[right_win].wrap = false
+			else
+				enable_native_diff(state.origin.win, right_win)
+			end
 			presentation.scrollopt_added = added_options(scrollopt, vim.o.scrollopt)
 			prepare_review_window(state.origin.win, layout)
 			prepare_review_window(right_win, layout)
+			if split_projections then
+				configure_unified_gutter(presentation, state.origin.win, left_buf, split_projections.old)
+				configure_unified_gutter(presentation, right_win, right_buf, split_projections.new)
+			end
 			local left_decorated, left_decorate_err =
 				decorate(state, entry, left_buf, state.origin.win, "old", context, false)
 			if not left_decorated then
@@ -1329,6 +1600,9 @@ function M.show(state, entry, options)
 				{ entry = entry, side = "new", win = right_win, buf = right_buf, path = entry.new_path }
 		else
 			prepare_review_window(state.origin.win, layout)
+			if split_projections then
+				configure_unified_gutter(presentation, state.origin.win, left_buf, split_projections.old)
+			end
 			local decorated, decorate_err = decorate(state, entry, left_buf, state.origin.win, "old", context, false)
 			if not decorated then
 				M.clear(state)
@@ -1338,6 +1612,9 @@ function M.show(state, entry, options)
 			presentation.target =
 				{ entry = entry, side = "old", win = state.origin.win, buf = left_buf, path = entry.old_path }
 		end
+	end
+	if split_projections and presentation.right then
+		bind_projected_scroll(state, presentation)
 	end
 	install_band_refresh(state, presentation)
 	return true
@@ -1393,6 +1670,9 @@ function M.clear(state)
 	local presentation = state and state.presentation
 	if not presentation then
 		return
+	end
+	if presentation.scroll_sync_autocmd then
+		pcall(vim.api.nvim_del_autocmd, presentation.scroll_sync_autocmd)
 	end
 	if presentation.logical_cursor_autocmd then
 		pcall(vim.api.nvim_del_autocmd, presentation.logical_cursor_autocmd)
@@ -1457,9 +1737,11 @@ function M.toggle_layout(state)
 	local entry = state.presentation.entry
 	local context = state.presentation.context
 	local layout = state.presentation.layout == "inline" and "split" or "inline"
+	local engine_result = state.presentation.engine_result
 	return M.show(state, entry, {
 		layout = layout,
 		context = context,
+		engine_result = engine_result,
 	})
 end
 
@@ -1473,28 +1755,46 @@ function M.toggle_context(state)
 	local entry = state.presentation.entry
 	local layout = state.presentation.layout
 	local context = state.presentation.context == "hunks" and "full" or "hunks"
+	local engine_result = state.presentation.engine_result
 	return M.show(state, entry, {
 		layout = layout,
 		context = context,
+		engine_result = engine_result,
 	})
 end
 
-local function active_projection(state, expected_generation)
+local function active_projection(state, expected_generation, win, anchor_side)
 	local presentation = state and state.presentation
-	local inline = presentation and presentation.inline
-	if not presentation or presentation.layout ~= "inline" or not presentation.projection or not inline then
-		return nil, "no unified review projection is active"
-	elseif expected_generation and expected_generation ~= presentation.generation then
-		return nil, "review projection generation changed"
-	elseif
-		not valid_win(inline.win)
-		or not valid_buf(inline.buf)
-		or vim.api.nvim_win_get_buf(inline.win) ~= inline.buf
-		or vim.b[inline.buf].nvim_review_projection_generation ~= presentation.generation
-	then
-		return nil, "unified review projection is no longer current"
+	if not presentation then
+		return nil, "no review projection is active"
 	end
-	return presentation, inline
+	local target = presentation.inline
+	if presentation.split_projections then
+		if anchor_side then
+			target = anchor_side == "left" and presentation.left or presentation.right
+		else
+			local selected_win = win or vim.api.nvim_get_current_win()
+			target = presentation.left and presentation.left.win == selected_win and presentation.left
+				or presentation.right and presentation.right.win == selected_win and presentation.right
+				or not win and (presentation.right or presentation.left)
+		end
+	end
+	local projection = target and (target.projection or presentation.projection)
+	if not projection then
+		return nil, "no review projection is active"
+	end
+	if expected_generation and expected_generation ~= presentation.generation then
+		return nil, "review projection generation changed"
+	end
+	if
+		not valid_win(target.win)
+		or not valid_buf(target.buf)
+		or vim.api.nvim_win_get_buf(target.win) ~= target.buf
+		or vim.b[target.buf].nvim_review_projection_generation ~= presentation.generation
+	then
+		return nil, "review projection is no longer current"
+	end
+	return presentation, target, projection
 end
 
 local function presenter_source(presentation, inline, source_ref)
@@ -1526,12 +1826,12 @@ end
 ---@param expected_generation? integer
 ---@return table? source_ref
 ---@return string? err
-function M.source_at(state, display_line, expected_generation)
-	local presentation, inline_or_err = active_projection(state, expected_generation)
+function M.source_at(state, display_line, expected_generation, win)
+	local presentation, inline_or_err, projection = active_projection(state, expected_generation, win)
 	if not presentation then
 		return nil, inline_or_err
 	end
-	local source_ref, source_err = review_projection.source_at(presentation.projection, display_line)
+	local source_ref, source_err = review_projection.source_at(projection, display_line)
 	if not source_ref then
 		return nil, source_err
 	end
@@ -1546,13 +1846,12 @@ end
 ---@param preferred_side? "old"|"new"|"left"|"right"
 ---@return table? source_range
 ---@return string? err
-function M.resolve_range(state, first, last, expected_generation, preferred_side)
-	local presentation, inline_or_err = active_projection(state, expected_generation)
+function M.resolve_range(state, first, last, expected_generation, preferred_side, win)
+	local presentation, inline_or_err, projection = active_projection(state, expected_generation, win)
 	if not presentation then
 		return nil, inline_or_err
 	end
-	local source_range, range_err =
-		review_projection.resolve_range(presentation.projection, first, last, preferred_side)
+	local source_range, range_err = review_projection.resolve_range(projection, first, last, preferred_side)
 	if not source_range then
 		return nil, range_err
 	end
@@ -1648,17 +1947,28 @@ end
 ---@param expected_generation? integer
 ---@return boolean?
 ---@return string? err
-function M.reveal_rows(state, rows, expected_generation)
-	local presentation, inline_or_err = active_projection(state, expected_generation)
+function M.reveal_rows(state, rows, expected_generation, win)
+	local presentation, inline_or_err, projection = active_projection(state, expected_generation, win)
 	if not presentation then
 		return nil, inline_or_err
 	elseif type(rows) ~= "table" or #rows == 0 then
 		return nil, "at least one display row is required"
 	end
 	for _, row in ipairs(rows) do
-		if not integer(row) or row < 1 or row > #presentation.projection.rows then
+		if not integer(row) or row < 1 or row > #projection.rows then
 			return nil, "display row is outside the unified projection"
 		end
+	end
+	if presentation.split_projections then
+		-- Both panes conceal the same display rows. Revealing a comment must
+		-- preserve that geometry, including unanchorable rows on the other side.
+		for _, pane in ipairs({ presentation.left, presentation.right }) do
+			local revealed, err = reveal_target_rows(state, presentation, pane, rows)
+			if not revealed then
+				return nil, err
+			end
+		end
+		return true
 	end
 	return reveal_target_rows(state, presentation, inline_or_err, rows)
 end
@@ -1678,7 +1988,8 @@ end
 ---@return table? location
 ---@return string? err
 function M.locate_anchor(state, anchor, expected_generation)
-	local presentation, inline_or_err = active_projection(state, expected_generation)
+	local presentation, inline_or_err, projection =
+		active_projection(state, expected_generation, nil, anchor and anchor.side)
 	if not presentation then
 		return nil, inline_or_err
 	elseif type(anchor) ~= "table" or type(anchor.path) ~= "string" then
@@ -1690,27 +2001,27 @@ function M.locate_anchor(state, anchor, expected_generation)
 	if not side then
 		return nil, "anchor side must be left or right"
 	end
-	local selected = presentation.projection.sources[side]
-	local line = anchor.start_line or first_source_line(presentation.projection, side)
+	local selected = projection.sources[side]
+	local line = anchor.start_line or first_source_line(projection, side)
 	local display_line
 	local locate_err
 	if line then
-		display_line, locate_err = review_projection.locate(presentation.projection, side, line, anchor.path)
+		display_line, locate_err = review_projection.locate(projection, side, line, anchor.path)
 	else
-		for index, row in ipairs(presentation.projection.rows) do
+		for index, row in ipairs(projection.rows) do
 			if row.path == anchor.path and row.anchor_side == side then
 				display_line = index
 				break
 			end
 		end
-		if not display_line and selected.path == anchor.path and presentation.projection.rows[1] then
+		if not display_line and selected.path == anchor.path and projection.rows[1] then
 			display_line = 1
 		end
 	end
 	if not display_line then
 		return nil, locate_err or "anchor is not represented by this unified projection"
 	end
-	local source_ref = assert(review_projection.source_at(presentation.projection, display_line))
+	local source_ref = assert(review_projection.source_at(projection, display_line))
 	local location = presenter_source(presentation, inline_or_err, source_ref)
 	local record = line and selected.lines[line] or nil
 	location.anchor_side = side == "old" and "left" or "right"
@@ -1742,7 +2053,7 @@ function M.reveal_new_location(state, path, line, expected_generation)
 		return nil, "NEW source line is outside the review presentation"
 	end
 
-	if presentation.projection and presentation.inline then
+	if presentation.projection and presentation.inline or presentation.split_projections then
 		local location, locate_err = M.locate_anchor(state, {
 			kind = "range",
 			path = path,
@@ -1754,15 +2065,16 @@ function M.reveal_new_location(state, path, line, expected_generation)
 		if not location then
 			return nil, locate_err
 		end
-		local revealed, reveal_err = M.reveal_rows(state, { location.display_line }, presentation.generation)
+		local revealed, reveal_err =
+			M.reveal_rows(state, { location.display_line }, presentation.generation, location.win)
 		if not revealed then
 			return nil, reveal_err
 		end
 		return {
-			buf = presentation.inline.buf,
+			buf = location.buf,
 			line = location.display_line,
 			source_line = line,
-			win = presentation.inline.win,
+			win = location.win,
 		}
 	end
 
@@ -1785,7 +2097,8 @@ end
 ---@return integer[]? rows
 ---@return string? err
 function M.rows_for_anchor(state, anchor, expected_generation)
-	local presentation, projection_err = active_projection(state, expected_generation)
+	local presentation, projection_err, projection =
+		active_projection(state, expected_generation, nil, anchor and anchor.side)
 	if not presentation then
 		return nil, projection_err
 	elseif type(anchor) ~= "table" or type(anchor.path) ~= "string" then
@@ -1800,7 +2113,7 @@ function M.rows_for_anchor(state, anchor, expected_generation)
 		return location and { location.display_line } or nil, locate_err
 	end
 	return review_projection.rows_for_range(
-		presentation.projection,
+		projection,
 		anchor.side,
 		anchor.start_line,
 		anchor.end_line or anchor.start_line,
@@ -1876,12 +2189,13 @@ function M.capture_location(state)
 	local cursor = vim.api.nvim_win_get_cursor(win)
 	local location
 	if
-		presentation.layout == "inline"
-		and presentation.projection
-		and presentation.inline
-		and presentation.inline.win == win
-		and valid_buf(presentation.inline.buf)
-		and vim.api.nvim_win_get_buf(win) == presentation.inline.buf
+		(
+			presentation.projection
+			and presentation.inline
+			and presentation.inline.win == win
+			and valid_buf(presentation.inline.buf)
+			and vim.api.nvim_win_get_buf(win) == presentation.inline.buf
+		) or presentation.split_projections ~= nil
 	then
 		local restored_cursor = presentation.logical_cursor
 		local side
@@ -1894,7 +2208,7 @@ function M.capture_location(state)
 		else
 			presentation.logical_cursor = nil
 			presentation.preferred_side = nil
-			local source, source_err = M.source_at(state, cursor[1], presentation.generation)
+			local source, source_err = M.source_at(state, cursor[1], presentation.generation, win)
 			if not source then
 				return nil, source_err
 			end
@@ -1979,7 +2293,7 @@ function M.restore_location(state, location, expected_generation)
 
 	local target
 	local target_line
-	if presentation.layout == "inline" and presentation.projection and presentation.inline then
+	if presentation.projection and presentation.inline or presentation.split_projections then
 		local anchor = {
 			kind = location.line == 0 and "file" or "range",
 			layer = location.layer,
@@ -1994,11 +2308,11 @@ function M.restore_location(state, location, expected_generation)
 		if not resolved then
 			return nil, resolve_err
 		end
-		local revealed, reveal_err = M.reveal_rows(state, { resolved.display_line }, generation)
+		local revealed, reveal_err = M.reveal_rows(state, { resolved.display_line }, generation, resolved.win)
 		if not revealed then
 			return nil, reveal_err
 		end
-		target = presentation.inline
+		target = presentation.inline or matching_side(presentation, location.side)
 		target_line = resolved.display_line
 	else
 		target = matching_side(presentation, location.side)
@@ -2065,6 +2379,12 @@ end
 ---@return table?
 function M.current_target(state)
 	local presentation = state and state.presentation
+	if presentation and presentation.split_projections then
+		local _, target = active_projection(state)
+		if target and valid_win(target.win) then
+			return M.source_at(state, vim.api.nvim_win_get_cursor(target.win)[1], presentation.generation, target.win)
+		end
+	end
 	if presentation and presentation.projection and presentation.inline and valid_win(presentation.inline.win) then
 		local display_line = vim.api.nvim_win_get_cursor(presentation.inline.win)[1]
 		return M.source_at(state, display_line, presentation.generation)
@@ -2074,26 +2394,26 @@ end
 
 local function navigate_hunk(state, direction)
 	local presentation = state and state.presentation
-	local hunks = presentation
-		and (presentation.projection and presentation.projection.hunks or presentation.entry.hunks)
+	local _, pane, projection = active_projection(state)
+	local hunks = projection and projection.hunks or presentation and presentation.entry.hunks
+
 	if not presentation or #(hunks or {}) == 0 then
 		return false
 	end
-	local win = presentation.projection and presentation.inline.win or vim.api.nvim_get_current_win()
+	local win = projection and pane.win or vim.api.nvim_get_current_win()
 	if not valid_win(win) then
 		return false
 	end
 	local side = presentation.target.side
-	if not presentation.projection and presentation.left and win == presentation.left.win then
+	if not projection and presentation.left and win == presentation.left.win then
 		side = "old"
-	elseif not presentation.projection and presentation.right and win == presentation.right.win then
+	elseif not projection and presentation.right and win == presentation.right.win then
 		side = "new"
 	end
 	local current = vim.api.nvim_win_get_cursor(win)[1]
 	local starts = {}
 	for _, hunk in ipairs(hunks) do
-		starts[#starts + 1] = presentation.projection and hunk.first
-			or math.max(1, side == "old" and hunk[1] or hunk[3])
+		starts[#starts + 1] = projection and hunk.first or math.max(1, side == "old" and hunk[1] or hunk[3])
 	end
 	local target
 	if direction > 0 then

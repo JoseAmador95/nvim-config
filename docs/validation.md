@@ -23,6 +23,11 @@ configured editor and pager parsers. The final check disables installers, is
 offline, validates all four validator pins plus `cc`, and fails if an installed
 plugin does not match the lock.
 
+The engine screen-geometry spec uses `-c 'lua dofile(...)'` so Neovim has
+initialized its screen before the test changes `lines` and `columns`. Running
+that spec with `-l` can leave the headless grid at its old dimensions and crash
+redraw in Neovim 0.12.5. Its redraw, scrolling and cursor assertions remain active.
+
 The committed `lazy-lock.json` belongs to the full editor. The pager copies it
 byte-for-byte to a profile-local state file before Lazy starts; Lazy may prune
 that writable copy for the allowlist but can never rewrite the committed lock.
@@ -69,6 +74,18 @@ strict `--require-managed-tools` run cannot succeed on that target.
 and `check-config` remains the complete offline, non-mutating acceptance gate.
 
 ## Runtime tool installation
+
+GumTree uses the separate `maven-release` backend. Explicit
+`:NvimConfigToolsInstall[!] gumtree` installs the fixed GumTree 4.0.0 JAR closure
+and private Temurin JRE 17.0.20.1+1 together. Every download has an exact SHA-256;
+the private receipt binds the source contract and complete installed closure,
+including the launcher and JRE. Repair atomically replaces the payload and
+receipt; an incomplete transaction cannot resolve. Only trusted `curl` and
+`gzip` are installation prerequisites. Host Java, Maven and Gradle are unused.
+The offline gate covers archive confinement, offline attempt preservation,
+tampered JAR/JRE/launcher rejection, repair and cancellation. The optional real
+package smoke requires an explicitly installed package and is separate from the
+offline suite.
 
 Full-editor startup registers only a lightweight command facade; the
 verified-tool lifecycle and local plugin remain unloaded until the first

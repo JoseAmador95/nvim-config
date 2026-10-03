@@ -16,6 +16,8 @@ local review_panel = require("native_review.panel")
 local review_presenter = require("native_review.presenter")
 local review_scope = require("native_review.scope")
 local review_store = require("native_review.store")
+local review_structural = require("native_review.structural")
+local review_engines = require("native_review.engines")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comments")
 local PREVIEW_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comment_preview")
@@ -54,6 +56,14 @@ local workspace_generation = 0
 local definition_navigation_options
 local operation_epoch = 0
 local pending_operation
+local pending_engine
+local function cancel_engine()
+	local pending = pending_engine
+	pending_engine = nil
+	if pending and pending.cancel then
+		pending.cancel()
+	end
+end
 local HISTORY_PROVIDER = "native-review"
 local ENTRY_SNAPSHOT_FIELDS = {
 	"layer",
@@ -204,6 +214,8 @@ local function workspace_for_key(expected)
 end
 
 local function bump_workspace_generation(workspace)
+	cancel_engine()
+	review_structural.close()
 	workspace_generation = workspace_generation + 1
 	workspace.generation = workspace_generation
 	return workspace.generation
@@ -357,6 +369,10 @@ function M.status()
 		scope_label = workspace.scope and workspace.scope.label or nil,
 		layout = workspace.layout,
 		context = workspace.context,
+		engine = workspace.engine or "main",
+		effective_engine = workspace.mode_state and workspace.mode_state.presentation and vim.deepcopy(
+			workspace.mode_state.presentation.origin_engine
+		) or nil,
 		inline_comments = workspace.inline_comments ~= false,
 	}
 	if pending_operation then
@@ -387,6 +403,8 @@ local function emit_changed()
 end
 
 local function cancel_pending(reason, emit)
+	cancel_engine()
+	review_structural.close()
 	operation_epoch = operation_epoch + 1
 	local pending = pending_operation
 	pending_operation = nil
@@ -1306,6 +1324,7 @@ local function panel_open(workspace)
 end
 
 local function disable_ui(workspace, close_panel)
+	cancel_engine()
 	clear_inline_preview()
 	if workspace.panel then
 		if close_panel then
@@ -1496,6 +1515,7 @@ local function ui_snapshot(workspace, focus)
 		entry_identity = workspace.entry_identity,
 		layout = workspace.layout,
 		context = workspace.context,
+		engine = workspace.engine or "main",
 		inline_comments = workspace.inline_comments ~= false,
 		mode_on = workspace.mode_on == true,
 		panel_visible = panel_open(workspace),
@@ -1650,6 +1670,7 @@ local function restore_ui(workspace, snapshot)
 	workspace.entry_identity = snapshot.entry_identity
 	workspace.layout = snapshot.layout
 	workspace.context = snapshot.context
+	workspace.engine = snapshot.engine or "main"
 	workspace.inline_comments = snapshot.inline_comments
 	if snapshot.mode_on or snapshot.panel_visible then
 		local acquired, acquire_err = acquire_surface(workspace)
@@ -1758,6 +1779,7 @@ local function workspace_preferences(existing, preferences)
 	return {
 		layout = preferences.layout or (existing and existing.layout) or config.layout,
 		context = preferences.context or (existing and existing.context) or config.context,
+		engine = preferences.engine or (existing and existing.engine) or "main",
 		inline_comments = inline_comments,
 	}
 end
@@ -1776,6 +1798,7 @@ local function activate(root, session, model, options)
 		root = root,
 		layout = resolved_preferences.layout,
 		context = resolved_preferences.context,
+		engine = resolved_preferences.engine,
 		inline_comments = resolved_preferences.inline_comments,
 		scope = session.scope,
 		session = session,
@@ -1945,6 +1968,7 @@ function M.open_async(request, root, callback)
 end
 
 function M.cancel_pending(reason, emit)
+	cancel_engine()
 	return cancel_pending(reason or "cancelled", emit ~= false)
 end
 
@@ -1975,6 +1999,7 @@ open_drilldown = function(request, parent)
 		preferences = {
 			layout = parent.layout,
 			context = parent.context,
+			engine = parent.engine,
 			inline_comments = parent.inline_comments ~= false,
 		},
 	})
@@ -2073,6 +2098,49 @@ local function present_owner_current(workspace, generation, state, expected_surf
 		and state.enabled == true
 end
 
+-- File navigation keeps its synchronous public contract. The subprocess is
+-- asynchronous and the bounded wait pumps events, allowing owner cancellation.
+local function prepared_engine(workspace, entry)
+	local id = workspace.engine or "main"
+	local snapshot = entry_snapshot(entry)
+	local cache = workspace.engine_prepared
+	if cache and cache.id == id and entry_matches_snapshot(entry, cache.snapshot) then
+		return cache.result
+	end
+	cancel_engine()
+	local request = { workspace = workspace, generation = workspace.generation }
+	pending_engine = request
+	local completed, result, err = false, nil, nil
+	local ok, handle = pcall(review_engines.prepare, id, snapshot, function(value, failure)
+		completed, result, err = true, value, failure
+	end)
+	if not ok then
+		completed, err = true, tostring(handle)
+	elseif type(handle) == "function" then
+		request.cancel = handle
+	end
+	vim.wait(6000, function()
+		return completed
+			or pending_engine ~= request
+			or current_workspace() ~= workspace
+			or workspace.generation ~= request.generation
+	end, 10)
+	local current = pending_engine == request
+		and current_workspace() == workspace
+		and workspace.generation == request.generation
+		and entry_matches_snapshot(find_entry(workspace, entry.identity), snapshot)
+	if pending_engine == request then
+		cancel_engine()
+	end
+	if not current then
+		return nil, "Review engine preparation was superseded"
+	elseif not completed or not result then
+		return nil, err or "Review engine preparation timed out"
+	end
+	workspace.engine_prepared = { id = id, snapshot = snapshot, result = result }
+	return result
+end
+
 function M.present(identity, expected, options)
 	clear_inline_preview()
 	if suspended then
@@ -2089,6 +2157,12 @@ function M.present(identity, expected, options)
 	if not entry then
 		return nil, "review entry is no longer part of the exact model"
 	end
+	cancel_engine()
+	local engine_result, engine_err = prepared_engine(workspace, entry)
+	if not engine_result then
+		return nil, engine_err
+	end
+	review_structural.close()
 	local selected_entry_snapshot = entry_snapshot(entry)
 	local generation = workspace.generation
 	local previous_identity = workspace.entry_identity
@@ -2125,6 +2199,7 @@ function M.present(identity, expected, options)
 		layout = workspace.layout,
 		context = workspace.context,
 		side = options and options.side or nil,
+		engine_result = engine_result,
 	})
 	if not shown then
 		if not present_owner_current(workspace, generation, state, expected_surface) then
@@ -2268,6 +2343,7 @@ function M.mode(value)
 			entry_identity = workspace.entry_identity,
 			layout = workspace.layout,
 			context = workspace.context,
+			engine = workspace.engine or "main",
 			inline_comments = workspace.inline_comments ~= false,
 			mode_on = true,
 			panel_visible = true,
@@ -2352,6 +2428,96 @@ local function presentation_option(name, value, allowed)
 	return true
 end
 
+function M.engine(id)
+	local workspace = current_workspace()
+	local blocked = composer_transition_error("change the diff engine")
+	if not workspace or blocked then
+		local err = blocked or "No active review"
+		notify(err, vim.log.levels.ERROR)
+		return nil, err
+	end
+	if not id or id == "" then
+		local token = workspace_token(workspace)
+		select_review(review_engines.list(), {
+			prompt = "Review diff engine",
+			format_item = function(item)
+				return item.label
+					.. " · "
+					.. item.version
+					.. (item.id == (workspace.engine or "main") and " · selected" or "")
+			end,
+		}, function(item)
+			if item and resolve_workspace_token(token, "selecting a diff engine") then
+				M.engine(item.id)
+			end
+		end)
+		return true
+	end
+	if not review_engines.origin(id) then
+		local err = "Unknown review engine: " .. tostring(id)
+		notify(err, vim.log.levels.ERROR)
+		return nil, err
+	end
+	local entry = find_entry(workspace, workspace.entry_identity)
+	if not entry then
+		workspace.engine = id
+		emit_changed()
+		return true
+	end
+	cancel_engine()
+	local snapshot = entry_snapshot(entry)
+	local request = { generation = workspace.generation, workspace = workspace }
+	pending_engine = request
+	local ok, handle = pcall(review_engines.prepare, id, snapshot, function(result, err)
+		if
+			pending_engine ~= request
+			or workspace ~= current_workspace()
+			or workspace.generation ~= request.generation
+			or workspace.entry_identity ~= entry.identity
+			or not entry_matches_snapshot(find_entry(workspace, entry.identity), snapshot)
+		then
+			return
+		end
+		pending_engine = nil
+		local blocked_now = composer_transition_error("change the diff engine")
+		if not result or blocked_now then
+			notify(blocked_now or err or "Could not prepare the diff engine", vim.log.levels.ERROR)
+			return
+		end
+		local previous, previous_cache = workspace.engine, workspace.engine_prepared
+		local location = workspace.mode_state
+				and workspace.mode_state.presentation
+				and review_presenter.capture_location(workspace.mode_state)
+			or nil
+		workspace.engine = id
+		workspace.engine_prepared = { id = id, snapshot = snapshot, result = result }
+		if workspace.mode_on then
+			local shown, show_err = M.present(entry.identity, nil, { emit = false })
+			if not shown then
+				workspace.engine, workspace.engine_prepared = previous, previous_cache
+				notify(show_err, vim.log.levels.ERROR)
+				return
+			end
+			if location then
+				review_presenter.restore_location(workspace.mode_state, location)
+			end
+		end
+		update_panel(workspace)
+		emit_changed()
+	end)
+	if not ok then
+		if pending_engine == request then
+			pending_engine = nil
+		end
+		notify(tostring(handle), vim.log.levels.ERROR)
+		return nil, tostring(handle)
+	end
+	if pending_engine == request and type(handle) == "function" then
+		request.cancel = handle
+	end
+	return true
+end
+
 function M.layout(value)
 	local ok, err = presentation_option("layout", value, { "inline", "split" })
 	if not ok then
@@ -2420,7 +2586,7 @@ local function presentation_target(workspace, win)
 	for _, name in ipairs({ "left", "right", "inline" }) do
 		local side = presentation[name]
 		if side and side.win == win then
-			if side.side == "unified" and presentation.projection then
+			if side.projection or side.side == "unified" and presentation.projection then
 				return {
 					entry = presentation.entry,
 					buf = side.buf,
@@ -2851,7 +3017,9 @@ local function source_lines(entry, side)
 	if type(text) ~= "string" or text == "" then
 		return {}
 	end
-	text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+	-- Git and display projections use LF boundaries. A standalone CR is a
+	-- source byte, not an additional line or an invented comment coordinate.
+	text = text:gsub("\r\n", "\n")
 	if text:sub(-1) == "\n" then
 		text = text:sub(1, -2)
 	end
@@ -2879,7 +3047,8 @@ local function context_for_entry(entry, side, first, last)
 end
 
 local function unified_file_source(workspace, target, display_line, preferred_side)
-	local source_ref, source_err = review_presenter.source_at(workspace.mode_state, display_line, target.generation)
+	local source_ref, source_err =
+		review_presenter.source_at(workspace.mode_state, display_line, target.generation, target.win)
 	if not source_ref then
 		return nil, source_err
 	end
@@ -2915,8 +3084,14 @@ local function resolve_capture(workspace, target, kind, first, last, preferred_s
 		if kind == "file" then
 			resolved, resolve_err = unified_file_source(workspace, target, first, preferred_side)
 		else
-			resolved, resolve_err =
-				review_presenter.resolve_range(workspace.mode_state, first, last, target.generation, preferred_side)
+			resolved, resolve_err = review_presenter.resolve_range(
+				workspace.mode_state,
+				first,
+				last,
+				target.generation,
+				preferred_side,
+				target.win
+			)
 		end
 		if not resolved then
 			return nil, resolve_err
@@ -2977,21 +3152,27 @@ local function displayed_anchor(workspace, anchor)
 	if not presentation then
 		return nil, "review presentation is unavailable"
 	end
-	if presentation.projection and presentation.inline then
+	if presentation.projection and presentation.inline or presentation.split_projections then
+		local location, location_err =
+			review_presenter.locate_anchor(workspace.mode_state, anchor, presentation.generation)
+		if not location then
+			return nil, location_err
+		end
 		local rows, rows_err = review_presenter.rows_for_anchor(workspace.mode_state, anchor, presentation.generation)
 		if not rows then
 			return nil, rows_err
 		end
-		local revealed, reveal_err = review_presenter.reveal_rows(workspace.mode_state, rows, presentation.generation)
+		local revealed, reveal_err =
+			review_presenter.reveal_rows(workspace.mode_state, rows, presentation.generation, location.win)
 		if not revealed then
 			return nil, reveal_err
 		end
 		return {
-			buf = presentation.inline.buf,
+			buf = location.buf,
 			first = rows[1],
 			last = rows[#rows],
 			rows = rows,
-			win = presentation.inline.win,
+			win = location.win,
 		}
 	end
 	local side = anchor.side == "left" and presentation.left or presentation.right or presentation.inline
@@ -3049,6 +3230,12 @@ local function focus_review_ui(token, action)
 	return resolve_workspace_token(token, action)
 end
 
+local function effective_origin(workspace)
+	local presentation = workspace.mode_state and workspace.mode_state.presentation
+	return presentation and presentation.origin_engine and vim.deepcopy(presentation.origin_engine)
+		or review_engines.origin("main")
+end
+
 local function add_from_capture(workspace, captured, requested_type, kind)
 	if not allow_mutation(workspace) then
 		return
@@ -3103,6 +3290,7 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 		end
 		vim.api.nvim_set_current_win(target.win)
 		vim.api.nvim_win_set_cursor(target.win, { display.last, 0 })
+		local origin_engine = effective_origin(workspace)
 		compose(workspace, {
 			title = anchor.kind == "file" and "New file comment" or "New",
 			type_cycle = true,
@@ -3123,6 +3311,7 @@ local function add_from_capture(workspace, captured, requested_type, kind)
 				type = selected_type or requested_type or "issue",
 				body = body,
 				anchor = anchor,
+				origin_engine = origin_engine,
 			})
 			if not changed then
 				return mutation_failed(current, err)
@@ -3288,6 +3477,7 @@ function M.general_comment(requested_type)
 		review_panel.hide(workspace.panel)
 	end
 	vim.api.nvim_set_current_win(source.win)
+	local origin_engine = effective_origin(workspace)
 	compose(workspace, {
 		title = "New review-level comment",
 		type_cycle = true,
@@ -3306,6 +3496,7 @@ function M.general_comment(requested_type)
 			type = selected_type or "issue",
 			body = body,
 			anchor = anchor,
+			origin_engine = origin_engine,
 		})
 		if not changed then
 			return mutation_failed(current, err)
@@ -3327,7 +3518,7 @@ local function current_location(workspace)
 	end
 	local display_line = vim.api.nvim_win_get_cursor(target.win)[1]
 	if target.unified then
-		local source_ref = review_presenter.source_at(workspace.mode_state, display_line, target.generation)
+		local source_ref = review_presenter.source_at(workspace.mode_state, display_line, target.generation, target.win)
 		if not source_ref then
 			return nil
 		end
@@ -3428,7 +3619,14 @@ end
 
 local function mapped_anchor_rows(workspace, anchor, buf)
 	local presentation = workspace.mode_state and workspace.mode_state.presentation
-	if presentation and presentation.projection and presentation.inline and presentation.inline.buf == buf then
+	if
+		presentation
+		and (
+			(presentation.projection and presentation.inline and presentation.inline.buf == buf)
+			or presentation.split_projections
+				and ((presentation.left and presentation.left.buf == buf and anchor.side == "left") or (presentation.right and presentation.right.buf == buf and anchor.side == "right"))
+		)
+	then
 		return review_presenter.rows_for_anchor(workspace.mode_state, anchor, presentation.generation)
 	end
 	if anchor.kind ~= "range" or not anchor.start_line then
@@ -3751,6 +3949,7 @@ local function compose_item(token, action)
 			return false
 		end
 	end
+	local origin_engine = effective_origin(workspace)
 	compose(workspace, {
 		title = title,
 		body = edit and item.body or "",
@@ -3773,6 +3972,7 @@ local function compose_item(token, action)
 			type = selected_type or (edit and stable.type or "issue"),
 			body = body,
 			anchor = stable.anchor,
+			origin_engine = not edit and origin_engine or nil,
 		}
 		local changed, err = edit and review_store.edit(current.session, stable.id, values)
 			or review_store.reply(current.session, stable.id, values)
@@ -4071,7 +4271,7 @@ function M.jump(id)
 	local presentation = workspace.mode_state.presentation
 	local target
 	local line
-	if presentation.projection then
+	if presentation.projection or presentation.split_projections then
 		local display_err
 		target, display_err = displayed_anchor(workspace, anchor)
 		if not target then
@@ -4347,7 +4547,14 @@ local function anchor_rows_for_buffer(workspace, anchor, buf)
 		return nil
 	end
 	local presentation = workspace.mode_state and workspace.mode_state.presentation
-	if presentation and presentation.projection and presentation.inline and presentation.inline.buf == buf then
+	if
+		presentation
+		and (
+			(presentation.projection and presentation.inline and presentation.inline.buf == buf)
+			or presentation.split_projections
+				and ((presentation.left and presentation.left.buf == buf and anchor.side == "left") or (presentation.right and presentation.right.buf == buf and anchor.side == "right"))
+		)
+	then
 		return review_presenter.rows_for_anchor(workspace.mode_state, anchor, presentation.generation)
 	end
 	if vim.b[buf].nvim_review_path == anchor.path then
@@ -4532,6 +4739,7 @@ function M.snapshot()
 			resolution = item.resolution,
 			body = item.body,
 			anchor = vim.deepcopy(item.anchor),
+			origin_engine = item.origin_engine and vim.deepcopy(item.origin_engine) or nil,
 			reply_to = item.reply_to,
 		}
 	end
@@ -4643,6 +4851,7 @@ function M.suspend_for_session()
 				entry_identity = workspace.entry_identity,
 				layout = workspace.layout,
 				context = workspace.context,
+				engine = workspace.engine or "main",
 				inline_comments = workspace.inline_comments ~= false,
 				mode_on = false,
 				panel_visible = false,
@@ -4872,7 +5081,33 @@ function M.setup()
 	setup_autocmds()
 end
 
+function M.structural_diff()
+	local workspace = current_workspace()
+	local entry = workspace and find_entry(workspace, workspace.entry_identity)
+	if not entry or not workspace.mode_on or not surface_valid() then
+		local err = "Select a file in an active review before opening structural diff"
+		notify(err, vim.log.levels.WARN)
+		return nil, err
+	end
+	local snapshot = entry_snapshot(entry)
+	local generation = workspace.generation
+	-- Model entries are immutable proxies; the snapshot exposes plain data.
+	local opened, err = review_structural.open(snapshot, function()
+		return workspace == current_workspace()
+			and workspace.generation == generation
+			and workspace.mode_on == true
+			and surface_valid()
+			and workspace.entry_identity == entry.identity
+			and entry_matches_snapshot(find_entry(workspace, entry.identity), snapshot)
+	end)
+	if not opened then
+		notify(err, vim.log.levels.WARN)
+	end
+	return opened, err
+end
+
 function M.teardown()
+	cancel_engine()
 	cancel_pending("review teardown", false)
 	clear_inline_preview()
 	local _, discard_err = discard_suspended_preview(suspended)

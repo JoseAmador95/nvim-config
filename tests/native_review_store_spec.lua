@@ -117,6 +117,7 @@ local function legacy_value(session, statuses, export_ids)
 	legacy.version = 1
 	for index, item in ipairs(legacy.items) do
 		item.anchor.kind = nil
+		item.origin_engine = nil
 		item.status = statuses[index]
 		item.resolution = nil
 		item.deliveries = nil
@@ -133,7 +134,7 @@ local function legacy_value(session, statuses, export_ids)
 end
 
 local function write_legacy(session)
-	local directory = vim.fs.joinpath(state, "nvim-config", "reviews", "v1", vim.fn.sha256(root))
+	local directory = vim.fs.joinpath(state, "nvim-config", "reviews", "v" .. session.version, vim.fn.sha256(root))
 	assert(vim.fn.mkdir(directory, "p", 448) == 1)
 	local path = vim.fs.joinpath(directory, session.id .. ".json")
 	local encoded = vim.json.encode(session) .. "\n"
@@ -145,7 +146,7 @@ end
 test("session and scope identities are deterministic and include the working fingerprint", function()
 	local first = fresh()
 	local second = fresh()
-	assert(first.version == 2 and first.scope.version == 1)
+	assert(first.version == 3 and first.scope.version == 1)
 	assert(first.id == second.id and first.repo_hash == second.repo_hash)
 	local changed_scope = working_scope(vim.fn.sha256("changed"))
 	assert(changed_scope.id ~= first.id)
@@ -212,6 +213,94 @@ test("anchor metadata survives add, edit, reply, save, and load", function()
 	assert(vim.deep_equal(loaded.items[2].anchor, updated_anchor))
 end)
 
+test("item origins survive lifecycle changes and replies record their own engine", function()
+	local main = { id = "main", version = "builtin-v1 / Neovim 0.12.0" }
+	local difftastic = { id = "difftastic", version = "0.71.0" }
+	local session = assert(store.add(fresh(), {
+		type = "issue",
+		body = "Recorded in the main engine",
+		anchor = { path = "src/main.lua", side = "left", start_line = 4 },
+		origin_engine = main,
+	}, deps))
+	local original_origin = vim.deepcopy(main)
+	main.version = "changed caller value"
+	local root_id = session.items[1].id
+	session = assert(store.reply(session, root_id, { body = "Structural reply", origin_engine = difftastic }, deps))
+	session = assert(store.reply(session, root_id, { body = "Unrecorded reply" }, deps))
+	session = assert(store.edit(session, root_id, {
+		body = "Edited body",
+		anchor = { kind = "range", path = "src/main.lua", side = "right", start_line = 9 },
+	}, deps))
+	session = assert(store.set_type(session, root_id, "issue", deps))
+	session = assert(store.set_resolution(session, root_id, "resolved", deps))
+	session = assert(store.set_resolution(session, root_id, "open", deps))
+	assert(vim.deep_equal(session.items[1].origin_engine, original_origin))
+	assert(vim.deep_equal(session.items[2].origin_engine, difftastic))
+	assert(session.items[3].origin_engine == nil, "reply invented or inherited an engine origin")
+	local forbidden, edit_err = store.edit(session, root_id, { origin_engine = difftastic }, deps)
+	assert(not forbidden and edit_err:find("unknown key", 1, true))
+	local saved = assert(store.save(root, session, deps))
+	local loaded = assert(store.load(root, saved.id, deps))
+	assert(vim.deep_equal(loaded, saved))
+	assert(loaded.scope.backend_id == "diffview" and loaded.id == session.id)
+	assert(loaded.items[1].anchor.start_line == 9 and loaded.items[1].anchor.side == "right")
+end)
+
+test("v3 engine origins are strict and bounded without restricting future engine names", function()
+	local session = add_root(fresh())
+	local saved, path = assert(store.save(root, session, deps))
+	local before = writes
+	local invalid_origins = {
+		vim.NIL,
+		false,
+		"main",
+		{},
+		{ id = "main" },
+		{ version = "1" },
+		{ id = "", version = "1" },
+		{ id = "Main", version = "1" },
+		{ id = "../main", version = "1" },
+		{ id = "main\n", version = "1" },
+		{ id = string.rep("a", 65), version = "1" },
+		{ id = "main", version = "" },
+		{ id = "main", version = string.rep("v", 129) },
+		{ id = "main", version = "1\n2" },
+		{ id = "main", version = "1\t2" },
+		{ id = "main", version = "1" .. string.char(127) },
+		{ id = "main", version = "1\0" },
+		{ id = "main", version = "v\195\169" },
+		{ id = "main", version = "1", preference = true },
+	}
+	for _, origin in ipairs(invalid_origins) do
+		local added, add_err = store.add(session, {
+			type = "issue",
+			body = "Invalid origin",
+			anchor = {},
+			origin_engine = origin,
+		}, deps)
+		assert(not added and add_err:find("origin_engine", 1, true))
+		local replied, reply_err = store.reply(session, session.items[1].id, {
+			body = "Invalid reply origin",
+			origin_engine = origin,
+		}, deps)
+		assert(not replied and reply_err:find("origin_engine", 1, true))
+		local invalid = vim.deepcopy(saved)
+		invalid.items[1].origin_engine = origin
+		local persisted, persist_err = store.save(root, invalid, deps)
+		assert(not persisted and persist_err:find("origin_engine", 1, true) and writes == before)
+		assert(config_fs.write_binary_atomic(path, vim.json.encode(invalid) .. "\n"))
+		local loaded, load_err = store.load(root, invalid.id, deps)
+		assert(not loaded and load_err:find("origin_engine", 1, true))
+	end
+	local future = assert(store.add(session, {
+		type = "issue",
+		body = "Future engine",
+		anchor = {},
+		origin_engine = { id = "future_engine-" .. string.rep("a", 50), version = string.rep("v", 128) },
+	}, deps))
+	assert(#future.items[2].origin_engine.id == 64 and #future.items[2].origin_engine.version == 128)
+end)
+
 test("file-level anchors survive save and load without invented line metadata", function()
 	local anchor = { kind = "file", path = "src/file.lua", side = "right", layer = "working", stale = false }
 	local session = assert(store.add(fresh(), {
@@ -225,7 +314,7 @@ test("file-level anchors survive save and load without invented line metadata", 
 	assert(loaded.items[1].anchor.start_line == nil and loaded.items[1].anchor.end_line == nil)
 end)
 
-test("saved v2 rationale comments load as objection! and save canonically", function()
+test("saved v3 rationale comments load as objection! and save canonically", function()
 	local session = add_root(fresh())
 	local saved, path = assert(store.save(root, session, deps))
 	local legacy = vim.deepcopy(saved)
@@ -236,7 +325,7 @@ test("saved v2 rationale comments load as objection! and save canonically", func
 
 	local loaded = assert(store.load(root, saved.id, deps))
 	assert(loaded.items[1].type == "objection!")
-	assert(config_fs.read_binary(path) == encoded, "read-only load rewrote v2 state")
+	assert(config_fs.read_binary(path) == encoded, "read-only load rewrote v3 state")
 	local updated = assert(store.save(root, loaded, deps))
 	assert(updated.items[1].type == "objection!")
 	local persisted = assert(vim.json.decode(assert(config_fs.read_binary(path))))
@@ -412,15 +501,15 @@ test("atomic save uses exact versioned path and owner-only permissions", functio
 	session.stale = true
 	local saved, path = assert(store.save(root, session, deps))
 	assert(writes > 0 and saved.stale and saved.revision == 1)
-	local expected = vim.fs.joinpath(state, "nvim-config", "reviews", "v2", vim.fn.sha256(root), session.id .. ".json")
+	local expected = vim.fs.joinpath(state, "nvim-config", "reviews", "v3", vim.fn.sha256(root), session.id .. ".json")
 	assert(path == expected)
 	assert(assert(vim.uv.fs_lstat(path)).mode % 512 == 384, "session file is not 0600")
 	for _, directory in ipairs({
 		state,
 		state .. "/nvim-config",
 		state .. "/nvim-config/reviews",
-		state .. "/nvim-config/reviews/v2",
-		state .. "/nvim-config/reviews/v2/" .. vim.fn.sha256(root),
+		state .. "/nvim-config/reviews/v3",
+		state .. "/nvim-config/reviews/v3/" .. vim.fn.sha256(root),
 	}) do
 		assert(assert(vim.uv.fs_lstat(directory)).mode % 512 == 448, directory .. " is not 0700")
 	end
@@ -453,7 +542,7 @@ test("v1 loads without writes and materializes safely only on explicit save", fu
 	local legacy_path, encoded = write_legacy(legacy)
 
 	local migrated, path = assert(store.load(root, legacy.id, deps))
-	assert(migrated.version == 2 and migrated.scope.version == 1 and migrated.revision == 7)
+	assert(migrated.version == 3 and migrated.scope.version == 1 and migrated.revision == 7)
 	assert(migrated.id == legacy.id and migrated.repo_hash == legacy.repo_hash)
 	assert(migrated.created_at == legacy.created_at and migrated.updated_at == legacy.updated_at)
 	assert(vim.deep_equal(migrated.bridge, legacy.bridge) and migrated.next_sequence == legacy.next_sequence)
@@ -467,10 +556,13 @@ test("v1 loads without writes and materializes safely only on explicit save", fu
 	for index, item in ipairs(migrated.items) do
 		assert(item.id == legacy.items[index].id and item.sequence == legacy.items[index].sequence)
 		assert(item.created_at == legacy.items[index].created_at and item.updated_at == legacy.items[index].updated_at)
-		assert(item.status == nil and item.anchor.kind ~= nil)
+		assert(item.status == nil and item.anchor.kind ~= nil and item.origin_engine == nil)
+		local original_anchor = vim.deepcopy(legacy.items[index].anchor)
+		original_anchor.kind = item.anchor.kind
+		assert(vim.deep_equal(item.anchor, original_anchor))
 	end
 	assert(path == legacy_path)
-	local target = vim.fs.joinpath(state, "nvim-config", "reviews", "v2", vim.fn.sha256(root), legacy.id .. ".json")
+	local target = vim.fs.joinpath(state, "nvim-config", "reviews", "v3", vim.fn.sha256(root), legacy.id .. ".json")
 	local backup = legacy_path:sub(1, -6) .. ".v1-backup"
 	assert(vim.uv.fs_lstat(target) == nil and vim.uv.fs_lstat(backup) == nil, "read-only load rewrote v1 state")
 	local again = assert(store.load(root, legacy.id, deps))
@@ -496,12 +588,110 @@ test("v1 loads without writes and materializes safely only on explicit save", fu
 	assert(vim.deep_equal(assert(store.load(root, legacy.id, deps)), saved))
 end)
 
-test("failed v1 migration rolls back v2 and its new backup without exposing bodies", function()
+test("v2 sessions migrate without inventing origins and preserve exact inert metadata", function()
+	local source = add_root(fresh())
+	source = assert(store.reply(source, source.items[1].id, { body = "Legacy v2 reply" }, deps))
+	source = assert(store.set_resolution(source, source.items[1].id, "resolved", deps))
+	source.items[2].resolution = "legacy_unknown"
+	source.items[2].deliveries = {
+		{ backend = "tuicr", receipt = "v2-reply", delivered_at = "2026-08-25T10:00:01Z" },
+	}
+	source.bridge = {
+		backend = "tuicr",
+		round = "123e4567-e89b-12d3-a456-426614174000",
+		trusted_scope_id = source.id,
+		linked_at = "2026-08-25T10:00:00Z",
+	}
+	source.version = 2
+	source.revision = 4
+	local legacy_path, encoded = write_legacy(source)
+	local older = legacy_value(source, { "resolved", "exported" }, { [2] = "tuicr:older-reply" })
+	older.items[1].body = "Superseded v1 body"
+	write_legacy(older)
+	local before = writes
+	local loaded, loaded_path = assert(store.load(root, source.id, deps))
+	local expected = vim.deepcopy(source)
+	expected.version = 3
+	assert(vim.deep_equal(loaded, expected), "v2 projection changed identifiers, anchors, replies, or inert metadata")
+	assert(loaded_path == legacy_path and writes == before)
+	for _, item in ipairs(loaded.items) do
+		assert(item.origin_engine == nil, "v2 migration invented an origin")
+	end
+	local listed = assert(store.list(root, deps))
+	assert(#listed == 1 and vim.deep_equal(listed[1], loaded), "v2 did not take precedence over v1")
+	local target = vim.fs.joinpath(state, "nvim-config", "reviews", "v3", vim.fn.sha256(root), source.id .. ".json")
+	local backup = legacy_path:sub(1, -6) .. ".v2-backup"
+	assert(not vim.uv.fs_lstat(target) and not vim.uv.fs_lstat(backup) and writes == before)
+	local writer_a = assert(store.add(loaded, {
+		type = "issue",
+		body = "New v3 comment",
+		anchor = { path = "src/main.lua", side = "right", start_line = 8 },
+		origin_engine = { id = "difftastic", version = "0.71.0" },
+	}, deps))
+	local writer_b = assert(store.edit(loaded, loaded.items[1].id, { body = "Stale writer" }, deps))
+	local saved, saved_path = assert(store.save(root, writer_a, deps))
+	assert(saved_path == target and saved.revision == 5)
+	assert(config_fs.read_binary(legacy_path) == encoded and config_fs.read_binary(backup) == encoded)
+	assert(assert(vim.uv.fs_lstat(backup)).mode % 512 == 384)
+	local conflicted, conflict_err = store.save(root, writer_b, deps)
+	assert(not conflicted and conflict_err:find("another Neovim", 1, true))
+	assert(vim.deep_equal(assert(store.load(root, source.id, deps)), saved))
+	listed = assert(store.list(root, deps))
+	assert(#listed == 1 and vim.deep_equal(listed[1], saved), "v3 duplicated older sessions")
+end)
+
+test("older codecs reject injected origin fields instead of silently discarding them", function()
+	for _, version in ipairs({ 1, 2 }) do
+		local source = add_root(assert(store.new(root, working_scope(vim.fn.sha256("strict-v" .. version)), deps)))
+		if version == 1 then
+			source = legacy_value(source, { "draft" })
+		else
+			source.version = 2
+		end
+		source.items[1].origin_engine = { id = "main", version = "forged" }
+		write_legacy(source)
+		local loaded, load_err = store.load(root, source.id, deps)
+		assert(not loaded and load_err:find("unknown key", 1, true))
+	end
+end)
+
+test("failed v2 reload rolls back only created v3 files and preserves originals", function()
+	local source = add_root(fresh())
+	source.version = 2
+	local legacy_path, encoded = write_legacy(source)
+	local backup = legacy_path:sub(1, -6) .. ".v2-backup"
+	local target = vim.fs.joinpath(state, "nvim-config", "reviews", "v3", vim.fn.sha256(root), source.id .. ".json")
+	local failing = vim.tbl_extend("force", deps, {
+		fs = {
+			read_binary = function(path)
+				if path == target then
+					return "{}"
+				end
+				return config_fs.read_binary(path)
+			end,
+			write_binary_atomic = config_fs.write_binary_atomic,
+		},
+	})
+	local loaded = assert(store.load(root, source.id, failing))
+	local saved, save_err = store.save(root, loaded, failing)
+	assert(not saved and save_err:find("reload validation", 1, true))
+	assert(not vim.uv.fs_lstat(target) and not vim.uv.fs_lstat(backup))
+	assert(config_fs.read_binary(legacy_path) == encoded)
+	assert(not vim.uv.fs_lstat(legacy_path .. ".lock") and not vim.uv.fs_lstat(target .. ".lock"))
+
+	assert(config_fs.write_binary_atomic(backup, "mismatching backup"))
+	saved, save_err = store.save(root, loaded, deps)
+	assert(not saved and save_err:find("backup does not match", 1, true))
+	assert(not vim.uv.fs_lstat(target) and config_fs.read_binary(backup) == "mismatching backup")
+	assert(config_fs.read_binary(legacy_path) == encoded)
+end)
+
+test("failed v1 migration rolls back v3 and its new backup without exposing bodies", function()
 	local source = add_root(fresh())
 	source.items[1].body = "secret migration body"
 	local legacy = legacy_value(source, { "draft" })
 	local legacy_path = write_legacy(legacy)
-	local target = vim.fs.joinpath(state, "nvim-config", "reviews", "v2", vim.fn.sha256(root), legacy.id .. ".json")
+	local target = vim.fs.joinpath(state, "nvim-config", "reviews", "v3", vim.fn.sha256(root), legacy.id .. ".json")
 	local failing = vim.tbl_extend("force", deps, {
 		fs = {
 			read_binary = config_fs.read_binary,
@@ -514,7 +704,7 @@ test("failed v1 migration rolls back v2 and its new backup without exposing bodi
 		},
 	})
 	local migrated = assert(store.load(root, legacy.id, failing))
-	assert(vim.uv.fs_lstat(target) == nil, "read-only load unexpectedly materialized v2")
+	assert(vim.uv.fs_lstat(target) == nil, "read-only load unexpectedly materialized v3")
 	local saved, migration_err = store.save(root, migrated, failing)
 	assert(not saved and migration_err:find("injected atomic failure", 1, true))
 	assert(not migration_err:find(source.items[1].body, 1, true))
@@ -539,7 +729,7 @@ test("complete recovery Markdown is owner-only and verified before discard", fun
 	assert(not verified and verify_err:find("changed", 1, true))
 end)
 
-test("near-limit v2 sessions produce complete owner-only verified recovery", function()
+test("near-limit v3 sessions produce complete owner-only verified recovery", function()
 	local session = fresh()
 	local context_marker = "PRIVATE_SOURCE_CONTEXT"
 	local context = context_marker .. string.rep("\n", store.max_anchor_context - #context_marker)

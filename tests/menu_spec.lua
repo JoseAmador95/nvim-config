@@ -315,9 +315,9 @@ test("every curated definition has an executable action", function()
 			end
 		end
 	end
-	assert(descriptor_count == 287, "catalog must retain exactly 287 explicit descriptors")
+	assert(descriptor_count == 289, "catalog must retain exactly 289 explicit descriptors")
 	equal(
-		"37f68e224bbb6b820472ebe4cb5990c79285c39d528e5b875a51a53c71c94c2d",
+		"219066e4f8af84bd5c069018cb29df127ec716f62500acfc9c98ae6270be6d41",
 		vim.fn.sha256(table.concat(inventory, "\0")),
 		"descriptor labels, order, availability or search metadata drifted"
 	)
@@ -369,6 +369,7 @@ test("review presentation and comment actions are palette-only namespaced comman
 	equal({ "context", "hunks", "full", "whole file", "folds" }, context_item.keywords, "review context search terms")
 	assert(not find_item(compact, "command.review_context"), "review context leaked into the context menu")
 	for id, expected in pairs({
+		["command.review_structural_diff"] = { "Open Structural Diff" },
 		["command.review_panel"] = { "Toggle Review Panel", "<leader>rr" },
 		["command.review_mode"] = { "Toggle Read-only Review Mode", "<leader>rm" },
 		["command.review_scope_back"] = { "Return to Parent Review Scope", "<leader>rb" },

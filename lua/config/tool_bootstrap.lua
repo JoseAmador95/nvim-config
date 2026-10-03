@@ -7,6 +7,7 @@ local manifest = require("config.toolchain")
 local paths = require("config.tool_paths")
 local release = require("config.release_installer")
 local npm_release = require("config.npm_release_installer")
+local gumtree_release = require("config.gumtree_installer")
 local legacy_state = require("config.tool_state")
 local engine = require("verified_tools")
 local uv = vim.uv
@@ -134,7 +135,7 @@ local function canonical_encode(value, seen)
 	return "{" .. table.concat(pieces, ",") .. "}"
 end
 
-local MANAGED_ONLY = { ["markdown-preview"] = true, ["devcontainers-cli"] = true }
+local MANAGED_ONLY = { ["markdown-preview"] = true, ["devcontainers-cli"] = true, difftastic = true, gumtree = true }
 
 local function external_recovery(name, detail)
 	detail = tostring(detail)
@@ -340,6 +341,19 @@ end
 function npm_release_backend.attest(plan, done)
 	local observed, observe_err = npm_release.observe(plan.manifest.npm_release_plan)
 	done(observed ~= nil, observed or observe_err)
+end
+
+local gumtree_backend = {}
+function gumtree_backend.run(plan, done, control)
+	local controller = gumtree_release.install(plan.manifest.gumtree_plan, done)
+	if type(controller) == "table" and type(controller.cancel) == "function" then
+		control.set_cancel(controller.cancel)
+	end
+	return nil
+end
+function gumtree_backend.attest(plan, done)
+	local observed, err = gumtree_release.observe(plan.manifest.gumtree_plan)
+	done(observed ~= nil, observed or err)
 end
 
 local function same_timestamp(left, right)
@@ -886,7 +900,41 @@ local function npm_release_spec(name, selected)
 	}
 end
 
+local function gumtree_spec(name)
+	local plan, err = gumtree_release.plan(name)
+	if not plan then
+		return nil, err
+	end
+	return {
+		identity = {
+			backend = "maven-release",
+			name = name,
+			version = plan.entry.version,
+			target = plan.target,
+			digest = "sha256:" .. plan.source_sha256,
+			install_root = plan.install_root,
+		},
+		manifest = {
+			entry = vim.deepcopy(plan.entry),
+			gumtree_plan = plan,
+			integrity = {
+				kind = "bundle-sha256",
+				source_sha256 = plan.source_sha256,
+				receipt_path = plan.receipt_path,
+				receipt = vim.deepcopy(plan.receipt),
+				commands = vim.deepcopy(plan.commands),
+			},
+		},
+		executables = { gumtree = "gumtree" },
+		requires_network = true,
+		force_managed = true,
+	}
+end
+
 function M.spec(name, options)
+	if name == "gumtree" then
+		return gumtree_spec(name)
+	end
 	if manifest.managed_tools[name] then
 		return release_spec(name, options)
 	end
@@ -900,6 +948,9 @@ function M.spec(name, options)
 end
 
 local function runtime_spec(name)
+	if name == "gumtree" then
+		return gumtree_spec(name)
+	end
 	if manifest.managed_tools[name] then
 		return runtime_release_spec(name)
 	end
@@ -1270,6 +1321,9 @@ local function repair_markdown_preview(name, identity)
 end
 
 local function preflight(plan)
+	if plan.identity.backend == "maven-release" then
+		return gumtree_release.preflight(plan.manifest.gumtree_plan)
+	end
 	if plan.identity.backend == "release" then
 		return release.preflight(plan.manifest.release_plan)
 	end
@@ -1494,7 +1548,7 @@ local function start_planned(name, force_managed, completion, supplied_plan)
 
 	local callback_called = false
 	local callback_result
-	if plan.identity.backend == "npm-release" then
+	if plan.identity.backend == "npm-release" or plan.identity.backend == "maven-release" then
 		return import_raw_then_continue()
 	end
 	local imported, import_err, import_started = M.import_legacy(name, function(ok)
@@ -1902,7 +1956,12 @@ function M.setup()
 	if not setup_done then
 		engine.setup({
 			state_root = vim.fs.joinpath(paths.primary_state_root(), "verified-tools"),
-			backends = { release = release_backend, ["npm-release"] = npm_release_backend, mason = mason_backend },
+			backends = {
+				release = release_backend,
+				["npm-release"] = npm_release_backend,
+				["maven-release"] = gumtree_backend,
+				mason = mason_backend,
+			},
 			probe_external = external_probe,
 			network_authorized = M._network_authorized,
 			notify = M._notify,

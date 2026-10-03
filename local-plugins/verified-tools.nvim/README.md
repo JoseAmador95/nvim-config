@@ -143,7 +143,7 @@ atomic with this validation.
 ```lua
 {
   identity = {
-    backend = "release" | "mason" | "npm-release",
+    backend = "release" | "mason" | "npm-release" | "maven-release",
     name = "logical-name",
     version = "exact-version",
     target = "exact-target",
@@ -232,6 +232,16 @@ bounded path depth, entry count, and bytes. It descriptor-revalidates the live
 tree against the exact receipt and persists the closure digest plus receipt and
 command fingerprints. This proof is independent from the narrower Mason
 launcher contract below.
+
+The fixed `maven-release` backend uses the same `bundle-sha256` proof with a
+distinct `verified-maven-bundle-receipt` header. Its canonical source digest
+binds exact Maven coordinates/URLs/hashes, target, JRE version/archive hash,
+main class and launcher version. Receipt entries must match every pinned JAR,
+the private Java executable and the generated launcher; runtime rejects any
+extra, altered or missing file. This backend has no dynamic active pointer and
+does not accept an npm receipt. `fingerprint_bundle(root)` lets an installer
+read a private staging closure using the core's verifier; it grants no runtime
+authority by itself.
 
 The Mason receipt above is a host-created normalized `0600` receipt, not Mason's
 raw receipt. On every install and attestation the host must validate Mason's raw
@@ -382,7 +392,7 @@ A live or unverifiable owner is never reclaimed, including by a forced repair.
 Operational recovery is to close the owning editor and retry explicitly from a
 fresh process; callers must not delete private records or lock tickets.
 
-Release, npm-release, and Mason share two global backend-mutation slots. Each
+Release, npm-release, maven-release, and Mason share two global backend-mutation slots. Each
 resource uses bounded Lamport
 bakery claims. Publication descriptor-relatively renames a unique, fully synced
 staging file onto an absent claim pathname with no-replace semantics, so a

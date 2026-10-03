@@ -292,6 +292,26 @@ run_check "native_review_changes_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/native_review_changes_spec.lua"
 run_check "native_review_projection_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/native_review_projection_spec.lua"
+run_check "native_review_diff_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_diff_spec.lua"
+run_check "native_review_textual_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_textual_spec.lua"
+run_check "native_review_gumtree_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_gumtree_spec.lua"
+run_check "review_gumtree_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/review_gumtree_spec.lua"
+run_check "native_review_difftastic_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_difftastic_spec.lua"
+run_check "native_review_engines_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_engines_spec.lua"
+# This spec changes screen dimensions: run after screen initialization, not -l.
+run_check "native_review_engine_presenter_spec" env \
+	NVIM_CONFIG_TEST="$repo_root/tests/native_review_engine_presenter_spec.lua" \
+	"$NVIM_BIN" --headless -u NONE -i NONE -c 'lua dofile(vim.env.NVIM_CONFIG_TEST)'
+run_check "native_review_structural_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/native_review_structural_spec.lua"
+run_check "review_structural_diff_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/review_structural_diff_spec.lua"
 run_check "native_review_scope_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/native_review_scope_spec.lua"
 run_check "native_review_store_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
@@ -313,7 +333,7 @@ run_check "devcontainer_editor_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NO
 run_check "devcontainer_editor_cli_spec" python3 "$repo_root/tests/devcontainer_editor_cli_spec.py"
 run_check "verified_npm_bundle_spec" python3 "$repo_root/tests/verified_npm_bundle_spec.py"
 
-for pure_spec in lazy_lock_spec lazy_attestation_spec local_plugins_spec local_config_plugins_spec trusted_workspace_spec markdown_spec project_settings_spec theme_router_spec diagram_view_spec verified_tools_host_spec log_watch_spec log_workbench_spec treesitter_spec pager_spec formatting_spec lint_spec menu_spec action_palette_adapter_spec tabs_spec editor_spec editor_actions_spec navigation_history_spec lsp_navigation_spec lsp_runtime_spec multicursor_spec oil_spec snacks_spec viewer_commands_spec jqx_spec hex_spec auto_session_spec notification_spec ux_spec statusline_performance_spec inline_diagnostics_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec npm_release_installer_spec tool_bootstrap_spec provision_runtime_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec devcontainer_runtime_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec workflow_execution_spec redraw_profile_lifecycle_spec; do
+for pure_spec in lazy_lock_spec lazy_attestation_spec local_plugins_spec local_config_plugins_spec trusted_workspace_spec markdown_spec project_settings_spec theme_router_spec diagram_view_spec verified_tools_host_spec log_watch_spec log_workbench_spec treesitter_spec pager_spec formatting_spec lint_spec menu_spec action_palette_adapter_spec tabs_spec editor_spec editor_actions_spec navigation_history_spec lsp_navigation_spec lsp_runtime_spec multicursor_spec oil_spec snacks_spec viewer_commands_spec jqx_spec hex_spec auto_session_spec notification_spec ux_spec statusline_performance_spec inline_diagnostics_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec npm_release_installer_spec gumtree_installer_spec tool_bootstrap_spec provision_runtime_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec devcontainer_runtime_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec workflow_execution_spec redraw_profile_lifecycle_spec; do
 	run_pure_test "$pure_spec"
 done
 run_pure_test markdown_view_spec

@@ -48,10 +48,30 @@ local function item_status(item, force, session_stale)
 	return table.concat(tags, ", ")
 end
 
+local function code_span(value)
+	local longest = 0
+	for run in value:gmatch("`+") do
+		longest = math.max(longest, #run)
+	end
+	local delimiter = string.rep("`", longest + 1)
+	local padding = (longest > 0 or value:sub(1, 1) == " " or value:sub(-1) == " ") and " " or ""
+	return delimiter .. padding .. value .. padding .. delimiter
+end
+
+local function origin_engine(item)
+	local origin = item.origin_engine
+	if origin == nil or origin == vim.NIL then
+		return "Origin engine: not recorded"
+	end
+	return "Origin engine: " .. code_span(origin.id) .. "; version: " .. code_span(origin.version)
+end
+
 local function append_item(lines, item, force, session_stale, heading)
 	lines[#lines + 1] = string.format("%s %s — %s", heading, item.type:upper(), location(item.anchor))
 	lines[#lines + 1] = ""
 	lines[#lines + 1] = "_" .. item_status(item, force, session_stale) .. "_"
+	lines[#lines + 1] = ""
+	lines[#lines + 1] = origin_engine(item)
 	lines[#lines + 1] = ""
 	lines[#lines + 1] = item.body
 	lines[#lines + 1] = ""
@@ -110,6 +130,8 @@ local function render(session, force, allow_empty)
 	for _, field in ipairs(scope_fields(session.scope)) do
 		lines[#lines + 1] = "- " .. field
 	end
+	lines[#lines + 1] = ""
+	lines[#lines + 1] = "Coordinates use the frozen original OLD/NEW documents, regardless of the display engine."
 	lines[#lines + 1] = ""
 	append_type_legend(lines, items)
 	if #items == 0 then

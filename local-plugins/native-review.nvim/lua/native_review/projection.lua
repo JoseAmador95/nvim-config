@@ -239,6 +239,31 @@ function M.build(entry)
 	return projection
 end
 
+---Align changed hunk rows while preserving each source's original order.
+function M.alignment(canonical)
+	local result = {}
+	local index = 1
+	while index <= #canonical.rows do
+		local row = canonical.rows[index]
+		if row.old_line and row.new_line then
+			result[#result + 1] = { old_line = row.old_line, new_line = row.new_line }
+		elseif row.hunk_index then
+			local hunk = canonical.hunks[row.hunk_index]
+			for offset = 0, math.max(hunk.old_count, hunk.new_count) - 1 do
+				result[#result + 1] = {
+					old_line = offset < hunk.old_count and hunk.old_start + offset or nil,
+					new_line = offset < hunk.new_count and hunk.new_start + offset or nil,
+				}
+			end
+			while canonical.rows[index + 1] and canonical.rows[index + 1].hunk_index == row.hunk_index do
+				index = index + 1
+			end
+		end
+		index = index + 1
+	end
+	return result
+end
+
 local function source_side(side)
 	if side == "left" then
 		return "old"

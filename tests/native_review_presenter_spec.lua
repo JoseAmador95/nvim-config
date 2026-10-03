@@ -1200,18 +1200,18 @@ test("split highlight namespaces are side-local and restore only their own owner
 		assert(vim.api.nvim_get_hl_ns({ winid = sibling }) == sibling_namespace)
 		assert_decoration_scopes(state, sibling)
 		for _, group in ipairs({ "DiffAdd", "DiffChange", "DiffText", "DiffTextAdd" }) do
-			assert(vim.api.nvim_get_hl(left_item.namespace, { name = group, link = true }).link == "DiffDelete")
-			assert(vim.api.nvim_get_hl(right_item.namespace, { name = group, link = true }).link == "DiffAdd")
+			assert(vim.tbl_isempty(vim.api.nvim_get_hl(left_item.namespace, { name = group, link = true })))
+			assert(vim.tbl_isempty(vim.api.nvim_get_hl(right_item.namespace, { name = group, link = true })))
 		end
 		assert(vim.api.nvim_get_hl(left_item.namespace, { name = "DiffDelete", link = true }).link == "Normal")
 		assert(vim.api.nvim_get_hl(right_item.namespace, { name = "DiffDelete", link = true }).link == "Normal")
 		assert(
 			vim.api.nvim_get_hl(left_item.namespace, { name = "NvimReviewNativeDiffOld", link = true }).link
-				== "DiffDelete"
+				== "NvimReviewNativeDiffOld"
 		)
 		assert(
 			vim.api.nvim_get_hl(right_item.namespace, { name = "NvimReviewNativeDiffNew", link = true }).link
-				== "DiffAdd"
+				== "NvimReviewNativeDiffNew"
 		)
 		assert(
 			vim.tbl_isempty(
@@ -1287,8 +1287,8 @@ test("inline uses one protected unified buffer with cursorable OLD and NEW rows"
 	for _, item in ipairs(presentation.decorations) do
 		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(item.buf, item.namespace, 0, -1, { details = true })) do
 			local details = mark[4]
-			if details.line_hl_group then
-				line_highlights[mark[2] + 1] = details.line_hl_group
+			if details.hl_group == "NvimReviewNativeDiffOld" or details.hl_group == "NvimReviewNativeDiffNew" then
+				line_highlights[mark[2] + 1] = details.hl_group
 			end
 			for _, virtual in ipairs(details.virt_lines or {}) do
 				local text = virtual[1] and virtual[1][1] or ""
@@ -1296,7 +1296,10 @@ test("inline uses one protected unified buffer with cursorable OLD and NEW rows"
 			end
 		end
 	end
-	assert(vim.deep_equal(line_highlights, { [2] = "DiffDelete", [3] = "DiffAdd" }), vim.inspect(line_highlights))
+	assert(
+		vim.deep_equal(line_highlights, { [2] = "NvimReviewNativeDiffOld", [3] = "NvimReviewNativeDiffNew" }),
+		vim.inspect(line_highlights)
+	)
 	assert(has_band, "inline hunk boundary bands are missing")
 
 	vim.api.nvim_win_set_cursor(inline.win, { 1, 0 })
@@ -1587,7 +1590,7 @@ test("unified pure insertions are real rows at BOF and after unchanged rows", fu
 	for _, item in ipairs(state.presentation.decorations) do
 		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(item.buf, item.namespace, 0, -1, { details = true })) do
 			local details = mark[4]
-			if details.line_hl_group == "DiffAdd" then
+			if details.hl_group == "NvimReviewNativeDiffNew" then
 				additions[#additions + 1] = mark[2] + 1
 			end
 		end
@@ -1762,7 +1765,7 @@ test("unified pure middle deletions are real OLD rows after preceding context", 
 	for _, item in ipairs(state.presentation.decorations) do
 		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(item.buf, item.namespace, 0, -1, { details = true })) do
 			local details = mark[4]
-			if details.line_hl_group == "DiffDelete" then
+			if details.hl_group == "NvimReviewNativeDiffOld" then
 				deletion_row = mark[2] + 1
 			end
 		end
@@ -1805,8 +1808,8 @@ test("split uses isolated old and snapshot buffers when current bytes differ", f
 	local has_delete = false
 	local has_add = false
 	for _, details in ipairs(decoration_details(state)) do
-		has_delete = has_delete or details.line_hl_group == "NvimReviewNativeDiffOld"
-		has_add = has_add or details.line_hl_group == "NvimReviewNativeDiffNew"
+		has_delete = has_delete or details.hl_group == "NvimReviewNativeDiffOld"
+		has_add = has_add or details.hl_group == "NvimReviewNativeDiffNew"
 	end
 	assert(has_delete and has_add, "split sides lost old/red or new/green highlights")
 	local right_win = presentation.right.win
@@ -2185,6 +2188,147 @@ test("presenter FileType keeps historical guards and ordinary mappings", functio
 	mode.disable(state)
 	vim.api.nvim_del_augroup_by_id(role_group)
 	vim.keymap.del("n", "gri")
+end)
+
+local function intraline_entry()
+	local value = entry()
+	value.old_text = "one\nlocal timeout = 30; control = 2\nthree\n"
+	value.new_text = "one\nlocal enabled = true\nlocal timeout = 60; array = 4\nthree\n"
+	value.hunks = vim.text.diff(value.old_text, value.new_text, { result_type = "indices" })
+	return value
+end
+
+for _, layout in ipairs({ "inline", "split" }) do
+	for _, context in ipairs({ "full", "hunks" }) do
+		test(layout .. "/" .. context .. " maps character and word detail to canonical OLD/NEW coordinates", function()
+			local state = setup_state()
+			local value = intraline_entry()
+			local hunks = vim.deepcopy(value.hunks)
+			local diffopt = vim.o.diffopt
+			assert(presenter.show(state, value, { layout = layout, context = context }))
+			local presentation = state.presentation
+			local found = { old = {}, new = {} }
+			for _, item in ipairs(presentation.decorations) do
+				for _, mark in
+					ipairs(vim.api.nvim_buf_get_extmarks(item.buf, item.namespace, 0, -1, { details = true }))
+				do
+					local details = mark[4]
+					local side = details.hl_group == "NvimReviewNativeDiffOldText" and "old"
+						or details.hl_group == "NvimReviewNativeDiffNewText" and "new"
+					if side then
+						local source_line = side == "old" and 2 or 3
+						local display_line = layout == "inline" and presentation.projection.by_source[side][source_line]
+							or source_line
+						assert(mark[2] + 1 == display_line and details.priority == 150)
+						local text = vim.api.nvim_buf_get_lines(item.buf, mark[2], mark[2] + 1, false)[1]
+						found[side][#found[side] + 1] = text:sub(mark[3] + 1, details.end_col)
+						vim.api.nvim_set_current_win(item.win)
+						vim.api.nvim_win_set_cursor(item.win, { display_line, mark[3] })
+						local location = assert(presenter.capture_location(state))
+						assert(location.side == side and location.line == source_line and location.col == mark[3] + 1)
+					end
+				end
+			end
+			assert(
+				vim.deep_equal(found, { old = { "3", "control", "2" }, new = { "6", "array", "4" } }),
+				vim.inspect(found)
+			)
+			assert(vim.deep_equal(value.hunks, hunks) and vim.o.diffopt == diffopt)
+			local cached = state.intraline_cache
+			assert(presenter.show(state, value, { layout = layout, context = context == "full" and "hunks" or "full" }))
+			assert(state.intraline_cache == cached, "context change recomputed frozen characters")
+			mode.disable(state)
+		end)
+	end
+end
+
+test("rendered changed characters remain distinct across themes and resizing", function()
+	local state = setup_state()
+	local value = intraline_entry()
+	local previous = {}
+	for _, name in ipairs({ "Normal", "DiffDelete", "DiffAdd", "DiagnosticError", "DiagnosticOk" }) do
+		previous[name] = vim.api.nvim_get_hl(0, { name = name })
+	end
+	vim.o.termguicolors = true
+	vim.api.nvim_set_hl(0, "Normal", { fg = 0xEEEEEE, bg = 0x101010 })
+	vim.api.nvim_set_hl(0, "DiffDelete", { bg = 0x302020 })
+	vim.api.nvim_set_hl(0, "DiffAdd", { bg = 0x203020 })
+	vim.api.nvim_set_hl(0, "DiagnosticError", { fg = 0xFF6060 })
+	vim.api.nvim_set_hl(0, "DiagnosticOk", { fg = 0x60FF60 })
+	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "intraline-spec" })
+	vim.api.nvim_set_hl(0, "NvimReviewIntralineTestSyntax", { fg = 0xC0FFEE })
+	local syntax_namespace = vim.api.nvim_create_namespace("NvimReviewIntralineTestSyntax")
+	-- Enable hlstate before rebuilding the grid; inspecting an existing grid
+	-- while enabling it would leave old numeric attribute IDs in those cells.
+	vim.api.nvim__inspect_cell(1, 0, 0)
+	local function attribute(win, line, column)
+		local position = vim.fn.screenpos(win, line, column)
+		assert(position.row > 0 and position.col > 0, "expected visible source cell")
+		return vim.api.nvim__inspect_cell(1, position.row - 1, position.col - 1)[2]
+	end
+	for _, layout in ipairs({ "inline", "split" }) do
+		assert(presenter.show(state, value, { layout = layout, context = "full" }))
+		local presentation = state.presentation
+		for _, item in ipairs(presentation.decorations) do
+			for row, text in ipairs(vim.api.nvim_buf_get_lines(item.buf, 0, -1, false)) do
+				vim.api.nvim_buf_set_extmark(item.buf, syntax_namespace, row - 1, 0, {
+					end_col = #text,
+					hl_group = "NvimReviewIntralineTestSyntax",
+					priority = 100,
+				})
+			end
+			vim.wo[item.win].number = false
+			vim.wo[item.win].relativenumber = false
+			vim.wo[item.win].statuscolumn = ""
+			vim.wo[item.win].signcolumn = "no"
+			vim.wo[item.win].cursorline = false
+			vim.api.nvim_win_set_cursor(item.win, { 1, 0 })
+		end
+		vim.cmd("redraw!")
+		for _, item in ipairs(presentation.decorations) do
+			for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(item.buf, item.namespace, 0, -1, { details = true })) do
+				if (mark[4].hl_group or ""):find("Diff.*Text$") then
+					local changed = attribute(item.win, mark[2] + 1, mark[3] + 1)
+					local unchanged = attribute(item.win, mark[2] + 1, 2)
+					assert(
+						changed.background ~= unchanged.background,
+						"changed character has the line's rendered background"
+					)
+					assert(
+						changed.foreground == 0xC0FFEE and unchanged.foreground == 0xC0FFEE,
+						"diff replaced syntax foreground"
+					)
+					for column = mark[3] + 1, mark[4].end_col do
+						assert(
+							attribute(item.win, mark[2] + 1, column).background == changed.background,
+							"whole-word emphasis left an unhighlighted letter"
+						)
+					end
+				end
+			end
+		end
+	end
+	local old = vim.api.nvim_get_hl(0, { name = "NvimReviewNativeDiffOldText" })
+	assert(old.bg ~= previous.DiffDelete.bg and old.fg == nil and old.bold)
+	vim.api.nvim_set_hl(0, "DiagnosticError", { fg = 0xFFFF00 })
+	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "intraline-spec-updated" })
+	local updated = vim.api.nvim_get_hl(0, { name = "NvimReviewNativeDiffOldText" })
+	assert(updated.bg ~= old.bg and updated.fg == nil)
+	vim.api.nvim_set_hl(0, "DiagnosticError", { fg = 0x302020 })
+	vim.api.nvim_set_hl(0, "DiagnosticOk", { fg = 0x203020 })
+	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "intraline-spec-equal-accent" })
+	assert(vim.api.nvim_get_hl(0, { name = "NvimReviewNativeDiffOldText" }).bg ~= 0x302020)
+	assert(vim.api.nvim_get_hl(0, { name = "NvimReviewNativeDiffNewText" }).bg ~= 0x203020)
+	local cache = state.intraline_cache
+	vim.api.nvim_win_set_width(state.presentation.left.win, 35)
+	vim.api.nvim_exec_autocmds("VimResized", {})
+	flush_scheduled()
+	assert(state.intraline_cache == cache)
+	mode.disable(state)
+	for name, definition in pairs(previous) do
+		vim.api.nvim_set_hl(0, name, definition)
+	end
+	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "intraline-spec-restored" })
 end)
 
 vim.fn.delete(fixture, "rf")

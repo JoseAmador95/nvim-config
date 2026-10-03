@@ -37,7 +37,13 @@ function M.setup(opts)
 	assert(type(opts) == "table", "native-review setup options must be a table")
 	for name in pairs(opts) do
 		assert(
-			REQUIRED[name] or name == "clipboard" or name == "lsp_navigation" or name == "config" or name == "event",
+			REQUIRED[name]
+				or name == "clipboard"
+				or name == "lsp_navigation"
+				or name == "structural_diff"
+				or name == "gumtree"
+				or name == "config"
+				or name == "event",
 			"unknown native-review adapter: " .. name
 		)
 	end
@@ -62,12 +68,41 @@ function M.setup(opts)
 		end
 	end
 	assert(type(opts.config) == "table", "native-review config must be a table")
+	if opts.gumtree ~= nil then
+		assert(type(opts.gumtree) == "table", "native-review adapter gumtree must be a table")
+		assert(type(opts.gumtree.analyze) == "function", "native-review adapter gumtree.analyze must be a function")
+	end
+	if opts.structural_diff ~= nil then
+		assert(type(opts.structural_diff) == "table", "native-review adapter structural_diff must be a table")
+		assert(
+			type(opts.structural_diff.run) == "function",
+			"native-review adapter structural_diff.run must be a function"
+		)
+		assert(
+			opts.structural_diff.analyze == nil or type(opts.structural_diff.analyze) == "function",
+			"native-review adapter structural_diff.analyze must be a function"
+		)
+	end
 	assert(opts.event == nil or type(opts.event) == "function", "native-review event adapter must be a function")
 	values = {}
 	for name, value in pairs(opts) do
 		values[name] = value
 	end
 	values.clipboard = opts.clipboard or default_clipboard()
+	values.gumtree = opts.gumtree
+		or {
+			analyze = function(_, callback)
+				callback(nil, "No GumTree adapter is configured")
+				return function() end
+			end,
+		}
+	values.structural_diff = opts.structural_diff
+		or {
+			run = function(_, callback)
+				callback(nil, "No structural diff adapter is configured")
+				return function() end
+			end,
+		}
 end
 
 function M.get(name)
