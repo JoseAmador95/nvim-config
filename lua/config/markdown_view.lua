@@ -22,6 +22,7 @@ M.PIN = "cb79d5a1c4cd929fe0144c4d75be50a1ad4c2c74" -- md-render.nvim v3.10.3
 local renderer
 local image
 local ready = false
+local configure_error
 local notified_error
 local previews = {}
 local pager_source_requested = {}
@@ -100,7 +101,7 @@ end
 -- Kitty capability before any preview starts; without it, fences stay code
 -- blocks and no Mermaid npx fallback or remote image fetch can run. Keep the
 -- public download callback as a second guard against remote fetches.
-function M.configure_renderer()
+local function configure()
 	ready = false
 	image = nil
 	renderer = nil
@@ -161,9 +162,27 @@ function M.configure_renderer()
 	return true
 end
 
+function M.configure_renderer()
+	local ok, err = configure()
+	configure_error = not ok and err or nil
+	return ok, err
+end
+
 local function ensure_renderer()
 	if not ready then
-		return fail("Markdown reading view unavailable: md-render.nvim is not configured")
+		if configure_error then
+			return fail(configure_error)
+		end
+		local locked, lock_err = M.lock_ok()
+		if not locked then
+			return fail("Markdown reading view unavailable: " .. tostring(lock_err))
+		end
+		-- Lazy skips config() for a plugin that is not installed, and startup
+		-- never installs missing plugins. Name the explicit restore path.
+		return fail(
+			"Markdown reading view unavailable: md-render.nvim is not installed or was not loaded; "
+				.. "run :Lazy install md-render.nvim (or scripts/provision-runtime --allow-network) and restart"
+		)
 	end
 	-- Reassert the guard in case an unrelated consumer reset the plugin cache.
 	image._set_kitty_supported(false)
