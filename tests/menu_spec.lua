@@ -317,7 +317,7 @@ test("every curated definition has an executable action", function()
 	end
 	assert(descriptor_count == 289, "catalog must retain exactly 289 explicit descriptors")
 	equal(
-		"219066e4f8af84bd5c069018cb29df127ec716f62500acfc9c98ae6270be6d41",
+		"718d2359b34b8f8451a05cf2c496a8c8f778b456e5128affc2bbdbd183886cf9",
 		vim.fn.sha256(table.concat(inventory, "\0")),
 		"descriptor labels, order, availability or search metadata drifted"
 	)

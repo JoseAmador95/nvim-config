@@ -172,8 +172,10 @@ update the render live. Invoke the command from the source to focus its existing
 reading tab, or from the render to close it and return to the source. The page
 is centered at 90% of the available width, capped at 120 columns. The
 viewer uses the exact `md-render.nvim` v3.10.3 pin; automatic media is disabled,
-so Mermaid and PlantUML fences stay code blocks and render only through
-`:DiagramShow`/`<leader>md`. Fenced code shows its language above a shaded
+so Mermaid and PlantUML fences stay code blocks and images stay as their link
+text. Both render only through `:DiagramShow`/`<leader>md`, which also works
+from the reading view: put the cursor on the line that carries the image and the
+viewer opens the file. Fenced code shows its language above a shaded
 block; the light theme uses a pale gray background. Headings use pastel pills
 over softly tinted page-width bands; the renderer's experimental terminal text
 scaling is disabled so their rounded ends stay aligned. The cursor stays inside
@@ -357,7 +359,22 @@ project or document names one explicitly.
 The unified viewer is `:DiagramShow [svg|ascii]`. Rendering is asynchronous,
 superseded work is cancelled, and content-addressed results are bounded under
 `stdpath("cache")/diagram`. Missing tools are reported with install hints and
-SVG mode falls back to ASCII when possible. In the image window, `+` (or `=`)
+SVG mode falls back to ASCII when possible.
+
+The same viewer opens the Markdown image under the cursor, so `<leader>md`
+either renders the fence it sits in or the image the line references. Inline
+`![alt](path)`, reference-style `![alt][label]`, and single-line `<img src=...>`
+are all recognized; with two images on one line the cursor column decides, and
+the reading view, which maps rows but not columns, takes the first one. Paths
+resolve against the buffer's own directory, accept `~` and percent-encoding,
+and must name a local regular file: a remote reference is reported, never
+fetched, exactly as the reading view refuses automatic media. PNG, JPEG, GIF and
+SVG are rendered up to 8 MiB; anything else is reported as unsupported. A raster
+image is embedded in a one-element SVG document, so the only tool an image needs
+is `rsvg-convert` and zoom, pan, `y`, caching, and cancellation behave as they
+do for a diagram. Zooming a vector source re-renders it sharp; a raster source
+is resampled, as its pixels are all there is. An image never degrades to ASCII:
+without terminal image support the viewer says so instead. In the image window, `+` (or `=`)
 and `-` zoom between 100% and 800%; `0` fits the whole diagram. Move around the
 enlarged image with `h`/`j`/`k`/`l` or the arrow keys. `y` copies the whole
 diagram, and `q` or Escape closes the window. Zoom uses the full float as its

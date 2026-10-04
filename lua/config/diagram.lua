@@ -3,6 +3,7 @@
 local M = {}
 
 local deferred = require("config.deferred")
+local diagram_image = require("config.diagram_image")
 local local_config = require("config.local_config")
 local markdown_view = require("config.markdown_view")
 local tool_paths = require("config.tool_paths")
@@ -14,6 +15,8 @@ local INSTALL = { ["rsvg-convert"] = "brew install librsvg" }
 local DEPS = {
 	mermaid = { svg = { "mmdflux", "rsvg-convert" }, ascii = { "mmdflux" } },
 	plantuml = { svg = { "plantuml", "rsvg-convert" }, ascii = { "plantuml" } },
+	-- An image is already its own picture: there is no ASCII rendering of one.
+	image = { svg = { "rsvg-convert" } },
 }
 local MANAGED = { mmdflux = true, plantuml = true }
 
@@ -321,7 +324,8 @@ end
 local function image_presenter()
 	return {
 		open = function(request, session)
-			local presentation = make_float(request.kind .. " (svg)", session)
+			local title = request.metadata and request.metadata.title
+			local presentation = make_float(title or (request.kind .. " (svg)"), session)
 			presentation.request = request
 			presentation.renderer = session.renderer_name
 			presentation.generation = 0
@@ -444,6 +448,15 @@ local function register_renderers()
 							argv = image_conversion_argv(request.metadata),
 						},
 					},
+					validate = valid_png,
+				}
+			end,
+		},
+		["image:svg"] = {
+			build = function(request)
+				return {
+					extension = "png",
+					stages = { { argv = image_conversion_argv(request.metadata) } },
 					validate = valid_png,
 				}
 			end,
@@ -609,7 +622,65 @@ local function ensure_view()
 	return configure_view(view, setup_options, effective_config)
 end
 
+local function buffer_directory(bufnr)
+	if type(bufnr) ~= "number" or not vim.api.nvim_buf_is_valid(bufnr) then
+		return vim.fn.getcwd()
+	end
+	local name = vim.api.nvim_buf_get_name(bufnr)
+	if name == "" then
+		return vim.fn.getcwd()
+	end
+	return vim.fs.dirname(vim.fs.normalize(name))
+end
+
+-- An image reference renders through the same SVG pipeline, so zoom, pan, copy,
+-- caching, and cancellation behave exactly as they do for a diagram.
+local function show_image(core, reference, target, ascii_requested)
+	if ascii_requested then
+		notify("An image has no ASCII rendering; showing the image instead.", vim.log.levels.WARN)
+	end
+	if not image_terminal_ok() then
+		local message = "Images need inline image support in the terminal (the Kitty graphics protocol)"
+		notify(message, vim.log.levels.ERROR)
+		return nil, message
+	end
+	local path, resolve_err = diagram_image.resolve(reference.source, buffer_directory(target.bufnr))
+	if not path then
+		notify(resolve_err, vim.log.levels.WARN)
+		return nil, resolve_err
+	end
+	local loaded, load_err = diagram_image.load(path)
+	if not loaded then
+		notify(load_err, vim.log.levels.ERROR)
+		return nil, load_err
+	end
+	local executables, unavailable = resolve_dependencies("image", "svg")
+	if #unavailable > 0 then
+		local names = unavailable_names(unavailable)
+		local message = ("Cannot render %s: unavailable %s (%s; install: %s)"):format(
+			vim.fs.basename(path),
+			table.concat(names, ", "),
+			unavailable_details(unavailable),
+			install_hint(names)
+		)
+		notify(message, vim.log.levels.ERROR)
+		return nil, message
+	end
+	local metadata = vim.tbl_extend("force", {
+		executables = executables,
+		title = vim.fs.basename(path) .. " (" .. loaded.format .. ")",
+	}, image_metadata())
+	return core.open({
+		renderer = "image:svg",
+		presenter = "image",
+		kind = "image",
+		source = loaded.source,
+		metadata = metadata,
+	})
+end
+
 function M.show(mode, selection)
+	local requested = mode
 	mode = mode or effective_config.default_mode
 	if mode ~= "svg" and mode ~= "ascii" then
 		local message = "diagram mode must be svg or ascii"
@@ -630,6 +701,9 @@ function M.show(mode, selection)
 	if not diagram then
 		notify(extract_err, vim.log.levels.WARN)
 		return nil, extract_err
+	end
+	if diagram.kind == "image" then
+		return show_image(core, diagram, target, requested == "ascii")
 	end
 
 	local executables

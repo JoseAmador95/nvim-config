@@ -1,5 +1,7 @@
 local M = {}
 
+local image_link = require("diagram_view.image_link")
+
 local LANGUAGES = {
 	mermaid = "mermaid",
 	plantuml = "plantuml",
@@ -28,31 +30,49 @@ local function normalized_lines(opts)
 	return vim.api.nvim_buf_get_lines(opts.bufnr, 0, -1, false)
 end
 
-local function source_row(opts)
+local function source_position(opts)
+	local explicit_row
 	if type(opts.row) == "number" and opts.row >= 1 and opts.row % 1 == 0 then
-		return opts.row
+		explicit_row = opts.row
+	end
+	local explicit_col
+	if type(opts.col) == "number" and opts.col >= 1 and opts.col % 1 == 0 then
+		explicit_col = opts.col
+	end
+	if explicit_row and explicit_col then
+		return explicit_row, explicit_col
 	end
 	local buf = opts.bufnr
 	if not buf then
-		return 1
+		return explicit_row or 1, explicit_col
 	end
-	local function row_for_window(win)
+	local function cursor_for_window(win)
 		if win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
-			return vim.api.nvim_win_get_cursor(win)[1]
+			return vim.api.nvim_win_get_cursor(win)
 		end
 	end
-	local row = row_for_window(opts.winid) or row_for_window(vim.api.nvim_get_current_win())
-	if row then
-		return row
-	end
-	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
-		row = row_for_window(win)
-		if row then
-			return row
+	local cursor = cursor_for_window(opts.winid) or cursor_for_window(vim.api.nvim_get_current_win())
+	if not cursor then
+		for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+			cursor = cursor_for_window(win)
+			if cursor then
+				break
+			end
 		end
+	end
+	if cursor then
+		-- An explicit row wins: the rendered reading view maps rows only, so its
+		-- cursor column belongs to the render, never to the source line.
+		if explicit_row then
+			return explicit_row, explicit_col
+		end
+		return cursor[1], explicit_col or (cursor[2] + 1)
+	end
+	if explicit_row then
+		return explicit_row, explicit_col
 	end
 	local mark = vim.api.nvim_buf_get_mark(buf, '"')
-	return mark[1] > 0 and mark[1] or 1
+	return mark[1] > 0 and mark[1] or 1, explicit_col
 end
 
 function M.find_fences(lines, accepted)
@@ -155,7 +175,7 @@ function M.extract(opts)
 		if not fences then
 			return nil, fence_err
 		end
-		local row = source_row(opts)
+		local row, col = source_position(opts)
 		for _, fence in ipairs(fences) do
 			if row >= fence.start_row and row <= fence.end_row then
 				return {
@@ -170,7 +190,26 @@ function M.extract(opts)
 				}
 			end
 		end
-		return nil, "no mermaid/plantuml diagram under the cursor"
+		local image, image_err = image_link.at(lines, row, col)
+		if image then
+			return {
+				kind = "image",
+				source = image.link,
+				origin = {
+					type = "image",
+					style = image.style,
+					alt = image.alt,
+					label = image.label,
+					row = row,
+					start_col = image.start_col,
+					end_col = image.end_col,
+				},
+			}
+		end
+		if image_err then
+			return nil, image_err
+		end
+		return nil, "no mermaid/plantuml diagram or image under the cursor"
 	end
 
 	return {
