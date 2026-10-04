@@ -210,5 +210,45 @@ assert(not find(1, function(details)
 	return details.virt_text_pos == "inline" and details.virt_text[1][2] == "MdRenderH2Edge"
 end), "rebuild kept a stale pill")
 
+-- Code is never truncated, so a block may be wider than the page. Its band
+-- stays rectangular up to the widest line.
+local wide_lines = { "    " .. string.rep("a", 11), "    " .. string.rep("b", 46) }
+vim.api.nvim_buf_set_lines(buf, 0, -1, false, wide_lines)
+local wide_session = {
+	buf = buf,
+	opts = { nvim_config_page_margin = 4, nvim_config_page_width = 32, nvim_config_wrap = false },
+	content = {
+		lines = wide_lines,
+		highlights = {},
+		code_blocks = { { start_line = 0, end_line = 1, prefix_len = 4 } },
+	},
+}
+local function inline_fill(row)
+	return find(row, function(details)
+		return details.virt_text_pos == "inline"
+	end)
+end
+codeblocks.decorate(wide_session)
+local short_fill = assert(inline_fill(0), "short code line lost its padding")
+assert(#short_fill[4].virt_text[1][1] == 35, "unwrapped code band does not reach the widest line")
+assert(not inline_fill(1), "the widest code line gained padding")
+
+-- While the render wraps, padding stops at the window edge so it never adds
+-- a screen row.
+local win = vim.api.nvim_open_win(buf, false, { split = "right", win = 0 })
+vim.api.nvim_win_set_width(win, 44)
+vim.wo[win].wrap = true
+wide_session.win = win
+wide_session.opts.nvim_config_wrap = nil
+codeblocks.decorate(wide_session)
+short_fill = assert(inline_fill(0), "wrapped code line lost its padding")
+assert(#short_fill[4].virt_text[1][1] == 29, "wrapped code band does not stop at the window edge")
+assert(not inline_fill(1), "a code line wider than the window gained padding")
+assert(
+	vim.api.nvim_win_text_height(win, { start_row = 0, end_row = 0 }).all == 1,
+	"code padding wrapped onto another screen row"
+)
+vim.api.nvim_win_close(win, true)
+
 print("markdown_codeblocks_spec: labels, shaded code, and bounded heading pills passed")
 vim.cmd("quitall!")

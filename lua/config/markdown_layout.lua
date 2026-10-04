@@ -6,13 +6,19 @@ local M = {}
 local MAX_PAGE_WIDTH = 120
 local RENDER_INDENT_WIDTH = 2
 
-function M.measure(win)
+function M.text_width(win)
 	local info = vim.fn.getwininfo(win)[1]
 	local textoff = info and info.textoff or 0
-	local available = math.max(1, vim.api.nvim_win_get_width(win) - textoff)
+	return math.max(1, vim.api.nvim_win_get_width(win) - textoff)
+end
+
+-- Prose stays in the centered page. Tables and code blocks start at the same
+-- left margin but may extend to the window's right edge (the block width).
+function M.measure(win)
+	local available = M.text_width(win)
 	local page_width = math.max(1, math.min(MAX_PAGE_WIDTH, math.floor(available * 0.9)))
 	local margin = math.floor((available - page_width) / 2)
-	return page_width, margin
+	return page_width, margin, available - margin
 end
 
 -- md-render's horizontal rules prepend its two-space base indent to a rule

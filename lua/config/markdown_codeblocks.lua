@@ -28,6 +28,36 @@ local function page_region(session)
 	return margin, margin + width
 end
 
+-- The text width of the window showing the render, or nil without one.
+local function render_text_width(session, buf)
+	local win = session.win
+	if type(win) ~= "number" or not vim.api.nvim_win_is_valid(win) or vim.api.nvim_win_get_buf(win) ~= buf then
+		win = vim.fn.win_findbuf(buf)[1]
+	end
+	if not win then
+		return nil
+	end
+	local info = vim.fn.getwininfo(win)[1]
+	return math.max(1, vim.api.nvim_win_get_width(win) - (info and info.textoff or 0))
+end
+
+-- Code blocks are never truncated, so a long line may extend past the page.
+-- Keep the shaded band rectangular up to the block's widest line. While the
+-- render wraps, stop at the window edge: padding past it would add a row.
+local function block_right(lines, first, last, right, wrap, text_width)
+	local widest = right
+	for row = first, last do
+		local line = lines[row + 1]
+		if type(line) == "string" then
+			widest = math.max(widest, vim.fn.strdisplaywidth(line))
+		end
+	end
+	if wrap and text_width then
+		return math.max(right, math.min(widest, text_width))
+	end
+	return widest
+end
+
 local function language_label(language)
 	if type(language) ~= "string" then
 		return nil
@@ -130,6 +160,10 @@ function M.decorate(session)
 	local content = session.content or {}
 	local lines = content.lines or {}
 	local left, right = page_region(session)
+	-- The rebuild wrapper restores the window's wrap only after decorating, so
+	-- read the reading view's mode from the session.
+	local wrap = not (session.opts and session.opts.nvim_config_wrap == false)
+	local text_width = render_text_width(session, buf)
 	vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
 	shade_headings(buf, content, lines, left, right)
 
@@ -139,10 +173,12 @@ function M.decorate(session)
 		local last = block.end_line
 		if type(row) == "number" and type(last) == "number" then
 			local from_col = math.max(left, nonnegative_integer(block.prefix_len, left))
-			for code_row = math.max(0, row), math.min(last, #lines - 1) do
+			local first_row, last_row = math.max(0, row), math.min(last, #lines - 1)
+			local edge = block_right(lines, first_row, last_row, right, wrap, text_width)
+			for code_row = first_row, last_row do
 				local line = lines[code_row + 1]
 				if type(line) == "string" then
-					shade_line(buf, code_row, line, from_col, right)
+					shade_line(buf, code_row, line, from_col, edge)
 				end
 			end
 		end

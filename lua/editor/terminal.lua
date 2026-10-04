@@ -80,7 +80,7 @@ vim.keymap.set("n", "<leader>lh", "<cmd>ToggleLogHighlight<cr>", {
 vim.keymap.set("n", "<leader>lw", "<cmd>ToggleWrap<cr>", {
 	noremap = true,
 	silent = true,
-	desc = "Toggle log wrap",
+	desc = "Toggle line wrap",
 })
 
 vim.keymap.set("n", "<leader>j", "<Cmd>tabprevious<CR>", {

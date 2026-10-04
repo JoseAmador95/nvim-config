@@ -2,32 +2,32 @@
 -- default discards cell text, and even its expanded mode can truncate a long
 -- unbreakable token. Keep the upstream checkout intact and limit the adapter
 -- to the exact version checked by config.markdown_view.
+--
+-- Every block (table, fenced code, callout code, frontmatter value) is
+-- always shown complete and is never toggleable: a click, <CR> or za must not
+-- change the layout. The window's wrap mode alone decides whether tables fit
+-- the block width or keep their natural width for horizontal scrolling.
 local M = {}
 
 local installed
 
-local function frontmatter_offset(lines)
-	if not (lines[1] and lines[1]:match("^%-%-%-%s*$")) then
-		return 0
-	end
-	for line = 2, #lines do
-		if lines[line]:match("^%-%-%-%s*$") then
-			return line
-		end
-	end
-	return 0
-end
+-- Layout of the build in progress. md-render renders tables synchronously
+-- from build_content, so this is set only for the duration of one build.
+local active
 
-local function table_start(lines, block_id, offset)
-	if type(block_id) ~= "number" or block_id < 1 or block_id + offset > #lines then
-		return false
-	end
-	local line = lines[block_id + offset]
-	if type(line) ~= "string" then
-		return false
-	end
-	line = line:gsub("^%s*>+%s*", ""):gsub("^%s*", "")
-	return line:sub(1, 1) == "|" or line:lower():match("^<table[%s>]") ~= nil
+local always_expanded = {
+	__index = function()
+		return true
+	end,
+}
+
+local function build_layout(opts)
+	local max_width = opts.max_width or 80
+	local block_width = opts.nvim_config_block_width
+	return {
+		wrap = opts.nvim_config_wrap ~= false,
+		extra = type(block_width) == "number" and math.max(0, math.floor(block_width) - max_width) or 0,
+	}
 end
 
 local function split_ascii_characters(word, word_start, leading_space)
@@ -421,11 +421,6 @@ function M.protect_rebuild(session)
 		local ok, err = pcall(original_rebuild, self, ...)
 		if vim.api.nvim_buf_is_valid(self.buf) then
 			vim.bo[self.buf].readonly = was_readonly
-			for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
-				if vim.api.nvim_win_is_valid(win) then
-					vim.wo[win].wrap = true
-				end
-			end
 		end
 		if not ok then
 			error(err, 0)
@@ -473,25 +468,36 @@ function M.configure(preview, wrap, markdown_table, postprocess)
 		return split_ascii_characters(word, word_start, leading_space)
 	end
 	local function build_content(lines, opts)
-		local content = original_build_content(lines, opts)
-		local state = opts and opts.expand_state
-		if type(state) == "table" then
-			local changed = false
-			local offset = frontmatter_offset(lines)
-			for _, region in ipairs(content.expandable_regions or {}) do
-				local block_id = region.block_id
-				if state[block_id] == nil and table_start(lines, block_id, offset) then
-					state[block_id] = true
-					changed = true
-				end
-			end
-			if changed then
-				content = original_build_content(lines, opts)
-			end
+		opts = opts or {}
+		if opts.expand_state == nil then
+			opts.expand_state = {}
 		end
+		-- The session reuses this table on every rebuild. Defaulting each block
+		-- id to expanded renders every block complete in a single pass.
+		if type(opts.expand_state) == "table" and getmetatable(opts.expand_state) == nil then
+			setmetatable(opts.expand_state, always_expanded)
+		end
+		local previous = active
+		active = build_layout(opts)
+		local ok, content = pcall(original_build_content, lines, opts)
+		active = previous
+		if not ok then
+			error(content, 0)
+		end
+		-- Without regions, md-render's <LeftRelease>, <CR> and za find no block
+		-- to collapse; links and callout folds keep working.
+		content.expandable_regions = {}
 		return postprocess and postprocess(content, opts) or content
 	end
 	local function render_table(parsed, indent, max_width, expanded, buf_dir)
+		if active then
+			-- One-line HTML tables arrive without an expansion state.
+			expanded = true
+			-- Wrapped tables may use the block width up to the window edge; the
+			-- relative offset keeps nested tables inside their container. Natural
+			-- width tables scroll horizontally instead.
+			max_width = active.wrap and max_width and max_width + active.extra or nil
+		end
 		local lines, highlights, links, images, source_offsets =
 			original_render_table(parsed, indent, max_width, expanded, buf_dir)
 		if

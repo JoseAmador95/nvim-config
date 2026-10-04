@@ -177,13 +177,19 @@ so Mermaid and PlantUML fences stay code blocks and render only through
 block; the light theme uses a pale gray background. Headings use pastel pills
 over softly tinted page-width bands; the renderer's experimental terminal text
 scaling is disabled so their rounded ends stay aligned. The cursor stays inside
-the centered page. Lines
-wrap instead of shifting the reading view horizontally. `<leader>mp` still
-opens the browser preview.
-Tables open expanded with top and bottom rules and outer vertical borders.
-When the columns cannot fit,
-the viewer shows bounded `field │ value` rows so every cell and link remains
-visible. Press `<CR>` or `za` on a table to switch to its compact view.
+the centered page. `<leader>mp` still opens the browser preview.
+Tables and fenced code always show their complete content, with top and bottom
+rules and outer vertical borders on tables. They start at the page margin but
+may extend to the window's right edge, so the 120-column cap only applies to
+prose. Clicks, `<CR>`, and `za` never change a table or code block; links and
+foldable callouts still respond. By default the view wraps: code continues on
+indented screen rows, and when table columns still cannot fit, the viewer shows
+bounded `field │ value` rows so every cell and link remains visible.
+`:ToggleWrap` (`<leader>lw`, or `:setlocal wrap!`) switches the reading view to
+natural-width tables and single-row code that scroll horizontally, and back.
+The mode survives live updates, resizes, and pager source/render toggles.
+Indented (four-space) code blocks are still truncated by the pinned renderer;
+use fenced code to keep long lines complete.
 In `nvimpager`, Markdown renders automatically, and `<leader>mv` toggles back
 to the original source. `:SetFileType` and the diagram viewer operate on that
 source even while the reading view is displayed.

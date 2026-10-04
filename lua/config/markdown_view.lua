@@ -27,6 +27,9 @@ local notified_error
 local previews = {}
 local pager_source_requested = {}
 local pager_filetype_pending = {}
+-- Rebuilds in progress. md-render writes `wrap = not any_expanded` on every
+-- rebuild; the wrap observer must not mistake that for the user's choice.
+local rebuilding = 0
 local render_winhighlight_var = "nvim_config_md_render_winhighlight"
 local render_window_options_var = "nvim_config_md_render_window_options"
 
@@ -288,14 +291,30 @@ local function remember_source_window_options(win)
 	end
 end
 
-local function configure_render_window(win)
+-- The reading view's wrap mode belongs to its session, so it survives live
+-- updates, resizes and pager source/render toggles. Only a change to the
+-- window's 'wrap' option (:ToggleWrap, :setlocal wrap!) switches it.
+local function wrap_mode(session)
+	return not (session and session.opts and session.opts.nvim_config_wrap == false)
+end
+
+local function set_window_option(win, name, value)
+	if vim.api.nvim_get_option_value(name, { win = win }) ~= value then
+		vim.api.nvim_set_option_value(name, value, { win = win, scope = "local" })
+	end
+end
+
+local function configure_render_window(win, session)
 	remember_source_window_options(win)
-	vim.wo[win].wrap = true
-	vim.wo[win].linebreak = true
-	vim.wo[win].breakindent = true
-	vim.api.nvim_win_call(win, function()
-		vim.fn.winrestview({ leftcol = 0 })
-	end)
+	local wrap = wrap_mode(session)
+	set_window_option(win, "wrap", wrap)
+	set_window_option(win, "linebreak", wrap)
+	set_window_option(win, "breakindent", true)
+	if wrap then
+		vim.api.nvim_win_call(win, function()
+			vim.fn.winrestview({ leftcol = 0 })
+		end)
+	end
 end
 
 local function protect_cursor_rebuild(session)
@@ -304,12 +323,20 @@ local function protect_cursor_rebuild(session)
 	end
 	local rebuild = session.rebuild
 	session.rebuild = function(self, ...)
-		local result = rebuild(self, ...)
-		for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
-			if vim.api.nvim_win_is_valid(win) then
-				configure_render_window(win)
-				keep_cursor_on_page(win, self)
+		rebuilding = rebuilding + 1
+		local ok, result = pcall(function(...)
+			local value = rebuild(self, ...)
+			for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
+				if vim.api.nvim_win_is_valid(win) then
+					configure_render_window(win, self)
+					keep_cursor_on_page(win, self)
+				end
 			end
+			return value
+		end, ...)
+		rebuilding = rebuilding - 1
+		if not ok then
+			error(result, 0)
 		end
 		return result
 	end
@@ -329,7 +356,7 @@ local function protect_render_buffer(win, source_winhighlight)
 	end
 	vim.bo[state.render_buf].modifiable = false
 	vim.bo[state.render_buf].readonly = true
-	configure_render_window(win)
+	configure_render_window(win, session)
 	apply_render_winhighlight(win, source_winhighlight)
 	palette.apply_markdown()
 	if session then
@@ -393,20 +420,86 @@ local function reflow_preview(preview)
 	if not session then
 		return
 	end
-	local page_width, margin = markdown_layout.measure(preview.win)
+	local page_width, margin, block_width = markdown_layout.measure(preview.win)
 	local render_width = markdown_layout.render_width(page_width)
+	local block_render_width = markdown_layout.render_width(block_width)
 	if
 		session.opts.max_width ~= render_width
 		or session.opts.nvim_config_page_width ~= page_width
 		or session.opts.nvim_config_page_margin ~= margin
+		or session.opts.nvim_config_block_width ~= block_render_width
 	then
 		session.opts.max_width = render_width
 		session.opts.nvim_config_page_width = page_width
 		session.opts.nvim_config_page_margin = margin
+		session.opts.nvim_config_block_width = block_render_width
 		session:rebuild()
 	end
-	configure_render_window(preview.win)
+	configure_render_window(preview.win, session)
 	keep_cursor_on_page(preview.win, session)
+end
+
+-- The pager keeps md-render's own prose width, but tables and code blocks may
+-- use the whole window.
+local function pager_block_width(win)
+	return markdown_layout.render_width(markdown_layout.text_width(win))
+end
+
+local function protected_session(win)
+	local state = win_state(win)
+	local session = state and renderer and renderer.preview._toggle_sessions[state.source_buf]
+	if session and session.nvim_config_cursor_rebuild then
+		return session
+	end
+	return nil
+end
+
+local function reflow_pager(win)
+	local session = protected_session(win)
+	if not session then
+		return
+	end
+	local block_width = pager_block_width(win)
+	if session.opts.nvim_config_block_width ~= block_width then
+		session.opts.nvim_config_block_width = block_width
+		session:rebuild()
+	end
+	configure_render_window(win, session)
+end
+
+local function reflow_all()
+	if pager.active then
+		for _, win in ipairs(vim.api.nvim_list_wins()) do
+			reflow_pager(win)
+		end
+		return
+	end
+	for _, preview in pairs(previews) do
+		reflow_preview(preview)
+	end
+end
+
+-- OptionSet runs with the changed window current. Adopt a user's wrap change
+-- as the session's mode and rerender: tables switch between the block width
+-- and their natural width.
+local function adopt_window_wrap()
+	if rebuilding > 0 then
+		return
+	end
+	local win = vim.api.nvim_get_current_win()
+	local session = protected_session(win)
+	if not session then
+		return
+	end
+	local wrap = vim.api.nvim_get_option_value("wrap", { win = win })
+	if wrap == wrap_mode(session) then
+		return
+	end
+	session.opts.nvim_config_wrap = wrap
+	local ok, err = pcall(session.rebuild, session)
+	if not ok then
+		notify("Could not apply the reading view wrap mode: " .. tostring(err), vim.log.levels.ERROR)
+	end
 end
 
 local function keep_active_cursor_on_page()
@@ -456,12 +549,13 @@ local function editor_toggle()
 	end
 	local render_tab = vim.api.nvim_get_current_tabpage()
 	local render_win = vim.api.nvim_get_current_win()
-	local page_width, margin = markdown_layout.measure(render_win)
+	local page_width, margin, block_width = markdown_layout.measure(render_win)
 	remember_source_window_options(render_win)
 	local toggled, toggle_err = pcall(preview_api.toggle, {
 		max_width = markdown_layout.render_width(page_width),
 		nvim_config_page_width = page_width,
 		nvim_config_page_margin = margin,
+		nvim_config_block_width = markdown_layout.render_width(block_width),
 		text_scale = false,
 	})
 	if not toggled or not win_state(render_win) then
@@ -518,8 +612,10 @@ local function pager_toggle()
 	pager_source_requested[source_buf] = nil
 	local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
 	remember_source_window_options(win)
-	preview_api.toggle({ text_scale = false })
-	if not protect_render_buffer(win, source_winhighlight) then
+	preview_api.toggle({ text_scale = false, nvim_config_block_width = pager_block_width(win) })
+	if protect_render_buffer(win, source_winhighlight) then
+		reflow_pager(win)
+	else
 		restore_render_window(win)
 	end
 end
@@ -573,9 +669,11 @@ function M.pager_filetype_changed(buf)
 				local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
 				remember_source_window_options(win)
 				vim.api.nvim_win_call(win, function()
-					preview_api.toggle({ text_scale = false })
+					preview_api.toggle({ text_scale = false, nvim_config_block_width = pager_block_width(win) })
 				end)
-				if not protect_render_buffer(win, source_winhighlight) then
+				if protect_render_buffer(win, source_winhighlight) then
+					reflow_pager(win)
+				else
 					restore_render_window(win)
 				end
 			end
@@ -625,6 +723,15 @@ function M.setup()
 		group = vim.api.nvim_create_augroup("MarkdownViewCursor", { clear = true }),
 		callback = keep_active_cursor_on_page,
 	})
+	vim.api.nvim_create_autocmd({ "WinResized", "VimResized", "TabEnter" }, {
+		group = vim.api.nvim_create_augroup("MarkdownViewReflow", { clear = true }),
+		callback = reflow_all,
+	})
+	vim.api.nvim_create_autocmd("OptionSet", {
+		pattern = "wrap",
+		group = vim.api.nvim_create_augroup("MarkdownViewWrap", { clear = true }),
+		callback = adopt_window_wrap,
+	})
 	if pager.active then
 		pager.set_markdown_view(M)
 		vim.keymap.set("n", "<leader>mv", M.toggle, { desc = "Toggle Markdown reading/source view" })
@@ -641,14 +748,6 @@ function M.setup()
 			callback = M.pager_initial_render,
 		})
 	else
-		vim.api.nvim_create_autocmd({ "WinResized", "VimResized", "TabEnter" }, {
-			group = vim.api.nvim_create_augroup("MarkdownViewReflow", { clear = true }),
-			callback = function()
-				for _, preview in pairs(previews) do
-					reflow_preview(preview)
-				end
-			end,
-		})
 		local function map(buf)
 			vim.keymap.set("n", "<leader>mv", M.toggle, { buffer = buf, desc = "Toggle Markdown reading view" })
 		end

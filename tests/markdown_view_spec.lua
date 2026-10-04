@@ -396,7 +396,7 @@ test("page padding shifts every byte-column metadata field", function()
 	assert(content.source_line_map[1] == 4 and content.heading_anchors.heading == 1, "row metadata changed")
 end)
 
-test("wide tables open without losing cell text and still allow manual collapse", function()
+test("wide tables open without losing cell text and never collapse", function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	local columns = vim.o.columns
@@ -460,14 +460,12 @@ test("wide tables open without losing cell text and still allow manual collapse"
 			break
 		end
 	end
-	assert(type(toggle) == "function", "table expansion mapping is missing")
+	assert(type(toggle) == "function", "renderer <CR> mapping is missing")
 	vim.api.nvim_set_current_win(win)
 	vim.api.nvim_win_set_cursor(win, { row, 0 })
 	toggle()
-	assert(contains(buf, "…"), "manual table collapse did not take effect")
-	assert(contains(buf, "┌") and contains(buf, "└"), "collapsed table lost its horizontal caps")
-	toggle()
-	assert(not contains(buf, "…"), "manual table expansion did not restore full content")
+	assert(not contains(buf, "…"), "<CR> collapsed the table")
+	assert(contains(buf, "┌") and contains(buf, "└"), "<CR> changed the table caps")
 	vim.api.nvim_set_current_tabpage(source_tab)
 	assert(vim.api.nvim_get_current_win() == source_win, "table view changed the source window")
 
@@ -484,6 +482,272 @@ test("wide tables open without losing cell text and still allow manual collapse"
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
+end)
+
+local function keymap_callback(buf, lhs)
+	for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+		if mapping.lhs == lhs then
+			return mapping.callback
+		end
+	end
+	error("renderer mapping is missing: " .. lhs)
+end
+
+local function find_row(buf, fragment)
+	for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		if line:find(fragment, 1, true) then
+			return row
+		end
+	end
+	error("rendered row is missing: " .. fragment)
+end
+
+local function max_width(buf, fragment)
+	local width = 0
+	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		if not fragment or line:find(fragment, 1, true) then
+			width = math.max(width, vim.api.nvim_strwidth(line))
+		end
+	end
+	return width
+end
+
+test("clicks and keys never change blocks or wrap", function()
+	vim.cmd("tabonly")
+	vim.cmd("only")
+	local columns = vim.o.columns
+	vim.o.columns = 68
+	local code = string.rep("x", 100)
+	local source = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(source)
+	vim.api.nvim_buf_set_lines(source, 0, -1, false, {
+		"| Item | Description |",
+		"| --- | --- |",
+		"| A | A complete sentence that continues until the very end |",
+		"",
+		"```text",
+		code,
+		"```",
+		"",
+		"> [!TIP]- Folded",
+		"> hidden callout body",
+	})
+	vim.bo[source].filetype = "markdown"
+	view.toggle()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_win_get_buf(win)
+	local session = assert(require("md-render").preview._toggle_sessions[source])
+	assert(#session.content.expandable_regions == 0, "rendered blocks remain toggleable")
+	assert(not contains(buf, "…"), "a block opened truncated")
+	assert(contains(buf, code), "long code line was truncated")
+	assert(vim.wo[win].wrap, "reading view did not open wrapped")
+
+	local opened = {}
+	local open = vim.ui.open
+	local getmousepos = vim.fn.getmousepos
+	vim.ui.open = function(target)
+		opened[#opened + 1] = target
+	end
+	local margin = session.opts.nvim_config_page_margin
+	local before = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+	for _, row in ipairs({ find_row(buf, "│ A "), find_row(buf, code) }) do
+		vim.api.nvim_win_set_cursor(win, { row, margin })
+		keymap_callback(buf, "<CR>")()
+		keymap_callback(buf, "za")()
+		vim.fn.getmousepos = function()
+			return { winid = win, line = row, column = margin + 3, wincol = margin + 3, winrow = row }
+		end
+		keymap_callback(buf, "<LeftRelease>")()
+		vim.fn.getmousepos = getmousepos
+		assert(vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), before), "a click or key changed a block")
+		assert(vim.wo[win].wrap, "a click or key changed wrap")
+	end
+	vim.ui.open = open
+	assert(#opened == 0, "clicking a block opened a target")
+
+	local fold = assert(session.content.callout_folds and session.content.callout_folds[1], "callout is not foldable")
+	assert(not contains(buf, "hidden callout body"), "folded callout opened expanded")
+	vim.api.nvim_win_set_cursor(win, { fold.header_line + 1, margin })
+	keymap_callback(buf, "<CR>")()
+	assert(contains(buf, "hidden callout body"), "<CR> no longer unfolds callouts")
+
+	local updated = string.rep("y", 100)
+	vim.api.nvim_buf_set_lines(source, 5, 6, false, { updated })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = source })
+	assert(
+		vim.wait(1000, function()
+			return contains(buf, updated)
+		end),
+		"live update truncated the edited code line"
+	)
+	view.toggle()
+	vim.api.nvim_buf_delete(source, { force = true })
+	vim.o.columns = columns
+end)
+
+test("ToggleWrap owns the reading layout", function()
+	vim.cmd("tabonly")
+	vim.cmd("only")
+	local columns = vim.o.columns
+	vim.o.columns = 120
+	local cell = vim.trim(string.rep("wide cell words ", 13))
+	local code = string.rep("c", 150)
+	local source = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(source)
+	vim.api.nvim_buf_set_lines(source, 0, -1, false, {
+		"Intro paragraph.",
+		"",
+		"| Item | Description |",
+		"| --- | --- |",
+		"| A | " .. cell .. " |",
+		"",
+		"```text",
+		code,
+		"```",
+	})
+	vim.bo[source].filetype = "markdown"
+	view.toggle()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_win_get_buf(win)
+	local session = assert(require("md-render").preview._toggle_sessions[source])
+	local text_width = require("config.markdown_layout").text_width(win)
+	local function assert_wrapped(context)
+		assert(vim.wo[win].wrap and vim.wo[win].linebreak, context .. ": reading view is not wrapped")
+		assert(session.opts.nvim_config_wrap ~= false, context .. ": session lost the wrap mode")
+		assert(max_width(buf, "│") <= text_width, context .. ": wrapped table exceeds the window")
+		assert(not contains(buf, cell), context .. ": wrapped table kept the cell on one row")
+		assert(vim.fn.winsaveview().leftcol == 0, context .. ": wrapped view scrolled horizontally")
+	end
+	local function assert_unwrapped(context)
+		assert(not vim.wo[win].wrap and not vim.wo[win].linebreak, context .. ": reading view is wrapped")
+		assert(session.opts.nvim_config_wrap == false, context .. ": session lost the nowrap mode")
+		assert(contains(buf, cell), context .. ": natural-width table split its cell")
+		assert(max_width(buf, cell) > text_width, context .. ": natural-width table fits the window")
+		assert(contains(buf, code), context .. ": code line was truncated")
+		assert(not contains(buf, "…"), context .. ": nowrap layout truncated a block")
+	end
+	assert_wrapped("open")
+
+	local editor_actions = require("config.editor_actions")
+	assert(editor_actions.toggle_wrap() == false, "ToggleWrap did not disable wrap")
+	assert_unwrapped("toggle")
+	vim.api.nvim_win_set_cursor(win, { find_row(buf, cell), 0 })
+	vim.cmd("normal! 30zl")
+	assert(vim.fn.winsaveview().leftcol > 0, "nowrap reading view cannot scroll horizontally")
+
+	vim.api.nvim_buf_set_lines(source, 0, 1, false, { "Edited paragraph." })
+	vim.api.nvim_exec_autocmds("TextChanged", { buffer = source })
+	assert(
+		vim.wait(1000, function()
+			return contains(buf, "Edited paragraph.")
+		end),
+		"live update did not reach the reading view"
+	)
+	assert_unwrapped("live update")
+	vim.api.nvim_exec_autocmds("WinResized", {})
+	assert_unwrapped("resize")
+
+	vim.cmd("setlocal wrap")
+	assert_wrapped("setlocal wrap")
+	assert(editor_actions.toggle_wrap() == false, "ToggleWrap did not disable wrap again")
+	assert(editor_actions.toggle_wrap() == true, "ToggleWrap did not restore wrap")
+	assert_wrapped("toggle back")
+	view.toggle()
+	vim.api.nvim_buf_delete(source, { force = true })
+	vim.o.columns = columns
+end)
+
+test("tables and code extend past the page to the window edge", function()
+	vim.cmd("tabonly")
+	vim.cmd("only")
+	local columns = vim.o.columns
+	vim.o.columns = 240
+	local prose = vim.trim(string.rep("prose words ", 40))
+	local source = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(source)
+	vim.api.nvim_buf_set_lines(source, 0, -1, false, {
+		prose,
+		"",
+		"| Item | Description |",
+		"| --- | --- |",
+		"| A | " .. vim.trim(string.rep("table words ", 25)) .. " |",
+	})
+	vim.bo[source].filetype = "markdown"
+	view.toggle()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_win_get_buf(win)
+	local session = assert(require("md-render").preview._toggle_sessions[source])
+	local layout = require("config.markdown_layout")
+	local page_width, margin, block_width = layout.measure(win)
+	assert(page_width == 120 and block_width == 180, "unexpected 240-column page geometry")
+	assert(session.opts.nvim_config_block_width == layout.render_width(block_width), "renderer lacks the block width")
+	local table_width = max_width(buf, "│")
+	assert(table_width > margin + page_width, "table stayed inside the 120-column page")
+	assert(table_width <= margin + block_width, "table extends past the window")
+	assert(not contains(buf, "…"), "wide table was truncated")
+	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		if line:find("prose", 1, true) then
+			assert(vim.api.nvim_strwidth(line) <= margin + page_width, "prose left the reading page")
+		end
+	end
+	view.toggle()
+	vim.api.nvim_buf_delete(source, { force = true })
+	vim.o.columns = columns
+end)
+
+test("every block builds complete within the block width", function()
+	local preview = require("md-render").preview
+	local lines = {
+		"---",
+		"summary: " .. vim.trim(string.rep("frontmatter words ", 6)) .. " fmend",
+		"---",
+		"",
+		"| Item | Description |",
+		"| --- | --- |",
+		"| A | " .. vim.trim(string.rep("table words ", 12)) .. " tend |",
+		"",
+		"<table><tr><td>" .. vim.trim(string.rep("html words ", 8)) .. " hend</td></tr></table>",
+		"",
+		"```text",
+		string.rep("f", 90),
+		"```",
+		"",
+		"> [!NOTE]",
+		"> ```text",
+		"> " .. string.rep("q", 90),
+		"> ```",
+	}
+	local function build(wrap)
+		return preview.build_content(lines, {
+			max_width = 40,
+			nvim_config_block_width = 70,
+			nvim_config_wrap = wrap,
+			expand_state = {},
+		})
+	end
+	for _, wrap in ipairs({ true, false }) do
+		local content = build(wrap)
+		local text = table.concat(content.lines, "\n")
+		assert(#content.expandable_regions == 0, "built blocks remain toggleable")
+		assert(not text:find("…", 1, true), "a block was truncated:\n" .. text)
+		assert(text:find(string.rep("f", 90), 1, true), "fenced code was truncated")
+		assert(text:find(string.rep("q", 90), 1, true), "callout code was truncated")
+		for _, word in ipairs({ "fmend", "tend", "hend" }) do
+			assert(text:find(word, 1, true), "block lost its final word: " .. word)
+		end
+		-- Callout bars also use │; a table's corners give its width.
+		local table_width = 0
+		for _, line in ipairs(content.lines) do
+			if line:find("┐", 1, true) or line:find("┘", 1, true) then
+				table_width = math.max(table_width, vim.api.nvim_strwidth(line))
+			end
+		end
+		if wrap then
+			assert(table_width > 40 and table_width <= 70, "wrapped table ignored the block width: " .. table_width)
+		else
+			assert(table_width > 70, "natural-width table was wrapped: " .. table_width)
+		end
+	end
 end)
 
 test("narrow tables keep full linked cells and outer borders", function()
@@ -673,6 +937,56 @@ test("pager opens wide Markdown tables with their complete cells", function()
 	assert(vim.wo[win].wrap == source_wrap, "pager changed the source wrap setting")
 	assert(vim.wo[win].linebreak == source_linebreak, "pager changed the source line-break setting")
 	assert(vim.wo[win].breakindent == source_breakindent, "pager changed the source continuation indent")
+	vim.api.nvim_buf_delete(source, { force = true })
+	vim.o.columns = columns
+	pager.active = false
+end)
+
+test("pager blocks use the window width and keep the wrap mode", function()
+	pager.active = true
+	local columns = vim.o.columns
+	-- A headless window follows 'columns' only after a layout change.
+	vim.o.columns = 160
+	vim.cmd("vnew")
+	vim.cmd("only")
+	local cell = vim.trim(string.rep("pager cell words ", 6))
+	local source = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(source)
+	vim.api.nvim_buf_set_lines(source, 0, -1, false, {
+		"| Item | Description |",
+		"| --- | --- |",
+		"| A | " .. cell .. " |",
+	})
+	vim.bo[source].filetype = "markdown"
+	local win = vim.api.nvim_get_current_win()
+	local source_wrap = vim.wo[win].wrap
+	view.toggle()
+	local buf = vim.api.nvim_win_get_buf(win)
+	local session = assert(require("md-render").preview._toggle_sessions[source])
+	assert(session.opts.nvim_config_block_width == 158, "pager block width ignores the window")
+	assert(max_width(buf, "│") > 82, "pager table stayed inside the 80-column prose width")
+	assert(max_width(buf, "│") <= 160, "pager table extends past the window")
+	assert(contains(buf, cell) and not contains(buf, "…"), "pager table split or truncated its cell")
+
+	assert(require("config.editor_actions").toggle_wrap() == false, "ToggleWrap did not disable pager wrap")
+	assert(session.opts.nvim_config_wrap == false, "pager session lost the nowrap mode")
+	view.toggle()
+	assert(vim.api.nvim_win_get_buf(win) == source, "pager did not show its source")
+	assert(vim.wo[win].wrap == source_wrap, "pager source inherited the render wrap mode")
+	view.toggle()
+	assert(vim.api.nvim_win_get_buf(win) == buf, "pager did not show its render again")
+	assert(not vim.wo[win].wrap, "pager render forgot the nowrap mode")
+
+	vim.cmd("vnew")
+	local other = vim.api.nvim_get_current_win()
+	vim.api.nvim_win_set_width(win, 120)
+	vim.api.nvim_exec_autocmds("WinResized", {})
+	assert(session.opts.nvim_config_block_width == 118, "pager block width did not follow the resize")
+	assert(not vim.wo[win].wrap, "resize reenabled pager wrap")
+	vim.api.nvim_win_close(other, true)
+	vim.api.nvim_set_current_win(win)
+	assert(require("config.editor_actions").toggle_wrap() == true, "ToggleWrap did not restore pager wrap")
+	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
 	pager.active = false
