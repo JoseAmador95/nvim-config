@@ -87,7 +87,8 @@ local function checkout_ok(image_module, render_module)
 	end
 	local head = vim.system({ "git", "-C", root, "rev-parse", "--verify", "HEAD" }, { text = true }):wait()
 	if head.code ~= 0 or vim.trim(head.stdout or "") ~= M.PIN then
-		return nil, "loaded renderer checkout differs from the v3.10.3 pin"
+		return nil,
+			"loaded renderer checkout differs from the v3.10.3 pin; run :Lazy restore md-render.nvim and restart"
 	end
 	local status = vim.system({ "git", "-C", root, "status", "--porcelain", "--untracked-files=no" }, { text = true })
 		:wait()
@@ -170,6 +171,9 @@ end
 
 local function ensure_renderer()
 	if not ready then
+		-- An explicit request must always explain itself, even when startup
+		-- already reported the same configuration error.
+		notified_error = nil
 		if configure_error then
 			return fail(configure_error)
 		end
