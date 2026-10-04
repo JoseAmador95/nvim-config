@@ -59,6 +59,15 @@ local function disable_upstream_entrypoints()
 	end
 end
 
+-- Lazy rewrites the shared lock from installed plugins only, so a restore
+-- while md-render is missing prunes its entry and disables the spec.
+local function lock_unavailable(lock_err)
+	return (
+		"Markdown reading view unavailable: %s; run git -C %s checkout -- lazy-lock.json, "
+		.. "then :Lazy install md-render.nvim and restart"
+	):format(tostring(lock_err), repo_root)
+end
+
 function M.lock_ok()
 	local entry, lock_err = lazy_lock.plugin(repo_root, "md-render.nvim")
 	if not entry then
@@ -109,7 +118,7 @@ local function configure()
 	local locked, lock_err = M.lock_ok()
 	if not locked then
 		disable_upstream_entrypoints()
-		return fail("Markdown reading view unavailable: " .. tostring(lock_err))
+		return fail(lock_unavailable(lock_err))
 	end
 	local ok_image, image_module = deferred.try("md-render.image")
 	local ok_renderer, render_module = deferred.try("md-render")
@@ -179,7 +188,7 @@ local function ensure_renderer()
 		end
 		local locked, lock_err = M.lock_ok()
 		if not locked then
-			return fail("Markdown reading view unavailable: " .. tostring(lock_err))
+			return fail(lock_unavailable(lock_err))
 		end
 		-- Lazy skips config() for a plugin that is not installed, and startup
 		-- never installs missing plugins. Name the explicit restore path.
