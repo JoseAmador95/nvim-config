@@ -1,10 +1,13 @@
 -- Center the editor's rendered Markdown page without changing md-render's
--- source-line mapping. The pinned renderer builds content before it knows the
--- display window, so the host supplies the page width and left margin.
+-- source-line mapping or byte columns. The pinned renderer builds content
+-- before it knows the display window, so the host supplies the page width and
+-- left margin.
 local M = {}
 
 local MAX_PAGE_WIDTH = 120
 local RENDER_INDENT_WIDTH = 2
+
+local namespace = vim.api.nvim_create_namespace("nvim_config_markdown_page")
 
 function M.text_width(win)
 	local info = vim.fn.getwininfo(win)[1]
@@ -27,45 +30,51 @@ function M.render_width(page_width)
 	return math.max(1, page_width - RENDER_INDENT_WIDTH)
 end
 
--- Every field here is a byte column in md-render v3.10.3. ASCII padding makes
--- its byte length equal the screen-cell shift. Row-only maps stay untouched.
+-- The page margin is drawn as inline virtual text (M.pad), never as buffer
+-- text, so Visual selections and yanks contain only the rendered page and
+-- md-render's byte columns stay valid. Two fields still need the margin:
+-- Kitty images are placed at buffer column + textoff and do not see inline
+-- virtual text, and a blank row keeps one real cell because Neovim draws the
+-- cursor of an empty line before inline virtual text.
 function M.center_content(content, opts)
 	local margin = opts and opts.nvim_config_page_margin
 	if type(margin) ~= "number" or margin <= 0 then
 		return content
 	end
 	margin = math.floor(margin)
-	local padding = string.rep(" ", margin)
 	for index, line in ipairs(content.lines) do
-		-- A blank rendered row still needs one page cell: normal-mode cursors
-		-- cannot rest one column past the end of the margin's spaces.
-		content.lines[index] = padding .. (line == "" and " " or line)
-	end
-	for _, entry in ipairs(content.highlights or {}) do
-		for _, group in ipairs(entry.groups) do
-			group.col = group.col + margin
-			if group.end_col >= 0 then
-				group.end_col = group.end_col + margin
-			end
+		if line == "" then
+			content.lines[index] = " "
 		end
-	end
-	for _, link in ipairs(content.link_metadata or {}) do
-		link.col_start = link.col_start + margin
-		link.col_end = link.col_end + margin
-	end
-	for _, block in ipairs(content.code_blocks or {}) do
-		block.prefix_len = (block.prefix_len or 0) + margin
 	end
 	for _, placement in ipairs(content.image_placements or {}) do
 		placement.col = placement.col + margin
 	end
-	for _, placement in ipairs(content.text_placements or {}) do
-		placement.col = placement.col + margin
-		if placement.icon_col then
-			placement.icon_col = placement.icon_col + margin
-		end
-	end
 	return content
 end
+
+-- Draw the left page margin on every rendered row. Safe to repeat after a
+-- rebuild; a margin of zero (the pager) clears it.
+function M.pad(buf, margin)
+	if not vim.api.nvim_buf_is_valid(buf) then
+		return
+	end
+	vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
+	margin = type(margin) == "number" and math.floor(margin) or 0
+	if margin <= 0 then
+		return
+	end
+	local chunks = { { string.rep(" ", margin) } }
+	for row = 0, vim.api.nvim_buf_line_count(buf) - 1 do
+		vim.api.nvim_buf_set_extmark(buf, namespace, row, 0, {
+			virt_text = chunks,
+			virt_text_pos = "inline",
+			right_gravity = false,
+			priority = 10000,
+		})
+	end
+end
+
+M.namespace = namespace
 
 return M

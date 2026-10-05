@@ -113,6 +113,27 @@ local function has_code_label(buf, language)
 	return false
 end
 
+-- Widths of the virtual page margin drawn on each rendered row.
+local function page_margins(buf)
+	local namespace = require("config.markdown_layout").namespace
+	local widths = {}
+	for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, namespace, 0, -1, { details = true })) do
+		local details = mark[4]
+		assert(mark[3] == 0 and details.virt_text_pos == "inline", "page margin is not inline at the row start")
+		assert(widths[mark[2] + 1] == nil, "a row has more than one page margin")
+		widths[mark[2] + 1] = vim.api.nvim_strwidth(details.virt_text[1][1])
+	end
+	return widths
+end
+
+local function assert_page_margin(buf, win, margin)
+	local widths = page_margins(buf)
+	for row = 1, vim.api.nvim_buf_line_count(buf) do
+		assert(widths[row] == margin, ("row %d has margin %s, expected %d"):format(row, tostring(widths[row]), margin))
+	end
+	assert(vim.wo[win].breakindentopt == "shift:" .. margin, "wrapped rows do not continue after the margin")
+end
+
 local function assert_render_winhighlight(win)
 	local current = vim.wo[win].winhighlight
 	assert(current:find("Normal:NormalFloat", 1, true), "render lost an existing Normal mapping")
@@ -312,28 +333,29 @@ test("centered page reflows on resize and keeps links aligned", function()
 	assert(expected_width == 120, "wide page did not cap at 120 columns")
 	assert(session.opts.max_width == layout.render_width(expected_width), "renderer used the wrong page width")
 	assert(session.opts.nvim_config_page_margin == expected_margin, "page has the wrong left margin")
-	assert(vim.api.nvim_win_get_cursor(win)[2] >= expected_margin, "cursor opened in the empty left margin")
 	assert(vim.wo[win].wrap, "reading view permits horizontal scrolling")
+	assert_page_margin(buf, win, expected_margin)
 	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
-		assert(line:sub(1, expected_margin) == string.rep(" ", expected_margin), "page line is not centered")
-		assert(vim.api.nvim_strwidth(line) <= expected_margin + expected_width, "render exceeded the 120-column page")
+		assert(vim.api.nvim_strwidth(line) <= expected_width, "render exceeded the 120-column page")
 	end
-	local blank_row
+	local blank_row, text_row
 	for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
-		if line:match("^ +$") then
-			blank_row = row
-			assert(#line > expected_margin, "blank row has no cursor cell inside the page")
-			break
+		if line == " " then
+			blank_row = blank_row or row
+		elseif line:find("A paragraph", 1, true) then
+			text_row = row
+			assert(line:find("^  A paragraph"), "page margin leaked into the rendered text: " .. line)
 		end
 	end
-	assert(blank_row, "test document has no blank rendered row")
-	vim.api.nvim_win_set_cursor(win, { blank_row, 0 })
-	vim.api.nvim_exec_autocmds("CursorMoved", { buffer = buf })
-	assert(vim.api.nvim_win_get_cursor(win)[2] == expected_margin, "cursor escaped into the blank-row margin")
+	assert(blank_row, "blank row has no cursor cell after the margin")
+	vim.api.nvim_win_set_cursor(win, { assert(text_row, "paragraph row is missing"), 0 })
+	vim.cmd("normal! Vy")
+	assert(vim.fn.getreg('"'):find("^  A paragraph"), "linewise yank copied the page margin")
 	vim.cmd("normal! 30zl")
 	assert(vim.fn.winsaveview().leftcol == 0, "reading view scrolled horizontally")
 	local link = assert(session.content.link_metadata[1], "rendered link has no metadata")
-	assert(link.col_start >= expected_margin, "link metadata omitted the page margin")
+	local link_line = vim.api.nvim_buf_get_lines(buf, link.line, link.line + 1, false)[1]
+	assert(link_line:sub(link.col_start + 1, link.col_end) == "a link", "link metadata misses the rendered text")
 	local function assert_link_extmark()
 		for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, session.ns, 0, -1, { details = true })) do
 			if mark[4].url == "https://example.com/centered" then
@@ -355,11 +377,10 @@ test("centered page reflows on resize and keeps links aligned", function()
 	assert(expected_width < 120, "test split did not narrow the reading page")
 	assert(session.opts.max_width == layout.render_width(expected_width), "resize did not update renderer width")
 	assert(session.opts.nvim_config_page_margin == expected_margin, "resize did not recenter the page")
-	assert(vim.api.nvim_win_get_cursor(win)[2] >= expected_margin, "cursor escaped after resizing the page")
 	assert(vim.wo[win].wrap and vim.fn.winsaveview().leftcol == 0, "resize reenabled horizontal scrolling")
+	assert_page_margin(buf, win, expected_margin)
 	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
-		assert(line:sub(1, expected_margin) == string.rep(" ", expected_margin), "resize lost centering")
-		assert(vim.api.nvim_strwidth(line) <= expected_margin + expected_width, "resize exceeded the page width")
+		assert(vim.api.nvim_strwidth(line) <= expected_width, "resize exceeded the page width")
 	end
 	assert_link_extmark()
 	assert(has_code_label(buf, "lua"), "language label vanished after reflow")
@@ -374,7 +395,53 @@ test("centered page reflows on resize and keeps links aligned", function()
 	vim.o.columns = columns
 end)
 
-test("page padding shifts every byte-column metadata field", function()
+-- Headless Neovim 0.12 aborts when it redraws two tab pages after 'columns'
+-- changed at runtime, so screen checks use the startup width.
+test("the cursor and Visual selections stay out of the page margin", function()
+	vim.cmd("tabonly")
+	vim.cmd("only")
+	assert(vim.o.columns == 80, "screen checks need the startup width")
+	local source = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(source)
+	vim.api.nvim_buf_set_lines(source, 0, -1, false, { "First paragraph.", "", "Second paragraph." })
+	vim.bo[source].filetype = "markdown"
+	view.toggle()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_win_get_buf(win)
+	local margin = assert(require("md-render").preview._toggle_sessions[source]).opts.nvim_config_page_margin
+	assert(margin > 0, "an 80-column window has no page margin")
+	local text_row, blank_row
+	for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+		if line:match("^%s*$") then
+			blank_row = blank_row or row
+		elseif line:find("First paragraph", 1, true) then
+			text_row = row
+		end
+	end
+	assert(text_row and blank_row, "render lacks a text row or a blank row")
+	for _, row in ipairs({ text_row, blank_row }) do
+		vim.api.nvim_win_set_cursor(win, { row, 0 })
+		vim.cmd("redraw")
+		assert(vim.fn.wincol() == margin + 1, "the cursor sits in the page margin on row " .. row)
+	end
+	vim.api.nvim_win_set_cursor(win, { text_row, 0 })
+	vim.cmd("redraw")
+	local screen_row = vim.fn.screenpos(win, text_row, 1).row
+	local text_column = margin + 3
+	local idle = vim.fn.screenattr(screen_row, text_column)
+	vim.cmd("normal! V")
+	vim.cmd("redraw")
+	local selected = vim.fn.screenattr(screen_row, text_column)
+	assert(selected ~= idle, "Visual mode did not highlight the text")
+	for column = 1, margin do
+		assert(vim.fn.screenattr(screen_row, column) ~= selected, "Visual highlights the page margin")
+	end
+	vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "nx", false)
+	view.toggle()
+	vim.api.nvim_buf_delete(source, { force = true })
+end)
+
+test("the virtual page margin keeps rendered text and byte columns intact", function()
 	local layout = require("config.markdown_layout")
 	local content = {
 		lines = { "abc", "xyz", "" },
@@ -386,21 +453,25 @@ test("page padding shifts every byte-column metadata field", function()
 		source_line_map = { 4, 5 },
 		heading_anchors = { heading = 1 },
 	}
+	local original = vim.deepcopy(content)
 	layout.center_content(content, { nvim_config_page_margin = 7 })
-	assert(content.lines[1] == "       abc" and content.lines[2] == "       xyz", "text was not padded")
-	assert(content.lines[3] == "        ", "blank row has no cursor cell inside the reading page")
-	assert(content.highlights[1].groups[1].col == 7, "highlight start was not shifted")
-	assert(content.highlights[1].groups[1].end_col == 10, "highlight end was not shifted")
-	assert(content.highlights[1].groups[2].end_col == -1, "end-of-line sentinel was changed")
-	assert(content.link_metadata[1].col_start == 8 and content.link_metadata[1].col_end == 10, "link was not shifted")
-	assert(content.code_blocks[1].prefix_len == 9, "Tree-sitter prefix was not shifted")
-	assert(content.code_blocks[1].source_lines[1] == "raw", "original code source was changed")
-	assert(content.image_placements[1].col == 8, "image column was not shifted")
-	assert(
-		content.text_placements[1].col == 8 and content.text_placements[1].icon_col == 7,
-		"scaled text was not shifted"
-	)
+	assert(content.lines[1] == "abc" and content.lines[2] == "xyz", "page margin was written into the text")
+	assert(content.lines[3] == " ", "blank row has no cursor cell after the margin")
+	for _, field in ipairs({ "highlights", "link_metadata", "code_blocks", "text_placements" }) do
+		assert(vim.deep_equal(content[field], original[field]), field .. " byte columns were shifted")
+	end
+	assert(content.image_placements[1].col == 8, "Kitty image column lacks the margin")
 	assert(content.source_line_map[1] == 4 and content.heading_anchors.heading == 1, "row metadata changed")
+
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, content.lines)
+	layout.pad(buf, 7)
+	layout.pad(buf, 7)
+	local widths = page_margins(buf)
+	assert(#widths == 3 and widths[1] == 7 and widths[3] == 7, "every row needs exactly one page margin")
+	layout.pad(buf, 0)
+	assert(#page_margins(buf) == 0, "a zero margin left virtual padding behind")
+	vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
 test("wide tables open without losing cell text and never collapse", function()
@@ -558,11 +629,11 @@ test("clicks and keys never change blocks or wrap", function()
 	local margin = session.opts.nvim_config_page_margin
 	local before = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 	for _, row in ipairs({ find_row(buf, "│ A "), find_row(buf, code) }) do
-		vim.api.nvim_win_set_cursor(win, { row, margin })
+		vim.api.nvim_win_set_cursor(win, { row, 2 })
 		keymap_callback(buf, "<CR>")()
 		keymap_callback(buf, "za")()
 		vim.fn.getmousepos = function()
-			return { winid = win, line = row, column = margin + 3, wincol = margin + 3, winrow = row }
+			return { winid = win, line = row, column = 3, wincol = margin + 3, winrow = row }
 		end
 		keymap_callback(buf, "<LeftRelease>")()
 		vim.fn.getmousepos = getmousepos
@@ -574,7 +645,7 @@ test("clicks and keys never change blocks or wrap", function()
 
 	local fold = assert(session.content.callout_folds and session.content.callout_folds[1], "callout is not foldable")
 	assert(not contains(buf, "hidden callout body"), "folded callout opened expanded")
-	vim.api.nvim_win_set_cursor(win, { fold.header_line + 1, margin })
+	vim.api.nvim_win_set_cursor(win, { fold.header_line + 1, 2 })
 	keymap_callback(buf, "<CR>")()
 	assert(contains(buf, "hidden callout body"), "<CR> no longer unfolds callouts")
 
@@ -685,16 +756,16 @@ test("tables and code extend past the page to the window edge", function()
 	local buf = vim.api.nvim_win_get_buf(win)
 	local session = assert(require("md-render").preview._toggle_sessions[source])
 	local layout = require("config.markdown_layout")
-	local page_width, margin, block_width = layout.measure(win)
+	local page_width, _, block_width = layout.measure(win)
 	assert(page_width == 120 and block_width == 180, "unexpected 240-column page geometry")
 	assert(session.opts.nvim_config_block_width == layout.render_width(block_width), "renderer lacks the block width")
 	local table_width = max_width(buf, "│")
-	assert(table_width > margin + page_width, "table stayed inside the 120-column page")
-	assert(table_width <= margin + block_width, "table extends past the window")
+	assert(table_width > page_width, "table stayed inside the 120-column page")
+	assert(table_width <= block_width, "table extends past the window")
 	assert(not contains(buf, "…"), "wide table was truncated")
 	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
 		if line:find("prose", 1, true) then
-			assert(vim.api.nvim_strwidth(line) <= margin + page_width, "prose left the reading page")
+			assert(vim.api.nvim_strwidth(line) <= page_width, "prose left the reading page")
 		end
 	end
 	view.toggle()

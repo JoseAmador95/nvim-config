@@ -6,6 +6,7 @@ vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
 local codeblocks = require("config.markdown_codeblocks")
+local layout = require("config.markdown_layout")
 local palette = require("config.palette")
 
 vim.o.background = "light"
@@ -66,7 +67,7 @@ local padding = assert(
 	end),
 	"code line has no shaded padding"
 )
-assert(#padding[4].virt_text[1][1] == 36 - vim.fn.strdisplaywidth(first_lines[1]), "code region width is wrong")
+assert(#padding[4].virt_text[1][1] == 32 - vim.fn.strdisplaywidth(first_lines[1]), "code region width is wrong")
 assert(padding[4].virt_text_pos == "inline", "code background leaves a gap after the final character")
 assert(not find(3, function(details)
 	return details.hl_group == "MdRenderCodeBlockBackground"
@@ -79,6 +80,8 @@ local label = assert(
 )
 assert(label[4].virt_lines_above == true, "language label is not above its code block")
 assert(label[4].virt_lines[1][2][1] == " lua ", "language label includes unsafe fence text")
+-- Virtual lines start at the text edge, so the label carries the page margin.
+assert(label[4].virt_lines[1][1][1] == string.rep(" ", 8), "language label is not aligned with its code")
 assert(vim.api.nvim_buf_get_lines(buf, 0, -1, false)[1] == first_lines[1], "decoration changed rendered text")
 
 local rebuilt_lines = { "    print('new')", "ordinary text" }
@@ -105,13 +108,13 @@ assert(not find(3, function(details)
 end), "rebuild kept a stale code background")
 
 local heading_lines = {
-	"      Heading [link]",
-	"      " .. string.rep("x", 29),
-	"    No leading cell",
-	"      " .. string.rep("y", 30),
+	"  Heading [link]",
+	"  " .. string.rep("x", 29),
+	"No leading cell",
+	"  " .. string.rep("y", 30),
 }
 vim.api.nvim_buf_set_lines(buf, 0, -1, false, heading_lines)
-local link_metadata = { { line = 0, col_start = 15, col_end = 19, url = "#target" } }
+local link_metadata = { { line = 0, col_start = 11, col_end = 15, url = "#target" } }
 local original_link_metadata = vim.deepcopy(link_metadata)
 assert(heading_lines[1]:sub(link_metadata[1].col_start + 1, link_metadata[1].col_end) == "link")
 local heading_session = {
@@ -120,10 +123,10 @@ local heading_session = {
 	content = {
 		lines = heading_lines,
 		highlights = {
-			{ line = 0, groups = { { col = 6, end_col = #heading_lines[1], hl = "MdRenderH1" } } },
-			{ line = 1, groups = { { col = 6, end_col = #heading_lines[2], hl = "MdRenderH2" } } },
-			{ line = 2, groups = { { col = 4, end_col = #heading_lines[3], hl = "MdRenderH3" } } },
-			{ line = 3, groups = { { col = 6, end_col = #heading_lines[4], hl = "MdRenderH4" } } },
+			{ line = 0, groups = { { col = 2, end_col = #heading_lines[1], hl = "MdRenderH1" } } },
+			{ line = 1, groups = { { col = 2, end_col = #heading_lines[2], hl = "MdRenderH2" } } },
+			{ line = 2, groups = { { col = 0, end_col = #heading_lines[3], hl = "MdRenderH3" } } },
+			{ line = 3, groups = { { col = 2, end_col = #heading_lines[4], hl = "MdRenderH4" } } },
 		},
 		link_metadata = link_metadata,
 	},
@@ -135,14 +138,14 @@ local band = assert(
 	end),
 	"pill row has no soft page band"
 )
-assert(band[3] == 4 and band[4].end_col == 6, "pill band escaped the page or covered heading text")
+assert(band[3] == 0 and band[4].end_col == 2, "pill band escaped the page or covered heading text")
 local left = assert(
 	find(0, function(details)
 		return details.virt_text_pos == "overlay"
 	end),
 	"pill lost its left cap"
 )
-assert(left[3] == 5 and left[4].virt_text[1][1] == "", "left cap moved the heading text")
+assert(left[3] == 1 and left[4].virt_text[1][1] == "", "left cap moved the heading text")
 assert(vim.api.nvim_strwidth(left[4].virt_text[1][1]) == 1, "left cap is not one cell")
 local right = assert(
 	find(0, function(details)
@@ -156,7 +159,7 @@ assert(
 	vim.fn.strdisplaywidth(heading_lines[1])
 			+ vim.api.nvim_strwidth(right[4].virt_text[1][1])
 			+ #right[4].virt_text[2][1]
-		== 36,
+		== 32,
 	"right cap and band exceed the page boundary"
 )
 local edge = assert(
@@ -191,11 +194,11 @@ assert(
 assert(vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), heading_lines), "pill changed rendered lines")
 
 heading_session.rebuild = function(self)
-	local updated = { "      Updated", "ordinary" }
+	local updated = { "  Updated", "ordinary" }
 	vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, updated)
 	self.content = {
 		lines = updated,
-		highlights = { { line = 0, groups = { { col = 6, end_col = #updated[1], hl = "MdRenderH4" } } } },
+		highlights = { { line = 0, groups = { { col = 2, end_col = #updated[1], hl = "MdRenderH4" } } } },
 	}
 end
 codeblocks.protect_rebuild(heading_session)
@@ -212,7 +215,7 @@ end), "rebuild kept a stale pill")
 
 -- Code is never truncated, so a block may be wider than the page. Its band
 -- stays rectangular up to the widest line.
-local wide_lines = { "    " .. string.rep("a", 11), "    " .. string.rep("b", 46) }
+local wide_lines = { string.rep("a", 11), string.rep("b", 46) }
 vim.api.nvim_buf_set_lines(buf, 0, -1, false, wide_lines)
 local wide_session = {
 	buf = buf,
@@ -220,7 +223,7 @@ local wide_session = {
 	content = {
 		lines = wide_lines,
 		highlights = {},
-		code_blocks = { { start_line = 0, end_line = 1, prefix_len = 4 } },
+		code_blocks = { { start_line = 0, end_line = 1, prefix_len = 0 } },
 	},
 }
 local function inline_fill(row)
@@ -234,13 +237,14 @@ assert(#short_fill[4].virt_text[1][1] == 35, "unwrapped code band does not reach
 assert(not inline_fill(1), "the widest code line gained padding")
 
 -- While the render wraps, padding stops at the window edge so it never adds
--- a screen row.
+-- a screen row; the virtual page margin uses the start of that row.
 local win = vim.api.nvim_open_win(buf, false, { split = "right", win = 0 })
 vim.api.nvim_win_set_width(win, 44)
 vim.wo[win].wrap = true
 wide_session.win = win
 wide_session.opts.nvim_config_wrap = nil
 codeblocks.decorate(wide_session)
+layout.pad(buf, 4)
 short_fill = assert(inline_fill(0), "wrapped code line lost its padding")
 assert(#short_fill[4].virt_text[1][1] == 29, "wrapped code band does not stop at the window edge")
 assert(not inline_fill(1), "a code line wider than the window gained padding")

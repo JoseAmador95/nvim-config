@@ -17,6 +17,8 @@ local function nonnegative_integer(value, fallback)
 	return math.max(0, math.floor(value))
 end
 
+-- The page in buffer columns, plus the left margin that config.markdown_layout
+-- draws before it as inline virtual text.
 local function page_region(session)
 	local opts = session.opts or {}
 	local margin = nonnegative_integer(opts.nvim_config_page_margin, 0)
@@ -25,7 +27,7 @@ local function page_region(session)
 		width = nonnegative_integer(opts.max_width, 80) + vim.api.nvim_strwidth(opts.indent or "  ")
 	end
 	width = math.max(1, math.min(max_region_width, nonnegative_integer(width, 80)))
-	return margin, margin + width
+	return 0, width, margin
 end
 
 -- The text width of the window showing the render, or nil without one.
@@ -159,11 +161,15 @@ function M.decorate(session)
 	end
 	local content = session.content or {}
 	local lines = content.lines or {}
-	local left, right = page_region(session)
+	local left, right, margin = page_region(session)
 	-- The rebuild wrapper restores the window's wrap only after decorating, so
 	-- read the reading view's mode from the session.
 	local wrap = not (session.opts and session.opts.nvim_config_wrap == false)
 	local text_width = render_text_width(session, buf)
+	if text_width then
+		-- The virtual margin occupies the start of every screen row.
+		text_width = math.max(1, text_width - margin)
+	end
 	vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
 	shade_headings(buf, content, lines, left, right)
 
@@ -183,11 +189,12 @@ function M.decorate(session)
 			end
 		end
 		if label and type(row) == "number" and row >= 0 and row < #lines then
+			-- Virtual lines start at the window's text edge, before the margin.
 			local indent = nonnegative_integer(block.prefix_len, left)
 			vim.api.nvim_buf_set_extmark(buf, namespace, row, 0, {
 				virt_lines = {
 					{
-						{ string.rep(" ", math.max(left, indent)), "Normal" },
+						{ string.rep(" ", margin + math.max(left, indent)), "Normal" },
 						{ " " .. label .. " ", label_group },
 					},
 				},

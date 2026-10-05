@@ -273,20 +273,6 @@ local function restore_render_window(win)
 	end
 end
 
-local function keep_cursor_on_page(win, session)
-	if not session or not vim.api.nvim_win_is_valid(win) or vim.api.nvim_win_get_buf(win) ~= session.buf then
-		return
-	end
-	local margin = session.opts and session.opts.nvim_config_page_margin
-	if type(margin) ~= "number" or margin <= 0 then
-		return
-	end
-	local cursor = vim.api.nvim_win_get_cursor(win)
-	if cursor[2] < margin then
-		vim.api.nvim_win_set_cursor(win, { cursor[1], margin })
-	end
-end
-
 local function remember_source_window_options(win)
 	local has_options = pcall(vim.api.nvim_win_get_var, win, render_window_options_var)
 	if not has_options then
@@ -294,6 +280,7 @@ local function remember_source_window_options(win)
 			wrap = vim.wo[win].wrap,
 			linebreak = vim.wo[win].linebreak,
 			breakindent = vim.wo[win].breakindent,
+			breakindentopt = vim.wo[win].breakindentopt,
 		})
 	end
 end
@@ -311,12 +298,22 @@ local function set_window_option(win, name, value)
 	end
 end
 
+-- Wrapped rows start after the virtual page margin, like the row they continue.
+local function page_breakindentopt(win, session)
+	local margin = session and session.opts and session.opts.nvim_config_page_margin
+	if type(margin) == "number" and margin >= 1 then
+		return "shift:" .. math.floor(margin)
+	end
+	return vim.api.nvim_win_get_var(win, render_window_options_var).breakindentopt
+end
+
 local function configure_render_window(win, session)
 	remember_source_window_options(win)
 	local wrap = wrap_mode(session)
 	set_window_option(win, "wrap", wrap)
 	set_window_option(win, "linebreak", wrap)
 	set_window_option(win, "breakindent", true)
+	set_window_option(win, "breakindentopt", page_breakindentopt(win, session))
 	if wrap then
 		vim.api.nvim_win_call(win, function()
 			vim.fn.winrestview({ leftcol = 0 })
@@ -324,8 +321,10 @@ local function configure_render_window(win, session)
 	end
 end
 
-local function protect_cursor_rebuild(session)
-	if session.nvim_config_cursor_rebuild then
+-- Outermost rebuild wrapper: redraw the virtual page margin over the new rows
+-- and restore the reading view's window options after md-render's writes.
+local function protect_page_rebuild(session)
+	if session.nvim_config_page_rebuild then
 		return
 	end
 	local rebuild = session.rebuild
@@ -333,10 +332,10 @@ local function protect_cursor_rebuild(session)
 		rebuilding = rebuilding + 1
 		local ok, result = pcall(function(...)
 			local value = rebuild(self, ...)
+			markdown_layout.pad(self.buf, self.opts.nvim_config_page_margin)
 			for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
 				if vim.api.nvim_win_is_valid(win) then
 					configure_render_window(win, self)
-					keep_cursor_on_page(win, self)
 				end
 			end
 			return value
@@ -347,7 +346,7 @@ local function protect_cursor_rebuild(session)
 		end
 		return result
 	end
-	session.nvim_config_cursor_rebuild = true
+	session.nvim_config_page_rebuild = true
 end
 
 -- md-render rewrites an image's placeholder rows when the image arrives,
@@ -381,7 +380,7 @@ local function protect_render_buffer(win, source_winhighlight)
 	if session then
 		markdown_tables.protect_rebuild(session)
 		markdown_codeblocks.protect_rebuild(session)
-		protect_cursor_rebuild(session)
+		protect_page_rebuild(session)
 	end
 	vim.bo[state.render_buf].modifiable = false
 	vim.bo[state.render_buf].readonly = true
@@ -391,7 +390,7 @@ local function protect_render_buffer(win, source_winhighlight)
 	palette.apply_markdown()
 	if session then
 		markdown_codeblocks.decorate(session)
-		keep_cursor_on_page(win, session)
+		markdown_layout.pad(state.render_buf, session.opts.nvim_config_page_margin)
 	end
 	return state
 end
@@ -467,7 +466,6 @@ local function reflow_preview(preview)
 		session:refresh_images()
 	end
 	configure_render_window(preview.win, session)
-	keep_cursor_on_page(preview.win, session)
 end
 
 -- The pager keeps md-render's own prose width, but tables and code blocks may
@@ -479,7 +477,7 @@ end
 local function protected_session(win)
 	local state = win_state(win)
 	local session = state and renderer and renderer.preview._toggle_sessions[state.source_buf]
-	if session and session.nvim_config_cursor_rebuild then
+	if session and session.nvim_config_page_rebuild then
 		return session
 	end
 	return nil
@@ -535,16 +533,6 @@ local function adopt_window_wrap()
 	if not ok then
 		notify("Could not apply the reading view wrap mode: " .. tostring(err), vim.log.levels.ERROR)
 	end
-end
-
-local function keep_active_cursor_on_page()
-	if not vim.b[vim.api.nvim_get_current_buf()].md_render then
-		return
-	end
-	local win = vim.api.nvim_get_current_win()
-	local state = win_state(win)
-	local session = state and renderer and renderer.preview._toggle_sessions[state.source_buf]
-	keep_cursor_on_page(win, session)
 end
 
 local function editor_toggle()
@@ -778,10 +766,6 @@ function M.setup()
 	vim.api.nvim_create_user_command("MarkdownView", M.toggle, { desc = "Toggle rendered Markdown reading view" })
 	vim.api.nvim_create_user_command("MarkdownImages", M.images, {
 		desc = "Choose whether this Markdown document loads remote images",
-	})
-	vim.api.nvim_create_autocmd({ "CursorMoved", "WinEnter", "BufEnter" }, {
-		group = vim.api.nvim_create_augroup("MarkdownViewCursor", { clear = true }),
-		callback = keep_active_cursor_on_page,
 	})
 	vim.api.nvim_create_autocmd({ "WinResized", "VimResized", "TabEnter" }, {
 		group = vim.api.nvim_create_augroup("MarkdownViewReflow", { clear = true }),

@@ -178,8 +178,10 @@ reading view: put the cursor on the line that carries the image and the viewer
 opens the file. Fenced code shows its language above a shaded
 block; the light theme uses a pale gray background. Headings use pastel pills
 over softly tinted page-width bands; the renderer's experimental terminal text
-scaling is disabled so their rounded ends stay aligned. The cursor stays inside
-the centered page. `<leader>mp` still opens the browser preview.
+scaling is disabled so their rounded ends stay aligned. The margin around the
+centered page is drawn beside the text, not inside it: the cursor stays on the
+page, and `V`, `y`, and mouse selections never pick up the margin.
+`<leader>mp` still opens the browser preview.
 Tables and fenced code always show their complete content, with top and bottom
 rules and outer vertical borders on tables. They start at the page margin but
 may extend to the window's right edge, so the 120-column cap only applies to
