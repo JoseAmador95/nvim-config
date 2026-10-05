@@ -612,6 +612,67 @@ test("repeated setup and teardown reset registries deterministically", function(
 	equal("svg", diagram.effective_config().default_mode)
 end)
 
+test("markdown image references are extracted by column, reference, and HTML tag", function()
+	local image_link = require("diagram_view.image_link")
+
+	local parsed = assert(image_link.parse_line('text ![one](a.png) and ![two](<b c.png> "title")'))
+	equal(2, #parsed)
+	equal("a.png", parsed[1].link)
+	equal("one", parsed[1].alt)
+	equal("inline", parsed[1].style)
+	equal("b c.png", parsed[2].link)
+
+	-- A destination may carry balanced parentheses; a title must not end it early.
+	local nested = assert(image_link.parse_line("![x](shot(1).png 'cap')"))
+	equal("shot(1).png", nested[1].link)
+
+	local lines = {
+		"# Doc",
+		"![first](one.png) y ![second](two.png)",
+		"![logo][Brand]",
+		'<img alt="raw" src="tag.png" />',
+		"![missing][absent]",
+		'[brand]: wordmark.png "Marca"',
+	}
+
+	local by_column = assert(image_link.at(lines, 2, 25))
+	equal("two.png", by_column.link)
+	-- No column is the rendered reading view: it maps rows, never columns.
+	equal("one.png", assert(image_link.at(lines, 2, nil)).link)
+	-- A column between two references still resolves to the row's first image.
+	equal("one.png", assert(image_link.at(lines, 2, 19)).link)
+	-- Reference labels are case-insensitive and resolve through the definition.
+	equal("wordmark.png", assert(image_link.at(lines, 3, 1)).link)
+	equal("tag.png", assert(image_link.at(lines, 4, 1)).link)
+	equal("raw", assert(image_link.at(lines, 4, 1)).alt)
+	local undefined, undefined_err = image_link.at(lines, 5, 1)
+	assert(undefined == nil, "an undefined reference must not resolve")
+	assert(undefined_err:find("absent", 1, true), "the error must name the missing label")
+	equal(nil, image_link.at(lines, 1, 1))
+
+	local extracted = assert(diagram.extract({ lines = lines, filetype = "markdown", row = 2, col = 25 }))
+	equal("image", extracted.kind)
+	equal("two.png", extracted.source)
+	equal("image", extracted.origin.type)
+	equal("inline", extracted.origin.style)
+	equal("second", extracted.origin.alt)
+
+	-- A fence still owns its own rows, even when it contains an image reference.
+	local fenced = assert(diagram.extract({
+		lines = { "```mermaid", "A --> B", "```", "![after](shot.png)" },
+		filetype = "markdown",
+		row = 2,
+	}))
+	equal("mermaid", fenced.kind)
+	local reported, reported_err = diagram.extract({
+		lines = { "plain prose" },
+		filetype = "markdown",
+		row = 1,
+	})
+	assert(reported == nil)
+	assert(reported_err:find("image", 1, true), "the miss must mention images: " .. tostring(reported_err))
+end)
+
 for _, path in ipairs(temporary) do
 	vim.fn.delete(path, "rf")
 end

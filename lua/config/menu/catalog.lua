@@ -201,7 +201,9 @@ function M.definitions()
 			item("picker.grep_string", "Grep String (cursor)"),
 		}),
 		section("render", "Render", {
-			item("command.diagram_show", "Diagram (Automatic SVG/ASCII)", "<leader>md", supports_diagrams),
+			item("command.diagram_show", "Diagram or Image (Automatic SVG/ASCII)", "<leader>md", supports_diagrams, {
+				keywords = { "image", "picture", "png", "jpeg", "screenshot" },
+			}),
 			palette_item("command.diagram_show_svg", "Diagram as SVG", nil, supports_diagrams, {
 				"mermaid",
 				"plantuml",

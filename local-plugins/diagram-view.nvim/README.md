@@ -8,6 +8,15 @@ registry, cancel-safe sessions, the private v3 cache, PlantUML security policy,
 and a presenter registry. It never discovers or installs tools, imports
 `config.*`, registers global commands/mappings, or depends on Snacks.
 
+`extract()` also recognizes Markdown image references once no fence owns the
+cursor row, returning `kind = "image"` with the raw reference as the source.
+`image_link` parses inline, reference-style, and single-line HTML forms as pure
+strings: it never touches the filesystem, so resolving a reference to a file,
+deciding which media is loadable, and reading it stay with the host. A fence
+always wins over an image on the same row, and an extraction carries the cursor
+column when the caller has one — a row without a column is the rendered reading
+view, which maps rows but never columns.
+
 PlantUML jobs always receive `PLANTUML_SECURITY_PROFILE=SANDBOX` unless the host
 callback explicitly returns a `local-trusted` decision and recognized profile.
 Cache identities include that effective profile. Cache directories and files

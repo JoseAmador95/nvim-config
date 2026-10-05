@@ -107,7 +107,7 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 	assert(package.loaded["config.tool_bootstrap"] == nil, "injected resolver still loaded the tool bootstrap")
 	local core = require("diagram_view")
 	local status = core.status()
-	equal({ "mermaid:ascii", "mermaid:svg", "plantuml:ascii", "plantuml:svg" }, status.renderers)
+	equal({ "image:svg", "mermaid:ascii", "mermaid:svg", "plantuml:ascii", "plantuml:svg" }, status.renderers)
 	equal({ "ascii", "image", "image_frame" }, status.presenters)
 	assert(core.register_presenter("pending", {
 		open = function()
@@ -508,6 +508,234 @@ test("failed cancellation retains the pending frame for a close retry", function
 		assert(job.killed)
 		assert(not vim.api.nvim_win_is_valid(context.presentation.win))
 		equal("cancelled", frame:status().state)
+	end)
+end)
+
+local function write_file(path, data)
+	local fd = assert(vim.uv.fs_open(path, "w", 420))
+	assert(vim.uv.fs_write(fd, data, 0))
+	vim.uv.fs_close(fd)
+	return path
+end
+
+local function be16(value)
+	return string.char(math.floor(value / 256), value % 256)
+end
+
+local function png_bytes(width, height)
+	return "\137PNG\r\n\26\n"
+		.. "\0\0\0\13IHDR"
+		.. string.char(0, 0, be16(width):byte(1), be16(width):byte(2))
+		.. string.char(0, 0, be16(height):byte(1), be16(height):byte(2))
+		.. "\8\2\0\0\0"
+		.. "payload"
+end
+
+test("image references resolve to local files and reject remote or unsupported media", function()
+	local image = require("config.diagram_image")
+	local root = vim.fn.tempname()
+	assert(vim.fn.mkdir(root, "p") == 1)
+	temporary[#temporary + 1] = root
+	local shot = write_file(root .. "/shot.png", png_bytes(640, 480))
+	write_file(root .. "/with space.png", png_bytes(8, 4))
+	write_file(root .. "/hash#1.png", png_bytes(8, 4))
+	write_file(root .. "/vector.svg", '<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>')
+	write_file(root .. "/notes.txt", "plain text, not an image")
+	assert(vim.fn.mkdir(root .. "/assets", "p") == 1)
+
+	equal(vim.fs.normalize(shot), assert(image.resolve("shot.png", root)))
+	equal(vim.fs.normalize(shot), assert(image.resolve("./shot.png", root)))
+	equal(vim.fs.normalize(shot), assert(image.resolve("<shot.png>", root)))
+	equal(vim.fs.normalize(shot), assert(image.resolve("shot.png#fragment", root)))
+	-- A percent-encoded "#" is part of the filename, not a fragment.
+	equal(vim.fs.normalize(root .. "/hash#1.png"), assert(image.resolve("hash%231.png", root)))
+	-- A percent-encoded space is a real filename, not a scheme.
+	equal(vim.fs.normalize(root .. "/with space.png"), assert(image.resolve("with%20space.png", root)))
+	equal(vim.fs.normalize(shot), assert(image.resolve(shot, nil)))
+	equal(vim.fs.normalize(shot), assert(image.resolve("../shot.png", root .. "/assets")))
+
+	for _, remote in ipairs({
+		"https://example.test/a.png",
+		"http://example.test/a.png",
+		"//example.test/a.png",
+		"data:image/png;base64,AAAA",
+		"file:///etc/hosts",
+	}) do
+		local resolved, err = image.resolve(remote, root)
+		assert(resolved == nil, "remote reference must not resolve: " .. remote)
+		assert(err:find("remote images are not rendered", 1, true), "unexpected rejection: " .. tostring(err))
+	end
+
+	local missing, missing_err = image.resolve("absent.png", root)
+	assert(missing == nil and missing_err:find("image not found", 1, true), tostring(missing_err))
+	local directory, directory_err = image.resolve("assets", root)
+	assert(directory == nil and directory_err:find("not a regular file", 1, true), tostring(directory_err))
+	local relative, relative_err = image.resolve("shot.png", nil)
+	assert(relative == nil and relative_err:find("no directory", 1, true), tostring(relative_err))
+
+	equal({ "png", 640, 480 }, { image.identify(png_bytes(640, 480)) })
+	equal({ "gif", 12, 7 }, { image.identify("GIF89a" .. "\12\0\7\0" .. "rest") })
+	equal({ "jpeg", 300, 200 }, { image.identify("\255\216\255\192\0\17\8" .. be16(200) .. be16(300) .. "\3\1\17\0") })
+	equal({ "svg" }, { image.identify('<svg xmlns="http://www.w3.org/2000/svg"/>') })
+	equal({}, { image.identify("plain text, not an image") })
+
+	local loaded = assert(image.load(shot))
+	equal("png", loaded.format)
+	equal(640, loaded.width)
+	assert(loaded.source:find('viewBox="0 0 640 480"', 1, true), "the wrapper lost the intrinsic size")
+	assert(loaded.source:find("data:image/png;base64,", 1, true), "the wrapper did not embed the image")
+	assert(loaded.source:find(vim.base64.encode(png_bytes(640, 480)), 1, true), "embedded bytes differ")
+
+	local vector = assert(image.load(root .. "/vector.svg"))
+	equal("svg", vector.format)
+	assert(vector.source:find("<rect/>", 1, true), "an SVG must reach the renderer unwrapped")
+
+	local unsupported, unsupported_err = image.load(root .. "/notes.txt")
+	assert(unsupported == nil and unsupported_err:find("unsupported image format", 1, true), tostring(unsupported_err))
+	local oversized, oversized_err = image.load(shot, 8)
+	assert(oversized == nil and oversized_err:find("viewer limit", 1, true), tostring(oversized_err))
+end)
+
+local function with_markdown_image(options, callback)
+	local original_snacks = _G.Snacks
+	local original_notify = vim.notify
+	local jobs, placements, notifications = {}, {}, {}
+	local adapter = assert(package.loaded["config.diagram"])
+	local root = vim.fn.tempname()
+	assert(vim.fn.mkdir(root, "p") == 1)
+	temporary[#temporary + 1] = root
+	write_file(root .. "/shot.png", png_bytes(600, 300))
+	local ok, err = xpcall(function()
+		vim.notify = function(message)
+			notifications[#notifications + 1] = message
+		end
+		_G.Snacks = {
+			image = {
+				supports_terminal = function()
+					return options.terminal ~= false
+				end,
+				terminal = {
+					size = function()
+						return { cell_width = 10, cell_height = 20 }
+					end,
+				},
+				util = {
+					dim = function()
+						return { width = 600, height = 300 }
+					end,
+				},
+				placement = {
+					new = function(buf, path, placement_options)
+						local placement = { buf = buf, path = path, options = placement_options }
+						placement.close = function() end
+						placements[#placements + 1] = placement
+						return placement
+					end,
+				},
+			},
+		}
+		assert(adapter.setup({
+			cache_root = cache_root(),
+			resolve_executable = function(executable)
+				if options.missing_tool then
+					return nil, "not found on the host PATH"
+				end
+				return "/verified/" .. executable
+			end,
+			spawn = function(argv, spawn_options, done)
+				jobs[#jobs + 1] = { argv = vim.deepcopy(argv), options = vim.deepcopy(spawn_options), callback = done }
+				return { kill = function() end }
+			end,
+			schedule = function(done)
+				done()
+			end,
+			notify = function() end,
+		}))
+		local buf = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_buf_set_name(buf, root .. "/doc.md")
+		vim.api.nvim_set_current_buf(buf)
+		vim.bo[buf].filetype = "markdown"
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "# Doc", "", "![captura](shot.png)" })
+		vim.api.nvim_win_set_cursor(0, { 3, 3 })
+		local session, show_err = adapter.show(options.mode or "svg")
+		callback({
+			session = session,
+			error = show_err,
+			jobs = jobs,
+			placements = placements,
+			notifications = notifications,
+			root = root,
+			complete = function(job, output)
+				job.callback({ code = 0, stdout = output, stderr = "" })
+			end,
+		})
+		if session then
+			session:cancel("test cleanup")
+		end
+	end, debug.traceback)
+	_G.Snacks = original_snacks
+	vim.notify = original_notify
+	assert(ok, err)
+end
+
+test("a Markdown image renders, zooms, and pans through the SVG pipeline", function()
+	with_markdown_image({}, function(context)
+		local session = assert(context.session, "the image did not open: " .. tostring(context.error))
+		equal(1, #context.jobs, "an image needs exactly one rasterizing stage")
+		local job = context.jobs[1]
+		equal("/verified/rsvg-convert", job.argv[1])
+		assert(job.options.stdin:find("data:image/png;base64,", 1, true), "the renderer did not receive the wrapper")
+		assert(not job.options.text, "PNG output must not be decoded as text")
+		assert(
+			vim.api.nvim_win_get_config(session.presentation.win).title[1][1]:find("shot.png", 1, true),
+			"the float did not name the image"
+		)
+
+		context.complete(job, "\137PNG\r\n\26\n" .. "fit")
+		equal(1, #context.placements, "the fitted image was never placed")
+		equal(1, session.presentation.viewport.zoom)
+
+		vim.api.nvim_buf_call(session.presentation.buf, function()
+			assert(vim.fn.maparg("+", "n", false, true).callback)()
+		end)
+		equal(2, #context.jobs, "zoom did not render a new frame")
+		local zoomed = context.jobs[2]
+		local flags = table.concat(zoomed.argv, " ")
+		assert(flags:find("--page-width=", 1, true), "the zoomed frame lost its viewport")
+		assert(flags:find("--left=", 1, true), "the zoomed frame lost its offset")
+		equal(zoomed.options.stdin, job.options.stdin, "zoom re-rendered from different bytes")
+		context.complete(zoomed, "\137PNG\r\n\26\n" .. "zoom")
+		equal(1.5, session.presentation.viewport.zoom)
+
+		vim.api.nvim_buf_call(session.presentation.buf, function()
+			assert(vim.fn.maparg("l", "n", false, true).callback)()
+		end)
+		equal(3, #context.jobs, "pan did not render a new frame")
+	end)
+end)
+
+test("an image refuses to degrade to ASCII and reports a missing rasterizer", function()
+	with_markdown_image({ terminal = false }, function(context)
+		assert(context.session == nil, "an image must not open without inline image support")
+		assert(context.error:find("inline image support", 1, true), tostring(context.error))
+		equal(0, #context.jobs, "no renderer may run without image support")
+	end)
+	with_markdown_image({ mode = "ascii" }, function(context)
+		local session = assert(context.session, "an explicit ascii request must still show the image")
+		equal(1, #context.jobs, "the image did not reach the rasterizing stage")
+		equal("/verified/rsvg-convert", context.jobs[1].argv[1])
+		assert(
+			vim.iter(context.notifications):any(function(message)
+				return message:find("no ASCII rendering", 1, true) ~= nil
+			end),
+			"the ascii request was silently upgraded: " .. vim.inspect(context.notifications)
+		)
+		session:cancel("ascii case done")
+	end)
+	with_markdown_image({ missing_tool = true }, function(context)
+		assert(context.session == nil, "a missing rasterizer must not open a window")
+		assert(context.error:find("rsvg%-convert"), tostring(context.error))
+		assert(context.error:find("shot.png", 1, true), "the failure must name the image")
 	end)
 end)
 
