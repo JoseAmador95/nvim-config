@@ -89,6 +89,7 @@ vim.api.nvim_create_autocmd("User", {
 						"MenuOpen",
 						"DiagramShow",
 						"MarkdownView",
+						"MarkdownImages",
 						"LogHlAdd",
 						"LogHlRegex",
 						"LogHlClear",

@@ -137,12 +137,19 @@ require("config.markdown_navigation").setup({
 	end,
 })
 
-test("pinned renderer installs a media-free reading mode", function()
+test("pinned renderer installs the guarded image policy", function()
 	assert(view.PIN == pinned, "host pin drifted")
 	assert(view.configure_renderer(), "pinned renderer could not initialize")
-	assert(not require("md-render.image").supports_kitty(), "automatic media remained enabled")
+	local image = require("md-render.image")
+	local supported = require("config.markdown_images").supported()
+	assert(image.supports_kitty() == supported, "md-render ignored the detected image capability")
+	assert(not image.has_mmdc() and not image.has_plantuml(), "diagram fences may execute renderers")
+	assert(not image.is_video_file("clip.mp4"), "video may render automatically")
+	-- The remaining specs exercise layout, not images; keep them terminal-independent.
+	require("config.markdown_images")._reset({ supported = false })
 	require("config.viewer_commands")
 	assert(vim.fn.exists(":MarkdownView") == 2, "MarkdownView command is missing")
+	assert(vim.fn.exists(":MarkdownImages") == 2, "MarkdownImages command is missing")
 end)
 
 test("editor opens one focused, live, read-only tab and preserves the editable source", function()

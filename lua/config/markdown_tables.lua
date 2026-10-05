@@ -429,13 +429,16 @@ function M.protect_rebuild(session)
 	session.nvim_config_readonly_rebuild = true
 end
 
-function M.configure(preview, wrap, markdown_table, postprocess)
+-- `around(opts, build)` may wrap each build, e.g. to give it a document
+-- context; it must call `build()` once and return its content.
+function M.configure(preview, wrap, markdown_table, postprocess, around)
 	if installed then
 		if
 			installed.preview == preview
 			and installed.wrap == wrap
 			and installed.markdown_table == markdown_table
 			and installed.postprocess == postprocess
+			and installed.around == around
 			and preview.build_content == installed.build_content
 			and wrap.split_ascii_syllables == installed.split_characters
 			and markdown_table.parse == installed.parse_table
@@ -451,6 +454,7 @@ function M.configure(preview, wrap, markdown_table, postprocess)
 		or type(markdown_table.parse) ~= "function"
 		or type(markdown_table.render) ~= "function"
 		or (postprocess ~= nil and type(postprocess) ~= "function")
+		or (around ~= nil and type(around) ~= "function")
 	then
 		return nil, "v3.10.3 table adapter contract changed"
 	end
@@ -479,7 +483,14 @@ function M.configure(preview, wrap, markdown_table, postprocess)
 		end
 		local previous = active
 		active = build_layout(opts)
-		local ok, content = pcall(original_build_content, lines, opts)
+		local ok, content
+		if around then
+			ok, content = pcall(around, opts, function()
+				return original_build_content(lines, opts)
+			end)
+		else
+			ok, content = pcall(original_build_content, lines, opts)
+		end
 		active = previous
 		if not ok then
 			error(content, 0)
@@ -533,6 +544,7 @@ function M.configure(preview, wrap, markdown_table, postprocess)
 		wrap = wrap,
 		markdown_table = markdown_table,
 		postprocess = postprocess,
+		around = around,
 		build_content = build_content,
 		split_characters = split_characters,
 		parse_table = parse_table,

@@ -315,9 +315,9 @@ test("every curated definition has an executable action", function()
 			end
 		end
 	end
-	assert(descriptor_count == 289, "catalog must retain exactly 289 explicit descriptors")
+	assert(descriptor_count == 290, "catalog must retain exactly 290 explicit descriptors")
 	equal(
-		"219066e4f8af84bd5c069018cb29df127ec716f62500acfc9c98ae6270be6d41",
+		"23e7d0580db59ae986a51a911b4493572c895f8c8a1df5f7c4149cef69afdef6",
 		vim.fn.sha256(table.concat(inventory, "\0")),
 		"descriptor labels, order, availability or search metadata drifted"
 	)
@@ -444,6 +444,7 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 		"command.diagram_show_svg",
 		"command.diagram_show_ascii",
 		"command.markdown_view",
+		"command.markdown_images",
 		"command.markdown_preview",
 		"command.markdown_preview_open",
 		"command.markdown_preview_stop",
@@ -453,6 +454,7 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 	for _, id in ipairs({ "command.diagram_show", "command.markdown_view", "command.markdown_preview" }) do
 		assert(find_item(markdown_menu, id), "context menu lost a Markdown render action: " .. id)
 	end
+	assert(not find_item(markdown_menu, "command.markdown_images"), "palette-only image choice leaked into context")
 	assert(not find_section(lua_sections, "render"), "render section leaked into Lua")
 	assert(not find_section(catalog.build(context.new({ filetype = "yaml" }), dispatch), "file.yaml"))
 	assert(not find_section(catalog.build(context.new({ filetype = "xml" }), dispatch), "file.xml"))

@@ -337,6 +337,7 @@ for pure_spec in lazy_lock_spec lazy_attestation_spec local_plugins_spec local_c
 	run_pure_test "$pure_spec"
 done
 run_pure_test markdown_view_spec
+run_pure_test markdown_images_spec
 run_pure_test markdown_render_navigation_spec
 run_pure_test markdown_codeblocks_spec
 

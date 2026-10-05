@@ -213,6 +213,11 @@ function M.definitions()
 				"text",
 			}),
 			item("command.markdown_view", "Toggle Markdown Reading View", "<leader>mv", is_filetype("markdown")),
+			palette_item("command.markdown_images", "Choose Markdown Images", nil, is_filetype("markdown"), {
+				"image",
+				"remote",
+				"picture",
+			}),
 			item("command.markdown_preview", "Toggle Markdown Browser Preview", "<leader>mp", is_filetype("markdown")),
 			palette_item(
 				"command.markdown_preview_open",

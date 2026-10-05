@@ -5,6 +5,7 @@ local M = {}
 local deferred = require("config.deferred")
 local lazy_lock = require("config.lazy_lock")
 local markdown_codeblocks = require("config.markdown_codeblocks")
+local markdown_images = require("config.markdown_images")
 local markdown_layout = require("config.markdown_layout")
 local markdown_tables = require("config.markdown_tables")
 local pager = require("config.pager")
@@ -20,7 +21,6 @@ local repo_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(
 M.PIN = "cb79d5a1c4cd929fe0144c4d75be50a1ad4c2c74" -- md-render.nvim v3.10.3
 
 local renderer
-local image
 local ready = false
 local configure_error
 local notified_error
@@ -110,13 +110,27 @@ local function checkout_ok(image_module, render_module)
 	return true
 end
 
--- v3.10.3 has no public switch for all automatic media. Disable its private
--- Kitty capability before any preview starts; without it, fences stay code
--- blocks and no Mermaid npx fallback or remote image fetch can run. Keep the
--- public download callback as a second guard against remote fetches.
+-- Rebuild a document's render after its images change, or mark it stale when
+-- it is hidden so the next toggle rebuilds it.
+local function rebuild_document(source_buf)
+	local session = renderer and renderer.preview._toggle_sessions[source_buf]
+	if not session or not vim.api.nvim_buf_is_valid(session.buf) then
+		return
+	end
+	if not session:is_visible() then
+		session.dirty = true
+		return
+	end
+	session:rebuild()
+	session:refresh_images()
+end
+
+-- v3.10.3 has no public switch for its automatic media. config.markdown_images
+-- replaces the image module's policy before any preview starts: local and
+-- approved remote images only, no diagram execution, no video, and no
+-- document path reaching vim.fn.expand() unchecked.
 local function configure()
 	ready = false
-	image = nil
 	renderer = nil
 	local locked, lock_err = M.lock_ok()
 	if not locked then
@@ -146,29 +160,22 @@ local function configure()
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: " .. checkout_err)
 	end
-	local blocked = function(_, _, callback)
-		callback(false)
-		return true
-	end
-	local installed, install_err = pcall(function()
-		image_module.set_download_fn(blocked)
-		image_module._set_kitty_supported(false)
-	end)
+	local installed, install_err = markdown_images.install(image_module, rebuild_document)
 	if not installed then
 		disable_upstream_entrypoints()
-		return fail("Markdown reading view unavailable: could not disable automatic media: " .. tostring(install_err))
+		return fail("Markdown reading view unavailable: could not install the image guard: " .. tostring(install_err))
 	end
 	local tables_ready, tables_err = markdown_tables.configure(
 		render_module.preview,
 		wrap_module,
 		render_module.MarkdownTable,
-		markdown_layout.center_content
+		markdown_layout.center_content,
+		markdown_images.around
 	)
 	if not tables_ready then
 		disable_upstream_entrypoints()
 		return fail("Markdown reading view unavailable: " .. tables_err)
 	end
-	image = image_module
 	renderer = render_module
 	palette.apply_markdown()
 	ready = true
@@ -200,8 +207,8 @@ local function ensure_renderer()
 				.. "run :Lazy install md-render.nvim (or scripts/provision-runtime --allow-network) and restart"
 		)
 	end
-	-- Reassert the guard in case an unrelated consumer reset the plugin cache.
-	image._set_kitty_supported(false)
+	-- Reassert the capability in case an unrelated consumer reset the plugin cache.
+	markdown_images.reassert()
 	return renderer.preview
 end
 
@@ -343,6 +350,28 @@ local function protect_cursor_rebuild(session)
 	session.nvim_config_cursor_rebuild = true
 end
 
+-- md-render rewrites an image's placeholder rows when the image arrives,
+-- outside any rebuild. Lift 'readonly' for that internal write so Neovim does
+-- not raise W10, then restore it; 'modifiable' still blocks user edits.
+local function allow_image_writes(buf)
+	if vim.b[buf].nvim_config_image_writes then
+		return
+	end
+	vim.b[buf].nvim_config_image_writes = true
+	vim.api.nvim_create_autocmd("FileChangedRO", {
+		buffer = buf,
+		callback = function(args)
+			vim.bo[args.buf].readonly = false
+			vim.schedule(function()
+				if vim.api.nvim_buf_is_valid(args.buf) then
+					vim.bo[args.buf].readonly = true
+					vim.bo[args.buf].modified = false
+				end
+			end)
+		end,
+	})
+end
+
 local function protect_render_buffer(win, source_winhighlight)
 	local state = win_state(win)
 	if not state then
@@ -356,6 +385,7 @@ local function protect_render_buffer(win, source_winhighlight)
 	end
 	vim.bo[state.render_buf].modifiable = false
 	vim.bo[state.render_buf].readonly = true
+	allow_image_writes(state.render_buf)
 	configure_render_window(win, session)
 	apply_render_winhighlight(win, source_winhighlight)
 	palette.apply_markdown()
@@ -434,6 +464,7 @@ local function reflow_preview(preview)
 		session.opts.nvim_config_page_margin = margin
 		session.opts.nvim_config_block_width = block_render_width
 		session:rebuild()
+		session:refresh_images()
 	end
 	configure_render_window(preview.win, session)
 	keep_cursor_on_page(preview.win, session)
@@ -463,6 +494,7 @@ local function reflow_pager(win)
 	if session.opts.nvim_config_block_width ~= block_width then
 		session.opts.nvim_config_block_width = block_width
 		session:rebuild()
+		session:refresh_images()
 	end
 	configure_render_window(win, session)
 end
@@ -496,7 +528,10 @@ local function adopt_window_wrap()
 		return
 	end
 	session.opts.nvim_config_wrap = wrap
-	local ok, err = pcall(session.rebuild, session)
+	local ok, err = pcall(function()
+		session:rebuild()
+		session:refresh_images()
+	end)
 	if not ok then
 		notify("Could not apply the reading view wrap mode: " .. tostring(err), vim.log.levels.ERROR)
 	end
@@ -556,6 +591,7 @@ local function editor_toggle()
 		nvim_config_page_width = page_width,
 		nvim_config_page_margin = margin,
 		nvim_config_block_width = markdown_layout.render_width(block_width),
+		nvim_config_image_doc = source_buf,
 		text_scale = false,
 	})
 	if not toggled or not win_state(render_win) then
@@ -612,7 +648,11 @@ local function pager_toggle()
 	pager_source_requested[source_buf] = nil
 	local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
 	remember_source_window_options(win)
-	preview_api.toggle({ text_scale = false, nvim_config_block_width = pager_block_width(win) })
+	preview_api.toggle({
+		text_scale = false,
+		nvim_config_block_width = pager_block_width(win),
+		nvim_config_image_doc = source_buf,
+	})
 	if protect_render_buffer(win, source_winhighlight) then
 		reflow_pager(win)
 	else
@@ -626,6 +666,19 @@ function M.toggle()
 	else
 		editor_toggle()
 	end
+end
+
+-- Choose whether the current document loads remote images.
+function M.images()
+	if not ensure_renderer() then
+		return
+	end
+	local source_buf = source_for_window(vim.api.nvim_get_current_win())
+	if vim.bo[source_buf].filetype ~= "markdown" then
+		notify("MarkdownImages requires a Markdown buffer")
+		return
+	end
+	markdown_images.choose(source_buf)
 end
 
 function M.pager_show_source(win)
@@ -669,7 +722,11 @@ function M.pager_filetype_changed(buf)
 				local source_winhighlight = vim.api.nvim_get_option_value("winhighlight", { win = win })
 				remember_source_window_options(win)
 				vim.api.nvim_win_call(win, function()
-					preview_api.toggle({ text_scale = false, nvim_config_block_width = pager_block_width(win) })
+					preview_api.toggle({
+						text_scale = false,
+						nvim_config_block_width = pager_block_width(win),
+						nvim_config_image_doc = buf,
+					})
 				end)
 				if protect_render_buffer(win, source_winhighlight) then
 					reflow_pager(win)
@@ -719,6 +776,9 @@ function M.setup()
 		callback = palette.apply_markdown,
 	})
 	vim.api.nvim_create_user_command("MarkdownView", M.toggle, { desc = "Toggle rendered Markdown reading view" })
+	vim.api.nvim_create_user_command("MarkdownImages", M.images, {
+		desc = "Choose whether this Markdown document loads remote images",
+	})
 	vim.api.nvim_create_autocmd({ "CursorMoved", "WinEnter", "BufEnter" }, {
 		group = vim.api.nvim_create_augroup("MarkdownViewCursor", { clear = true }),
 		callback = keep_active_cursor_on_page,

@@ -171,9 +171,9 @@ new tab. The editable source stays in its original tab, and unsaved changes
 update the render live. Invoke the command from the source to focus its existing
 reading tab, or from the render to close it and return to the source. The page
 is centered at 90% of the available width, capped at 120 columns. The
-viewer uses the exact `md-render.nvim` v3.10.3 pin; automatic media is disabled,
-so Mermaid and PlantUML fences stay code blocks and render only through
-`:DiagramShow`/`<leader>md`. Fenced code shows its language above a shaded
+viewer uses the exact `md-render.nvim` v3.10.3 pin. Mermaid and PlantUML fences
+stay code blocks and render only through `:DiagramShow`/`<leader>md`; video
+stays disabled. Fenced code shows its language above a shaded
 block; the light theme uses a pale gray background. Headings use pastel pills
 over softly tinted page-width bands; the renderer's experimental terminal text
 scaling is disabled so their rounded ends stay aligned. The cursor stays inside
@@ -190,6 +190,17 @@ natural-width tables and single-row code that scroll horizontally, and back.
 The mode survives live updates, resizes, and pager source/render toggles.
 Indented (four-space) code blocks are still truncated by the pinned renderer;
 use fenced code to keep long lines complete.
+Images render inline in terminals with the Kitty graphics protocol (Ghostty,
+Kitty, WezTerm), outside tmux. Local images next to the document always render.
+Remote images load only over https and only after you approve the document:
+the first render asks whether to load this time, always for this file, or not
+at all, and lists the image hosts. Until then they show as their alt text.
+`:MarkdownImages` (palette: `Render: Choose Markdown Images`) reopens that
+choice and revokes a saved approval. Saved approvals live in
+`stdpath("state")/nvim-config/markdown-images.json` (owner-only). Downloads use
+`curl` with https-only redirects, a 15-second timeout, and a 20 MB limit, and
+`NVIM_CONFIG_OFFLINE=1` refuses them. Image paths that would expand shell
+commands, environment variables, or globs are ignored.
 In `nvimpager`, Markdown renders automatically, and `<leader>mv` toggles back
 to the original source. `:SetFileType` and the diagram viewer operate on that
 source even while the reading view is displayed.

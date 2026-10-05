@@ -151,6 +151,7 @@ local commands = {
 	log_watch_disable = { name = "LogWatchCurrentFile", args = { "off" } },
 	log_watch_enable = { name = "LogWatchCurrentFile", args = { "on" } },
 	log_highlight_clear = { "LogHlClear" },
+	markdown_images = { "MarkdownImages" },
 	markdown_preview = { "MarkdownPreviewToggle" },
 	markdown_preview_open = { "MarkdownPreview" },
 	markdown_preview_stop = { "MarkdownPreviewStop" },
