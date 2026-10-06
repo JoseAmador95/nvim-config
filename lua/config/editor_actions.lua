@@ -1,5 +1,6 @@
 local M = {}
 local editor = require("config.editor")
+local markdown_view = require("config.markdown_view")
 
 local function trim_location_token(token)
 	token = token:gsub("^[%(%[%{<\"'`]+", "")
@@ -83,13 +84,19 @@ function M.with_target(target, options, callback)
 	return true, result
 end
 
+local function apply_wrap(enabled, win)
+	if not markdown_view.set_wrap(enabled, win) then
+		vim.wo[win].wrap = enabled
+		vim.wo[win].linebreak = enabled
+	end
+end
+
 ---@param enabled boolean
 ---@param target? table
 ---@return boolean?, string?
 function M.set_wrap(enabled, target)
-	local ok, err = M.with_target(target, { window = true }, function()
-		vim.wo.wrap = enabled
-		vim.wo.linebreak = enabled
+	local ok, err = M.with_target(target, { window = true }, function(origin)
+		apply_wrap(enabled, origin.winid)
 	end)
 	if not ok then
 		return nil, tostring(err)
@@ -101,10 +108,9 @@ end
 ---@return boolean?, string?
 function M.toggle_wrap(target)
 	local enabled
-	local ok, err = M.with_target(target, { window = true }, function()
+	local ok, err = M.with_target(target, { window = true }, function(origin)
 		enabled = not vim.wo.wrap
-		vim.wo.wrap = enabled
-		vim.wo.linebreak = enabled
+		apply_wrap(enabled, origin.winid)
 	end)
 	if not ok then
 		return nil, tostring(err)

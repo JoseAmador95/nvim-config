@@ -286,8 +286,8 @@ local function remember_source_window_options(win)
 end
 
 -- The reading view's wrap mode belongs to its session, so it survives live
--- updates, resizes and pager source/render toggles. Only a change to the
--- window's 'wrap' option (:ToggleWrap, :setlocal wrap!) switches it.
+-- updates, resizes and pager source/render toggles. Editor actions and explicit
+-- changes to the window's 'wrap' option switch it.
 local function wrap_mode(session)
 	return not (session and session.opts and session.opts.nvim_config_wrap == false)
 end
@@ -483,6 +483,27 @@ local function protected_session(win)
 	return nil
 end
 
+---Apply a wrap action directly: OptionSet does not run inside non-nested
+---callbacks or when the caller has ignored that event.
+---@param enabled boolean
+---@param win? integer
+---@return boolean handled Whether the window is a protected reading view
+function M.set_wrap(enabled, win)
+	win = win or vim.api.nvim_get_current_win()
+	local session = protected_session(win)
+	if not session then
+		return false
+	end
+	if enabled ~= wrap_mode(session) then
+		session.opts.nvim_config_wrap = enabled
+		session:rebuild()
+		session:refresh_images()
+	else
+		configure_render_window(win, session)
+	end
+	return true
+end
+
 local function reflow_pager(win)
 	local session = protected_session(win)
 	if not session then
@@ -525,11 +546,7 @@ local function adopt_window_wrap()
 	if wrap == wrap_mode(session) then
 		return
 	end
-	session.opts.nvim_config_wrap = wrap
-	local ok, err = pcall(function()
-		session:rebuild()
-		session:refresh_images()
-	end)
+	local ok, err = pcall(M.set_wrap, wrap, win)
 	if not ok then
 		notify("Could not apply the reading view wrap mode: " .. tostring(err), vim.log.levels.ERROR)
 	end

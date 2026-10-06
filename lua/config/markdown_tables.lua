@@ -6,7 +6,7 @@
 -- Every block (table, fenced code, callout code, frontmatter value) is
 -- always shown complete and is never toggleable: a click, <CR> or za must not
 -- change the layout. The window's wrap mode alone decides whether tables fit
--- the block width or keep their natural width for horizontal scrolling.
+-- the centered page (the window in the pager) or keep their natural width.
 local M = {}
 
 local installed
@@ -23,10 +23,10 @@ local always_expanded = {
 
 local function build_layout(opts)
 	local max_width = opts.max_width or 80
-	local block_width = opts.nvim_config_block_width
+	local table_width = opts.nvim_config_page_width or opts.nvim_config_block_width
 	return {
 		wrap = opts.nvim_config_wrap ~= false,
-		extra = type(block_width) == "number" and math.max(0, math.floor(block_width) - max_width) or 0,
+		extra = type(table_width) == "number" and math.max(0, math.floor(table_width) - max_width) or 0,
 	}
 end
 
@@ -504,9 +504,9 @@ function M.configure(preview, wrap, markdown_table, postprocess, around)
 		if active then
 			-- One-line HTML tables arrive without an expansion state.
 			expanded = true
-			-- Wrapped tables may use the block width up to the window edge; the
-			-- relative offset keeps nested tables inside their container. Natural
-			-- width tables scroll horizontally instead.
+			-- Wrapped tables stay inside the centered page; the pager uses its
+			-- window width. The relative offset keeps nested tables inside their
+			-- container. Natural-width tables scroll horizontally instead.
 			max_width = active.wrap and max_width and max_width + active.extra or nil
 		end
 		local lines, highlights, links, images, source_offsets =

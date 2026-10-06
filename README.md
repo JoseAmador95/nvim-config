@@ -183,11 +183,12 @@ centered page is drawn beside the text, not inside it: the cursor stays on the
 page, and `V`, `y`, and mouse selections never pick up the margin.
 `<leader>mp` still opens the browser preview.
 Tables and fenced code always show their complete content, with top and bottom
-rules and outer vertical borders on tables. They start at the page margin but
-may extend to the window's right edge, so the 120-column cap only applies to
-prose. Clicks, `<CR>`, and `za` never change a table or code block; links and
-foldable callouts still respond. By default the view wraps: code continues on
-indented screen rows, and when table columns still cannot fit, the viewer shows
+rules and outer vertical borders on tables. With wrap enabled, tables stay
+inside the centered page, capped at 120 columns. Code starts at the page margin
+and may extend to the window's right edge. Clicks, `<CR>`, and `za` never change
+a table or code block; links and foldable callouts still respond. By default
+the view wraps: code continues on indented screen rows, and when table columns
+still cannot fit, the viewer shows
 bounded `field │ value` rows so every cell and link remains visible.
 `:ToggleWrap` (`<leader>lw`, or `:setlocal wrap!`) switches the reading view to
 natural-width tables and single-row code that scroll horizontally, and back.
@@ -207,7 +208,8 @@ choice and revokes a saved approval. Saved approvals live in
 commands, environment variables, or globs are ignored.
 In `nvimpager`, Markdown renders automatically, and `<leader>mv` toggles back
 to the original source. `:SetFileType` and the diagram viewer operate on that
-source even while the reading view is displayed.
+source even while the reading view is displayed. Wrapped tables use the pager's
+available window width.
 In the full terminal editor, buffer-local `gd` opens existing regular-file links
 through the tab-aware editor adapter, sends headings, fragments, and reference
 links to Marksman, and opens HTTP(S)/email targets through the host UI. Under

@@ -692,7 +692,10 @@ test("ToggleWrap owns the reading layout", function()
 	local function assert_wrapped(context)
 		assert(vim.wo[win].wrap and vim.wo[win].linebreak, context .. ": reading view is not wrapped")
 		assert(session.opts.nvim_config_wrap ~= false, context .. ": session lost the wrap mode")
-		assert(max_width(buf, "│") <= text_width, context .. ": wrapped table exceeds the window")
+		assert(
+			max_width(buf, "│") + session.opts.nvim_config_page_margin <= text_width,
+			context .. ": wrapped table and margin exceed the window"
+		)
 		assert(not contains(buf, cell), context .. ": wrapped table kept the cell on one row")
 		assert(vim.fn.winsaveview().leftcol == 0, context .. ": wrapped view scrolled horizontally")
 	end
@@ -735,7 +738,99 @@ test("ToggleWrap owns the reading layout", function()
 	vim.o.columns = columns
 end)
 
-test("tables and code extend past the page to the window edge", function()
+test("wrap actions reflow tables when OptionSet is suppressed", function()
+	vim.cmd("tabonly")
+	vim.cmd("only")
+	local columns = vim.o.columns
+	vim.o.columns = 325
+	local cell = vim.trim(string.rep("wide cell words ", 24))
+	local source = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_set_current_buf(source)
+	vim.api.nvim_buf_set_lines(source, 0, -1, false, {
+		"| Item | Description |",
+		"| --- | --- |",
+		"| A | " .. cell .. " |",
+	})
+	vim.bo[source].filetype = "markdown"
+	local source_win = vim.api.nvim_get_current_win()
+	view.toggle()
+	local win = vim.api.nvim_get_current_win()
+	local buf = vim.api.nvim_win_get_buf(win)
+	local session = assert(require("md-render").preview._toggle_sessions[source])
+	local text_width = require("config.markdown_layout").text_width(win)
+	local editor_actions = require("config.editor_actions")
+	local target = { bufnr = buf, winid = win }
+	local group = vim.api.nvim_create_augroup("MarkdownWrapActionSpec", { clear = true })
+	local option_events = 0
+	vim.api.nvim_create_autocmd("OptionSet", {
+		group = group,
+		pattern = "wrap",
+		callback = function()
+			option_events = option_events + 1
+		end,
+	})
+	local function inside_callback(callback)
+		local before = option_events
+		vim.api.nvim_create_autocmd("User", {
+			group = group,
+			pattern = "MarkdownWrapActionSpec",
+			once = true,
+			callback = callback,
+		})
+		vim.api.nvim_exec_autocmds("User", { pattern = "MarkdownWrapActionSpec" })
+		assert(option_events == before, "test callback did not suppress OptionSet")
+	end
+	local function assert_mode(enabled)
+		assert(vim.wo[win].wrap == enabled and vim.wo[win].linebreak == enabled, "window lost the wrap mode")
+		assert((session.opts.nvim_config_wrap ~= false) == enabled, "session disagrees with the window")
+		if enabled then
+			assert(max_width(buf, "│") <= session.opts.nvim_config_page_width, "wrapped table exceeds the page")
+			assert(
+				max_width(buf, "│") + session.opts.nvim_config_page_margin <= text_width,
+				"wrapped table overflows after accounting for the virtual margin"
+			)
+			assert(not contains(buf, cell), "wrapped table kept its natural width")
+			for row, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+				if line:find("│", 1, true) or line:find("┌", 1, true) or line:find("└", 1, true) then
+					local height = vim.api.nvim_win_text_height(win, { start_row = row - 1, end_row = row - 1 })
+					assert(height.all == 1, "wrapped table border folds onto a second screen row")
+				end
+			end
+		else
+			assert(contains(buf, cell), "nowrap table was still reflowed")
+		end
+	end
+	assert_mode(true)
+	inside_callback(function()
+		assert(editor_actions.set_wrap(false) == false)
+	end)
+	assert_mode(false)
+	inside_callback(function()
+		assert(editor_actions.set_wrap(true) == true)
+	end)
+	assert_mode(true)
+
+	-- Palette actions keep the render as their target after another window gains focus.
+	vim.api.nvim_set_current_win(source_win)
+	inside_callback(function()
+		assert(editor_actions.toggle_wrap(target) == false)
+	end)
+	assert_mode(false)
+	inside_callback(function()
+		assert(editor_actions.toggle_wrap(target) == true)
+	end)
+	assert_mode(true)
+	assert(vim.api.nvim_get_current_win() == source_win, "wrap action took focus from its caller")
+	vim.api.nvim_exec_autocmds("WinResized", {})
+	assert_mode(true)
+	vim.api.nvim_del_augroup_by_id(group)
+	vim.api.nvim_set_current_win(win)
+	view.toggle()
+	vim.api.nvim_buf_delete(source, { force = true })
+	vim.o.columns = columns
+end)
+
+test("wrapped tables stay inside the page while code may use the window", function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	local columns = vim.o.columns
@@ -749,6 +844,10 @@ test("tables and code extend past the page to the window edge", function()
 		"| Item | Description |",
 		"| --- | --- |",
 		"| A | " .. vim.trim(string.rep("table words ", 25)) .. " |",
+		"",
+		"```text",
+		string.rep("c", 150),
+		"```",
 	})
 	vim.bo[source].filetype = "markdown"
 	view.toggle()
@@ -760,17 +859,45 @@ test("tables and code extend past the page to the window edge", function()
 	assert(page_width == 120 and block_width == 180, "unexpected 240-column page geometry")
 	assert(session.opts.nvim_config_block_width == layout.render_width(block_width), "renderer lacks the block width")
 	local table_width = max_width(buf, "│")
-	assert(table_width > page_width, "table stayed inside the 120-column page")
-	assert(table_width <= block_width, "table extends past the window")
+	assert(table_width <= page_width, "wrapped table extends past the 120-column page")
+	assert(contains(buf, string.rep("c", 150)), "code was clipped to the table's page width")
 	assert(not contains(buf, "…"), "wide table was truncated")
 	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
 		if line:find("prose", 1, true) then
 			assert(vim.api.nvim_strwidth(line) <= page_width, "prose left the reading page")
 		end
 	end
+	assert(require("config.editor_actions").toggle_wrap() == false)
+	assert(max_width(buf, "│") > page_width, "nowrap table stayed bounded by the page")
+	assert(require("config.editor_actions").toggle_wrap() == true)
+	assert(max_width(buf, "│") <= page_width, "restoring wrap did not bring the table back inside the page")
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
+end)
+
+test("centered tables keep wide Unicode cells inside the page", function()
+	local value = vim.trim(string.rep("長い日本語 ", 35))
+	local content = require("md-render").preview.build_content({
+		"| A | B |",
+		"| --- | --- |",
+		"| 長い | " .. value .. " |",
+	}, {
+		max_width = 118,
+		nvim_config_page_width = 120,
+		nvim_config_block_width = 221,
+	})
+	local parts = {}
+	for row, line in ipairs(content.lines) do
+		assert(vim.api.nvim_strwidth(line) <= 120, "Unicode table extends past the page")
+		if content.source_line_map[row] == 3 then
+			local cell = line:match("│[^│]*│(.-)│%s*$")
+			if cell then
+				parts[#parts + 1] = cell:gsub("─", ""):gsub("%s", "")
+			end
+		end
+	end
+	assert(table.concat(parts) == value:gsub("%s", ""), "page wrapping lost Unicode cell text")
 end)
 
 test("every block builds complete within the block width", function()
