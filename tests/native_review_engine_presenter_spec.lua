@@ -260,7 +260,7 @@ test("textual moves survive every layout/context with exact anchors and labels",
 	local value = entry(block .. middle, middle .. block)
 	local original = vim.deepcopy(value)
 	local diffopt = vim.o.diffopt
-	for _, id in ipairs({ "main", "patience", "gumtree" }) do
+	for _, id in ipairs({ "main", "patience" }) do
 		local analysis = assert(id == "patience" and textual.patience(value) or textual.main(value))
 		assert(#analysis.relations == 1)
 		analysis.origin_engine = { id = id, version = "fixture" }

@@ -2,9 +2,7 @@
 local dependencies = require("native_review.dependencies")
 local difftastic = require("native_review.difftastic")
 local textual = require("native_review.textual")
-local gumtree = require("native_review.gumtree")
 local structural = dependencies.get("structural_diff")
-local gumtree_adapter = dependencies.get("gumtree")
 
 local M = {}
 local registry = {}
@@ -79,14 +77,6 @@ M.register("patience", {
 	prepare = function(entry, callback)
 		callback(textual.patience(entry))
 		return function() end
-	end,
-})
-
-M.register("gumtree", {
-	label = "GumTree",
-	version = "4.0.0 / gumtree-simple / nvim-ts-v1",
-	prepare = function(entry, callback)
-		return gumtree.prepare(entry, gumtree_adapter, callback)
 	end,
 })
 

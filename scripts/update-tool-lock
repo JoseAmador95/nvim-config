@@ -1,0 +1,11 @@
+#!/bin/sh
+# Explicit maintenance: render the catalog and resolve its dependency locks.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+stage=$(mktemp "$repo_root/.mise-config.XXXXXX")
+trap 'rm -f -- "$stage"' 0 HUP INT TERM
+NVIM_CONFIG_ROOT="$repo_root" "${NVIM_BIN:-nvim}" --headless -u NONE -i NONE \
+	--cmd 'lua vim.opt.runtimepath:prepend(vim.env.NVIM_CONFIG_ROOT)' \
+	-c 'lua local ok,err=pcall(function() io.write(require("config.toolchain").mise_config()) end); if not ok then vim.api.nvim_err_writeln(tostring(err)); vim.cmd("cquit 1") end' -c 'quitall!' >"$stage"
+mv -f "$stage" "$repo_root/mise.toml"
+exec "$repo_root/scripts/mise" lock --global --platform macos-arm64,macos-x64,linux-x64,linux-arm64 "$@"

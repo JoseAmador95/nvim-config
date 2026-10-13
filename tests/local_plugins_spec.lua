@@ -39,7 +39,6 @@ local expected = {
 	"just-workbench.nvim",
 	"clangd-compile-db.nvim",
 	"trusted-workspace.nvim",
-	"verified-tools.nvim",
 	"treesitter-runtime.nvim",
 	"theme-router.nvim",
 }
@@ -60,7 +59,6 @@ local modules = {
 	["just-workbench.nvim"] = "just_workbench",
 	["clangd-compile-db.nvim"] = "clangd_compile_db",
 	["trusted-workspace.nvim"] = "trusted_workspace",
-	["verified-tools.nvim"] = "verified_tools",
 	["treesitter-runtime.nvim"] = "treesitter_runtime",
 	["theme-router.nvim"] = "theme_router",
 }
@@ -93,7 +91,7 @@ test("runtimepath harness loads local boundaries early and deterministically", f
 
 	local harness = require("config.local_plugins")
 	local paths = harness.setup()
-	assert(#paths == 17, "runtimepath harness must expose exactly 17 products")
+	assert(#paths == 16, "runtimepath harness must expose exactly 16 products")
 	assert(not vim.tbl_contains(paths, vim.fs.joinpath(local_root, "_shared")), "shared library became a runtime")
 	assert(harness.shared_lua() == vim.fs.joinpath(local_root, "_shared", "lua"))
 	local runtimepath = vim.opt.runtimepath:get()

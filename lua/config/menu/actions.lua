@@ -156,7 +156,6 @@ local commands = {
 	markdown_preview_open = { "MarkdownPreview" },
 	markdown_preview_stop = { "MarkdownPreviewStop" },
 	markdown_view = { "MarkdownView" },
-	mason = { "Mason" },
 	messages = { "messages" },
 	nvim_config_dump = { "NvimConfigDump" },
 	nvim_config_edit = { "NvimConfigEdit" },

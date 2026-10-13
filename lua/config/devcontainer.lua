@@ -114,7 +114,7 @@ end
 local function resolve_cli()
 	local loaded, bootstrap = deferred.try("config.tool_bootstrap")
 	if not loaded then
-		return nil, "could not load certified tools: " .. tostring(bootstrap)
+		return nil, "could not load Mise adapter: " .. tostring(bootstrap)
 	end
 	return bootstrap.resolve("devcontainers-cli", "devcontainer")
 end

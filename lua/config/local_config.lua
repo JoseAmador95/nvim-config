@@ -440,7 +440,6 @@ local SCHEMA = {
 				},
 			},
 			trusted_workspace = { type = "table", fields = {} },
-			verified_tools = { type = "table", fields = {} },
 			treesitter_runtime = {
 				type = "table",
 				fields = {
@@ -1137,7 +1136,6 @@ return {
       max_validation_bytes = 256 * 1024 * 1024,
     },
     trusted_workspace = {}, -- security policy is not user-configurable
-    verified_tools = {}, -- concurrency and attestations are not user-configurable
     treesitter_runtime = {
       max_bytes = 200 * 1024,
       reevaluate_debounce_ms = 50,

@@ -1,5 +1,5 @@
 -- Last-mile LSP process boundary. Managed server paths are resolved from a
--- durable verified-tools record immediately before vim.lsp.rpc starts them.
+-- durable Mise catalog immediately before vim.lsp.rpc starts them.
 -- Requiring this module is observational: it does not resolve or probe tools.
 local M = {}
 
@@ -93,7 +93,7 @@ function M.wrap_root_dir(binding, upstream)
 	end
 end
 
----Start one manifest-backed language server from its attested absolute path.
+---Start one manifest-backed language server from its Mise launcher path.
 ---@param binding { name: string, package: string, command: string, args?: string[] }
 ---@param dispatchers table
 ---@param config table?
@@ -110,7 +110,7 @@ function M.managed_start(binding, dispatchers, config, extra_args, expected_path
 		local canonical = vim.uv.fs_realpath(expanded) or expanded
 		if canonical ~= resolved then
 			error(
-				("Cannot start LSP '%s': configured path does not match the attested executable"):format(binding.name),
+				("Cannot start LSP '%s': configured path does not match the catalog launcher"):format(binding.name),
 				0
 			)
 		end

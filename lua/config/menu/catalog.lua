@@ -453,7 +453,7 @@ function M.definitions()
 				"Select Diff Engine",
 				nil,
 				nil,
-				{ "main", "patience", "difftastic", "gumtree", "moved", "AST" }
+				{ "main", "patience", "difftastic", "moved" }
 			),
 			palette_item("command.review_next", "Next Review Comment", "]r"),
 			palette_item("command.review_prev", "Previous Review Comment", "[r"),
@@ -514,7 +514,6 @@ function M.definitions()
 			palette_item("view.toggle_list", "Toggle Invisible Characters", nil, nil, { "whitespace", "listchars" }),
 			item("view.toggle_paste", "Toggle Paste"),
 			item("command.reload_config", "Reload Config"),
-			item("command.mason", "Mason"),
 		}, nil, { palette_label = "View" }),
 	}
 end

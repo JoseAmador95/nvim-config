@@ -1,14 +1,10 @@
 # Neovim dentro de un Dev Container
 
-`scripts/devcontainer-editor` usa exclusivamente la versión certificada de
-`@devcontainers/cli` activa en `verified-tools.nvim`. Resolver o instalar el
-dist-tag `latest` sólo ocurre mediante el comando explícito
-`:NvimConfigToolsInstall devcontainers-cli`; abrir Neovim o un workspace nunca
-consulta npm ni descarga la CLI, Neovim, plugins o herramientas. El proyecto
-instala cada release como un bundle privado e inmutable con Node `24.20.0`; el
-puntero activo sólo se publica después de verificar de nuevo el bundle y su
-closure. Tanto el editor como el helper headless de tmux resuelven ese mismo
-puntero offline y no consultan `PATH`, Node/npm del host ni metadata `latest`.
+`scripts/devcontainer-editor` usa `@devcontainers/cli` 0.89.0 y Node 24.20.0
+fijados en el catálogo y los locks de Mise. El editor y el helper headless de
+tmux resuelven el mismo launcher. Su primera ejecución puede instalar la CLI
+mediante `mise exec`; `:NvimConfigToolsInstall devcontainers-cli` permite
+preinstalarla. No se consulta `latest` ni se instala Mise automáticamente.
 El repositorio conserva como source of truth su propio
 `.devcontainer/devcontainer.json` o
 `.devcontainer.json`; una ruta explícita inválida falla sin elegir otra
@@ -130,8 +126,8 @@ resolver ni a sondear herramientas.
 
 `!` transmite autorización de red al runtime como
 `NVIM_CONFIG_OFFLINE=0`. Sin `!`, el editor recibe
-`NVIM_CONFIG_OFFLINE=1`: `verified-tools.nvim` puede planificar/probar, pero un
-claim que requiera red queda `blocked/offline` sin consumir el intento. La CLI
+`NVIM_CONFIG_OFFLINE=1`: Mise no instala herramientas ausentes y su ejecución
+falla con un diagnóstico. La CLI
 del Dev Container puede necesitar red por la propia imagen o Features del
 proyecto; esta configuración no intenta ocultar ni sustituir esa política del
 runtime.

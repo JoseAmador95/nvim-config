@@ -51,15 +51,7 @@ find_tool() {
 		command -v "$tool_name"
 		return 0
 	fi
-	if [ -n "${XDG_DATA_HOME:-}" ]; then
-		data_root="$XDG_DATA_HOME/nvim"
-	else
-		data_root=$(
-			"$NVIM_BIN" --headless -u NONE -i NONE \
-				-c 'lua io.write(vim.fn.stdpath("data"))' -c 'quitall!'
-		)
-	fi
-	candidate="$data_root/mason/bin/$tool_name"
+	candidate="$HOME/.local/share/mise/nvim-bin/$tool_name"
 	if [ -x "$candidate" ]; then
 		printf '%s\n' "$candidate"
 		return 0
@@ -276,8 +268,6 @@ run_check "tab_first_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/local-plugins/tab-first.nvim/tests/tab_first_spec.lua"
 run_check "diagram_view_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/local-plugins/diagram-view.nvim/tests/diagram_view_spec.lua"
-run_check "verified_tools_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
-	-l "$repo_root/local-plugins/verified-tools.nvim/tests/verified_tools_spec.lua"
 run_check "project_python_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/local-plugins/project-python.nvim/tests/project_python_spec.lua"
 run_check "log_workbench_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
@@ -296,10 +286,6 @@ run_check "native_review_diff_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/native_review_diff_spec.lua"
 run_check "native_review_textual_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/native_review_textual_spec.lua"
-run_check "native_review_gumtree_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
-	-l "$repo_root/tests/native_review_gumtree_spec.lua"
-run_check "review_gumtree_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
-	-l "$repo_root/tests/review_gumtree_spec.lua"
 run_check "native_review_difftastic_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/native_review_difftastic_spec.lua"
 run_check "native_review_engines_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
@@ -331,9 +317,8 @@ run_check "action_palette_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 run_check "devcontainer_editor_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/local-plugins/devcontainer-editor.nvim/tests/devcontainer_editor_spec.lua"
 run_check "devcontainer_editor_cli_spec" python3 "$repo_root/tests/devcontainer_editor_cli_spec.py"
-run_check "verified_npm_bundle_spec" python3 "$repo_root/tests/verified_npm_bundle_spec.py"
 
-for pure_spec in lazy_lock_spec lazy_attestation_spec local_plugins_spec local_config_plugins_spec trusted_workspace_spec markdown_spec project_settings_spec theme_router_spec diagram_view_spec verified_tools_host_spec log_watch_spec log_workbench_spec treesitter_spec pager_spec formatting_spec lint_spec menu_spec action_palette_adapter_spec tabs_spec editor_spec editor_actions_spec navigation_history_spec lsp_navigation_spec lsp_runtime_spec multicursor_spec oil_spec snacks_spec viewer_commands_spec jqx_spec hex_spec auto_session_spec notification_spec ux_spec statusline_performance_spec inline_diagnostics_spec toolchain_spec tombi_spec tool_paths_spec tool_state_spec release_installer_spec npm_release_installer_spec gumtree_installer_spec tool_bootstrap_spec provision_runtime_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec devcontainer_runtime_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec workflow_execution_spec redraw_profile_lifecycle_spec; do
+for pure_spec in lazy_lock_spec lazy_attestation_spec local_plugins_spec local_config_plugins_spec trusted_workspace_spec markdown_spec project_settings_spec theme_router_spec diagram_view_spec log_watch_spec log_workbench_spec treesitter_spec pager_spec formatting_spec lint_spec menu_spec action_palette_adapter_spec tabs_spec editor_spec editor_actions_spec navigation_history_spec lsp_navigation_spec lsp_runtime_spec multicursor_spec oil_spec snacks_spec viewer_commands_spec jqx_spec hex_spec auto_session_spec notification_spec ux_spec statusline_performance_spec inline_diagnostics_spec toolchain_spec tombi_spec tool_paths_spec tool_bootstrap_spec provision_runtime_spec health_spec code_review_spec exact_editor_host_spec exact_editor_open_spec devcontainer_editor_host_spec devcontainer_runtime_spec terminal_spec python_spec clangd_cmake_spec just_spec trouble_spec scratch_spec dap_ui_spec workflow_execution_spec redraw_profile_lifecycle_spec; do
 	run_pure_test "$pure_spec"
 done
 run_pure_test markdown_view_spec
@@ -386,7 +371,8 @@ run_check "devcontainer-runtime syntax" sh -n scripts/devcontainer-runtime
 run_check "devcontainer-runtime shellcheck" "$SHELLCHECK_BIN" -s sh scripts/devcontainer-runtime
 run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests local-plugins
 run_check "ShellCheck" "$SHELLCHECK_BIN" \
-	scripts/check-config scripts/bootstrap-config scripts/install-ci-tools scripts/provision-runtime
+	scripts/check-config scripts/bootstrap-config scripts/install-ci-tools scripts/provision-runtime \
+	scripts/mise scripts/install-mise scripts/update-tool-lock
 if [ -n "${ACTIONLINT_BIN:-}" ]; then
 	run_check "actionlint" "$ACTIONLINT_BIN" -shellcheck="$SHELLCHECK_BIN"
 fi

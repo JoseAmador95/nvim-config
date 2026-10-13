@@ -96,7 +96,7 @@ Only the selected frozen entry's detail is cached across presentation changes.
 Canonical Git hunks and anchors remain independent of the display engine.
 
 `:ReviewEngine` or `<leader>rD` opens the numbered engine picker; use
-`:ReviewEngine main|patience|difftastic|gumtree` to choose directly. Main is
+`:ReviewEngine main|patience|difftastic` to choose directly. Main is
 the default at startup. Selection belongs to the workspace, travels with its
 layout/context preferences, and is never saved in the review store. All four
 engines use the existing inline and split reviewer, file panel and comments.
@@ -116,26 +116,6 @@ more than 100,000 changed line/gap tokens and shows `Move analysis limited`.
 These labels and colors are decorations; source rows and comment anchors do not
 move.
 
-GumTree keeps Main's complete textual diff and adds matched moves (`M`) and
-identifier updates (`U`), including nodes moved and edited together. These are
-tree-node relations, not a claim of a project-wide semantic rename. Install it
-explicitly with `:NvimConfigToolsInstall gumtree` (or `!` to retry/repair).
-GumTree 4.0.0, its fixed Maven JAR closure and private Temurin JRE 17.0.20.1+1
-are SHA-256 pinned for macOS/Linux x64/arm64. Runtime never uses host Java,
-Maven, Gradle or a compiler, and engine selection never installs or downloads.
-
-The initial GumTree languages are Lua, Python, C and C++. Installed Neovim
-Tree-sitter parsers export frozen strings, including anonymous tokens/comments,
-to byte-positioned XML; GumTree uses its fixed `gumtree-simple` matcher. Missing parsers,
-unsupported languages, syntax errors and preanalysis limits select Main for that
-file with a visible reason while retaining the GumTree choice. Limits are 1 MiB
-combined source, 50,000 combined nodes and tree depth 512. Missing tools,
-timeouts or invalid JSON retain the previous view and notify. Java has a 256 MiB
-heap, a five-second process deadline and an 8 MiB combined-output ceiling.
-Private snapshots and process groups are cleaned on completion/cancellation.
-Validated relations map to original OLD/NEW coordinates even when moves cross;
-they replace textual move labels rather than duplicating them.
-
 Difftastic interprets private copies of the frozen OLD/NEW documents through
 its pinned unstable JSON format. Only structural changes receive backgrounds
 and character ranges. Formatting-only changes show `No structural changes`;
@@ -154,8 +134,8 @@ API with a bounded, event-pumping wait for uncached analysis.
 Each new comment and reply captures `origin_engine = { id, version }` when its
 composer opens, using the effective engine for that file. Main records
 `builtin-v2` and the Neovim runtime version; Patience records `builtin-v1` and
-Neovim; Difftastic records `0.71.0`; GumTree records its matcher/export contract
-version alongside `4.0.0`.
+Neovim; Difftastic records `0.71.0`. Historical GumTree origins remain inert
+metadata and round-trip without loading an engine.
 Edits, resolution and reanchoring preserve this origin. Older comments show
 `not recorded`. Markdown exports and recovery exports include the origin and
 state that coordinates reference frozen original OLD/NEW sources. V1/v2 loads
@@ -165,7 +145,9 @@ and retain the original file. Scope identities and backend IDs do not change.
 The host's `:ReviewStructuralDiff` (also in the Review palette) opens a separate
 read-only float for the selected entry. Install its optional pinned Difftastic
 0.71.0 backend explicitly with `:NvimConfigToolsInstall difftastic`. Startup and
-opening a review never install or probe it. The float consumes colored human
+opening a review never install or probe it. Selecting Difftastic invokes Mise
+and may install its locked version; preinstall it if the cold download exceeds
+the analysis deadline. The float consumes colored human
 output for private copies of the exact frozen OLD/NEW snapshots, including
 their logical paths and modes; it never reads CURRENT source. `q` or `<Esc>`
 closes it. Binary and metadata-only entries are refused. This auxiliary float has
@@ -193,12 +175,6 @@ line changes and intraline ranges. Textual display hunks remain separate from
 canonical Git hunks. Optional `relations` use `kind = "move"|"identifier_update"`
 and OLD/NEW ranges with one-based lines, zero-based byte columns and exclusive
 ends. The presenter does not infer layout behavior from an engine ID.
-
-Standalone hosts may inject `gumtree.analyze({ entry, trees = { old, new } },
-callback) -> cancel_function`. It receives detached frozen metadata and exported
-XML strings, returning raw GumTree JSON or an error. The adapter owns bounded
-execution, cancellation and cleanup; the plugin validates action node signatures
-against the exact exported trees and resolves destinations through `matches`.
 
 ## Safety contracts
 

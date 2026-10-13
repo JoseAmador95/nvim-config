@@ -230,8 +230,15 @@ local function execute(request, callback, analysis)
 			end
 		end
 	end
+	local command_paths = { vim.fs.dirname(executable), "/usr/bin", "/bin" }
+	local mise = vim.fn.exepath("mise")
+	if mise ~= "" then
+		table.insert(command_paths, 2, vim.fs.dirname(mise))
+	end
 	local environment = {
-		PATH = vim.fs.dirname(executable) .. ":/usr/bin:/bin",
+		PATH = table.concat(command_paths, ":"),
+		HOME = vim.env.HOME,
+		NVIM_CONFIG_OFFLINE = vim.env.NVIM_CONFIG_OFFLINE,
 		LANG = "C",
 		LC_ALL = "C",
 		TERM = "xterm-256color",

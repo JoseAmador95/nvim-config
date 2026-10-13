@@ -3,6 +3,7 @@
 local M = {}
 
 local runtime = require("treesitter_runtime")
+local deferred = require("config.deferred")
 local parsers = {}
 local policy_observers = {}
 local policy_snapshots = {}
@@ -111,6 +112,10 @@ function M.install(requested, opts)
 	local selected = as_list(requested or parsers)
 	if #selected == 0 then
 		return false, "No Tree-sitter parsers are configured"
+	end
+	local executable, tool_err = deferred.load("config.tool_bootstrap").resolve("tree-sitter-cli", "tree-sitter")
+	if not executable then
+		return false, tool_err
 	end
 
 	local loaded, treesitter = pcall(require, "nvim-treesitter")

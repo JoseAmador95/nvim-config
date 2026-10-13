@@ -1,49 +1,36 @@
-# Verified runtime consumers
+# Mise runtime consumers
 
-`verified-tools.nvim` is the only authority for release-managed and Mason-managed
-executables. A successful install is not enough by itself: each consumer asks
-`config.tool_bootstrap.resolve(tool, command)` for an absolute path immediately
-before its process boundary. Missing, stale, corrupt, or drifted records fail
-closed and never fall through to `$PATH` or a project-local `node_modules/.bin`.
+`config.tool_bootstrap.resolve(tool, command)` returns an absolute launcher in
+`~/.local/share/mise/nvim-bin`. The launcher executes the repository's
+`scripts/mise exec <tool> -- <command>` with the original argv, stdin and cwd.
+Mise selects the committed catalog and may install a missing tool on first use.
+`NVIM_CONFIG_OFFLINE=1` prevents downloads and rejects absent tools.
 
-## Process boundaries
-
-| Consumer | Runtime boundary |
+| Consumer | Process boundary |
 | --- | --- |
-| Native LSP | Every managed server has a function-valued `cmd`. Root activation performs an observational availability check; the `cmd` resolves again immediately before `vim.lsp.rpc.start`. |
-| clangd | The compile-database router freezes the selected database for each restart, while the executable is resolved again at the RPC boundary. A configured absolute override must equal the attested executable. |
-| Conform | Each formatter command function resolves the manifest command immediately before Conform starts it. |
-| nvim-lint | A copied linter definition receives a command function that resolves immediately before `uv.spawn`. |
-| DAP | debugpy and codelldb resolve after durable `debug` authority and immediately before the adapter callback receives its launch command. |
-| Diagrams | Managed mmdflux and PlantUML resolve for each render request before the cancellable stage pipeline is built. |
-| Review engines | Difftastic and GumTree resolve immediately before analysis. GumTree's launcher, fixed Maven JAR closure and private JRE are one attested bundle; host Java is never selected. |
-| JQX / JsonTree | The host adapter resolves jq for each request and invokes it as an argv vector with buffer content on stdin. The pinned `nvim-jqx` package supplies visual defaults only; its shell-string commands, completion functions, mapping, and autocmd are synchronously reclaimed. |
+| Native LSP / clangd | Resolve at root activation and immediately before native RPC startup; the compile-database router retains its selected database and override policy. |
+| Conform / nvim-lint | Resolve the command when the formatter or copied linter definition executes. |
+| DAP | Resolve debugpy or codelldb after the durable debug grant. Project Python remains the debug target. |
+| Diagrams / review | Resolve mmdflux, PlantUML or Difftastic before the cancellable bounded pipeline. GumTree is absent. |
+| JQX / JsonTree | Resolve jq and pass buffer content through stdin with argv-based execution. |
+| Dev Containers | Resolve the fixed CLI 0.89.0 and its managed Node runtime. |
+| Markdown Preview | Bridge upstream's app/bin path to the catalog launcher. No npm build or host Node fallback. |
+| Parser installation | Resolve tree-sitter only for the explicit parser installation action. |
 
-Loading the consumer modules does not resolve, probe, install, repair, or start a
-tool. Opening a buffer whose native LSP applies is an actual use: its root gate
-performs the metadata-only lookup. If authority is absent, it withholds the root
-callback and emits one bounded warning instead of aborting the `FileType` event.
+Module discovery does not install or probe tools. Opening a buffer with an LSP
+is a tool use. Missing Mise gives a diagnostic naming `:NvimConfigMiseInstall`;
+startup and provisioning never invoke that command themselves. A cold download
+can exceed a consumer's unchanged timeout: preinstall with
+`:NvimConfigToolsInstall <name>` and retry.
 
-Approval of a project `plugins.clangd_compile_db.path` value is configuration
-authority, not executable attestation. A relative value other than the canonical
-`clangd` command, or an absolute value different from the currently certified
-path, is retained in the effective config but blocks the launch with a clear
-error.
+Artifact verification belongs to Mise at installation time. Runtime does not
+rehash binaries or maintain separate certifications. Project configuration
+approval and workspace execution grants remain independent authorities. A clangd
+absolute override must still match the selected launcher; project configuration
+cannot redirect the managed executable.
 
-## Explicit host-tool exceptions
-
-Some tools are intentionally outside the release/Mason catalogue:
-
-- `rust-analyzer` remains an optional host/user executable. Its lookup is delayed
-  until a Rust buffer activates the client, and the path resolver excludes Mason,
-  managed-tool, and verified-shim roots.
-- `just` remains subject to the Just workbench's content-closure trust plus the
-  durable `build` grant. Discovery and execution are bound to the same canonical
-  host executable.
-- CMake/CTest and platform helpers such as `rsvg-convert`, `osascript`, `wl-copy`,
-  and `xclip` are host facilities. They are canonicalized or capability-gated by
-  their adapters; they are not represented as verified-tools managed packages.
-
-These exceptions must not be described as verified-tools attestations. Adding a
-host utility to the managed catalogue requires an exact version/integrity
-contract first.
+Rust remains host/user-only, excluding Mise and retired managed/Mason/shim roots.
+Just retains its canonical host executable and build grant. CMake/CTest,
+`rsvg-convert`, clipboard helpers and platform utilities remain host facilities.
+On macOS x64, the pinned PlantUML JAR uses host Java. The selected Python project
+environment remains separate from the managed Python used by tooling.

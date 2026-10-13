@@ -315,9 +315,9 @@ test("every curated definition has an executable action", function()
 			end
 		end
 	end
-	assert(descriptor_count == 290, "catalog must retain exactly 290 explicit descriptors")
+	assert(descriptor_count == 289, "catalog must retain exactly 289 explicit descriptors")
 	equal(
-		"22fd321f2160a003097e02a8b8c7059bf4f278acd94579fb7354410b6f3e6eb6",
+		"7ae71eb24142cba791387897e6a84a6f394e0d35edec3a46c78d2e9530a574e8",
 		vim.fn.sha256(table.concat(inventory, "\0")),
 		"descriptor labels, order, availability or search metadata drifted"
 	)
@@ -327,7 +327,7 @@ test("every curated definition has an executable action", function()
 	for _, section in ipairs(contextual) do
 		contextual_count = contextual_count + #section.items
 	end
-	assert(contextual_count == 89, "context menu must retain exactly 89 exposures")
+	assert(contextual_count == 88, "context menu must retain exactly 88 exposures")
 	for _, id in ipairs({
 		"command.review_publish",
 		"command.review_link_tuicr",

@@ -1,0 +1,28 @@
+#!/bin/sh
+# Explicitly install the pinned Mise executable into the user's local bin.
+set -eu
+umask 077
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+[ "${NVIM_CONFIG_OFFLINE:-0}" != 1 ] || { printf '%s\n' 'Mise installation is disabled offline.' >&2; exit 1; }
+pin=$(NVIM_CONFIG_ROOT="$repo_root" "${NVIM_BIN:-nvim}" --headless -u NONE -i NONE \
+	--cmd 'lua vim.opt.runtimepath:prepend(vim.env.NVIM_CONFIG_ROOT)' \
+	-c 'lua local ok,err=pcall(function() local t=require("config.toolchain"); local u=vim.uv.os_uname(); local target=assert(t.target_key(u.sysname,u.machine), "unsupported Mise platform"); io.write(t.versions.mise," ",target," ",assert(t.mise_checksums[target])) end); if not ok then vim.api.nvim_err_writeln(tostring(err)); vim.cmd("cquit 1") end' -c 'quitall!')
+read -r version target checksum <<EOF
+$pin
+EOF
+bin_dir="$HOME/.local/bin"
+mkdir -p "$bin_dir"
+stage=$(mktemp -d "$bin_dir/.mise-install.XXXXXX")
+trap 'rm -rf -- "$stage"' 0 HUP INT TERM
+url="https://github.com/jdx/mise/releases/download/v$version/mise-v$version-$target.tar.gz"
+curl --fail --location --retry 2 --connect-timeout 15 --max-time 180 --output "$stage/mise.tar.gz" "$url"
+if command -v sha256sum >/dev/null 2>&1; then
+	actual=$(sha256sum "$stage/mise.tar.gz" | awk '{print $1}')
+else
+	actual=$(shasum -a 256 "$stage/mise.tar.gz" | awk '{print $1}')
+fi
+[ "$actual" = "$checksum" ] || { printf '%s\n' 'Mise checksum mismatch; installation was not changed.' >&2; exit 1; }
+tar -xzf "$stage/mise.tar.gz" -C "$stage" mise/bin/mise
+chmod 755 "$stage/mise/bin/mise"
+mv -f "$stage/mise/bin/mise" "$bin_dir/mise"
+printf 'Installed Mise %s in %s/mise\n' "$version" "$bin_dir"

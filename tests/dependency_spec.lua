@@ -29,7 +29,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
 						"SchemaStore.nvim",
 						"diffview-plus.nvim",
 						"grug-far.nvim",
-						"mason-lspconfig.nvim",
 						"neoconf.nvim",
 						"neotest",
 						"nvim-lint",
@@ -55,8 +54,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"the encapsulated grug-far result-location seam changed"
 				)
 
-				local mason_lsp = require_table("mason-lspconfig")
-				assert(type(mason_lsp.setup) == "function", "mason-lspconfig setup API is missing")
 				assert(type(require_table("neoconf").get) == "function", "neoconf public get API is missing")
 
 				local neotest = require_table("neotest")

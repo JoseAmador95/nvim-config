@@ -68,8 +68,9 @@ function M.provision_tools(allow_network)
 		timeout = 300000,
 	})
 	if type(inventory) == "table" then
-		report.mason = inventory.mason or report.mason
-		report.managed_tools = inventory.managed_tools or report.managed_tools
+		report.mise = inventory.mise or report.mise
+		report.tools = inventory.tools or report.tools
+		report.extra_tools = inventory.extras or report.extra_tools
 	end
 	report.changed = report.changed or changed == true
 	local lock_ok = persist(report)
@@ -77,9 +78,7 @@ function M.provision_tools(allow_network)
 		return report_store.fail("lock-changed")
 	end
 	if not ok then
-		local code = error_code == "unsupported-platform" and error_code
-			or error_code == "mason" and "mason"
-			or "managed-tools"
+		local code = error_code == "unsupported-platform" and error_code or error_code == "mise" and "mise" or "tools"
 		return report_store.fail(code)
 	end
 	return true
@@ -91,13 +90,16 @@ function M.finalize(require_managed)
 		and report.profiles.nvimpager.plugins.exact == true
 		and report.profiles.editor.parsers.exact == true
 		and report.profiles.nvimpager.parsers.exact == true
-		and report.mason.exact == true
-	for _, name in ipairs(toolchain.managed_order) do
-		local item = report.managed_tools[name]
-		exact = exact and type(item) == "table" and item.exact == true
-		if require_managed and item and item.shadowed == true then
-			report_store.write(report)
-			return report_store.fail("strict-managed")
+		and report.mise.supported == true
+	for _, name in ipairs(toolchain.tool_order) do
+		local item = report.tools[name]
+		exact = exact and type(item) == "table" and item.status == "ready"
+		if require_managed and item and item.status == "ready" then
+			local prefix = vim.env.HOME .. "/.local/share/mise/installs/"
+			if type(item.path) ~= "string" or item.path:sub(1, #prefix) ~= prefix then
+				report_store.write(report)
+				return report_store.fail("strict-managed")
+			end
 		end
 	end
 	if not persist(report) then

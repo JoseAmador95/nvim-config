@@ -1,5 +1,5 @@
 -- Shared host boundary for workflow execution. Requiring this module is
--- observational: verified tool planning stays inside the authorized resolver.
+-- observational: Mise command preparation stays inside the authorized resolver.
 local execution = require("config.execution")
 local deferred = require("config.deferred")
 

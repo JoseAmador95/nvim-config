@@ -55,9 +55,9 @@ test("every managed catalog server has one exact manifest command", function()
 	for _, server in ipairs(catalog.servers) do
 		assert(type(server.args) == "table" or server.args == nil, server.name .. " has invalid argv")
 		if server.package then
-			local entry = assert(toolchain.mason_entry(server.package), server.package)
+			local entry = assert(toolchain.tools[server.package], server.package)
 			assert(
-				toolchain.executable_map(entry)[server.command],
+				vim.tbl_contains(entry.commands, server.command),
 				server.name .. " command is absent from its manifest"
 			)
 		else
@@ -141,14 +141,14 @@ test("native root gating turns ordinary absence into a quiet non-start", functio
 	assert(upstream == 1 and roots == 1, "verified runtime did not reach native root resolution")
 end)
 
-test("clangd absolute override must match the attested executable", function()
+test("clangd absolute override must match the catalog launcher", function()
 	resolution = function()
 		return "/verified/bin/clangd"
 	end
 	rpc_calls = {}
 	local binding = assert(catalog.server("clangd"))
 	local ok, err = pcall(runtime.managed_start, binding, {}, {}, { "--clang-tidy" }, "/host/bin/clangd")
-	assert(not ok and tostring(err):find("does not match the attested executable", 1, true))
+	assert(not ok and tostring(err):find("does not match the catalog launcher", 1, true))
 	assert(#rpc_calls == 0)
 	assert(runtime.managed_start(binding, {}, {}, { "--clang-tidy" }, "/verified/bin/clangd").rpc)
 	assert(vim.deep_equal(rpc_calls[1].argv, { "/verified/bin/clangd", "--clang-tidy" }))

@@ -5,7 +5,7 @@ local fs = require("config.fs")
 local toolchain = require("config.toolchain")
 local uv = vim.uv
 
-local SCHEMA = 1
+local SCHEMA = 2
 local MAX_REPORT_BYTES = 1024 * 1024
 local FILE_MODE = tonumber("600", 8)
 local allowed_errors = {
@@ -13,8 +13,8 @@ local allowed_errors = {
 	["lock-changed"] = true,
 	["plugin-editor"] = true,
 	["plugin-nvimpager"] = true,
-	["mason"] = true,
-	["managed-tools"] = true,
+	["mise"] = true,
+	["tools"] = true,
 	["parser-editor"] = true,
 	["parser-nvimpager"] = true,
 	["unsupported-platform"] = true,
@@ -201,15 +201,34 @@ function M.empty_inventory()
 	return { required = {}, exact = false, problems = { "not-run" }, extras = {} }
 end
 
-local function managed_placeholder(name)
-	local entry = assert(toolchain.managed_tools[name])
-	return { version = entry.version, direct = vim.NIL, effective = vim.NIL, shadowed = false, exact = false }
+local function tool_lock_digests()
+	local result = {}
+	local function add(relative)
+		local data = assert(fs.read_binary(vim.fs.joinpath(config_root(), relative)), "missing tool lock: " .. relative)
+		result[relative] = vim.fn.sha256(data)
+	end
+	add("mise.toml")
+	add("mise.lock")
+	local directory = vim.fs.joinpath(config_root(), ".mise/locks")
+	if uv.fs_stat(directory) then
+		for name, kind in vim.fs.dir(directory, { depth = 8 }) do
+			if kind == "file" then
+				add(".mise/locks/" .. name)
+			end
+		end
+	end
+	return result
 end
 
 function M.initialize()
-	local managed = {}
-	for _, name in ipairs(toolchain.managed_order) do
-		managed[name] = managed_placeholder(name)
+	local tools = {}
+	for _, name in ipairs(toolchain.tool_order) do
+		tools[name] = {
+			expected_version = toolchain.tools[name].version,
+			installed_version = vim.NIL,
+			path = vim.NIL,
+			status = "not-run",
+		}
 	end
 	local version = vim.version()
 	local report = {
@@ -222,13 +241,14 @@ function M.initialize()
 			minimum = "0.12.0",
 			supported = vim.fn.has("nvim-0.12") == 1,
 		},
-		lock = { sha256 = lock_digest(), unchanged = true },
+		lock = { sha256 = lock_digest(), tools = tool_lock_digests(), unchanged = true },
 		profiles = {
 			editor = { plugins = M.empty_inventory(), parsers = M.empty_inventory() },
 			nvimpager = { plugins = M.empty_inventory(), parsers = M.empty_inventory() },
 		},
-		mason = M.empty_inventory(),
-		managed_tools = managed,
+		mise = { path = vim.NIL, version = vim.NIL, minimum = toolchain.versions.mise, supported = false },
+		tools = tools,
+		extra_tools = {},
 	}
 	write_report(report)
 	if not report.nvim.supported then
@@ -239,6 +259,7 @@ end
 
 function M.update_lock(report)
 	report.lock.unchanged = report.lock.sha256 == lock_digest()
+		and vim.deep_equal(report.lock.tools, tool_lock_digests())
 	return report.lock.unchanged
 end
 

@@ -1,0 +1,45 @@
+#!/bin/sh
+# Run the editor catalog without changing the caller's working directory.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+mise_bin=$(command -v mise || true)
+if [ -z "$mise_bin" ]; then
+	printf '%s\n' 'Mise is missing. Install it or run :NvimConfigMiseInstall.' >&2
+	exit 127
+fi
+
+# A project or activated shell must not select different editor tools.
+for name in $(env | sed -n 's/^\(MISE_[A-Za-z0-9_]*_VERSION\)=.*/\1/p'); do
+	unset "$name"
+done
+unset MISE_ENV MISE_OVERRIDE_CONFIG_FILENAMES MISE_CD MISE_NO_CONFIG
+export MISE_GLOBAL_CONFIG_FILE="$repo_root/mise.toml"
+export MISE_GLOBAL_CONFIG_ROOT="$repo_root"
+export MISE_CONFIG_DIR="$HOME/.local/share/mise/nvim-config"
+export MISE_SYSTEM_CONFIG_FILE="$MISE_CONFIG_DIR/no-system.toml"
+MISE_CEILING_PATHS=$(pwd -P)
+export MISE_CEILING_PATHS
+export MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES=none
+export MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS=
+export MISE_AUTO_ENV=0 MISE_NO_ENV=1 MISE_NO_HOOKS=1
+export MISE_DATA_DIR="$HOME/.local/share/mise"
+export MISE_INSTALLS_DIR="$MISE_DATA_DIR/installs"
+export MISE_INSTALL_STORE_DIR="$MISE_INSTALLS_DIR"
+export MISE_STATE_DIR="$HOME/.local/state/mise"
+export MISE_CACHE_DIR="$HOME/.cache/mise"
+export MISE_TRUSTED_CONFIG_PATHS="$repo_root/mise.toml"
+export MISE_LOCKFILE=1 MISE_LOCKED=1 MISE_COLOR=0
+
+if [ "${NVIM_CONFIG_OFFLINE:-0}" = 1 ]; then
+	export MISE_OFFLINE=1 MISE_AUTO_INSTALL=0 MISE_EXEC_AUTO_INSTALL=0
+	if [ "${1:-}" = exec ]; then
+		for tool in "$@"; do
+			case $tool in exec) continue ;; --) break ;; esac
+			"$mise_bin" where "$tool" >/dev/null || exit 1
+		done
+	fi
+fi
+case ${1:-} in
+	lock) export MISE_LOCKED=0 ;;
+esac
+exec "$mise_bin" "$@"

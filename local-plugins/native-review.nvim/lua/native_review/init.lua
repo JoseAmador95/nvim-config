@@ -25,7 +25,6 @@ local ALLOWED = {
 	clipboard = true,
 	lsp_navigation = true,
 	structural_diff = true,
-	gumtree = true,
 	event = true,
 	hunk_context = true,
 	max_files = true,
@@ -167,7 +166,6 @@ function M.setup(opts)
 		clipboard = opts.clipboard,
 		lsp_navigation = opts.lsp_navigation,
 		structural_diff = opts.structural_diff,
-		gumtree = opts.gumtree,
 		event = opts.event or function() end,
 		config = config,
 	})

@@ -4,6 +4,8 @@ vim.o.swapfile = false
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+local mise = vim.fn.exepath("mise")
+local expected_path = "/verified/bin:" .. (mise ~= "" and vim.fs.dirname(mise) .. ":" or "") .. "/usr/bin:/bin"
 
 local failures = {}
 local count = 0
@@ -220,7 +222,9 @@ test("rename labels use the nine-argument Git form and explicit light background
 	assert(calls.options.timeout == 5000 and calls.options.text == false)
 	assert(calls.options.clear_env == true)
 	assert(vim.deep_equal(calls.options.env, {
-		PATH = "/verified/bin:/usr/bin:/bin",
+		PATH = expected_path,
+		HOME = vim.env.HOME,
+		NVIM_CONFIG_OFFLINE = vim.env.NVIM_CONFIG_OFFLINE,
 		LANG = "C",
 		LC_ALL = "C",
 		TERM = "xterm-256color",
@@ -423,7 +427,9 @@ test("JSON analysis defaults geometry and returns raw output in a private enviro
 	assert(calls.argv[6] == "--strip-cr=off")
 	assert(calls.options.clear_env == true and calls.options.env.DFT_UNSTABLE == "yes")
 	assert(vim.deep_equal(calls.options.env, {
-		PATH = "/verified/bin:/usr/bin:/bin",
+		PATH = expected_path,
+		HOME = vim.env.HOME,
+		NVIM_CONFIG_OFFLINE = vim.env.NVIM_CONFIG_OFFLINE,
 		LANG = "C",
 		LC_ALL = "C",
 		TERM = "xterm-256color",

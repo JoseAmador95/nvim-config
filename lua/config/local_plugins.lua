@@ -1,5 +1,5 @@
 -- Register repository-local product boundaries without involving Lazy or its
--- lockfile. The order is the extraction plan's canonical 17-product order.
+-- lockfile. The order is the extraction plan's canonical product order.
 local M = {}
 
 local NAMES = {
@@ -17,7 +17,6 @@ local NAMES = {
 	"just-workbench.nvim",
 	"clangd-compile-db.nvim",
 	"trusted-workspace.nvim",
-	"verified-tools.nvim",
 	"treesitter-runtime.nvim",
 	"theme-router.nvim",
 }

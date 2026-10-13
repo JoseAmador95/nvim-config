@@ -1,5 +1,5 @@
 -- Pure mapping between native Neovim server names and their executable source.
--- Exact Mason package versions and prerequisites live only in config.toolchain.
+-- Exact Mise versions and prerequisites live only in config.toolchain.
 
 local M = {}
 
@@ -19,7 +19,7 @@ M.servers = {
 	{ name = "marksman", package = "marksman", command = "marksman", args = { "server" } },
 	{ name = "ruff", package = "ruff", command = "ruff", args = { "server" } },
 	-- Rust intentionally remains a host/user tool. It is never resolved from
-	-- Mason, and its lookup is deferred until the first Rust client starts.
+	-- managed installs, and its lookup is deferred until the first Rust client starts.
 	{ name = "rust_analyzer", external = "rust-analyzer", args = {} },
 	{ name = "tombi", package = "tombi", command = "tombi", args = { "lsp" } },
 	{ name = "ty", package = "ty", command = "ty", args = { "server" } },
@@ -52,25 +52,6 @@ function M.server(name)
 	for _, server in ipairs(M.servers) do
 		if server.name == name then
 			return server
-		end
-	end
-	return nil
-end
-
-function M.mason_packages()
-	local names = {}
-	for _, server in ipairs(M.servers) do
-		if server.package then
-			names[#names + 1] = server.package
-		end
-	end
-	return names
-end
-
-function M.mason_package(server_name)
-	for _, server in ipairs(M.servers) do
-		if server.name == server_name then
-			return server.package
 		end
 	end
 	return nil

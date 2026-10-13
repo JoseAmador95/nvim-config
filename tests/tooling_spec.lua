@@ -30,29 +30,12 @@ vim.api.nvim_create_autocmd("VimEnter", {
 				)
 
 				assert(package.loaded.mason == nil, "Python environment selection activated Mason")
-				require("lazy").load({ plugins = { "mason.nvim" } })
-				local mason_options = require("mason.settings").current
 				assert(
-					mason_options.install_root_dir == require("config.tool_paths").mason_root(),
-					"Mason is not rooted in the primary editor data directory"
+					require("lazy.core.config").plugins["mason.nvim"] == nil,
+					"Mason remains installed by the config"
 				)
-				assert(mason_options.PATH == "append", "Mason still prepends itself ahead of host tools")
-				assert(
-					mason_options.ui.check_outdated_packages_on_open == false,
-					"Mason UI still performs registry checks when opened"
-				)
-				for _, key in ipairs({
-					"install_package",
-					"update_package",
-					"check_package_version",
-					"update_all_packages",
-					"check_outdated_packages",
-					"uninstall_package",
-					"cancel_installation",
-				}) do
-					assert(mason_options.ui.keymaps[key] == "<Nop>", "Mason mutation key remains: " .. key)
-				end
-				assert(package.loaded["mason-lspconfig"] == nil, "opening Mason activated its unused LSP bridge")
+				assert(vim.fn.exists(":NvimConfigMiseInstall") == 2, "explicit Mise installer is missing")
+
 				assert(vim.lsp.is_enabled("docker_language_server"), "Docker LSP is not explicitly enabled")
 				assert(not vim.lsp.is_enabled("stylua"), "Stylua was unexpectedly enabled as an LSP")
 				assert(vim.lsp.config["*"].before_init == nil, "wildcard before_init hook is still configured")

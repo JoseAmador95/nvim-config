@@ -1,5 +1,4 @@
--- Lightweight host surface for verified-tools.nvim. The lifecycle engine is
--- loaded only after an explicit install/repair command is invoked.
+-- Startup-light command registration. Installations are delegated to Mise.
 local M = {}
 local deferred = require("config.deferred")
 local manifest = require("config.toolchain")
@@ -7,10 +6,7 @@ local manifest = require("config.toolchain")
 local registered = false
 
 local function names()
-	local result = vim.deepcopy(manifest.managed_order or {})
-	vim.list_extend(result, manifest.dynamic_order or {})
-	vim.list_extend(result, manifest.mason_order or {})
-	return result
+	return vim.deepcopy(manifest.tool_order)
 end
 
 function M.setup()
@@ -24,8 +20,11 @@ function M.setup()
 		nargs = "?",
 		bang = true,
 		complete = names,
-		desc = "Install or repair exact verified tools",
+		desc = "Install or reinstall locked Mise tools",
 	})
+	vim.api.nvim_create_user_command("NvimConfigMiseInstall", function()
+		deferred.load("config.tool_bootstrap").install_mise()
+	end, { desc = "Install pinned Mise into ~/.local/bin" })
 	registered = true
 	return true
 end

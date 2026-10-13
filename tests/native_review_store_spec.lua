@@ -246,6 +246,20 @@ test("item origins survive lifecycle changes and replies record their own engine
 	assert(loaded.items[1].anchor.start_line == 9 and loaded.items[1].anchor.side == "right")
 end)
 
+test("retired GumTree origins remain readable and round-trip without an engine", function()
+	local origin = { id = "gumtree", version = "4.0.0" }
+	local session = assert(store.add(fresh(), {
+		type = "issue",
+		body = "Historical structural comment",
+		anchor = { path = "src/main.lua", side = "left", start_line = 4 },
+		origin_engine = origin,
+	}, deps))
+	local saved = assert(store.save(root, session, deps))
+	local loaded = assert(store.load(root, saved.id, deps))
+	assert(vim.deep_equal(loaded.items[1].origin_engine, origin))
+	assert(vim.deep_equal(assert(store.save(root, loaded, deps)).items[1].origin_engine, origin))
+end)
+
 test("v3 engine origins are strict and bounded without restricting future engine names", function()
 	local session = add_root(fresh())
 	local saved, path = assert(store.save(root, session, deps))

@@ -17,17 +17,8 @@ return {
 			}
 		end,
 		config = function(plugin)
-			local ok_bootstrap, bootstrap = deferred.try("config.tool_bootstrap")
-			local ok_repair, repair = deferred.try("verified_tools.markdown_preview")
-			if not ok_bootstrap or not ok_repair then
-				return
-			end
-			for _, record in ipairs(bootstrap.engine().records() or {}) do
-				if record.identity and record.identity.name == "markdown-preview" and record.status == "succeeded" then
-					repair.repair(plugin.dir, record)
-					break
-				end
-			end
+			local ok, err = deferred.load("config.tool_bootstrap").markdown_preview(plugin.dir)
+			assert(ok, err)
 		end,
 		keys = {
 			{ "<leader>mp", "<cmd>MarkdownPreviewToggle<cr>", desc = "Markdown preview" },

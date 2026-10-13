@@ -7,7 +7,7 @@ usage() {
 }
 
 if [ "$#" -eq 1 ] && [ "$1" = "--contract-version" ]; then
-	printf '%s\n' '1'
+	printf '%s\n' '2'
 	exit 0
 fi
 
@@ -78,6 +78,7 @@ esac
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 NVIM_BIN=${NVIM_BIN:-nvim}
+export PATH="$HOME/.local/bin:$PATH"
 if ! command -v "$NVIM_BIN" >/dev/null 2>&1; then
 	printf 'Required command not found: %s\n' "$NVIM_BIN" >&2
 	exit 1
@@ -295,12 +296,12 @@ run_profile_action() {
 	if [ "$profile_name" = "nvimpager" ]; then
 		NVIM_APPNAME=nvimpager "$NVIM_BIN" --headless -u "$repo_root/init.lua" -i NONE \
 			-c 'lua local m = require("config.provision_runtime"); if vim.g.nvim_config_initialized ~= true then m.fail_if_running(vim.env.NVIM_CONFIG_PROVISION_ERROR); vim.cmd("cquit 41") end' \
-			-c 'lua local m = require("config.provision_runtime"); local online = vim.env.NVIM_CONFIG_ALLOW_NETWORK == "1"; local ok = vim.env.NVIM_CONFIG_PROVISION_ACTION == "plugins" and m.provision_plugins(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online) or m.provision_parsers(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online); if not ok then vim.cmd("cquit 42") end' \
+			-c 'lua local m = require("config.provision_runtime"); local online = vim.env.NVIM_CONFIG_ALLOW_NETWORK == "1"; local ok; if vim.env.NVIM_CONFIG_PROVISION_ACTION == "plugins" then ok = m.provision_plugins(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online) else ok = m.provision_parsers(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online) end; if not ok then vim.cmd("cquit 42") end' \
 			-c 'quitall!'
 	else
 		"$NVIM_BIN" --headless -u "$repo_root/init.lua" -i NONE \
 			-c 'lua local m = require("config.provision_runtime"); if vim.g.nvim_config_initialized ~= true then m.fail_if_running(vim.env.NVIM_CONFIG_PROVISION_ERROR); vim.cmd("cquit 41") end' \
-			-c 'lua local m = require("config.provision_runtime"); local online = vim.env.NVIM_CONFIG_ALLOW_NETWORK == "1"; local ok = vim.env.NVIM_CONFIG_PROVISION_ACTION == "plugins" and m.provision_plugins(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online) or m.provision_parsers(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online); if not ok then vim.cmd("cquit 42") end' \
+			-c 'lua local m = require("config.provision_runtime"); local online = vim.env.NVIM_CONFIG_ALLOW_NETWORK == "1"; local ok; if vim.env.NVIM_CONFIG_PROVISION_ACTION == "plugins" then ok = m.provision_plugins(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online) else ok = m.provision_parsers(vim.env.NVIM_CONFIG_PROVISION_PROFILE, online) end; if not ok then vim.cmd("cquit 42") end' \
 			-c 'quitall!'
 	fi
 }
@@ -321,10 +322,10 @@ if ! run_profile_action plugins nvimpager plugin-nvimpager; then
 fi
 
 if ! "$NVIM_BIN" --headless -u "$repo_root/init.lua" -i NONE \
-	-c 'lua local m = require("config.provision_runtime"); if vim.g.nvim_config_initialized ~= true then m.fail_if_running("managed-tools"); vim.cmd("cquit 41") end' \
+	-c 'lua local m = require("config.provision_runtime"); if vim.g.nvim_config_initialized ~= true then m.fail_if_running("tools"); vim.cmd("cquit 41") end' \
 	-c 'lua if not require("config.provision_runtime").provision_tools(vim.env.NVIM_CONFIG_ALLOW_NETWORK == "1") then vim.cmd("cquit 42") end' \
 	-c 'quitall!'; then
-	run_none -c 'lua require("config.provision_report").fail_if_running("managed-tools")' || true
+	run_none -c 'lua require("config.provision_report").fail_if_running("tools")' || true
 	exit 1
 fi
 

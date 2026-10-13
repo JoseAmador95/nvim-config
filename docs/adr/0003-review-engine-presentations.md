@@ -1,6 +1,6 @@
 # ADR 0003: Separate diff presentation from source relations
 
-- Status: Accepted
+- Status: Accepted; GumTree-specific decisions superseded by [ADR 0005](0005-mise-tooling.md)
 - Date: 2026-10-01
 
 ## Context

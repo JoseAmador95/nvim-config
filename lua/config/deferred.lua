@@ -32,7 +32,6 @@ local allowed = {
 	["project_python"] = true,
 	["repo_scratch"] = true,
 	["terminal_lifecycle"] = true,
-	["verified_tools.markdown_preview"] = true,
 }
 
 function M.load(name)

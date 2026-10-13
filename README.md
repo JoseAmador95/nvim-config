@@ -7,12 +7,14 @@ This is a Neovim 0.12+ configuration with a full editor profile and a small
 
 ## Setup and optional features
 
-Clone the repository as `~/.config/nvim` and start Neovim. Lazy restores locked
-plugins; startup only registers a lightweight verified-tool command facade. The
-tool lifecycle and its local plugin are loaded on the first runtime tool use or
-explicit `:NvimConfigToolsInstall[!]` lifecycle request. Startup performs no
-managed-tool planning, version probes, attestation, registry access, or network
-work, and offline startup never consumes an attempt.
+Clone the repository as `~/.config/nvim`. Install Mise yourself and put it on
+`PATH`; this catalog requires Mise 2026.10.4 or newer. Alternatively, explicitly
+run `./scripts/install-mise` or `:NvimConfigMiseInstall` to install the pinned
+executable into `~/.local/bin/mise`. Startup and provisioning never install Mise.
+Startup registers tool commands without probing or installing tools. An actual
+feature use runs `mise exec`, which installs missing locked tools automatically.
+Use `:NvimConfigToolsInstall [all|name]` to preinstall them, or `!` to reinstall.
+`NVIM_CONFIG_OFFLINE=1` disables downloads and reports missing tools.
 
 An existing `lazy.nvim` checkout is still validated fail-closed. After one
 authoritative Git identity/status/hidden-index scan, startup may use a private
@@ -40,39 +42,34 @@ PATH=/absolute/path/to/nvim-config-tools/bin:$PATH \
   ./scripts/check-config
 ```
 
-`install-ci-tools` downloads official StyLua, ShellCheck, actionlint, and
-tree-sitter assets, verifies their manifest SHA-256 values, and never builds
-validators through a language package manager. The first two commands may use
-the network on a cold machine.
+`install-ci-tools` delegates the exact precompiled StyLua, ShellCheck, actionlint,
+and tree-sitter pins to Mise with `--locked`. The first two commands may use the
+network on a cold machine; Mise must already be available.
 Parser bootstrap requires the exact pinned `tree-sitter` CLI and a host `cc`;
 `--skip-parsers` skips that preflight. The final gate is offline and never
 mutates plugins, parsers, or the committed lock.
 
-To reconcile the plugins, verified tools, Mason packages, and Tree-sitter
-parsers in the current HOME runtime, request an owner-private schema-v1 report:
+To reconcile plugins, Mise tools and Tree-sitter parsers in the current HOME
+runtime, request an owner-private schema-v2 report:
 
 ```sh
 ./scripts/provision-runtime --non-interactive \
   --report "$HOME/.local/state/nvim/provision-runtime.json"
 ```
 
-That command is offline by default: it inventories and locally attests existing
-state, but missing or stale components fail without consuming an installation
-attempt. Add `--allow-network` to authorize downloads and repairs. Add
-`--require-managed-tools` when every managed release must win through its
-verified shim. The full interface is
-`scripts/provision-runtime --non-interactive --report ABSOLUTE_PATH
-[--require-managed-tools] [--allow-network]`; `--contract-version` prints `1`.
+The command is offline by default: missing or stale components fail without
+being downloaded. Add `--allow-network` to restore them, and
+`--require-managed-tools` to require every tool beneath
+`~/.local/share/mise/installs`. `--contract-version` prints `2`.
+The external custom-cloud integration still requires v1 and is incompatible
+with this report until it is updated separately; this migration does not edit it.
 
-Provisioning uses only canonical paths below the caller's HOME, rejects HOME or
-XDG roots under `/localdata`, secures its XDG/state directories as `0700`, and
-writes the report atomically as `0600`. The report records deterministic
-`status`, `changed`, bounded `error_codes`, Neovim/lock state, both runtime
-profiles, Mason, and managed tools. It preserves the committed `lazy-lock.json`
-and unrelated plugin, parser, and Mason extras. On Linux ARM64 the manifest has
-no managed `markdown-preview` release asset, so provisioning reports
-`unsupported-platform`; in particular, strict `--require-managed-tools` cannot
-succeed there until a verified ARM64 asset is pinned.
+Provisioning confines canonical XDG/state/report paths below HOME, rejects
+`/localdata`, and atomically writes a deterministic `0600` report. It records
+Neovim, Mise, exact installed tool versions, both plugin/parser profiles, extras,
+and digests of all committed locks. It preserves unrelated installations and
+never updates locks. Linux ARM64 has no pinned mmdflux, Markdown Preview or
+clangd asset in this catalog, so full provisioning reports `unsupported-platform`.
 
 Use `bootstrap-config` for a disposable isolated XDG tree, `provision-runtime`
 for the caller's real private runtime, and `check-config` for the offline
@@ -232,16 +229,15 @@ grant one capability, `:NvimConfigExecutionRevoke <capability>` to revoke it,
 and `:NvimConfigExecutionStatus [capability]` to inspect the durable state.
 There is no implicit prompt: an unauthorized action stops before its runner is
 started. Grants express trust in that repository; they are not a sandbox and do
-not replace Just's stricter content-based closure checks. Tool installation and
-network access remain separate, explicit decisions.
+not replace Just's stricter content-based closure checks. Tool acquisition through `mise exec` is independent of these execution grants;
+`NVIM_CONFIG_OFFLINE=1` disables downloads.
 
-All 17 local plugin directories stay on `runtimepath`; none is registered as a
+All 16 local plugin directories stay on `runtimepath`; none is registered as a
 Lazy plugin. The startup-owned foundations are `trusted-workspace`, `tab-first`,
 `treesitter-runtime`, and `theme-router` (VSCode and pager use their smaller
 profile-specific subsets). Exact-editor loads only after a stable interactive
 UI, and native-review plus the devcontainer, terminal, Python, action palette,
-diagram, log, scratch, coverage, Just, clangd compile-database, and
-verified-tools cores load only at their documented first-use boundary. Their
+diagram, log, scratch, coverage, Just, and clangd compile-database cores load only at their documented first-use boundary. Their
 host commands and mappings remain available from startup through lightweight
 adapters.
 
@@ -261,100 +257,46 @@ refresh window; a durable reload wins over repaint when both are pending.
 
 The effective executable order is deliberate:
 
-1. core-owned verified shims;
+1. Mise launchers in `~/.local/share/mise/nvim-bin`;
 2. directories in `local_config.path`, in declared order;
 3. `~/.local/bin`;
-4. inherited host `PATH` entries;
-5. config-managed release binaries under the primary Neovim data root;
-6. Mason's `bin` directory.
+4. inherited host `PATH` entries, excluding retired managed/Mason/shim roots.
 
-External candidates are probed only while planning an explicit install request,
-before a managed claim. A compatible candidate from a non-bang request is
-re-hashed while holding its identity, destination, and shim resources and
-persisted as a private explicit
-external certification. Runtime resolution reads only durable managed proof or
-that certification: it never inspects `PATH`, runs a version process, or writes
-state. Non-bundle authorities recheck canonical path and complete fingerprint
-metadata without hashing executable contents. Active npm bundle resolution is
-the deliberate exception: it rehashes the exact private closure and receipt on
-every use. Drift asks for the same non-bang command to recertify.
-`:NvimConfigToolsInstall! <name>` bypasses external probing and
-selects managed installation/repair. Any managed record has precedence and an
-unhealthy one fails closed without external fallback. `markdown-preview` is
-managed-only because its host bridge is tied to the pinned release layout.
-External executables and their path ancestors must be owned by root or the
-effective user, and ancestor directories cannot be group/world-writable. An
-unsafe private certification receipt must be inspected and removed manually, or
-superseded with the explicit managed `!` action; it is never overwritten.
-Older managed records without the complete metadata fingerprint require repair.
-`:checkhealth nvimconfig` prints the effective origin and order.
-External tools are optional unless their feature is used:
+`config.toolchain` defines exact pins and generates `mise.toml`.
+`mise.lock` and `.mise/locks` contain native platform and npm/Python dependency
+locks. Run `./scripts/update-tool-lock` explicitly after changing the catalog,
+and review all generated changes together. Normal installation and execution
+use `--locked` and never select a new version. Dev Containers is fixed at 0.89.0,
+Node at 24.20.0, and the tools' Python at 3.13.16. Project Python environments
+remain independent of the tools' Python. Runtime dependencies enter only the
+child process PATH; they do not replace the editor's host Python/Node commands.
+
+All tools live in `~/.local/share/mise/installs`; Mise state lives in
+`~/.local/state/mise`. The editor and pager share these locations. The adapter
+preserves each caller's cwd, argv, stdin, timeouts and cancellation while
+selecting only this catalog, without importing project or global Mise settings.
+A slow first download can exceed a consumer's existing timeout; preinstall that
+tool with `:NvimConfigToolsInstall <name>` and retry the action.
+
+Mise verifies artifacts/dependency locks during installation. Runtime does not
+rehash tools or keep a separate attestation database. Host executables are not
+certified as substitutes. Mason, verified-tools and GumTree have been removed;
+old installations are left on disk but excluded from resolution. Historical
+GumTree comment origins remain readable. Health reports configuration and paths;
+`provision-runtime` inventories installed versions offline.
 
 | Feature | Tools |
 | --- | --- |
-| Mermaid diagrams | `mmdflux` (`:NvimConfigToolsInstall mmdflux`); `rsvg-convert` from librsvg for image mode |
-| PlantUML diagrams | `plantuml` (`:NvimConfigToolsInstall plantuml`); `rsvg-convert` for image mode |
-| Rust language intelligence | Host/user `rust-analyzer`; managed and Mason paths are ignored |
-| Dockerfile/Markdown lint | `hadolint` and `markdownlint-cli2`, managed by Mason |
-| Inline diagram images | A terminal with the Kitty graphics protocol, such as Ghostty |
-| Pager profile | `nvimpager` plus the config symlink below |
-| Git terminal UI | Host `lazygit` |
-| Container editor | An active verified `devcontainers-cli` bundle and project `devcontainer.json`; an explicit `:NvimConfigToolsInstall devcontainers-cli` (or `all`) resolves npm `latest`, bundles private Node 24.20.0, and activates it for offline runtime use. See [the focused workflow](docs/devcontainer-neovim.md) |
-| Just recipes | Host `just`; it is never installed automatically |
+| Mermaid diagrams | Mise `mmdflux`; host `rsvg-convert` for image mode |
+| PlantUML diagrams | Mise `plantuml`; host `rsvg-convert` for image mode; host Java for the macOS x64 JAR |
+| Dockerfile/Markdown lint | Mise `hadolint` and `markdownlint-cli2` |
+| Container editor | Mise `devcontainers-cli` 0.89.0 and Node 24.20.0; project `devcontainer.json`. See [the workflow](docs/devcontainer-neovim.md) |
+| Inline images | A terminal with the Kitty graphics protocol, such as Ghostty |
+| Git terminal UI / recipes | Host `lazygit` / `just` |
 
-`mmdflux`, PlantUML, release tools and exact Mason packages share
-`:NvimConfigToolsInstall [all|name]`; append `!` for explicit repair or to
-force the managed pin when a compatible external tool would otherwise be
-certified. Repeating the non-bang command recertifies a changed compatible
-external executable.
-Naming one tool plans only that target; spelling `all` is the explicit aggregate
-planning/install path. That explicit request also imports only the matching
-legacy tool record; startup never scans the legacy catalog.
-Each valid invocation owns a distinct persistent `Tools` spinner while its
-items move through the shared host queue. Progress frames stay out of native
-notification history; after every item in that invocation settles, the same
-toast becomes one aggregate success or persistent failure summary. Existing
-per-tool result notices remain available for detail, and overlapping requests
-do not share progress state.
-If an older Neovim owns unfinished verified-tools work, close that editor and
-rerun the explicit install or repair from a fresh Neovim. A live or
-unverifiable owner is never stolen, even with `!`; do not delete its state or
-lock tickets manually.
-
-Mason's UI is command-lazy and read-only: it stays outside normal file/LSP
-startup, and its install, update and uninstall commands and mappings are
-removed. Native `nvim-lspconfig` loads independently on file open;
-`mason-lspconfig` remains dormant for compatibility checks and has no runtime
-setup.
-Release installs bind the verified source-archive SHA to hashes of every
-promoted command/artifact. Mason validates its exact raw source version and
-complete declared executable-link map, then binds them to a private `0600`
-receipt and canonical launcher fingerprints. Before an already-succeeded record
-is attested, the host compares it with the current immutable manifest; mismatch
-selects explicit repair instead of attesting an obsolete plan.
-Mason proof currently covers the receipt and canonical launcher targets, not a
-launcher's transitive package tree or host interpreter. Node-loaded `dist` files
-therefore remain a documented closure limit pending a versioned proof extension.
-The current Mason identity digest also covers its complete immutable entry,
-integrity, and executable maps. Older partial-digest records are retained as
-recovery evidence but require an explicit current managed install/repair before
-runtime use.
-
-The managed backends and their host prerequisites are:
-
-| Backend | Packages | Host prerequisite |
-| --- | --- | --- |
-| Prebuilt | clangd, Docker LS, lemminx, Lua LS, marksman, Ruff, Tombi, codelldb, hadolint, jq, ShellCheck, shfmt, StyLua, tree-sitter CLI | None |
-| npm | Bash/JSON/TypeScript/YAML language servers, markdownlint-cli2, prettierd | `node` and `npm` |
-| PyPI | ty, cmake-language-server, clang-format, debugpy | Python with `venv` |
-
-The private npm-release bundle for `devcontainers-cli` scans eligible `curl`
-and Python candidates in `PATH` order and executes only the first canonical
-absolute path that passes authority validation. An unsafe Homebrew candidate
-therefore cannot mask a later safe system executable, and is never executed.
-
-Python language tooling is pinned to Ruff 0.16.6 and ty 0.0.77. Removing
-Pyright from the manifest does not uninstall an existing Mason copy.
+Native LSP loads independently on file open. Python tooling remains pinned to
+Ruff 0.16.6 and ty 0.0.77. See [runtime consumers](docs/verified-runtime-consumers.md)
+for process boundaries and host-tool exceptions.
 
 Rust remains fully editable even without language tooling. Its LSP activates
 only for an external host/user `rust-analyzer`; formatting stays disabled until
@@ -364,7 +306,7 @@ state when the analyzer is absent. The ASM and PlantUML language servers are
 intentionally absent. PlantUML rendering remains available through the
 precompiled renderer above.
 
-TOML language intelligence and formatting use the exact Mason pin Tombi 1.2.7.
+TOML language intelligence and formatting use the exact Mise pin Tombi 1.2.7.
 The versioned user default in `tombi/config.toml` keeps schema strict mode off
 and disables schema catalogs. Projects can opt in with a project-level
 `tombi.toml`; an individual document can use a leading `#:schema` directive
@@ -721,7 +663,7 @@ or the macOS daemon-group system principal remains inside the host trust
 boundary. Reusing a compatible container does not require recreation solely
 for agent forwarding.
 `!` authorizes network-dependent managed tools in the container; without it
-verified-tools remains `blocked/offline` and does not consume an attempt. See
+Mise reports missing tools without installing them. See
 [Neovim inside a Dev Container](docs/devcontainer-neovim.md) for lifecycle,
 path mapping, structured `exec --`, authenticated spool, and security limits.
 

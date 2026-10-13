@@ -57,7 +57,6 @@ local plugin_names = {
 	"just_workbench",
 	"clangd_compile_db",
 	"trusted_workspace",
-	"verified_tools",
 	"treesitter_runtime",
 	"theme_router",
 }

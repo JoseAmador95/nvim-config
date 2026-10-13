@@ -19,6 +19,7 @@ local function test(name, callback)
 end
 
 local environment_names = {
+	"HOME",
 	"NVIM_APPNAME",
 	"XDG_DATA_HOME",
 	"XDG_STATE_HOME",
@@ -37,6 +38,7 @@ end
 -- fixture before comparing exact strings as well.
 local root = vim.fs.normalize(vim.fn.tempname())
 assert(vim.fn.mkdir(root, "p") == 1)
+vim.env.HOME = root
 vim.env.XDG_DATA_HOME = root .. "/data"
 vim.env.XDG_STATE_HOME = root .. "/state"
 vim.env.NVIM_CONFIG_PRIMARY_DATA_ROOT = nil
@@ -50,13 +52,13 @@ test("primary roots are shared with the pager profile", function()
 	vim.env.NVIM_APPNAME = "nvimpager"
 	assert(paths.primary_data_root() == root .. "/data/nvim")
 	assert(paths.primary_state_root() == root .. "/state/nvim")
-	assert(paths.managed_root() == root .. "/data/nvim/nvim-tools")
+	assert(paths.managed_root() == root .. "/.local/share/mise")
 	assert(paths.mason_root() == root .. "/data/nvim/mason")
 	vim.env.NVIM_APPNAME = "nvim"
 	assert(paths.primary_data_root() == root .. "/data/nvim")
 end)
 
-test("PATH order puts verified shims before every local, host, and managed path", function()
+test("PATH order puts Mise launchers before every local, host, and managed path", function()
 	local managed = paths.managed_bin()
 	local mason = paths.mason_bin()
 	local segments = paths.compose_segments(
@@ -69,23 +71,20 @@ test("PATH order puts verified shims before every local, host, and managed path"
 			"/usr/bin",
 		}, ":")
 	)
-	assert(segments[1] == paths.verified_shim_bin())
+	assert(segments[1] == managed)
 	assert(segments[2] == root .. "/local-a")
 	assert(segments[3] == root .. "/local-b")
 	assert(segments[4] == vim.fs.normalize(vim.fn.expand("~/.local/bin")))
 	assert(segments[5] == "/usr/bin")
 	assert(segments[6] == "/opt/bin")
-	assert(segments[7] == managed)
-	assert(segments[8] == mason)
-	assert(#segments == 8, "PATH segments were not exactly deduplicated")
+	assert(#segments == 6, "PATH segments were not exactly deduplicated")
 end)
 
 test("an explicit local override remains after verified shims but before managed roots", function()
 	local managed = paths.managed_bin()
 	local segments = paths.compose_segments({ managed, root .. "/custom" }, managed .. ":/usr/bin")
-	assert(segments[1] == paths.verified_shim_bin())
-	assert(segments[2] == managed)
-	assert(segments[3] == root .. "/custom")
+	assert(segments[1] == managed)
+	assert(segments[2] == root .. "/custom")
 	local occurrences = 0
 	for _, segment in ipairs(segments) do
 		if segment == managed then

@@ -11,7 +11,6 @@ require("config.local_plugins").setup()
 local review = require("config.native_review")
 local host = require("config.code_review")
 local adapter = require("config.review_structural_diff")
-local gumtree_adapter = require("config.review_gumtree")
 if vim.env.NVIM_REVIEW_PARSER_ROOT then
 	vim.opt.runtimepath:append(vim.env.NVIM_REVIEW_PARSER_ROOT)
 end
@@ -68,7 +67,6 @@ local originals = {
 	compose = review.editor.compose,
 	has_active = review.editor.has_active,
 	analyze = adapter.analyze,
-	gumtree_analyze = gumtree_adapter.analyze,
 	select = vim.ui.select,
 }
 for _, name in ipairs({ "load", "save", "list" }) do
@@ -358,16 +356,12 @@ test("Split comments keep canonical coordinates and reveal hidden rows in both p
 	assert(controller.engine("main"))
 	assert(lhs.origin_engine.id == "difftastic" and rhs.origin_engine.id == "difftastic")
 end)
-test("four engines retain layout, context, comments and refresh behavior", function()
-	gumtree_adapter.analyze = function(_, callback)
-		callback('{"matches":[],"actions":[]}')
-		return function() end
-	end
+test("three engines retain layout, context, comments and refresh behavior", function()
 	adapter.analyze = function(_, callback)
 		callback(output())
 		return function() end
 	end
-	local expected = { "main", "difftastic", "gumtree", "patience" }
+	local expected = { "main", "difftastic", "patience" }
 	assert(vim.deep_equal(vim.fn.getcompletion("ReviewEngine ", "cmdline"), expected))
 	local preserved = workspace.session.items[1].origin_engine.id
 	for _, id in ipairs(expected) do
@@ -410,56 +404,10 @@ test("four engines retain layout, context, comments and refresh behavior", funct
 		assert(markdown:find("Origin engine: `" .. id .. "`", 1, true))
 	end
 end)
-test("GumTree selection survives unsupported files with visible Main provenance", function()
-	assert(controller.refresh(), vim.inspect(notifications))
-	local lua_entry, other
-	for _, item in ipairs(workspace.model.entries) do
-		if item.path == "sample.lua" then
-			lua_entry = item.identity
-		elseif item.path == "zz-other.txt" then
-			other = item.identity
-		end
-	end
-	assert(lua_entry and other)
-	assert(controller.engine("gumtree"))
-	assert(controller.present(other))
-	local shown = workspace.mode_state.presentation
-	assert(workspace.engine == "gumtree" and shown.origin_engine.id == "main" and shown.fallback_reason)
-	local pane = shown.inline or shown.right or shown.left
-	assert(vim.wo[pane.win].winbar:find("effective:main", 1, true))
-	controller.general_comment()
-	assert(workspace.session.items[#workspace.session.items].origin_engine.id == "main")
-	assert(controller.present(lua_entry))
-	assert(workspace.engine == "gumtree" and workspace.mode_state.presentation.origin_engine.id == "gumtree")
-end)
-
-test("GumTree errors and superseded completion retain the previous view", function()
-	assert(controller.engine("main"))
-	local done, cancelled_gumtree
-	gumtree_adapter.analyze = function(_, callback)
-		done = callback
-		return function()
-			cancelled_gumtree = true
-		end
-	end
-	local before = workspace.mode_state.presentation
-	assert(controller.engine("gumtree"))
-	done("{broken")
-	assert(workspace.mode_state.presentation == before and workspace.engine == "main")
-	assert(controller.engine("gumtree"))
-	local stale = done
-	assert(controller.engine("patience"))
-	before = workspace.mode_state.presentation
-	assert(cancelled_gumtree)
-	stale('{"matches":[],"actions":[]}')
-	assert(workspace.mode_state.presentation == before and workspace.engine == "patience")
-end)
 
 controller.teardown()
 for name, value in pairs(originals) do
-	if name == "gumtree_analyze" then
-		gumtree_adapter.analyze = value
-	elseif name == "analyze" then
+	if name == "analyze" then
 		adapter.analyze = value
 	elseif name == "compose" or name == "has_active" then
 		review.editor[name] = value

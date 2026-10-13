@@ -56,6 +56,13 @@ local starts = {}
 local stops = {}
 local install_calls = {}
 local install_task
+local tool_error
+package.loaded["config.tool_bootstrap"] = {
+	resolve = function(name, command)
+		assert(name == "tree-sitter-cli" and command == "tree-sitter")
+		return not tool_error and "/mise/tree-sitter" or nil, tool_error
+	end,
+}
 
 local function successful_task()
 	return {
@@ -261,6 +268,15 @@ test("async install awaits completion and retries eligible buffers", function()
 		"install completion did not retry the loaded buffer"
 	)
 	equal({ "lua" }, starts_for(buf), "install completion retried the buffer more than once")
+end)
+
+test("parser installation reports missing Mise before starting a task", function()
+	local before = #install_calls
+	tool_error = "Mise is missing; run :NvimConfigMiseInstall"
+	local ok, err = runtime.install({ "lua" })
+	tool_error = nil
+	assert(not ok and err:find("NvimConfigMiseInstall", 1, true))
+	assert(#install_calls == before)
 end)
 
 test("blocking install API honors timeout and returns the Task result", function()

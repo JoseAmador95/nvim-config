@@ -40,15 +40,19 @@ function M.primary_state_root()
 	return join(xdg_root("XDG_STATE_HOME", "~/.local/state"), "nvim")
 end
 
-function M.managed_root()
+local function legacy_managed_root()
 	if nonempty(vim.env.NVIM_CONFIG_TOOLS_ROOT) then
 		return expand(vim.env.NVIM_CONFIG_TOOLS_ROOT)
 	end
 	return join(M.primary_data_root(), "nvim-tools")
 end
 
+function M.managed_root()
+	return join(vim.env.HOME, ".local/share/mise")
+end
+
 function M.managed_bin()
-	return join(M.managed_root(), "bin")
+	return join(M.managed_root(), "nvim-bin")
 end
 
 function M.mason_root()
@@ -77,7 +81,7 @@ local function within(path, root)
 end
 
 function M.is_managed_path(path)
-	return within(path, M.managed_root())
+	return within(path, M.managed_root()) or within(path, legacy_managed_root())
 end
 
 function M.is_mason_path(path)
@@ -109,10 +113,8 @@ function M.compose_segments(local_paths, inherited)
 	local parts = {}
 	local seen = {}
 
-	-- A verified command must win over every host, workspace, release, and
-	-- Mason path. Ownership and content are enforced by verified-tools before
-	-- anything is published in this directory.
-	append_unique(parts, seen, M.verified_shim_bin())
+	-- Catalog launchers run Mise; retired manager roots never re-enter PATH.
+	append_unique(parts, seen, M.managed_bin())
 	for _, path in ipairs(local_paths or {}) do
 		append_unique(parts, seen, path)
 	end
@@ -124,8 +126,6 @@ function M.compose_segments(local_paths, inherited)
 		end
 	end
 
-	append_unique(parts, seen, M.managed_bin())
-	append_unique(parts, seen, M.mason_bin())
 	return parts
 end
 

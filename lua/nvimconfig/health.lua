@@ -21,7 +21,6 @@ local LOCAL_PRODUCTS = {
 	{ name = "just-workbench.nvim", module = "just_workbench" },
 	{ name = "clangd-compile-db.nvim", module = "clangd_compile_db" },
 	{ name = "trusted-workspace.nvim", module = "trusted_workspace" },
-	{ name = "verified-tools.nvim", module = "verified_tools" },
 	{ name = "treesitter-runtime.nvim", module = "treesitter_runtime" },
 	{ name = "theme-router.nvim", module = "theme_router" },
 }
@@ -61,8 +60,8 @@ local function path_origin(path, configured)
 		root = root:gsub("/+$", "")
 		return path == root or path:sub(1, #root + 1) == root .. "/"
 	end
-	if tool_paths.is_verified_shim_path(path) then
-		return "verified-shim", 1
+	if within(tool_paths.managed_bin()) then
+		return "mise-launcher", 1
 	end
 	for root in pairs(configured) do
 		if within(root) then
@@ -85,9 +84,7 @@ local function check_path_order()
 	local configured = local_path_set()
 	local previous_rank = 0
 	local ordered = true
-	health.info(
-		"PATH precedence contract: verified shims > local_config.path > ~/.local/bin > host PATH > managed > Mason"
-	)
+	health.info("PATH precedence contract: Mise launchers > local_config.path > ~/.local/bin > host PATH")
 	for index, path in ipairs(split_path(vim.env.PATH)) do
 		local origin, rank = path_origin(path, configured)
 		health.info(("PATH[%02d] %-12s %s"):format(index, origin, normalized(path)))
@@ -151,25 +148,6 @@ local function check_validation_tool(name, expected_line, configured)
 			expected_line
 		)
 	)
-end
-
-local function dynamic_tool_contract()
-	local result = {}
-	for _, name in ipairs(toolchain.dynamic_order or {}) do
-		local entry = toolchain.dynamic_entry(name)
-		if entry then
-			local targets = vim.tbl_keys(entry.node.assets or {})
-			table.sort(targets)
-			result[#result + 1] = {
-				name = name,
-				backend = entry.backend,
-				dist_tag = entry.dist_tag,
-				node_version = entry.node.version,
-				targets = targets,
-			}
-		end
-	end
-	return result
 end
 
 local function config_paths()
@@ -273,217 +251,13 @@ local function check_local_products()
 	end
 end
 
-local function joined_pins(order, entries)
-	local pins = {}
-	for _, name in ipairs(order) do
-		pins[#pins + 1] = toolchain.identity(name, entries[name])
+local function tool_contract()
+	local result = {}
+	for _, name in ipairs(toolchain.tool_order) do
+		local entry = toolchain.tools[name]
+		result[#result + 1] = { name = name, version = entry.version, backend = entry.backend }
 	end
-	return table.concat(pins, ", ")
-end
-
-local function state_summary()
-	local engine = package.loaded.verified_tools
-	if type(engine) ~= "table" or type(engine.status) ~= "function" then
-		health.info("Verified tool runtime is not loaded; health did not scan or reconcile durable records")
-	else
-		local ok, status = pcall(engine.status)
-		local jobs = ok and type(status) == "table" and status.jobs or nil
-		health.info(("Verified tool runtime is loaded; active jobs=%d"):format(type(jobs) == "table" and #jobs or 0))
-	end
-	health.info("Tool failures never auto-retry; inspect state through an explicit install or repair command")
-end
-
-local function safe_relative(value)
-	if type(value) ~= "string" or value == "" or value:sub(1, 1) == "/" or vim.fs.normalize(value) ~= value then
-		return false
-	end
-	for segment in value:gmatch("[^/]+") do
-		if segment == "." or segment == ".." then
-			return false
-		end
-	end
-	return true
-end
-
-local function mason_receipt_status(name, expected)
-	local entry = toolchain.mason_entry(name)
-	if not entry then
-		return "missing"
-	end
-	local receipt = vim.fs.joinpath(tool_paths.mason_root(), "packages", name, "mason-receipt.json")
-	local receipt_stat = vim.uv.fs_lstat(receipt)
-	if not receipt_stat then
-		return "missing"
-	end
-	if receipt_stat.type ~= "file" or receipt_stat.nlink ~= 1 or receipt_stat.size > 262144 then
-		return "corrupt"
-	end
-	local ok, lines = pcall(vim.fn.readfile, receipt)
-	if not ok then
-		return "corrupt"
-	end
-	local decoded_ok, value = pcall(vim.json.decode, table.concat(lines, "\n"))
-	if
-		not decoded_ok
-		or type(value) ~= "table"
-		or value.name ~= name
-		or not ({ ["1.0"] = true, ["1.1"] = true, ["2.0"] = true })[value.schema_version]
-	then
-		return "corrupt"
-	end
-	local source = value.schema_version == "2.0" and value.source or value.primary_source
-	local source_id = type(source) == "table" and source.id or nil
-	if type(source_id) ~= "string" then
-		return "corrupt"
-	end
-	local actual = source_id:match("@([^@]+)$")
-	if not actual or actual == "" then
-		return "corrupt"
-	end
-	if actual ~= expected then
-		return "wrong", actual
-	end
-	local links = type(value.links) == "table" and value.links.bin or nil
-	local executables = toolchain.executable_map(entry)
-	if type(links) ~= "table" or vim.tbl_count(links) ~= vim.tbl_count(executables) then
-		return "corrupt"
-	end
-	local package_root = vim.fs.joinpath(tool_paths.mason_root(), "packages", name)
-	local canonical_package = vim.uv.fs_realpath(package_root)
-	if not canonical_package then
-		return "corrupt"
-	end
-	for command in pairs(executables) do
-		local relative = links[command]
-		if not safe_relative(relative) then
-			return "corrupt"
-		end
-		local command_path = vim.fs.joinpath(tool_paths.mason_root(), "bin", command)
-		local source_path = vim.fs.joinpath(package_root, relative)
-		local source_real = vim.uv.fs_realpath(source_path)
-		local source_stat = source_real and vim.uv.fs_stat(source_real) or nil
-		if
-			not source_real
-			or not (source_real == canonical_package or source_real:sub(1, #canonical_package + 1) == canonical_package .. "/")
-			or vim.uv.fs_realpath(command_path) ~= source_real
-			or not source_stat
-			or source_stat.type ~= "file"
-			or vim.fn.executable(command_path) ~= 1
-		then
-			return "corrupt"
-		end
-	end
-	for command in pairs(links) do
-		if not executables[command] then
-			return "corrupt"
-		end
-	end
-	local private = vim.fs.joinpath(tool_paths.mason_root(), ".verified-tools", "receipts", name .. ".json")
-	local private_stat = vim.uv.fs_lstat(private)
-	if not private_stat then
-		return "unverified"
-	end
-	if private_stat.type ~= "file" or private_stat.nlink ~= 1 or private_stat.mode % 512 ~= 384 then
-		return "corrupt"
-	end
-	local private_ok, private_lines = pcall(vim.fn.readfile, private)
-	local private_decoded, private_value = false, nil
-	if private_ok then
-		private_decoded, private_value = pcall(vim.json.decode, table.concat(private_lines, "\n"))
-	end
-	local expected_private = { package = name, version = expected, source_version = expected }
-	return private_decoded and vim.deep_equal(private_value, expected_private) and "exact" or "corrupt", actual
-end
-
-local function check_mason_receipts()
-	local grouped = { exact = {}, wrong = {}, missing = {}, unverified = {}, corrupt = {} }
-	for _, name in ipairs(toolchain.mason_order) do
-		local entry = toolchain.mason_tools[name]
-		local status, actual = mason_receipt_status(name, entry.version)
-		local label = toolchain.identity(name, entry)
-		if status == "wrong" then
-			label = label .. " (installed " .. actual .. ")"
-		end
-		grouped[status][#grouped[status] + 1] = label
-	end
-	for _, status in ipairs({ "exact", "wrong", "missing", "unverified", "corrupt" }) do
-		if #grouped[status] > 0 then
-			local message = "Mason receipts " .. status .. ": " .. table.concat(grouped[status], ", ")
-			if status == "wrong" or status == "unverified" or status == "corrupt" then
-				health.warn(message)
-			else
-				health.info(message)
-			end
-		end
-	end
-end
-
-local function check_managed_release_eligibility()
-	local uname = uv.os_uname()
-	local results = {}
-	for _, name in ipairs(toolchain.managed_order) do
-		local entry = toolchain.managed_tools[name]
-		local release = entry.backend == "maven-release" and entry.jre or entry
-		local asset, target = toolchain.asset_for(release, uname.sysname, uname.machine)
-		results[#results + 1] = toolchain.identity(name, entry) .. "=" .. (asset and target or "unsupported")
-	end
-	health.info("Managed release platform/prerequisites (manifest only; no planning): " .. table.concat(results, ", "))
-end
-
-local function missing_requirements(entry)
-	local missing = {}
-	local deferred = {}
-	for _, executable in ipairs(entry.requires_all or {}) do
-		if not tool_paths.external_executable(executable) then
-			missing[#missing + 1] = executable
-		end
-	end
-
-	local selected
-	if entry.requires_any then
-		for _, executable in ipairs(entry.requires_any) do
-			selected = tool_paths.external_executable(executable)
-			if selected then
-				break
-			end
-		end
-		if not selected then
-			missing[#missing + 1] = table.concat(entry.requires_any, "|")
-		end
-	end
-
-	if entry.requires_python_venv and selected then
-		deferred[#deferred + 1] = "python-venv"
-	end
-	return missing, deferred
-end
-
-local function check_mason_inventory()
-	local managers = { prebuilt = {}, npm = {}, pypi = {} }
-	local blocked = {}
-	local deferred = {}
-	for _, name in ipairs(toolchain.mason_order) do
-		local entry = toolchain.mason_tools[name]
-		managers[entry.manager][#managers[entry.manager] + 1] = toolchain.identity(name, entry)
-		local missing, unprobed = missing_requirements(entry)
-		if #missing > 0 then
-			blocked[#blocked + 1] = name .. " (" .. table.concat(missing, "+") .. ")"
-		end
-		if #unprobed > 0 then
-			deferred[#deferred + 1] = name .. " (" .. table.concat(unprobed, "+") .. ")"
-		end
-	end
-	for _, manager in ipairs({ "prebuilt", "npm", "pypi" }) do
-		health.info(("Mason %-8s %s"):format(manager .. ":", table.concat(managers[manager], ", ")))
-	end
-	if #blocked == 0 then
-		health.ok("All declared Mason installer prerequisites are available")
-	else
-		health.warn("One-shot Mason skips tools blocked by host prerequisites: " .. table.concat(blocked, ", "))
-	end
-	if #deferred > 0 then
-		health.info("Prerequisites not executed by health: " .. table.concat(deferred, ", "))
-	end
+	return result
 end
 
 local function check_validation_contract(configured)
@@ -506,7 +280,7 @@ local function check_validation_contract(configured)
 	local provision = vim.fs.joinpath(root, "scripts", "provision-runtime")
 	if vim.fn.executable(provision) == 1 then
 		health.info(
-			"provision-runtime is present; contract version 1 is executed only by scripts/check-config (offline unless --allow-network is explicit)"
+			"provision-runtime is present; contract version 2 is executed only by scripts/check-config (offline unless --allow-network is explicit)"
 		)
 	end
 	check_validation_tool("stylua", "stylua " .. toolchain.versions.stylua, configured)
@@ -574,26 +348,21 @@ function M.check()
 	check_profile()
 	check_local_products()
 
-	health.start("Pinned tool bootstrap")
-	health.info("Managed release pins: " .. joined_pins(toolchain.managed_order, toolchain.managed_tools))
-	health.info("Mason exact pins: " .. joined_pins(toolchain.mason_order, toolchain.mason_tools))
-	for _, entry in ipairs(dynamic_tool_contract()) do
-		health.info(
-			("Dynamic managed tool manifest only: %s backend=%s dist-tag=%s private Node=%s targets=%s"):format(
-				entry.name,
-				entry.backend,
-				entry.dist_tag,
-				entry.node_version,
-				table.concat(entry.targets, ",")
-			)
-		)
+	health.start("Mise tools")
+	check_tool("mise", "locked editor tools", "Install Mise or run :NvimConfigMiseInstall.", true, configured)
+	health.info(
+		"Mise minimum version: " .. toolchain.versions.mise .. "; version execution is reserved for provisioning"
+	)
+	health.info("Tools: ~/.local/share/mise/installs; state: ~/.local/state/mise")
+	for _, entry in ipairs(tool_contract()) do
+		health.info(entry.name .. "@" .. entry.version .. " (" .. entry.backend .. ")")
 	end
-	health.ok("Startup leaves verified-tools unloaded; only explicit commands own plan/probe/attest/install")
-	state_summary()
-	check_managed_release_eligibility()
-	check_mason_receipts()
-	health.info("Install or repair release and Mason pins with :NvimConfigToolsInstall[!] [all|name]")
-	check_mason_inventory()
+	health.info(
+		"mise exec installs missing locked tools on first use; :NvimConfigToolsInstall[!] [all|name] preinstalls or reinstalls them"
+	)
+	health.info(
+		"Health observes the catalog and executable paths; provision-runtime inventories installed versions offline"
+	)
 
 	health.start("Optional feature dependencies")
 	check_tool("mmdflux", "Mermaid ASCII/SVG rendering", "Run :NvimConfigToolsInstall mmdflux.", false, configured)
@@ -604,7 +373,7 @@ function M.check()
 		"Install it with rustup or the host package manager; managed and Mason copies are intentionally ignored.",
 		configured
 	)
-	health.info("Rust formatting is disabled until rustfmt has an exact verified manifest contract")
+	health.info("Rust formatting is disabled until rustfmt has an exact manifest contract")
 	check_tool(
 		"cmake-language-server",
 		"CMake language intelligence",
@@ -632,8 +401,7 @@ end
 
 -- Small test seam for origin classification; no filesystem or state mutation.
 M._path_origin = path_origin
-M._mason_receipt_status = mason_receipt_status
 M._local_product_status = local_product_status
-M._dynamic_tool_contract = dynamic_tool_contract
+M._tool_contract = tool_contract
 
 return M
