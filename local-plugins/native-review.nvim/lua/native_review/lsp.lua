@@ -5,7 +5,7 @@ local dependencies = require("native_review.dependencies")
 local editor = dependencies.get("editor")
 local repo = dependencies.get("repo")
 
-local BLOCKED = { old = true, snapshot = true, unified = true, panel = true }
+local BLOCKED = { old = true, snapshot = true, unified = true, markdown = true, panel = true }
 local DIAGNOSTIC_NAMESPACE = vim.api.nvim_create_namespace("NvimReviewCurrentDiagnostics")
 local LSP_NAVIGATION_MAPPINGS = {
 	{ "n", "gd" },
@@ -297,13 +297,13 @@ end
 
 ---Mark a buffer before setting its filetype so native LSP root discovery can reject it.
 ---@param buf integer
----@param buffer_role "old"|"snapshot"|"unified"|"current"|"panel"
+---@param buffer_role "old"|"snapshot"|"unified"|"markdown"|"current"|"panel"
 ---@param metadata? table
 ---@return boolean
 function M.mark(buf, buffer_role, metadata)
 	if
 		not valid_buffer(buf)
-		or not ({ old = true, snapshot = true, unified = true, current = true, panel = true })[buffer_role]
+		or not ({ old = true, snapshot = true, unified = true, markdown = true, current = true, panel = true })[buffer_role]
 	then
 		return false
 	end

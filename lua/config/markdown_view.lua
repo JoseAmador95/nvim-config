@@ -212,6 +212,17 @@ local function ensure_renderer()
 	return renderer.preview
 end
 
+-- Frozen review snapshots use the same pin, checkout and media guards as the
+-- reading view, without creating a live preview session or touching a source.
+function M.build_snapshot(lines, opts)
+	local preview, err = ensure_renderer()
+	if not preview then
+		return nil, err
+	end
+	local ok, content = pcall(preview.build_content, lines, opts)
+	return ok and content or nil, not ok and tostring(content) or nil
+end
+
 local function win_state(win)
 	if not vim.api.nvim_win_is_valid(win) then
 		return nil

@@ -10,6 +10,8 @@ local review_mode = require("native_review.mode")
 local review_projection = require("native_review.projection")
 local review_diff = require("native_review.diff")
 local review_relations = require("native_review.relations")
+local review_markdown = require("native_review.markdown")
+M.supports_markdown = review_markdown.supports
 
 local BAND_HIGHLIGHT = "NvimReviewNativeHunkBand"
 local OLD_LINE_HIGHLIGHT = "NvimReviewNativeDiffOld"
@@ -357,7 +359,7 @@ end
 local function unified_scratch(entry, projection, generation, state, side)
 	local buf = vim.api.nvim_create_buf(false, true)
 	local metadata = {
-		bridge = true,
+		bridge = not projection.rendered,
 		context = state.presentation.context,
 		current_path = entry.new_path,
 		entry = entry,
@@ -390,11 +392,15 @@ local function unified_scratch(entry, projection, generation, state, side)
 	vim.b[buf].nvim_review_entry_identity = entry.identity
 	vim.b[buf].nvim_review_layer = entry.layer or "history"
 	vim.b[buf].nvim_review_projection_generation = generation
-	if not review_lsp.mark(buf, "unified", metadata) then
+	if not review_lsp.mark(buf, projection.rendered and "markdown" or "unified", metadata) then
 		pcall(vim.api.nvim_buf_delete, buf, { force = true })
 		error("Could not mark unified review projection before FileType")
 	end
-	set_filetype(buf, side == "old" and entry.old_path or entry.new_path or entry.old_path)
+	if projection.rendered then
+		vim.bo[buf].filetype = "md-render"
+	else
+		set_filetype(buf, side == "old" and entry.old_path or entry.new_path or entry.old_path)
+	end
 	local protected, protect_err = review_mode.protect_transient(state, buf)
 	if not protected then
 		pcall(vim.api.nvim_buf_delete, buf, { force = true })
@@ -842,6 +848,12 @@ local function review_winbar(state, entry, side, layout, context)
 		layout .. "/" .. context,
 	}
 	local presentation = state.presentation or {}
+	if presentation.engine_result and presentation.engine_result.markdown then
+		values[#values + 1] = "view:markdown-visual"
+		if presentation.engine_result.status == "unchanged" then
+			values[#values + 1] = "No visual changes"
+		end
+	end
 	local origin = presentation.origin_engine
 	local selected = presentation.selected_engine or "main"
 	values[#values + 1] = "engine:" .. selected
@@ -957,6 +969,18 @@ local function add_band(item, row, above, label)
 end
 
 local function decorate_intraline(presentation, item, side, projected)
+	if projected and projected.rendered then
+		for line, row in ipairs(projected.rows) do
+			for _, range in ipairs(row.detail) do
+				vim.api.nvim_buf_set_extmark(item.buf, item.namespace, line - 1, range.start_col, {
+					end_col = range.end_col,
+					hl_group = row.kind == "old" and OLD_TEXT_HIGHLIGHT or NEW_TEXT_HIGHLIGHT,
+					priority = 6500,
+				})
+			end
+		end
+		return
+	end
 	local detail = presentation.intraline
 	for _, source_side in ipairs(projected and { "old", "new" } or { side }) do
 		local group = source_side == "old" and OLD_TEXT_HIGHLIGHT or NEW_TEXT_HIGHLIGHT
@@ -1000,6 +1024,33 @@ local function decorate(state, entry, buf, win, side, context, inline)
 		win = win,
 	}
 	presentation.decorations[#presentation.decorations + 1] = item
+	if projected and projected.rendered then
+		for _, entry_highlight in ipairs(projected.highlights) do
+			for _, group in ipairs(entry_highlight.groups) do
+				vim.api.nvim_buf_set_extmark(buf, namespace, entry_highlight.line, group.col, {
+					end_col = group.end_col,
+					hl_group = group.hl,
+					priority = group.priority or 1000,
+				})
+			end
+		end
+		local markdown = dependencies.get("markdown")
+		if markdown.decorate then
+			markdown.decorate({ buf = buf, win = win, projection = projected, width = presentation.engine_result.width })
+		end
+		vim.wo[win].wrap = false
+		vim.wo[win].signcolumn = "yes:1"
+		for line, row in ipairs(projected.rows) do
+			if row.kind == "old" or row.kind == "new" then
+				vim.api.nvim_buf_set_extmark(buf, namespace, line - 1, 0, {
+					end_col = #row.text,
+					hl_eol = true,
+					hl_group = row.kind == "old" and OLD_LINE_HIGHLIGHT or NEW_LINE_HIGHLIGHT,
+					priority = 5000,
+				})
+			end
+		end
+	end
 	if not inline then
 		local configured, configure_err = configure_split_highlights(item, side)
 		if not configured then
@@ -1308,6 +1359,9 @@ local function remember_owned(presentation, buf)
 end
 
 local function split_projection(analysis, side)
+	if analysis.markdown then
+		return analysis.split_projections[side]
+	end
 	local source = analysis.projection.sources[side]
 	local value = {
 		sources = analysis.projection.sources,
@@ -1399,6 +1453,22 @@ local function bind_projected_scroll(state, presentation)
 end
 
 ---Render one entry in the state's origin tab without creating a tab.
+local function markdown_width(state, entry, layout)
+	local presentation = state.presentation
+	local right = presentation and presentation.right
+	local width = vim.api.nvim_win_get_width(state.origin.win)
+	if right and valid_win(right.win) then
+		width = layout == "split" and math.min(width, vim.api.nvim_win_get_width(right.win))
+			or width + vim.api.nvim_win_get_width(right.win) + 1
+	elseif layout == "split" then
+		width = math.floor((width - 1) / 2)
+	end
+	local digits =
+		#tostring(math.max(source_line_count(entry.old_text or ""), source_line_count(entry.new_text or ""), 1))
+	return math.max(4, math.min(120, math.floor((width - 2 * digits - 7) * 0.9)))
+end
+
+---Render one entry in the state's origin tab without creating a tab.
 ---@param state table
 ---@param entry table
 ---@param options? { layout?: "inline"|"split", context?: "hunks"|"full", side?: "old"|"new" }
@@ -1429,6 +1499,18 @@ function M.show(state, entry, options)
 	end
 	local previous_inline_view = capture_inline_view(state, entry)
 	local engine_result = options.engine_result or {}
+	if options.markdown_view == "render" and review_markdown.supports(entry) then
+		local ok, rendered, markdown_err = pcall(
+			review_markdown.prepare,
+			entry,
+			markdown_width(state, entry, layout),
+			state.presentation and state.presentation.engine_result
+		)
+		if not ok or not rendered then
+			return nil, ok and markdown_err or tostring(rendered)
+		end
+		engine_result = rendered
+	end
 	local projected = engine_result.presentation == "projected" and engine_result or nil
 	local projection
 	if layout == "inline" and not entry.metadata_only then
@@ -1548,7 +1630,7 @@ function M.show(state, entry, options)
 		}
 		remember_owned(presentation, left_buf)
 		put_buffer(state.origin.win, left_buf)
-		if not entry.deleted then
+		if not entry.deleted or engine_result.markdown then
 			local right_buf, real
 			if projected then
 				right_buf, real =
@@ -1595,9 +1677,15 @@ function M.show(state, entry, options)
 			end
 			set_review_winbar(state, presentation, presentation.left)
 			set_review_winbar(state, presentation, presentation.right)
-			vim.api.nvim_set_current_win(right_win)
-			presentation.target =
-				{ entry = entry, side = "new", win = right_win, buf = right_buf, path = entry.new_path }
+			if entry.deleted then
+				vim.api.nvim_set_current_win(state.origin.win)
+				presentation.target =
+					{ entry = entry, side = "old", win = state.origin.win, buf = left_buf, path = entry.old_path }
+			else
+				vim.api.nvim_set_current_win(right_win)
+				presentation.target =
+					{ entry = entry, side = "new", win = right_win, buf = right_buf, path = entry.new_path }
+			end
 		else
 			prepare_review_window(state.origin.win, layout)
 			if split_projections then
@@ -1617,6 +1705,33 @@ function M.show(state, entry, options)
 		bind_projected_scroll(state, presentation)
 	end
 	install_band_refresh(state, presentation)
+	if engine_result.markdown then
+		presentation.markdown_resize_autocmd = vim.api.nvim_create_autocmd({ "VimResized", "WinResized" }, {
+			callback = function()
+				if presentation.markdown_resize_pending then
+					return
+				end
+				presentation.markdown_resize_pending = true
+				vim.schedule(function()
+					presentation.markdown_resize_pending = false
+					if state.presentation ~= presentation or not valid_win(state.origin.win) then
+						return
+					end
+					if markdown_width(state, entry, layout) == engine_result.width then
+						return
+					end
+					local location = M.capture_location(state)
+					local shown, err =
+						M.show(state, entry, { layout = layout, context = context, markdown_view = "render" })
+					if shown and location then
+						M.restore_location(state, location)
+					elseif not shown then
+						vim.notify(tostring(err), vim.log.levels.ERROR, { title = "Review" })
+					end
+				end)
+			end,
+		})
+	end
 	return true
 end
 
@@ -1668,6 +1783,9 @@ end
 ---@param state table
 function M.clear(state)
 	local presentation = state and state.presentation
+	if presentation and presentation.markdown_resize_autocmd then
+		pcall(vim.api.nvim_del_autocmd, presentation.markdown_resize_autocmd)
+	end
 	if not presentation then
 		return
 	end
@@ -1742,6 +1860,7 @@ function M.toggle_layout(state)
 		layout = layout,
 		context = context,
 		engine_result = engine_result,
+		markdown_view = engine_result.markdown and "render" or nil,
 	})
 end
 
@@ -1760,6 +1879,7 @@ function M.toggle_context(state)
 		layout = layout,
 		context = context,
 		engine_result = engine_result,
+		markdown_view = engine_result.markdown and "render" or nil,
 	})
 end
 
@@ -2239,7 +2359,7 @@ function M.capture_location(state)
 			side = side,
 			path = path,
 			line = source_line,
-			col = source_line == 0 and 1 or cursor[2] + 1,
+			col = (source_line == 0 or presentation.engine_result.markdown) and 1 or cursor[2] + 1,
 		}
 	else
 		local target
@@ -2336,7 +2456,7 @@ function M.restore_location(state, location, expected_generation)
 		return nil, "review presentation changed while restoring its logical location"
 	end
 	local line = vim.api.nvim_buf_get_lines(target.buf, target_line - 1, target_line, false)[1] or ""
-	local column = math.max(0, math.min(location.col - 1, #line))
+	local column = presentation.engine_result.markdown and 0 or math.max(0, math.min(location.col - 1, #line))
 	vim.api.nvim_set_current_win(target.win)
 	vim.api.nvim_win_set_cursor(target.win, { target_line, column })
 	presentation.preferred_side = location.side

@@ -41,6 +41,7 @@ function M.setup(opts)
 				or name == "clipboard"
 				or name == "lsp_navigation"
 				or name == "structural_diff"
+				or name == "markdown"
 				or name == "config"
 				or name == "event",
 			"unknown native-review adapter: " .. name
@@ -79,11 +80,27 @@ function M.setup(opts)
 		)
 	end
 	assert(opts.event == nil or type(opts.event) == "function", "native-review event adapter must be a function")
+	if opts.markdown ~= nil then
+		assert(type(opts.markdown) == "table", "native-review adapter markdown must be a table")
+		assert(type(opts.markdown.build_snapshot) == "function", "markdown.build_snapshot is required")
+		assert(type(opts.markdown.version) == "string", "markdown.version is required")
+		assert(
+			opts.markdown.decorate == nil or type(opts.markdown.decorate) == "function",
+			"markdown.decorate must be a function"
+		)
+	end
 	values = {}
 	for name, value in pairs(opts) do
 		values[name] = value
 	end
 	values.clipboard = opts.clipboard or default_clipboard()
+	values.markdown = opts.markdown
+		or {
+			version = "unavailable",
+			build_snapshot = function()
+				return nil, "No Markdown renderer adapter is configured"
+			end,
+		}
 	values.structural_diff = opts.structural_diff
 		or {
 			run = function(_, callback)

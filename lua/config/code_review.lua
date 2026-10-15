@@ -16,6 +16,7 @@ local MAPPINGS = {
 	{ lhs = "<leader>rh", rhs = "<cmd>ReviewCommits<cr>", desc = "Focus review commits", help = "common" },
 	{ lhs = "<leader>rl", rhs = "<cmd>ReviewComments<cr>", desc = "Focus review comments", help = "common" },
 	{ lhs = "<leader>rv", rhs = "<cmd>ReviewLayout<cr>", desc = "Toggle review layout", help = "common" },
+	{ lhs = "<leader>rM", rhs = "<cmd>ReviewMarkdown<cr>", desc = "Toggle rendered Markdown diff", help = "common" },
 	{ lhs = "<leader>rD", rhs = "<cmd>ReviewEngine<cr>", desc = "Select review diff engine", help = "common" },
 	{ lhs = "<leader>rw", rhs = "<cmd>ReviewContext<cr>", desc = "Toggle review context", help = "common" },
 	{ lhs = "<leader>ri", rhs = "<cmd>ReviewInlineComments<cr>", desc = "Toggle inline comments", help = "common" },
@@ -186,6 +187,14 @@ local function setup_commands()
 			return { "hunks", "full" }
 		end,
 	})
+	command("ReviewMarkdown", function(value)
+		controller().markdown(value.args ~= "" and value.args or "toggle")
+	end, {
+		nargs = "?",
+		complete = function()
+			return { "source", "render", "toggle" }
+		end,
+	})
 	command("ReviewInlineComments", function(value)
 		controller().inline_comments(value.args ~= "" and value.args or "toggle")
 	end, {
@@ -319,6 +328,19 @@ function M.capture_location()
 		return nil
 	end
 	return review_controller.capture_location()
+end
+
+function M.source_document(selection)
+	local review_controller = loaded_controller()
+	local document, err
+	if review_controller and type(review_controller.source_document) == "function" then
+		document, err = review_controller.source_document(selection)
+	end
+	local role = vim.b.nvim_review_role
+	if not document and not err and role and role ~= "current" then
+		err = "The review source is no longer available"
+	end
+	return document, err
 end
 
 function M.restore_location(entry)

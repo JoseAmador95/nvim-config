@@ -42,6 +42,11 @@ test("host registration and neutral observers preserve the first-action boundary
 	assert(review.snapshot(true) == nil, "unloaded review exposed a snapshot")
 	assert(review.suspend_for_session() and review.restore_after_session(), "unloaded session hook was not neutral")
 	assert(review.capture_location() == nil, "unloaded review exposed a navigation location")
+	assert(review.source_document() == nil, "unloaded review exposed a frozen document")
+	vim.b.nvim_review_role = "markdown"
+	local document, document_err = review.source_document()
+	assert(not document and document_err, "orphaned rendered review fell back to a live document")
+	vim.b.nvim_review_role = nil
 	assert(
 		review.restore_location({ kind = "provider", provider = "native-review", payload = {} }) == false,
 		"unloaded review claimed to restore a navigation location"
@@ -82,6 +87,7 @@ test("host registration and neutral observers preserve the first-action boundary
 		"ReviewStructuralDiff",
 		"ReviewEngine",
 		"ReviewLayout",
+		"ReviewMarkdown",
 		"ReviewContext",
 		"ReviewInlineComments",
 		"ReviewComment",
@@ -100,7 +106,7 @@ test("host registration and neutral observers preserve the first-action boundary
 	}) do
 		assert(vim.fn.exists(":" .. command) == 2, command .. " was not registered lazily")
 	end
-	assert(#review.mapping_specs() == 26, "host mapping catalogue is incomplete")
+	assert(#review.mapping_specs() == 27, "host mapping catalogue is incomplete")
 	require("config.statusline").refresh_buffer(0)
 	require("plugins.auto-session")
 	require("plugins.navic")
@@ -174,6 +180,7 @@ test("mapping table uses only the approved lowercase review vocabulary", functio
 		"<leader>rh",
 		"<leader>rl",
 		"<leader>rv",
+		"<leader>rM",
 		"<leader>rD",
 		"<leader>rw",
 		"<leader>ri",

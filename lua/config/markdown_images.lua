@@ -9,6 +9,7 @@
 -- `backtick` commands. Every such path is checked here before upstream sees
 -- it, whether or not images are displayed.
 local M = {}
+local references_only = false
 
 local fs = require("config.fs")
 
@@ -415,6 +416,9 @@ function M.install(image_module, rebuild_callback)
 			return remote_allowed(value)
 		end,
 		resolve = function(src, base_dir)
+			if references_only then
+				return nil
+			end
 			if type(src) ~= "string" then
 				return nil
 			end
@@ -484,6 +488,8 @@ end
 -- Run one md-render build for the document named by opts.nvim_config_image_doc.
 -- Builds without a document never load remote images.
 function M.around(opts, build)
+	local previous_references_only = references_only
+	references_only = previous_references_only or opts and opts.nvim_config_review == true or false
 	local buf = type(opts) == "table" and opts.nvim_config_image_doc or nil
 	local doc
 	if originals and type(buf) == "number" and vim.api.nvim_buf_is_valid(buf) then
@@ -495,6 +501,7 @@ function M.around(opts, build)
 	current = doc
 	local ok, content = pcall(build)
 	current = previous
+	references_only = previous_references_only
 	if not ok then
 		error(content, 0)
 	end

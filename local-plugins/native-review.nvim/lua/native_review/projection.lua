@@ -273,6 +273,50 @@ local function source_side(side)
 	return side
 end
 
+-- Rendered rows name complete source blocks. Repeated rows are intentional;
+-- fillers and crossings between OLD and NEW can never become comment anchors.
+local function rendered_range(projection, first, last, preferred_side)
+	local side = preferred_side
+	for line = first, last do
+		local row = projection.rows[line]
+		if not row or not row.anchorable then
+			return nil, "rendered selection includes a non-anchorable row; use the source view"
+		end
+		local only = not row.old_range and "new" or not row.new_range and "old" or nil
+		if only and side and side ~= only then
+			return nil, "rendered selection crosses OLD and NEW blocks"
+		end
+		side = only or side
+	end
+	side = side or "new"
+	local start_line, end_line, previous_first
+	for line = first, last do
+		local range = projection.rows[line][side .. "_range"]
+		if not range then
+			return nil, "rendered block has no range on the selected source side"
+		elseif end_line and range.first > end_line + 1 then
+			for gap = end_line + 1, range.first - 1 do
+				if vim.trim(projection.sources[side].lines[gap].text) ~= "" then
+					return nil, "rendered selection skips source content; use the source view"
+				end
+			end
+		elseif previous_first and range.first < previous_first then
+			return nil, "rendered selection reverses source order"
+		end
+		start_line = start_line or range.first
+		end_line = math.max(end_line or 0, range.last)
+		previous_first = range.first
+	end
+	return {
+		display_first = first,
+		display_last = last,
+		path = projection.sources[side].path,
+		side = side,
+		start_line = start_line,
+		end_line = end_line,
+	}
+end
+
 ---Resolve one display row to its canonical source anchor.
 ---@param projection table
 ---@param display_line integer
@@ -316,6 +360,9 @@ function M.resolve_range(projection, first, last, preferred_side)
 	preferred_side = source_side(preferred_side)
 	if preferred_side ~= nil and preferred_side ~= "old" and preferred_side ~= "new" then
 		return nil, "preferred source side must be old/new or left/right"
+	end
+	if projection and projection.rendered then
+		return rendered_range(projection, first, last, preferred_side)
 	end
 
 	local rows = {}
@@ -409,6 +456,23 @@ function M.rows_for_range(projection, side, first, last, path)
 		return nil, "source range must use positive integer lines"
 	end
 	first, last = math.min(first, last), math.max(first, last)
+	if projection and projection.rendered then
+		side = source_side(side)
+		for line = first, last do
+			local located, err = M.locate(projection, side, line, path)
+			if not located then
+				return nil, err
+			end
+		end
+		local result = {}
+		for index, row in ipairs(projection.rows) do
+			local range = row[side .. "_range"]
+			if range and range.first <= last and range.last >= first then
+				result[#result + 1] = index
+			end
+		end
+		return result
+	end
 	local rows = {}
 	for line = first, last do
 		local display_line, locate_err = M.locate(projection, side, line, path)
@@ -428,10 +492,24 @@ function M.sections(projection, context)
 	context = math.max(0, math.floor(tonumber(context) or 0))
 	local values = {}
 	for index, hunk in ipairs(projection and projection.hunks or {}) do
+		local first, last = math.max(1, hunk.first - context), math.min(#projection.rows, hunk.last + context)
+		if projection.rendered then
+			local first_block, last_block
+			for block, range in ipairs(projection.blocks) do
+				if range.first <= hunk.first and range.last >= hunk.first then
+					first_block = block
+				end
+				if range.first <= hunk.last and range.last >= hunk.last then
+					last_block = block
+				end
+			end
+			first = projection.blocks[math.max(1, first_block - context)].first
+			last = projection.blocks[math.min(#projection.blocks, last_block + context)].last
+		end
 		values[#values + 1] = {
-			first = math.max(1, hunk.first - context),
+			first = first,
 			hunks = { index },
-			last = math.min(#projection.rows, hunk.last + context),
+			last = last,
 		}
 	end
 	local merged = {}

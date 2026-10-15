@@ -11,7 +11,8 @@ CURRENT-only LSP and diagnostic bridge.
 
 The plugin never imports `config.*` and never registers global commands or
 global mappings. `setup(opts)` receives repository, filesystem, editor, tabs,
-clipboard, event and LSP-navigation adapters. Its own panels, protected review
+clipboard, event and LSP-navigation adapters, with an optional Markdown snapshot
+adapter. Its own panels, protected review
 buffers, composers, and export previews may install buffer-local mappings.
 
 The host keeps `:Review*` commands, global mappings, menu/statusline adapters,
@@ -44,6 +45,7 @@ local review = require("native_review").setup({
     valid_transient = valid_transient,
   },
   lsp_navigation = lsp_navigation_adapter,
+  markdown = markdown_snapshot_adapter, -- optional, render on demand
   event = function(status) end,
   hunk_context = 3,
   max_files = 2000,
@@ -94,6 +96,94 @@ colors. Inserted/deleted lines retain their line backgrounds. Refinement skips
 blocks over 128 KiB or 8192 remaining graphemes and retains the line diff.
 Only the selected frozen entry's detail is cached across presentation changes.
 Canonical Git hunks and anchors remain independent of the display engine.
+
+### Visual Markdown diff
+
+The host's `:ReviewMarkdown [source|render|toggle]` and `<leader>rM` select a
+workspace-local view, starting in source. Markdown rendering uses the exact
+frozen OLD/NEW strings, never unsaved buffers or the current worktree. The host
+adapter guards `md-render.nvim` v3.10.3 and installed Markdown parsers. It returns
+rendered blocks with original source ranges, visible styles, pre-wrap text and
+byte spans; the plugin compares those blocks and owns all buffers and anchors.
+Missing renderer/parser or build errors retain the previous presentation.
+
+`ReviewLayout inline` shows unchanged content once and changed OLD blocks before
+NEW blocks. `split` aligns OLD on the left and NEW on the right at a common
+width. Both use protected, pre-wrapped buffers with LSP disabled. `ReviewContext`
+counts complete blocks, logical table rows and code lines around visual hunks.
+Fillers and decoration-only rows
+cannot anchor range comments. Width changes rebuild rows and remap cached word
+edits for the selected frozen entry without reclassifying its visual changes.
+Tables and code stay complete; code fences retain language labels. Tables with
+matching headers, columns and alignment compare logical rows. Unchanged rows
+stay as context after row insertion/deletion or cell-width changes. A wrapped
+grid row or field/value card retains one original source-row anchor. Header or
+column-layout changes retain the whole-table fallback. Bottom frames in row
+comparisons are decoration-only and have no range anchor.
+
+Code fences with matching languages and container shapes compare original
+source lines. Inserted/deleted lines leave shifted, repeated and blank lines as
+context; all wrapped fragments keep one exact source-line anchor. Language or
+container changes keep the whole-block fallback. Syntax captures come from each
+complete frozen OLD/NEW fence before wrapping, preserving aliases and multiline
+tokens without letting OLD parser state bleed into NEW. Installed language
+parsers and highlight queries are optional: missing support keeps plain code.
+Diff backgrounds preserve syntax foregrounds; syntax recoloring does not
+classify line edits.
+
+Visual equality includes rendered text, inline styles and block structure.
+Link destinations and equivalent wrapping/whitespace are absent from this
+comparison when the renderer hides them. A source change with no visual change
+shows `No visual changes`. Source engines remain available through
+`ReviewMarkdown source`; selecting `ReviewEngine` prepares that engine before
+switching to source. Non-Markdown entries use the selected source engine while
+retaining the Markdown view preference for the next Markdown entry.
+
+Changed words are refined in corresponding prose, code and table units; changed
+structure, ambiguous correspondence and the existing 128 KiB / 8192-token detail
+bounds retain whole-block or whole-line backgrounds. A rendered range comment
+names the complete original block, table row or code line on one side, never a
+rendered byte column. Cross-side,
+filler, reversed or source-skipping selections are rejected. Existing comments
+whose source range is hidden can be opened from the comments panel, which returns
+to source. New rendered comments record `markdown-visual` and
+`visual-v3 / md-render 3.10.3`; earlier comments retain their recorded origin,
+and the canonical model and store v3 schema are unchanged.
+
+Images remain visible frozen references, including reference-style destinations.
+Building the diff accesses no current image files, network downloads or diagram
+renderers. The host's explicit `<leader>md` / `:DiagramShow` action can preview a
+Mermaid/PlantUML fence from the selected frozen OLD/NEW document in either view.
+Rendered selections within a single fence preview that complete fence; cross-side and filler rows
+are rejected. Image previews remain references-only in Review.
+The ordinary reading view and its image approval policy remain independent.
+
+`controller.source_document(selection?)` returns a detached `lines`, `filetype`,
+`row`, `path`, `side`, `frozen` and `rendered` document for the owned review pane,
+or `nil, error` for an invalid source. Optional selections use display rows and
+return canonical source `selection` rows. Rendered documents omit `col`; source
+documents keep the source byte column. It never reads a current file or buffer.
+
+The optional adapter provides `version: string`,
+`build_snapshot({ text, path, width }) -> document | nil, error` and optional
+`decorate({ projection, buf, win, width })`. A document's ordered `blocks` carry
+`source = { first, last, kind }` or no anchor, `lines`, row-indexed `highlights`,
+semantic `units` with display byte `spans`, `structure`, `code_blocks` and a visual
+`fingerprint`. An optional `correspondence` descriptor distinguishes structural
+shapes without participating in visual equality; `kind` is the fallback. Word
+detail requires a one-to-one unmatched block run with matching shapes and units.
+An optional `table_rows = { schema, blocks }` supplies a width-independent header
+schema and ordered header, logical row and frame blocks. The comparator expands
+tables with a shared schema before alignment; incompatible tables retain their
+whole block. Row signatures exclude absolute source-row indices and geometry.
+An optional `code_lines = { schema, blocks }` supplies a width-independent
+language/container schema and ordered code-line and surrounding frame blocks.
+Each logical code line carries its one original source-line range. Highlight
+groups may specify an extmark `priority`; frozen syntax captures use `syntax =
+true` and stay independent of comparison signatures and token styles.
+Only the host knows renderer internals; the plugin never imports
+`config.*` or opens a live Markdown preview session. See
+[ADR 0004](../../docs/adr/0004-markdown-visual-review.md).
 
 `:ReviewEngine` or `<leader>rD` opens the numbered engine picker; use
 `:ReviewEngine main|patience|difftastic` to choose directly. Main is

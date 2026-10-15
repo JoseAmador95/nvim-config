@@ -289,6 +289,31 @@ test("setup requires every transient tab lease method atomically", function()
 	end
 end)
 
+test("Markdown adapter validation is atomic and optional across repeated setup", function()
+	setup({ markdown = {
+		version = "test-v1",
+		build_snapshot = function()
+			return { blocks = {} }
+		end,
+	} })
+	local proxy = require("native_review.dependencies").get("markdown")
+	local before = native_review.status()
+	for _, adapter in ipairs({
+		true,
+		{},
+		{ version = "test-v1" },
+		{ version = "test-v1", build_snapshot = function() end, decorate = true },
+	}) do
+		local ok, err = pcall(setup, { markdown = adapter })
+		assert(not ok and tostring(err):lower():find("markdown", 1, true), tostring(err))
+		equal(before, native_review.status(), "rejected Markdown adapter mutated status")
+		assert(proxy.version == "test-v1", "rejected Markdown adapter replaced active dependencies")
+	end
+	setup()
+	local document, err = proxy.build_snapshot({})
+	assert(not document and err:find("No Markdown renderer", 1, true))
+end)
+
 test("clipboard adapter is optional, strict, and replaced through its stable proxy", function()
 	local before = native_review.status()
 	for _, adapter in ipairs({ true, {}, { available = function() end }, { setreg = function() end } }) do
@@ -443,16 +468,17 @@ end)
 
 test("session preferences override normalized defaults", function()
 	equal(
-		{ layout = "inline", context = "hunks", engine = "main", inline_comments = true },
+		{ layout = "inline", context = "hunks", engine = "main", markdown_view = "source", inline_comments = true },
 		native_review.controller._workspace_preferences(nil, nil),
 		"normalized defaults"
 	)
 	equal(
-		{ layout = "split", context = "full", engine = "difftastic", inline_comments = false },
+		{ layout = "split", context = "full", engine = "difftastic", markdown_view = "render", inline_comments = false },
 		native_review.controller._workspace_preferences(nil, {
 			layout = "split",
 			context = "full",
 			engine = "difftastic",
+			markdown_view = "render",
 			inline_comments = false,
 		}),
 		"session preference override"

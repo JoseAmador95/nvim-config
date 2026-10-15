@@ -79,6 +79,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					"MarkdownView",
 					"ReviewOpen",
 					"ReviewPanel",
+					"ReviewMarkdown",
 					"ReviewComment",
 					"ReviewReanchor",
 					"ReviewExport",
@@ -110,6 +111,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 					package.loaded["config.native_review"] == nil,
 					"native review host adapter loaded during startup"
 				)
+				assert(package.loaded["config.review_markdown"] == nil, "Markdown review adapter loaded during startup")
 				for name in pairs(package.loaded) do
 					assert(
 						not is_module_or_child(name, "native_review"),

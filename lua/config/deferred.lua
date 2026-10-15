@@ -25,6 +25,7 @@ local allowed = {
 	["just_workbench"] = true,
 	["log_workbench.matches"] = true,
 	["md-render"] = true,
+	["md-render.content_builder"] = true,
 	["md-render.image"] = true,
 	["md-render.wrap"] = true,
 	["nvim-jqx.config"] = true,

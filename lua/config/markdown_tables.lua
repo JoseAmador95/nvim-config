@@ -27,6 +27,10 @@ local function build_layout(opts)
 	return {
 		wrap = opts.nvim_config_wrap ~= false,
 		extra = type(table_width) == "number" and math.max(0, math.floor(table_width) - max_width) or 0,
+		table_layout = opts.nvim_config_review
+				and type(opts.nvim_config_table_layout) == "function"
+				and opts.nvim_config_table_layout
+			or nil,
 	}
 end
 
@@ -501,6 +505,7 @@ function M.configure(preview, wrap, markdown_table, postprocess, around)
 		return postprocess and postprocess(content, opts) or content
 	end
 	local function render_table(parsed, indent, max_width, expanded, buf_dir)
+		local stacked = false
 		if active then
 			-- One-line HTML tables arrive without an expansion state.
 			expanded = true
@@ -524,9 +529,15 @@ function M.configure(preview, wrap, markdown_table, postprocess, around)
 			local card_lines, card_highlights, card_links, card_images, card_offsets =
 				stacked_table(parsed, indent, max_width, buf_dir, original_render_table)
 			if card_lines then
+				stacked = true
 				lines, highlights, links, images, source_offsets =
 					card_lines, card_highlights, card_links, card_images, card_offsets
 			end
+		end
+		-- Review records the actual layout before mapping semantic cell bytes.
+		-- Ordinary reading views do not request this build-scoped metadata.
+		if active and active.table_layout then
+			active.table_layout(stacked)
 		end
 		return add_table_caps(lines, highlights, links, images, source_offsets, indent)
 	end

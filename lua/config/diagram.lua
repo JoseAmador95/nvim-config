@@ -6,6 +6,7 @@ local deferred = require("config.deferred")
 local diagram_image = require("config.diagram_image")
 local local_config = require("config.local_config")
 local markdown_view = require("config.markdown_view")
+local code_review = require("config.code_review")
 local tool_paths = require("config.tool_paths")
 local view
 local configured = false
@@ -692,17 +693,41 @@ function M.show(mode, selection)
 		notify("Could not initialize diagram viewer: " .. tostring(setup_err), vim.log.levels.ERROR)
 		return nil, setup_err
 	end
-	local target, target_err = markdown_view.diagram_target(selection)
+	local target, target_err = code_review.source_document(selection)
+	if not target and not target_err then
+		target, target_err = markdown_view.diagram_target(selection)
+	end
 	if not target then
 		notify(target_err, vim.log.levels.WARN)
 		return nil, target_err
+	end
+	local rendered_selection = target.rendered and target.selection
+	if rendered_selection then
+		target.selection = nil
 	end
 	local diagram, extract_err = core.extract(target)
 	if not diagram then
 		notify(extract_err, vim.log.levels.WARN)
 		return nil, extract_err
 	end
+	if
+		rendered_selection
+		and (
+			diagram.origin.type ~= "fence"
+			or diagram.origin.start_row > rendered_selection.start_row
+			or diagram.origin.end_row < rendered_selection.end_row
+		)
+	then
+		local message = "Select rows within a single diagram block in rendered review"
+		notify(message, vim.log.levels.WARN)
+		return nil, message
+	end
 	if diagram.kind == "image" then
+		if target.frozen then
+			local message = "Review images are frozen references; open the source file to preview a current image"
+			notify(message, vim.log.levels.WARN)
+			return nil, message
+		end
 		return show_image(core, diagram, target, requested == "ascii")
 	end
 
@@ -802,7 +827,7 @@ local function register_interface()
 		)
 	end
 	vim.api.nvim_create_autocmd("FileType", {
-		pattern = { "markdown", "plantuml" },
+		pattern = { "markdown", "plantuml", "md-render" },
 		group = vim.api.nvim_create_augroup("DiagramKeymaps", { clear = true }),
 		callback = function(args)
 			map(args.buf)
@@ -811,7 +836,7 @@ local function register_interface()
 	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 		if vim.api.nvim_buf_is_loaded(buf) then
 			local filetype = vim.bo[buf].filetype
-			if filetype == "markdown" or filetype == "plantuml" then
+			if filetype == "markdown" or filetype == "plantuml" or filetype == "md-render" then
 				map(buf)
 			end
 		end

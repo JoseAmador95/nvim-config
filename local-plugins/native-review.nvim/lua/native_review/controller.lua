@@ -370,6 +370,7 @@ function M.status()
 		layout = workspace.layout,
 		context = workspace.context,
 		engine = workspace.engine or "main",
+		markdown_view = workspace.markdown_view or "source",
 		effective_engine = workspace.mode_state and workspace.mode_state.presentation and vim.deepcopy(
 			workspace.mode_state.presentation.origin_engine
 		) or nil,
@@ -1516,6 +1517,7 @@ local function ui_snapshot(workspace, focus)
 		layout = workspace.layout,
 		context = workspace.context,
 		engine = workspace.engine or "main",
+		markdown_view = workspace.markdown_view or "source",
 		inline_comments = workspace.inline_comments ~= false,
 		mode_on = workspace.mode_on == true,
 		panel_visible = panel_open(workspace),
@@ -1671,6 +1673,7 @@ local function restore_ui(workspace, snapshot)
 	workspace.layout = snapshot.layout
 	workspace.context = snapshot.context
 	workspace.engine = snapshot.engine or "main"
+	workspace.markdown_view = snapshot.markdown_view or "source"
 	workspace.inline_comments = snapshot.inline_comments
 	if snapshot.mode_on or snapshot.panel_visible then
 		local acquired, acquire_err = acquire_surface(workspace)
@@ -1780,6 +1783,7 @@ local function workspace_preferences(existing, preferences)
 		layout = preferences.layout or (existing and existing.layout) or config.layout,
 		context = preferences.context or (existing and existing.context) or config.context,
 		engine = preferences.engine or (existing and existing.engine) or "main",
+		markdown_view = preferences.markdown_view or (existing and existing.markdown_view) or "source",
 		inline_comments = inline_comments,
 	}
 end
@@ -1799,6 +1803,7 @@ local function activate(root, session, model, options)
 		layout = resolved_preferences.layout,
 		context = resolved_preferences.context,
 		engine = resolved_preferences.engine,
+		markdown_view = resolved_preferences.markdown_view,
 		inline_comments = resolved_preferences.inline_comments,
 		scope = session.scope,
 		session = session,
@@ -2000,6 +2005,7 @@ open_drilldown = function(request, parent)
 			layout = parent.layout,
 			context = parent.context,
 			engine = parent.engine,
+			markdown_view = parent.markdown_view or "source",
 			inline_comments = parent.inline_comments ~= false,
 		},
 	})
@@ -2158,7 +2164,12 @@ function M.present(identity, expected, options)
 		return nil, "review entry is no longer part of the exact model"
 	end
 	cancel_engine()
-	local engine_result, engine_err = prepared_engine(workspace, entry)
+	local engine_result, engine_err
+	if workspace.markdown_view == "render" and review_presenter.supports_markdown(entry) then
+		engine_result = {}
+	else
+		engine_result, engine_err = prepared_engine(workspace, entry)
+	end
 	if not engine_result then
 		return nil, engine_err
 	end
@@ -2200,6 +2211,7 @@ function M.present(identity, expected, options)
 		context = workspace.context,
 		side = options and options.side or nil,
 		engine_result = engine_result,
+		markdown_view = workspace.markdown_view,
 	})
 	if not shown then
 		if not present_owner_current(workspace, generation, state, expected_surface) then
@@ -2344,6 +2356,7 @@ function M.mode(value)
 			layout = workspace.layout,
 			context = workspace.context,
 			engine = workspace.engine or "main",
+			markdown_view = workspace.markdown_view or "source",
 			inline_comments = workspace.inline_comments ~= false,
 			mode_on = true,
 			panel_visible = true,
@@ -2415,12 +2428,20 @@ local function presentation_option(name, value, allowed)
 		return nil, name .. " must be " .. allowed[1] .. " or " .. allowed[2]
 	end
 	local previous = workspace[name]
+	local location = workspace.mode_state
+		and workspace.mode_state.presentation
+		and workspace.mode_state.presentation.source_line_counts
+		and (name == "markdown_view" or workspace.mode_state.presentation.engine_result.markdown)
+		and review_presenter.capture_location(workspace.mode_state)
 	workspace[name] = value
 	if workspace.mode_on and workspace.entry_identity then
 		local shown, err = M.present(workspace.entry_identity, nil, { emit = false })
 		if not shown then
 			workspace[name] = previous
 			return nil, err
+		end
+		if location then
+			review_presenter.restore_location(workspace.mode_state, location)
 		end
 	end
 	update_panel(workspace)
@@ -2461,6 +2482,7 @@ function M.engine(id)
 	local entry = find_entry(workspace, workspace.entry_identity)
 	if not entry then
 		workspace.engine = id
+		workspace.markdown_view = "source"
 		emit_changed()
 		return true
 	end
@@ -2484,17 +2506,20 @@ function M.engine(id)
 			notify(blocked_now or err or "Could not prepare the diff engine", vim.log.levels.ERROR)
 			return
 		end
-		local previous, previous_cache = workspace.engine, workspace.engine_prepared
+		local previous, previous_cache, previous_markdown =
+			workspace.engine, workspace.engine_prepared, workspace.markdown_view
 		local location = workspace.mode_state
 				and workspace.mode_state.presentation
 				and review_presenter.capture_location(workspace.mode_state)
 			or nil
 		workspace.engine = id
+		workspace.markdown_view = "source"
 		workspace.engine_prepared = { id = id, snapshot = snapshot, result = result }
 		if workspace.mode_on then
 			local shown, show_err = M.present(entry.identity, nil, { emit = false })
 			if not shown then
 				workspace.engine, workspace.engine_prepared = previous, previous_cache
+				workspace.markdown_view = previous_markdown
 				notify(show_err, vim.log.levels.ERROR)
 				return
 			end
@@ -2516,6 +2541,31 @@ function M.engine(id)
 		request.cancel = handle
 	end
 	return true
+end
+
+function M.markdown(value)
+	local workspace = current_workspace()
+	local blocked = composer_transition_error("change the Markdown view")
+	local entry = workspace and find_entry(workspace, workspace.entry_identity)
+	value = value and value ~= "" and value or "toggle"
+	if value == "toggle" then
+		value = workspace and workspace.markdown_view == "render" and "source" or "render"
+	end
+	local err = blocked
+		or not workspace and "No active review"
+		or (value ~= "source" and value ~= "render") and "Usage: ReviewMarkdown [source|render|toggle]"
+		or value == "render"
+			and (not entry or not review_presenter.supports_markdown(entry))
+			and "The selected review entry is not Markdown"
+	if err then
+		notify(err, vim.log.levels.ERROR)
+		return nil, err
+	end
+	local ok, change_err = presentation_option("markdown_view", value, { "source", "render" })
+	if not ok then
+		notify(change_err, vim.log.levels.ERROR)
+	end
+	return ok, change_err
 end
 
 function M.layout(value)
@@ -3024,6 +3074,77 @@ local function source_lines(entry, side)
 		text = text:sub(1, -2)
 	end
 	return vim.split(text, "\n", { plain = true })
+end
+
+---Return a detached frozen document at the current OLD/NEW review position.
+---Rendered selections map whole blocks; source selections keep exact lines.
+---@param selection? { start_row: integer, end_row: integer }
+---@return table? document
+---@return string? err
+function M.source_document(selection)
+	local captured, err = M.capture_location()
+	if not captured then
+		return nil, err
+	end
+	local location = captured.payload
+	if location.line < 1 then
+		return nil, "Selected review row has no source content"
+	end
+	local workspace = current_workspace()
+	local state = workspace.mode_state
+	local presentation = state.presentation
+	local entry = find_entry(workspace, location.entry_identity)
+	local rendered = presentation.engine_result.markdown == true
+	local lines = source_lines(entry, location.side == "old" and "left" or "right")
+	if selection then
+		if
+			type(selection) ~= "table"
+			or type(selection.start_row) ~= "number"
+			or type(selection.end_row) ~= "number"
+			or selection.start_row % 1 ~= 0
+			or selection.end_row % 1 ~= 0
+			or selection.start_row < 1
+			or selection.end_row < 1
+		then
+			return nil, "Review source selection must use positive integer rows"
+		end
+		local first, last =
+			math.min(selection.start_row, selection.end_row), math.max(selection.start_row, selection.end_row)
+		if presentation.projection or presentation.split_projections then
+			local cursor_row = vim.api.nvim_win_get_cursor(vim.api.nvim_get_current_win())[1]
+			local preferred_side = cursor_row >= first and cursor_row <= last and location.side or nil
+			local range, range_err = review_presenter.resolve_range(
+				state,
+				first,
+				last,
+				presentation.generation,
+				preferred_side,
+				vim.api.nvim_get_current_win()
+			)
+			if not range then
+				return nil, range_err
+			end
+			location.side, location.path = range.side, range.path
+			lines = source_lines(entry, range.side == "old" and "left" or "right")
+			first, last = range.start_line, range.end_line
+		end
+		if last > #lines then
+			return nil, "Review source selection exceeds the frozen document"
+		end
+		selection = { start_row = first, end_row = last }
+		location.line = first
+	end
+	return {
+		lines = lines,
+		filetype = vim.filetype.match({ filename = location.path }),
+		row = location.line,
+		col = not rendered and location.col or nil,
+		selection = selection,
+		path = location.path,
+		side = location.side,
+		frozen = true,
+		rendered = rendered,
+	}
 end
 
 local function context_for_entry(entry, side, first, last)
@@ -4274,6 +4395,15 @@ function M.jump(id)
 	if presentation.projection or presentation.split_projections then
 		local display_err
 		target, display_err = displayed_anchor(workspace, anchor)
+		if not target and presentation.engine_result.markdown then
+			local restored, restore_err = M.markdown("source")
+			if restored then
+				presentation = workspace.mode_state.presentation
+				target, display_err = displayed_anchor(workspace, anchor)
+			else
+				display_err = restore_err
+			end
+		end
 		if not target then
 			notify(display_err, vim.log.levels.ERROR)
 			return false
@@ -4852,6 +4982,7 @@ function M.suspend_for_session()
 				layout = workspace.layout,
 				context = workspace.context,
 				engine = workspace.engine or "main",
+				markdown_view = workspace.markdown_view or "source",
 				inline_comments = workspace.inline_comments ~= false,
 				mode_on = false,
 				panel_visible = false,

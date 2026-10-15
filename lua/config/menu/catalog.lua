@@ -30,7 +30,7 @@ local function is_filetype(filetype)
 end
 
 local function supports_diagrams(context)
-	return context.filetype == "markdown" or context.filetype == "plantuml"
+	return context.filetype == "markdown" or context.filetype == "plantuml" or context.filetype == "md-render"
 end
 
 local function descriptor(id, label, hint, when, metadata)
@@ -420,6 +420,13 @@ function M.definitions()
 			palette_item("command.review_files", "Focus Review Files", "<leader>rf"),
 			palette_item("command.review_commits", "Focus Review Commits", "<leader>rh"),
 			palette_item("command.review_code", "Focus Reviewed Code", "<leader>rg"),
+			palette_item(
+				"command.review_markdown",
+				"Toggle Rendered Markdown Diff",
+				"<leader>rM",
+				nil,
+				{ "markdown", "render", "visual" }
+			),
 			palette_item(
 				"command.review_layout",
 				"Toggle Side-by-side / Unified Inline Diff",

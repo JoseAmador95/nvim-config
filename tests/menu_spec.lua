@@ -315,9 +315,9 @@ test("every curated definition has an executable action", function()
 			end
 		end
 	end
-	assert(descriptor_count == 289, "catalog must retain exactly 289 explicit descriptors")
+	assert(descriptor_count == 290, "catalog must retain exactly 290 explicit descriptors")
 	equal(
-		"7ae71eb24142cba791387897e6a84a6f394e0d35edec3a46c78d2e9530a574e8",
+		"9d4fae03b6bd82fe7cc05659d93de11e63bd1fc03e25d5bd2c3712c96ac12811",
 		vim.fn.sha256(table.concat(inventory, "\0")),
 		"descriptor labels, order, availability or search metadata drifted"
 	)
@@ -369,6 +369,7 @@ test("review presentation and comment actions are palette-only namespaced comman
 	equal({ "context", "hunks", "full", "whole file", "folds" }, context_item.keywords, "review context search terms")
 	assert(not find_item(compact, "command.review_context"), "review context leaked into the context menu")
 	for id, expected in pairs({
+		["command.review_markdown"] = { "Toggle Rendered Markdown Diff", "<leader>rM" },
 		["command.review_structural_diff"] = { "Open Structural Diff" },
 		["command.review_panel"] = { "Toggle Review Panel", "<leader>rr" },
 		["command.review_mode"] = { "Toggle Read-only Review Mode", "<leader>rm" },
@@ -455,6 +456,13 @@ test("catalog filters visual, filetype, and CMake descriptors from context", fun
 		assert(find_item(markdown_menu, id), "context menu lost a Markdown render action: " .. id)
 	end
 	assert(not find_item(markdown_menu, "command.markdown_images"), "palette-only image choice leaked into context")
+	local rendered_context = context.new({ filetype = "md-render" })
+	local rendered_palette = catalog.build(rendered_context, dispatch, "palette")
+	for _, id in ipairs({ "command.diagram_show", "command.diagram_show_svg", "command.diagram_show_ascii" }) do
+		assert(find_item(rendered_palette, id), "rendered diagram action is missing: " .. id)
+	end
+	assert(find_item(catalog.build(rendered_context, dispatch, "context"), "command.diagram_show"))
+	assert(not find_item(rendered_palette, "command.markdown_preview"), "source browser preview leaked into render")
 	assert(not find_section(lua_sections, "render"), "render section leaked into Lua")
 	assert(not find_section(catalog.build(context.new({ filetype = "yaml" }), dispatch), "file.yaml"))
 	assert(not find_section(catalog.build(context.new({ filetype = "xml" }), dispatch), "file.xml"))

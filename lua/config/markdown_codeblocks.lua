@@ -188,7 +188,13 @@ function M.decorate(session)
 				end
 			end
 		end
-		if label and type(row) == "number" and row >= 0 and row < #lines then
+		if
+			label
+			and type(row) == "number"
+			and row >= 0
+			and row < #lines
+			and not (session.opts and session.opts.nvim_config_code_labels == false)
+		then
 			-- Virtual lines start at the window's text edge, before the margin.
 			local indent = nonnegative_integer(block.prefix_len, left)
 			vim.api.nvim_buf_set_extmark(buf, namespace, row, 0, {

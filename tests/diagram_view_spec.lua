@@ -86,6 +86,12 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 
 	equal(2, vim.fn.exists(":DiagramShow"), "host command is missing")
 	assert(package.loaded.diagram_view == nil, "host registration initialized diagram-view")
+	assert(package.loaded["config.native_review"] == nil, "diagram registration initialized native review")
+	local render_buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_set_current_buf(render_buf)
+	vim.bo[render_buf].filetype = "md-render"
+	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>md", "n", false, true)), "rendered diagram mapping is missing")
+	assert(not vim.tbl_isempty(vim.fn.maparg("<leader>md", "x", false, true)), "rendered visual mapping is missing")
 
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
@@ -105,6 +111,7 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 	equal({ "/verified/mmdflux" }, jobs_a[#jobs_a].argv, "renderer did not use the resolved executable path")
 	assert(package.loaded.diagram_view ~= nil, "first DiagramShow did not initialize diagram-view")
 	assert(package.loaded["config.tool_bootstrap"] == nil, "injected resolver still loaded the tool bootstrap")
+	assert(package.loaded["config.native_review"] == nil, "ordinary DiagramShow initialized native review")
 	local core = require("diagram_view")
 	local status = core.status()
 	equal({ "image:svg", "mermaid:ascii", "mermaid:svg", "plantuml:ascii", "plantuml:svg" }, status.renderers)

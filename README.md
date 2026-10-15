@@ -162,7 +162,29 @@ actions stay pinned at the top for the current Neovim session. Configure or
 disable that in `~/.nvim-local.lua` with
 `plugins = { action_palette = { recent_limit = 5 } }` (`0..20`).
 
-Markdown stays raw and editable in the full editor, including native review.
+Markdown source stays raw and editable in the full editor. Native review starts
+with its protected source diff. For Markdown entries, `:ReviewMarkdown` or
+`<leader>rM` toggles an on-demand visual diff using the pinned renderer;
+`:ReviewMarkdown source|render` selects explicitly. `:ReviewLayout inline|split`
+and `<leader>rv` switch between OLD then NEW in one pane and aligned OLD/NEW
+panes. Tables with matching headers and columns compare individual rows;
+unchanged rows stay as context, including around inserted or deleted rows.
+Code fences with matching languages and containers compare original source
+lines and retain syntax colors from installed language parsers. Each side is
+highlighted from its complete frozen fence before wrapping. Table-row and
+code-line comments anchor the original source line. `:ReviewContext hunks|full`
+applies to complete rendered blocks, logical table rows and code lines. Changed
+words receive stronger backgrounds within changed blocks; equivalent source
+wrapping, hidden link destinations and other visually equal edits remain
+visible only in source. Other rendered comments anchor the whole original
+Markdown block, and opening a comment on hidden source content reveals the source diff.
+Images show frozen references; building the diff never loads pictures or runs
+diagrams. `<leader>md` or `:DiagramShow` previews the Mermaid/PlantUML fence from
+the selected frozen OLD/NEW side in either source or rendered view, including
+rendered selections within a single block. Image previews remain references-only
+in Review. Selecting `:ReviewEngine` prepares and returns to source;
+failure preserves the current view. See the [review plugin contract](local-plugins/native-review.nvim/README.md#visual-markdown-diff).
+
 `:MarkdownView` or `<leader>mv` opens a focused, read-only reading view in a
 new tab. The editable source stays in its original tab, and unsaved changes
 update the render live. Invoke the command from the source to focus its existing
