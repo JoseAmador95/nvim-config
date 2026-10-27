@@ -69,26 +69,15 @@ local function configure(overrides)
 			return fallback
 		end,
 		terminal = terminal,
-		test_runner = overrides.test_runner,
 		repl = overrides.repl,
 	})
 end
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
-test("pre-setup public defaults and aggregate status are copied", function()
+T["pre-setup public defaults and aggregate status are copied"] = function()
 	local first = project_python.effective_config()
-	assert(first.test_runner == "pytest")
 	assert(first.repl.readiness_timeout_ms == 5000 and first.repl.poll_interval_ms == 50)
 	first.repl.poll_interval_ms = 1
 	first.root_markers[1] = "mutated"
@@ -101,9 +90,9 @@ test("pre-setup public defaults and aggregate status are copied", function()
 	assert(status.configured == false and vim.tbl_isempty(status.snapshots))
 	status.configured = true
 	assert(project_python.status().configured == false)
-end)
+end
 
-test("ty and legacy markers resolve the same nested project root", function()
+T["ty and legacy markers resolve the same nested project root"] = function()
 	configure()
 	assert(vim.fn.delete(service .. "/pyproject.toml") == 0)
 	for _, marker in ipairs({ "ty.toml", "pyrightconfig.json", "Pipfile" }) do
@@ -112,9 +101,9 @@ test("ty and legacy markers resolve the same nested project root", function()
 		assert(vim.fn.delete(service .. "/" .. marker) == 0)
 	end
 	assert(vim.fn.writefile({ "[project]" }, service .. "/pyproject.toml") == 0)
-end)
+end
 
-test("root precedence is attached, nearest marker, repository, then directory", function()
+T["root precedence is attached, nearest marker, repository, then directory"] = function()
 	configure()
 	assert(project_python.resolve_root({ start = source, attached_root = service, repo_root = repo }) == service)
 	assert(project_python.resolve_root({ start = source, repo_root = repo }) == service)
@@ -122,9 +111,9 @@ test("root precedence is attached, nearest marker, repository, then directory", 
 	assert(project_python.resolve_root({ start = source, repo_root = repo }) == repo)
 	assert(project_python.resolve_root({ start = source }) == service .. "/src")
 	assert(vim.fn.writefile({ "[project]" }, service .. "/pyproject.toml") == 0)
-end)
+end
 
-test("precedence is explicit, manual, project environment, active environment, fallback", function()
+T["precedence is explicit, manual, project environment, active environment, fallback"] = function()
 	configure()
 	local snapshot = project_python.snapshot(service)
 	assert(snapshot.source == "local:.venv" and snapshot.value.interpreter == automatic)
@@ -143,9 +132,9 @@ test("precedence is explicit, manual, project environment, active environment, f
 	assert(project_python.refresh(service).value.interpreter == active)
 	env.VIRTUAL_ENV = nil
 	assert(project_python.refresh(service).source == "fallback")
-end)
+end
 
-test("invalid explicit configuration fails without automatic fallback", function()
+T["invalid explicit configuration fails without automatic fallback"] = function()
 	configure()
 	local local_python = executable(service .. "/.venv/bin/python")
 	explicit[service] = { pythonPath = service .. "/missing/python" }
@@ -155,9 +144,9 @@ test("invalid explicit configuration fails without automatic fallback", function
 	assert(local_python ~= nil)
 	explicit[service] = { venvPath = service .. "/envs" }
 	assert(project_python.refresh(service).validity == "invalid")
-end)
+end
 
-test("snapshots are copied, generation-aware, and stale manual choices wait for refresh", function()
+T["snapshots are copied, generation-aware, and stale manual choices wait for refresh"] = function()
 	configure()
 	local local_python = executable(service .. "/.venv/bin/python")
 	local selected_python = executable(service .. "/.selected/bin/python")
@@ -180,9 +169,9 @@ test("snapshots are copied, generation-aware, and stale manual choices wait for 
 		end,
 	})
 	assert(project_python.snapshot(service).source ~= "manual", "manual choice persisted across reset")
-end)
+end
 
-test("default snapshot hits bypass canonicalization and discovery", function()
+T["default snapshot hits bypass canonicalization and discovery"] = function()
 	configure()
 	executable(service .. "/.venv/bin/python")
 	local first = project_python.snapshot(service)
@@ -204,9 +193,9 @@ test("default snapshot hits bypass canonicalization and discovery", function()
 	vim.uv.fs_access = original_access
 	assert(ok, second)
 	assert(vim.deep_equal(second, first))
-end)
+end
 
-test("caller explicit snapshots are ephemeral", function()
+T["caller explicit snapshots are ephemeral"] = function()
 	local events = {}
 	configure({
 		event = function(event)
@@ -228,9 +217,9 @@ test("caller explicit snapshots are ephemeral", function()
 	assert(vim.deep_equal(project_python.status(), status), "ephemeral snapshot changed published state")
 	assert(#events == event_count, "ephemeral snapshot emitted an event")
 	assert(vim.deep_equal(project_python.snapshot(service), baseline))
-end)
+end
 
-test("published synchronization is provider-neutral and shared by Neotest and DAP", function()
+T["published synchronization is provider-neutral and shared by DAP"] = function()
 	configure()
 	executable(service .. "/.venv/bin/python")
 	local python = executable(service .. "/.synchronized/bin/python")
@@ -240,23 +229,20 @@ test("published synchronization is provider-neutral and shared by Neotest and DA
 	local generation = snapshot.generation
 	snapshot = assert(project_python.sync(service, service .. "/.synchronized"))
 	assert(snapshot.generation == generation, "unchanged synchronization advanced the generation")
-	assert(vim.deep_equal(project_python.neotest_python(service), { python }))
-	assert(project_python.neotest_runner() == "pytest")
 	local dap, dap_snapshot = project_python.apply_dap({ type = "python", request = "launch" }, service)
 	assert(dap.pythonPath == python and dap_snapshot.value.interpreter == python)
 
 	snapshot = assert(project_python.sync(service, service .. "/missing/python"))
 	assert(snapshot.source == "explicit" and snapshot.validity == "invalid")
-	assert(project_python.neotest_python(service) == nil)
 	local unresolved, unresolved_snapshot = project_python.apply_dap({ type = "python", request = "launch" }, service)
 	assert(unresolved.pythonPath == nil and unresolved_snapshot.validity == "invalid")
 	local explicit_dap, explicit_snapshot =
 		project_python.apply_dap({ type = "python", pythonPath = "/missing/python" }, service)
 	assert(explicit_snapshot.validity == "invalid" and explicit_dap.pythonPath == "/missing/python")
 	assert(project_python.apply_pyright == nil, "provider-specific Pyright API remains exported")
-end)
+end
 
-test("discovery never executes Python and REPL uses only the injected lifecycle", function()
+T["discovery never executes Python and REPL uses only the injected lifecycle"] = function()
 	configure()
 	executable(service .. "/.venv/bin/python")
 	local original_system = vim.system
@@ -274,9 +260,9 @@ test("discovery never executes Python and REPL uses only the injected lifecycle"
 	end, debug.traceback)
 	vim.system = original_system
 	assert(ok, err)
-end)
+end
 
-test("REPL launch revalidates a cached interpreter without refreshing discovery", function()
+T["REPL launch revalidates a cached interpreter without refreshing discovery"] = function()
 	configure()
 	local python = executable(service .. "/.venv/bin/python")
 	assert(project_python.snapshot(service).value.interpreter == python)
@@ -287,9 +273,9 @@ test("REPL launch revalidates a cached interpreter without refreshing discovery"
 		project_python.snapshot(service).value.interpreter == python,
 		"REPL validation mutated the published snapshot"
 	)
-end)
+end
 
-test("defaultInterpreterPath is approved and diagnostics enumerate without executing", function()
+T["defaultInterpreterPath is approved and diagnostics enumerate without executing"] = function()
 	configure()
 	local approved = executable(service .. "/.approved/bin/python")
 	explicit[service] = { defaultInterpreterPath = approved }
@@ -303,19 +289,18 @@ test("defaultInterpreterPath is approved and diagnostics enumerate without execu
 	vim.system = original_system
 	assert(ok and diagnostics.root == service and #diagnostics.candidates > 0)
 	assert(diagnostics.candidates[1].source == "explicit")
-end)
+end
 
-test("setup contracts are transactional and snapshots are immutable", function()
+T["setup contracts are transactional and snapshots are immutable"] = function()
 	local events = {}
 	configure({
 		event = function(event)
 			events[#events + 1] = event
 		end,
 		repl = { readiness_timeout_ms = 5000, poll_interval_ms = 50 },
-		test_runner = "pytest",
 	})
 	local before = assert(project_python.effective_config())
-	assert(before.test_runner == "pytest" and before.repl.readiness_timeout_ms == 5000)
+	assert(before.repl.readiness_timeout_ms == 5000)
 	assert(before.environment == nil and before.event == nil and before.terminal == nil)
 	assert(pcall(vim.json.encode, before))
 	before.repl.poll_interval_ms = 1
@@ -330,9 +315,6 @@ test("setup contracts are transactional and snapshots are immutable", function()
 	assert(not ok, "false setup options were accepted")
 	ok, err = pcall(project_python.setup, { repl = false })
 	assert(not ok, "false repl options were accepted")
-	ok, err = pcall(project_python.setup, { test_runner = "nose" })
-	assert(not ok and tostring(err):find("pytest or unittest", 1, true))
-	assert(project_python.effective_config().test_runner == "pytest")
 	assert(project_python.status(service).snapshot.value.interpreter == snapshot.value.interpreter)
 	local aggregate = project_python.status()
 	assert(aggregate.configured == true and aggregate.snapshots[service] ~= nil)
@@ -345,19 +327,13 @@ test("setup contracts are transactional and snapshots are immutable", function()
 	end
 	assert(project_python.teardown())
 	local defaults = project_python.effective_config()
-	assert(defaults.test_runner == "pytest" and defaults.repl.poll_interval_ms == 50)
+	assert(defaults.repl.poll_interval_ms == 50)
 	assert(project_python.status().configured == false)
 	assert(project_python.status(service).configured == false)
-end)
-
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("project_python_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

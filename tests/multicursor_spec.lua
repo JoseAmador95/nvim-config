@@ -10,24 +10,9 @@ package.path = table.concat({
 }, ";")
 vim.g.mapleader = " "
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local feedkeys = {}
 local layer_factory
@@ -74,7 +59,7 @@ local function persistent_lhs()
 	return result
 end
 
-test("persistent multicursor keys use the explicit host leader namespace", function()
+T["persistent multicursor keys use the explicit host leader namespace"] = function()
 	local expected = {
 		"<c-leftdrag>",
 		"<c-leftmouse>",
@@ -97,9 +82,9 @@ test("persistent multicursor keys use the explicit host leader namespace", funct
 		assert(not mapping.lhs:match("^m"), "persistent mapping stole native m{mark}: " .. mapping.lhs)
 	end
 	assert(type(layer_factory) == "function", "active-cursor keymap layer was not registered")
-end)
+end
 
-test("active layer owns only history Flash and surround collision keys", function()
+T["active layer owns only history Flash and surround collision keys"] = function()
 	local layer = {}
 	layer_factory(function(modes, lhs, rhs, options)
 		layer[#layer + 1] = { modes = modes, lhs = lhs, rhs = rhs, options = options }
@@ -118,9 +103,9 @@ test("active layer owns only history Flash and surround collision keys", functio
 	layer[3].rhs()
 	layer[4].rhs()
 	equal({ "s", "S" }, feedkeys, "substitute keys were not replayed through multicursor")
-end)
+end
 
-test("removing the active layer reveals history Flash and surround again", function()
+T["removing the active layer reveals history Flash and surround again"] = function()
 	local bufnr = vim.api.nvim_get_current_buf()
 	local globals = {
 		{ "n", "<C-o>", function() end, "Navigation back" },
@@ -163,9 +148,9 @@ test("removing the active layer reveals history Flash and surround again", funct
 	for _, mapping in ipairs(globals) do
 		pcall(vim.keymap.del, mapping[1], mapping[2])
 	end
-end)
+end
 
-test("Flash leaves visual S to nvim-surround", function()
+T["Flash leaves visual S to nvim-surround"] = function()
 	local flash = require("plugins.flash")
 	local by_lhs = {}
 	for _, mapping in ipairs(flash.keys) do
@@ -173,9 +158,9 @@ test("Flash leaves visual S to nvim-surround", function()
 	end
 	equal({ "n", "x", "o" }, by_lhs.s.mode, "Flash s lost a supported mode")
 	equal({ "n", "o" }, by_lhs.S.mode, "Flash S still claims visual mode")
-end)
+end
 
-test("which-key labels the shared leader-m namespace", function()
+T["which-key labels the shared leader-m namespace"] = function()
 	local group
 	for _, entry in ipairs(require("plugins.which-key").opts.spec) do
 		if entry[1] == "<leader>m" then
@@ -183,14 +168,6 @@ test("which-key labels the shared leader-m namespace", function()
 		end
 	end
 	equal("markdown/multicursor", group, "which-key still labels leader-m as markdown only")
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("multicursor_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

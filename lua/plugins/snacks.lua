@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("plugins.snacks")
 -- snacks.picker: the single fuzzy finder for editor workflows.
 local function focus_buffer(bufnr)
 	for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
@@ -29,7 +30,7 @@ local function review_picker_show(picker)
 	-- Larger menus retain native counts, so 12<Enter> selects item 12 unambiguously.
 	if picker:count() <= 9 then
 		for number = 1, 9 do
-			vim.keymap.set("n", tostring(number), function()
+			usage_map("n", tostring(number), function()
 				review_confirm_number(picker, number)
 			end, { buffer = picker.list.win.buf, nowait = true, desc = "Select review choice " .. number })
 		end
@@ -98,10 +99,7 @@ return {
 			enabled = false,
 			timeout = 3000,
 		},
-		scratch = {
-			enabled = true,
-			root = vim.fs.joinpath(vim.fn.stdpath("state"), "nvim-config", "snacks-scratch"),
-		},
+
 		image = {
 			-- Enable the image machinery (Kitty graphics protocol; Ghostty). The
 			-- diagram viewer (config.diagram) drives image rendering itself via the

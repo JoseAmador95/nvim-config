@@ -6,18 +6,7 @@ vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local function temp_dir()
 	local path = vim.fn.tempname()
@@ -224,13 +213,13 @@ local function write_bootstrap_fake_nvim(root)
 	return fake_nvim
 end
 
-test("local config diagnostics redact environment values without mutating cache", function()
+T["local config diagnostics redact environment values without mutating cache"] = function()
 	local root = temp_dir()
 	local config_path = root .. "/host.lua"
 	local secret = "security-spec-secret-value"
 	assert(vim.fn.writefile({
 		"return {",
-		"  plugins = { theme_router = { background = 'light' } },",
+		"  theme = { background = 'light' },",
 		"  env = { CONFIG_SECRET = '" .. secret .. "', EMPTY_SECRET = '' },",
 		"}",
 	}, config_path) == 0, "could not write temporary local config")
@@ -247,11 +236,8 @@ test("local config diagnostics redact environment values without mutating cache"
 	assert(display.env.EMPTY_SECRET == "<redacted>", "empty environment value was not redacted")
 	assert(runtime.env.CONFIG_SECRET == secret, "display helper mutated the cached secret")
 	assert(runtime.env.EMPTY_SECRET == "", "display helper mutated the cached empty value")
-	display.plugins.theme_router.background = "dark"
-	assert(
-		local_config.read().plugins.theme_router.background == "light",
-		"display snapshot shares nested runtime tables"
-	)
+	display.theme.background = "dark"
+	assert(local_config.read().theme.background == "light", "display snapshot shares nested runtime tables")
 
 	local notifications = {}
 	local original_notify = vim.notify
@@ -273,9 +259,9 @@ test("local config diagnostics redact environment values without mutating cache"
 	vim.notify = original_notify
 	vim.env.NVIM_CONFIG_FILE = original_override
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("native review hunk context accepts only bounded integers and is present in the template", function()
+T["native review hunk context accepts only bounded integers and is present in the template"] = function()
 	local root = temp_dir()
 	local config_path = root .. "/host.lua"
 	local original_override = vim.env.NVIM_CONFIG_FILE
@@ -329,9 +315,9 @@ test("native review hunk context accepts only bounded integers and is present in
 	vim.notify = original_notify
 	vim.env.NVIM_CONFIG_FILE = original_override
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("removed Claude credential is never exported while ordinary environment values remain supported", function()
+T["removed Claude credential is never exported while ordinary environment values remain supported"] = function()
 	local root = temp_dir()
 	local config_path = root .. "/host.lua"
 	local blocked_token = "security-spec-blocked-oauth"
@@ -372,9 +358,9 @@ test("removed Claude credential is never exported while ordinary environment val
 	vim.env.SECURITY_SPEC_PUBLIC = original_public
 	vim.env.PATH = original_path
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("removed workflow namespaces are rejected by local config", function()
+T["removed workflow namespaces are rejected by local config"] = function()
 	local root = temp_dir()
 	local config_path = root .. "/host.lua"
 	assert(vim.fn.writefile({
@@ -400,9 +386,9 @@ test("removed workflow namespaces are rejected by local config", function()
 
 	vim.env.NVIM_CONFIG_FILE = original_override
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("lazy bootstrap reports clone failure without network access", function()
+T["lazy bootstrap reports clone failure without network access"] = function()
 	local root = temp_dir()
 	local bin = root .. "/bin"
 	assert(vim.fn.mkdir(bin, "p") == 1, "could not create fake binary directory")
@@ -440,9 +426,9 @@ test("lazy bootstrap reports clone failure without network access", function()
 	assert(output:find("lazy/lazy.nvim", 1, true), "bootstrap destination was not reported")
 	assert(output:find("git exit 23", 1, true), "git exit status was not reported")
 	assert(output:find("Check Git/network access", 1, true), "bootstrap error is not actionable")
-end)
+end
 
-test("lazy bootstrap checks out the exact lock commit before loading", function()
+T["lazy bootstrap checks out the exact lock commit before loading"] = function()
 	local root = temp_dir()
 	local bin = write_pinned_fake_git(root)
 	local log = root .. "/git.log"
@@ -487,9 +473,9 @@ test("lazy bootstrap checks out the exact lock commit before loading", function(
 	assert(vim.fn.isdirectory(destination) == 1, "verified bootstrap was not promoted")
 	assert(vim.fn.glob(destination .. ".bootstrap.*") == "", "bootstrap staging directory leaked")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("lazy bootstrap validates the complete staging checkout before promotion", function()
+T["lazy bootstrap validates the complete staging checkout before promotion"] = function()
 	local root = temp_dir()
 	local bin = write_pinned_fake_git(root)
 	local log = root .. "/git.log"
@@ -528,9 +514,9 @@ test("lazy bootstrap validates the complete staging checkout before promotion", 
 	assert(vim.uv.fs_lstat(destination) == nil, "invalid staging checkout was promoted")
 	assert(vim.fn.glob(destination .. ".bootstrap.*") == "", "invalid staging checkout was not cleaned")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("lazy cache attests only a stable complete checkout", function()
+T["lazy cache attests only a stable complete checkout"] = function()
 	local root = temp_dir()
 	local appname = "nvim-security-index-attestation"
 	local config_root, checkout = create_real_lazy_fixture(root, appname)
@@ -581,9 +567,9 @@ test("lazy cache attests only a stable complete checkout", function()
 	assert(logged_command(log, "rev-parse") and logged_command(log, "status"), "hidden flags bypassed mandatory checks")
 	assert(logged_command(log, "ls-files"), "changed index did not invalidate the positive attestation")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("existing lazy checkout mismatch fails closed before loading or mutation", function()
+T["existing lazy checkout mismatch fails closed before loading or mutation"] = function()
 	local root = temp_dir()
 	local bin = write_pinned_fake_git(root)
 	local log = root .. "/git.log"
@@ -635,9 +621,9 @@ test("existing lazy checkout mismatch fails closed before loading or mutation", 
 	assert(not commands:find("checkout", 1, true), "normal startup tried to repair the existing checkout")
 	assert(not commands:find("clone", 1, true), "normal startup tried to replace the existing checkout")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("ignored files in an otherwise locked lazy checkout fail closed", function()
+T["ignored files in an otherwise locked lazy checkout fail closed"] = function()
 	local root = temp_dir()
 	local appname = "nvim-security-ignored"
 	local config_root, checkout = create_real_lazy_fixture(root, appname)
@@ -671,9 +657,9 @@ test("ignored files in an otherwise locked lazy checkout fail closed", function(
 	assert(output:find("Refusing modified lazy.nvim checkout", 1, true), "ignored-file rejection was hidden")
 	assert(output:find("ignored-plugin.lua", 1, true), "ignored plugin path was not reported")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("hidden Git index flags cannot conceal a lazy checkout", function()
+T["hidden Git index flags cannot conceal a lazy checkout"] = function()
 	local root = temp_dir()
 	local appname = "nvim-security-index-flags"
 	local config_root, checkout = create_real_lazy_fixture(root, appname)
@@ -703,9 +689,9 @@ test("hidden Git index flags cannot conceal a lazy checkout", function()
 	assert(result.code ~= 0, "assume-unchanged checkout unexpectedly loaded")
 	assert(output:find("hidden index flags", 1, true), "hidden-index rejection was not actionable")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("Git repository redirect environment cannot bypass lazy validation", function()
+T["Git repository redirect environment cannot bypass lazy validation"] = function()
 	local root = temp_dir()
 	local appname = "nvim-security-git-env"
 	local config_root = create_real_lazy_fixture(root, appname)
@@ -734,9 +720,9 @@ test("Git repository redirect environment cannot bypass lazy validation", functi
 
 	assert(result.code == 0, (result.stdout or "") .. (result.stderr or ""))
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("lazy bootstrap cleans staging when locked checkout fails", function()
+T["lazy bootstrap cleans staging when locked checkout fails"] = function()
 	local root = temp_dir()
 	local bin = write_pinned_fake_git(root)
 	local log = root .. "/git.log"
@@ -778,9 +764,9 @@ test("lazy bootstrap cleans staging when locked checkout fails", function()
 	assert(vim.fn.isdirectory(destination) == 0, "failed checkout was promoted")
 	assert(vim.fn.glob(destination .. ".bootstrap.*") == "", "failed checkout staging directory leaked")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("bootstrap repairs only its isolated stale checkouts before any config startup", function()
+T["bootstrap repairs only its isolated stale checkouts before any config startup"] = function()
 	local root = temp_dir()
 	local bin = write_pinned_fake_git(root)
 	local fake_nvim = write_bootstrap_fake_nvim(root)
@@ -850,9 +836,9 @@ test("bootstrap repairs only its isolated stale checkouts before any config star
 	assert(require("config.fs").read_binary(source_lock) == source_before, "reused bootstrap changed source lock")
 	assert(vim.fn.readfile(outside_checkout .. "/marker")[1] == "preserve", "reused bootstrap changed outside checkout")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("bootstrap rejects an internal data symlink without touching its outside target", function()
+T["bootstrap rejects an internal data symlink without touching its outside target"] = function()
 	local root = temp_dir()
 	local xdg_root = root .. "/xdg"
 	local outside = root .. "/outside"
@@ -875,9 +861,9 @@ test("bootstrap rejects an internal data symlink without touching its outside ta
 	assert(vim.uv.fs_realpath(xdg_root .. "/data/nvim") == vim.uv.fs_realpath(outside), "symlink fixture was replaced")
 	assert(vim.fn.isdirectory(outside .. "/lazy") == 0, "bootstrap escaped through the internal symlink")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("bootstrap lock prevents concurrent staging or promotion", function()
+T["bootstrap lock prevents concurrent staging or promotion"] = function()
 	local root = temp_dir()
 	local xdg_root = root .. "/xdg"
 	assert(vim.fn.mkdir(xdg_root .. "/.bootstrap-config.lock", "p") == 1, "could not create bootstrap lock fixture")
@@ -898,9 +884,9 @@ test("bootstrap lock prevents concurrent staging or promotion", function()
 	assert(vim.fn.readfile(xdg_root .. "/.bootstrap-config.lock/marker")[1] == "owner", "foreign lock was changed")
 	assert(vim.fn.isdirectory(xdg_root .. "/data") == 0, "concurrent bootstrap created staging directories")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("bootstrap rejects lexical spellings of the physical filesystem root", function()
+T["bootstrap rejects lexical spellings of the physical filesystem root"] = function()
 	for _, root_path in ipairs({ "/tmp/..", "/.", "//" }) do
 		local result = vim.system({
 			repo .. "/scripts/bootstrap-config",
@@ -912,14 +898,6 @@ test("bootstrap rejects lexical spellings of the physical filesystem root", func
 		assert(result.code == 2, "physical root spelling was not rejected: " .. root_path)
 		assert(output:find("Refusing to use /", 1, true), "physical root rejection was not actionable: " .. root_path)
 	end
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("security_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

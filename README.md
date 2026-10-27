@@ -30,9 +30,9 @@ Git authority and once afterward, then revalidates the accepted paths without
 file; unsafe metadata, corruption, ambiguity, or a race discards fast authority
 and falls back to Git or fails startup without loading the checkout.
 
-For a reproducible install or validation run, download the four pinned,
-precompiled validators and restore the committed plugin/parser pins into an
-isolated directory:
+For a reproducible install or validation run, install the four pinned,
+precompiled validators and the test-only mini.test dependency, then restore the
+committed plugin/parser pins into an isolated directory:
 
 ```sh
 ./scripts/install-ci-tools /absolute/path/to/nvim-config-tools/bin
@@ -43,8 +43,10 @@ PATH=/absolute/path/to/nvim-config-tools/bin:$PATH \
 ```
 
 `install-ci-tools` delegates the exact precompiled StyLua, ShellCheck, actionlint,
-and tree-sitter pins to Mise with `--locked`. The first two commands may use the
-network on a cold machine; Mise must already be available.
+and tree-sitter pins to Mise with `--locked`, and installs mini.test v0.18.0 at
+its exact commit outside the editor runtime (by default beside `bin`, in
+`test-deps`; override with `NVIM_CONFIG_TEST_DEPS`). The first two commands may
+use the network on a cold machine; Mise must already be available.
 Parser bootstrap requires the exact pinned `tree-sitter` CLI and a host `cc`;
 `--skip-parsers` skips that preflight. The final gate is offline and never
 mutates plugins, parsers, or the committed lock.
@@ -73,13 +75,13 @@ clangd asset in this catalog, so full provisioning reports `unsupported-platform
 
 Use `bootstrap-config` for a disposable isolated XDG tree, `provision-runtime`
 for the caller's real private runtime, and `check-config` for the offline
-non-mutating acceptance gate. `install-ci-tools` only prepares the four pinned
-validators used by that gate.
+non-mutating acceptance gate. `install-ci-tools` prepares the test dependency
+and the four pinned validators used by that gate.
 
 Host-specific settings belong in `~/.nvim-local.lua`; create a documented
 owner-only template with `:NvimConfigInit`. Plugin settings live exclusively
-under `plugins.<plugin_name>`; `dap`, `ui`, `path`, `env`, and `plugins_dir` remain
-host-level settings. The retired root names `theme`, `clangd`, `review`,
+under `plugins.<plugin_name>`; `theme`, `ui`, `telemetry`, `path`, `env`, and `plugins_dir` remain
+host-level settings. The retired root names `dap`, `clangd`, `review`,
 `log_watch`, `diagram_cache`, and `mason` are rejected rather than treated as
 aliases. `:NvimConfigDump` recursively redacts environment values. For example,
 native review hunk views show three unchanged lines on either side by default;
@@ -240,7 +242,8 @@ inside the reading view. This mapping is absent from `nvimpager` and VSCode
 Neovim and remains fail-closed in historical review buffers.
 
 Every local product exposes a strict setup contract plus copied `status()` and
-`effective_config()` snapshots. `:checkhealth nvimconfig` aggregates those 17
+`effective_config()` snapshots.
+`:checkhealth nvimconfig` aggregates the registered
 surfaces without refreshing state, starting processes, installing tools, or
 downloading parsers. Workflow commands remain in the host configuration rather
 than inside the plugins.
@@ -250,32 +253,36 @@ Workspace execution is opt-in per canonical repository and capability. Use
 grant one capability, `:NvimConfigExecutionRevoke <capability>` to revoke it,
 and `:NvimConfigExecutionStatus [capability]` to inspect the durable state.
 There is no implicit prompt: an unauthorized action stops before its runner is
-started. Grants express trust in that repository; they are not a sandbox and do
-not replace Just's stricter content-based closure checks. Tool acquisition through `mise exec` is independent of these execution grants;
+started. Grants express trust in that repository; they are not a sandbox.
+Tool acquisition through `mise exec` is independent of these execution grants;
 `NVIM_CONFIG_OFFLINE=1` disables downloads.
 
-All 16 local plugin directories stay on `runtimepath`; none is registered as a
-Lazy plugin. The startup-owned foundations are `trusted-workspace`, `tab-first`,
-`treesitter-runtime`, and `theme-router` (VSCode and pager use their smaller
-profile-specific subsets). Exact-editor loads only after a stable interactive
+Local plugin directories are registered once from `config.local_plugins` and
+stay on `runtimepath`; none is registered as a Lazy plugin.
+The startup-owned foundations are `trusted-workspace`, `tab-first`,
+and `treesitter-runtime` (VSCode and pager use their smaller
+profile-specific subsets).
+Exact-editor loads only after a stable interactive
 UI, and native-review plus the devcontainer, terminal, Python, action palette,
-diagram, log, scratch, coverage, Just, and clangd compile-database cores load only at their documented first-use boundary. Their
-host commands and mappings remain available from startup through lightweight
+diagram, log, and clangd compile-database cores load only at their documented
+first-use boundary.
+Their host commands and mappings remain available from startup through lightweight
 adapters.
+The Markdown layer is a local plugin over stock `md-render.nvim`; it
+owns reading-view behavior and centralizes the required engine compatibility
+adaptations.
+The locked upstream checkout is unchanged.
 
-The debug UI defaults to `dap-ui`. Select the pinned `nvim-dap-view`
-alternative with `dap = { ui = "dap-view" }` in local config, or for one
-process with `NVIM_DAP_UI=dap-view nvim`. The selection is fixed at startup and
-only the selected UI is loaded.
+The debug UI is `nvim-dap-view`.
+It opens when a debug session starts, closes
+after the final session ends, and routes source navigation through editor tabs.
 
-The versioned editor and pager theme remains VSCode. `:Theme catppuccin`
-persists Catppuccin as a machine-local alternative; it follows the detected
-terminal background with Latte in light mode and Mocha in dark mode.
-`:Theme vscode` switches back, while `:ThemeReset` discards the local choice
-and restores the current versioned default without persisting it; a private
-migration marker prevents the retained legacy Lua choice from returning.
-Focus, terminal-background option, and OSC response bursts share one 100 ms
-refresh window; a durable reload wins over repaint when both are pending.
+The editor and pager use VSCode.
+Host settings under `theme` control `background` (`"auto"`, `"light"` or `"dark"`),
+`transparent`, and `italic_comments`.
+Automatic mode follows the terminal background; light mode keeps the terminal's
+native background.
+Theme switching and persisted theme choices are removed.
 
 The effective executable order is deliberate:
 
@@ -314,7 +321,7 @@ GumTree comment origins remain readable. Health reports configuration and paths;
 | Dockerfile/Markdown lint | Mise `hadolint` and `markdownlint-cli2` |
 | Container editor | Mise `devcontainers-cli` 0.89.0 and Node 24.20.0; project `devcontainer.json`. See [the workflow](docs/devcontainer-neovim.md) |
 | Inline images | A terminal with the Kitty graphics protocol, such as Ghostty |
-| Git terminal UI / recipes | Host `lazygit` / `just` |
+| Git terminal UI | Host `lazygit` |
 
 Native LSP loads independently on file open. Python tooling remains pinned to
 Ruff 0.16.6 and ty 0.0.77. See [runtime consumers](docs/verified-runtime-consumers.md)
@@ -555,13 +562,14 @@ closing a modified window aborts the caller while preserving the buffer.
 
 ## Development workflows
 
-`<leader>t` opens a host shell in a lower split. Shells, Python REPLs, LazyGit
-and Just share one Snacks terminal
-lifecycle keyed by runtime, repository and purpose. Hiding a terminal preserves
+`<leader>t` opens a host shell in a lower split.
+Shells, Python REPLs and LazyGit share one Snacks terminal
+lifecycle keyed by runtime, repository and purpose.
+Hiding a terminal preserves
 its process; a failed process keeps its output. Stop, restart and disposal wait
 for the old job's actual exit before settling, and terminal input is rejected
 while any of those transitions is pending. LazyGit uses a 95% float, while
-shells, REPLs and recipe output use the lower split. `gf` on a contained
+shells and REPLs use the lower split. `gf` on a contained
 `file:line[:column]` location opens or reuses the corresponding editor tab.
 Embedded LazyGit also sets a process-local `GH_EDITOR` to the blocking helper,
 so `gh pr create` keeps its interactive questions in the LazyGit terminal while
@@ -580,7 +588,7 @@ compatibility input, only after
 `.vscode/settings.json` and `.neoconf.json`; any edit revokes their effect until
 they are approved again. Selection never changes global `PATH`,
 `VIRTUAL_ENV` or terminal activation. The effective interpreter for each root
-is shared by ty, Neotest, DAP, the REPL and an event-refreshed statusline
+is shared by ty, DAP, the REPL and an event-refreshed statusline
 cache. Statusline renders read cached labels only; project discovery, Git and
 filesystem work run outside the render path. An attached ty root or the
 nearest Python project marker takes precedence over an enclosing Git root, so
@@ -592,39 +600,21 @@ Environment discovery is cached per project; use `:PythonEnvironmentRefresh`
 after changing an environment on disk, or `:PythonEnvironmentClear` to discard
 the manual selection and rediscover it.
 
-`<leader>Tn` runs the nearest test, `<leader>Td` debugs it, `<leader>pr` toggles
-the project REPL and `<leader>ps` opens or focuses that REPL before sending the
-current line or visual selection. Sends are queued FIFO per project until the
+`<leader>pr` toggles the project REPL and `<leader>ps` opens or focuses it before sending the
+current line or visual selection.
+Sends are queued FIFO per project until the
 terminal accepts input; a stopped/failed REPL or a bounded startup timeout
 aborts the queue visibly instead of writing into a replacement or dead job.
-Pytest is preferred when installed in that interpreter, with unittest as the
-fallback; a live REPL asks before changing interpreter.
+A live REPL asks before changing interpreter.
 
-Coverage is import-only: `:CoverageLoad [path]` reads an existing
-`coverage.json` or LCOV report, `:CoverageSummary` displays it and
-`:CoverageClear` removes it. These commands never run tests or generate a
-report. Host configuration may reduce the 16 MiB per-source and 64 MiB
-aggregate-source/model bounds under `plugins.coverage_workbench`; canonical
-duplicate sources, out-of-range sign lines, model expansion, and overlapping
-executed/missing/excluded classifications fail closed.
 CMake Tools keeps its selected build directory as clangd's
 `--compile-commands-dir` for the same root without copying or linking
 `compile_commands.json`; `:ClangdSetCompileCommands` remains the manual
 override and `:ClangdSwitchSourceHeader` opens the paired source/header. CTest
-is the project-wide C/C++ test action in the CMake menu; Neotest-GTest remains
-for a focused associated test.
+is the project-wide C/C++ test action in the CMake menu.
 
-`:JustRun [recipe]` reads recipes from `just --dump --dump-format json` only
-after the justfile content is trusted, prompts for structured parameters and
-executes literal argv in the lower terminal. Flags use their long/short switches;
-bounded and variadic options/positionals prompt repeatedly, required empty input
-retries, repeated-flag counts accept decimal digits only, and dismissing any
-prompt cancels without launching. The core rejects more than 4,096
-recipe-supplied argv entries before materialization. `:JustImportLast`
-conservatively imports contained `file:line[:column]` output into quickfix and
-Trouble. The project/branch `:Scratch` (`<leader>.`) is private under
-`stdpath("state")`, saved atomically and prunes only inactive files older than 30
-days when opened.
+The Scratch, Just, Neotest and coverage interfaces are removed.
+Previously saved Scratch notes remain on disk under `stdpath("state")`.
 
 `Alt-Space` in tmux exposes stable container/host editor actions. The container
 action starts a detached coordinator for the dev session's exact single
@@ -634,8 +624,11 @@ the adapter waits for its unique `starting` claim, and the coordinator checks
 pane PID/ownership before publishing `running`. Routing state is removed only
 after a verified host-editor handoff and durable ACK. The spool secret stays
 solely in its private `auth.json`; requests and ACKs carry HMACs instead of that
-secret. Selecting the container action again verifies and focuses an already
-live registered pane without restarting it. The tmux host action asks the live
+secret. Python is the single protocol and filesystem owner. A bounded JSON-lines
+client connects the Lua UI to that owner; Python3 is required in every container,
+including containers that do not use the Podman SSH-agent route. Selecting the
+container action again verifies and focuses an already live registered pane
+without restarting it. The tmux host action asks the live
 coordinator through that authenticated spool, because the coordinator retains
 the lifecycle lock until the container editor exits.
 `:DevContainerUp[!]`, `:DevContainerRecreate[!]`, `:DevContainerStatus`,
@@ -700,6 +693,38 @@ For Markdown piped on stdin, use
 the Neovim version, required Git dependency, optional tools, pager symlink, and
 legacy undo state.
 
+## Local usage statistics
+
+Interactive editor, pager and VSCode sessions count configuration-owned mappings and executed palette actions.
+Collection uses the host `sqlite3` CLI; a missing CLI produces a warning without interrupting editing.
+Set `telemetry = { enabled = false }` in `~/.nvim-local.lua` and restart to disable collection.
+Headless checks, bootstrap and CI do not collect usage.
+
+- `:UsageStats [all|mapping|palette] [days]` opens a read-only report, ordered by invocation count.
+  The default period is 30 days; `0` includes all history.
+  It shows distinct days used in the period, last use across all history, profile, mode
+  and the stable action identifier.
+- `:UsagePause` and `:UsageResume` control collection in the current process.
+- `:UsageReset` asks before deleting the shared counters for all profiles.
+
+Counters stay in memory and flush asynchronously every 30 seconds, with a bounded flush on normal exit.
+A crash can lose the pending interval.
+SQLite transactions coordinate simultaneous editors; retries do not duplicate counts.
+Resetting invalidates pending counters in other editors when they next flush,
+including activity before they observe the reset.
+
+The shared database is `${XDG_STATE_HOME:-~/.local/state}/nvim/usage/usage.sqlite3`,
+in a `0700` directory with a `0600` file.
+It contains daily aggregates per process session, profile, origin, action and mapping mode, plus the last-use timestamp.
+It stores no paths, command arguments, searches or buffer contents, and sends nothing over the network.
+
+Coverage includes explicit host mappings and native Lazy `keys` declarations.
+Plugin-internal binding dictionaries, including Oil, dashboard and picker options, are outside coverage.
+Built-in keys and commands typed with `:` are also excluded.
+A zero means an action was registered but not invoked in the period; mappings that have never loaded are absent.
+Counts include mapping replays and macros and represent invocation, including dispatch of asynchronous work.
+Mapping and palette totals describe separate entry points; adding them does not give a feature-use total.
+
 ## Validation and formatting
 
 Run the complete local validation from the repository root:
@@ -714,10 +739,24 @@ startup smoke, StyLua, ShellCheck for the validation/provisioning scripts,
 actionlint, the exact tree-sitter CLI, a host C compiler, and `git diff --check`.
 Writable state, cache, temporary files, and logs are isolated. The check is
 offline; only `bootstrap-config` restores plugins and parsers, while
-`install-ci-tools` prepares the exact validator versions. Both preparation
-commands may need network access on a cold cache.
+`install-ci-tools` prepares the exact validator versions and mini.test. Both
+preparation commands may need network access on a cold cache.
 GitHub Actions runs the same contract on Linux and macOS with Neovim 0.12.4 and
 pinned validation tools.
+
+Lua tests use mini.test with one process per suite. Focused pure tests run with:
+
+```sh
+NVIM_CONFIG_TEST_DEPS=/absolute/path/to/nvim-config-tools/test-deps \
+  nvim --headless -u NONE -i NONE --cmd 'set runtimepath^=.' \
+  --cmd 'lua require("config.local_plugins").setup()' \
+  -l tests/runner.lua tests/terminal_spec.lua
+```
+
+Profile tests retain the startup phases driven by `check-config`. Screenshot
+references are checked in: missing references fail. Set
+`NVIM_CONFIG_UPDATE_SCREENSHOTS=1` explicitly to update them locally after
+reviewing a deliberate visual change; CI forbids reference updates.
 
 Tree-sitter never installs parsers implicitly during startup. Install the
 configured set explicitly with `:NvimConfigParsersInstall`; bootstrap uses the

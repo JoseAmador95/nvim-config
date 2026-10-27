@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("plugins.treesitter")
 -- lua/plugins/treesitter.lua
 local redraw_profile = require("config.redraw_profile")
 
@@ -68,36 +69,36 @@ return {
 				["ib"] = "@block.inner",
 			}
 			for key, query in pairs(sel_maps) do
-				vim.keymap.set({ "x", "o" }, key, function()
+				usage_map({ "x", "o" }, key, function()
 					select.select_textobject(query, "textobjects")
 				end, { desc = "TS select " .. query })
 			end
 
 			-- Navigation keymaps
-			vim.keymap.set({ "n", "x", "o" }, "]f", function()
+			usage_map({ "n", "x", "o" }, "]f", function()
 				move.goto_next_start("@function.outer")
 			end, { desc = "Next function start" })
-			vim.keymap.set({ "n", "x", "o" }, "[f", function()
+			usage_map({ "n", "x", "o" }, "[f", function()
 				move.goto_previous_start("@function.outer")
 			end, { desc = "Prev function start" })
-			vim.keymap.set({ "n", "x", "o" }, "]F", function()
+			usage_map({ "n", "x", "o" }, "]F", function()
 				move.goto_next_end("@function.outer")
 			end, { desc = "Next function end" })
-			vim.keymap.set({ "n", "x", "o" }, "[F", function()
+			usage_map({ "n", "x", "o" }, "[F", function()
 				move.goto_previous_end("@function.outer")
 			end, { desc = "Prev function end" })
-			vim.keymap.set({ "n", "x", "o" }, "]c", function()
+			usage_map({ "n", "x", "o" }, "]c", function()
 				move.goto_next_start("@class.outer")
 			end, { desc = "Next class start" })
-			vim.keymap.set({ "n", "x", "o" }, "[c", function()
+			usage_map({ "n", "x", "o" }, "[c", function()
 				move.goto_previous_start("@class.outer")
 			end, { desc = "Prev class start" })
 
 			-- Swap arguments
-			vim.keymap.set("n", "<leader>sa", function()
+			usage_map("n", "<leader>sa", function()
 				swap.swap_next("@parameter.inner")
 			end, { desc = "Swap next argument" })
-			vim.keymap.set("n", "<leader>sA", function()
+			usage_map("n", "<leader>sA", function()
 				swap.swap_previous("@parameter.inner")
 			end, { desc = "Swap prev argument" })
 		end,

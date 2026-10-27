@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.markdown_navigation")
 local editor = require("config.editor")
 local pager = require("config.pager")
 local clipboard = require("config.clipboard")
@@ -515,12 +516,11 @@ local function apply_mapping(bufnr)
 	local callback = function()
 		M.follow(bufnr)
 	end
-	vim.keymap.set("n", "gd", callback, {
+	owned_mappings[bufnr] = usage_map("n", "gd", callback, {
 		buffer = bufnr,
 		silent = true,
 		desc = "Open Markdown target or definition",
 	})
-	owned_mappings[bufnr] = callback
 end
 
 ---Return the Markdown `gd` handler for a buffer, if this adapter owns it.

@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.pager")
 -- lua/config/pager.lua
 -- "Pager profile" for when this config is loaded by nvimpager.
 --
@@ -41,11 +42,10 @@ function M.specs()
 	snacks.keys = nil
 	snacks.opts.dashboard.enabled = false
 	snacks.opts.terminal.enabled = false
-	snacks.opts.scratch.enabled = false
 
 	return {
 		require("plugins.core"), -- plenary (dormant) + nvim-web-devicons
-		require("plugins.colorscheme"), -- VSCode/Catppuccin themes (+ OSC11 bg detection)
+		require("plugins.colorscheme"), -- fixed VSCode theme (+ OSC11 bg detection)
 		snacks, -- picker engine used by :SetFileType; no editor keymaps
 		require("plugins.md-render"), -- read-only document view
 		{
@@ -377,7 +377,7 @@ function M.setup()
 
 	-- `:SetFileType` itself lives in viewer_commands.lua (shared); here we only
 	-- add the pager-only picker keymap that drives it.
-	vim.keymap.set("n", "<leader>ft", pick_filetype, { desc = "Set filetype (picker)" })
+	usage_map("n", "<leader>ft", pick_filetype, { desc = "Set filetype (picker)" })
 end
 
 M.MAX_STRIP_BYTES = MAX_STRIP_BYTES

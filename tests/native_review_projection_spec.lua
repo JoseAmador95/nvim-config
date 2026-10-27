@@ -8,17 +8,7 @@ vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local projection = require("config.native_review").projection
 
@@ -66,7 +56,7 @@ local function row_shape(value)
 	return rows
 end
 
-test("replacement rows are context once then OLD before NEW", function()
+T["replacement rows are context once then OLD before NEW"] = function()
 	local value, err = projection.build(entry("keep\r\nold-a\r\nold-b\r\ntail", "keep\r\nnew-a\r\ntail"))
 	assert(value, err)
 	assert(
@@ -96,9 +86,9 @@ test("replacement rows are context once then OLD before NEW", function()
 	assert(vim.deep_equal(projection.rows_for_range(value, "left", 2, 3, "old.lua"), { 2, 3 }))
 	assert(vim.deep_equal(projection.sections(value, 0), { { first = 2, hunks = { 1 }, last = 4 } }))
 	assert(vim.deep_equal(projection.sections(value, 1), { { first = 1, hunks = { 1 }, last = 5 } }))
-end)
+end
 
-test("range resolution uses exclusive rows, shared defaults, and a preferred shared side", function()
+T["range resolution uses exclusive rows, shared defaults, and a preferred shared side"] = function()
 	local value = assert(projection.build(entry("before\nold\nafter\n", "before\nnew\nafter\n", {
 		old_path = "before.lua",
 		new_path = "after.lua",
@@ -113,9 +103,9 @@ test("range resolution uses exclusive rows, shared defaults, and a preferred sha
 	assert(new_with_context.side == "new" and new_with_context.start_line == 2 and new_with_context.end_line == 3)
 	local mixed, mixed_err = projection.resolve_range(value, 2, 3)
 	assert(mixed == nil and mixed_err:find("OLD-only and NEW-only", 1, true), mixed_err)
-end)
+end
 
-test("BOF and EOF additions and deletions keep exact display order", function()
+T["BOF and EOF additions and deletions keep exact display order"] = function()
 	local added = assert(projection.build(entry("middle\n", "head\nmiddle\ntail\n")))
 	assert(
 		vim.deep_equal(row_shape(added), {
@@ -137,9 +127,9 @@ test("BOF and EOF additions and deletions keep exact display order", function()
 		}),
 		vim.inspect(row_shape(deleted))
 	)
-end)
+end
 
-test("line-ending and final-newline changes remain distinct real rows", function()
+T["line-ending and final-newline changes remain distinct real rows"] = function()
 	local value = assert(projection.build(entry("same\r\nnext\r\n", "same\nnext")))
 	assert(value.sources.old.fileformat == "dos" and value.sources.old.endofline)
 	assert(value.sources.new.fileformat == "unix" and not value.sources.new.endofline)
@@ -157,9 +147,9 @@ test("line-ending and final-newline changes remain distinct real rows", function
 		{ kind = "new", text = "same", new_line = 1 },
 	}))
 	assert(final_newline.rows[1].terminator == "\n" and final_newline.rows[2].terminator == "")
-end)
+end
 
-test("renames anchor unchanged rows to NEW while retaining both reverse maps", function()
+T["renames anchor unchanged rows to NEW while retaining both reverse maps"] = function()
 	local value = assert(projection.build(entry("one\ntwo\n", "one\ntwo\n", {
 		old_path = "before.lua",
 		new_path = "after.lua",
@@ -178,9 +168,9 @@ test("renames anchor unchanged rows to NEW while retaining both reverse maps", f
 	assert(projection.locate(value, "new", 2, "after.lua") == 2)
 	local missing, missing_err = projection.locate(value, "old", 1, "after.lua")
 	assert(missing == nil and missing_err:find("path", 1, true), missing_err)
-end)
+end
 
-test("added deleted and empty files expose only valid source anchors", function()
+T["added deleted and empty files expose only valid source anchors"] = function()
 	local added = assert(projection.build(entry("", "new\n", { old_path = false, new_path = "added.lua" })))
 	assert(#added.rows == 1 and added.rows[1].kind == "new" and added.rows[1].new_line == 1)
 	local deleted = assert(projection.build(entry("old\n", "", { old_path = "deleted.lua", new_path = false })))
@@ -202,9 +192,9 @@ test("added deleted and empty files expose only valid source anchors", function(
 		hunks = {},
 	})))
 	assert(empty_deleted.rows[1].anchor_side == "old" and empty_deleted.rows[1].path == "empty.lua")
-end)
+end
 
-test("malformed supplied hunks fail validation instead of drifting", function()
+T["malformed supplied hunks fail validation instead of drifting"] = function()
 	local value, err = projection.build(entry("one\ntwo\n", "one\nchanged\n", {
 		hunks = { { 2, 1, 1, 1 } },
 	}))
@@ -213,13 +203,6 @@ test("malformed supplied hunks fail validation instead of drifting", function()
 	assert(value == nil and err:find("boundary", 1, true), err)
 	value, err = projection.build(entry("one\n", "changed\n", { hunks = { { 1, 0, 1, 0 } } }))
 	assert(value == nil and err:find("invalid indices", 1, true), err)
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("review_projection_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+return T

@@ -11,18 +11,8 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function fake_backend(options)
 	local backend = {
@@ -128,8 +118,10 @@ local function spec(key, overrides)
 	}, overrides or {})
 end
 
-test("normalized specs reject unsafe launch values", function()
-	setup_backend()
+T["invalid specs cannot open or alter a running terminal"] = function()
+	local backend = setup_backend()
+	assert(terminal.open(spec("invalid")))
+	local before = terminal.status("invalid")
 	for _, value in ipairs({
 		{ key = "" },
 		{ launch = { argv = "printf" } },
@@ -139,29 +131,38 @@ test("normalized specs reject unsafe launch values", function()
 		{ launch = { cwd = "relative" } },
 		{ launch = { cwd = "/definitely/missing" } },
 		{ launch = { env = false } },
+		{ launch = { argv = { [1] = "printf", [3] = "gap" } } },
 		{ launch = { env = { BAD = 1 } } },
+		{ launch = { env = { ["BAD=NAME"] = "value" } } },
+		{ launch = { env = { BAD = "nul\0value" } } },
+		{ policy = { "list" } },
+		{ view = { "list" } },
+		{ metadata = { "list" } },
+		{ view = { passthrough = { false } } },
 		{ policy = { dispose_on_stop = "yes" } },
 		{ injected = true },
 		{ launch = { injected = true } },
 	}) do
-		local _, err = terminal._normalize(vim.tbl_deep_extend("force", spec("invalid"), value))
-		assert(type(err) == "string" and err ~= "", "invalid spec was accepted")
+		for _, operation in ipairs({ "open", "toggle", "focus", "restart" }) do
+			local result, err = terminal[operation](vim.tbl_deep_extend("force", spec("invalid"), value))
+			assert(not result and type(err) == "string" and err ~= "", "invalid spec was accepted")
+			assert(vim.deep_equal(terminal.status("invalid"), before), "invalid spec changed running state")
+			assert(#backend.opened == 1 and backend.stop_count == 0, "invalid spec changed backend state")
+		end
 	end
-end)
+end
 
-test("empty argument values are preserved after the executable", function()
+T["empty argument values are preserved after the executable"] = function()
 	local backend = setup_backend()
 	local value = spec("empty-argument", { launch = { argv = { "printf", "%s", "" } } })
-	local normalized = assert(terminal._normalize(value))
-	assert(vim.deep_equal(normalized.launch.argv, value.launch.argv), "normalization changed exact argv")
 	assert(terminal.open(value))
 	assert(
 		#backend.opened == 1 and vim.deep_equal(backend.opened[1].spec.launch.argv, value.launch.argv),
 		"backend did not receive exact argv"
 	)
-end)
+end
 
-test("open and toggle reuse one running process and tag its buffer ephemeral", function()
+T["open and toggle reuse one running process and tag its buffer ephemeral"] = function()
 	local backend = setup_backend()
 	local value = spec("toggle")
 	local record = assert(terminal.open(value))
@@ -173,9 +174,9 @@ test("open and toggle reuse one running process and tag its buffer ephemeral", f
 	assert(terminal.toggle(value) == record and not record.handle.visible, "toggle did not hide the process view")
 	assert(terminal.toggle(value) == record and record.handle.visible, "toggle did not restore the process view")
 	assert(#backend.opened == 1, "toggle created a duplicate process")
-end)
+end
 
-test("a changed launch is rejected and explicit restart waits for process exit", function()
+T["a changed launch is rejected and explicit restart waits for process exit"] = function()
 	local backend = setup_backend()
 	local first = assert(terminal.open(spec("changed")))
 	local changed = spec("changed", { launch = { argv = { "printf", "changed" } } })
@@ -190,9 +191,9 @@ test("a changed launch is rejected and explicit restart waits for process exit",
 	local second = assert(terminal.open(changed))
 	assert(first.state == "disposed" and second ~= first and second.state == "running")
 	assert(#backend.opened == 2 and backend.stop_count == 1 and backend.dispose_count == 1)
-end)
+end
 
-test("failure output is retained with an exited-retained status", function()
+T["failure output is retained with an exited-retained status"] = function()
 	local backend = setup_backend()
 	local value = spec("failure")
 	local record = assert(terminal.open(value))
@@ -202,43 +203,43 @@ test("failure output is retained with an exited-retained status", function()
 	assert(vim.deep_equal(assert(terminal.lines(value)), { "retained output" }), "failure output was discarded")
 	assert(backend.dispose_count == 0, "failure disposed the visual backend")
 	assert(#notices == 1 and notices[1].message:find("retained", 1, true), "failure retention was not reported")
-end)
+end
 
-test("quick success during starting settles as disposed", function()
+T["quick success during starting settles as disposed"] = function()
 	local backend = setup_backend({ quick_exit = 0 })
 	local value = spec("quick-success")
 	local record = assert(terminal.open(value))
 	assert(record.state == "disposed" and terminal.status(value).state == "disposed")
 	assert(backend.dispose_count == 1, "quick success left its backend view alive")
-end)
+end
 
-test("quick failure during starting settles with retained output", function()
+T["quick failure during starting settles with retained output"] = function()
 	local backend = setup_backend({ quick_exit = 19 })
 	local value = spec("quick-failure")
 	local record = assert(terminal.open(value))
 	assert(record.state == "exited-retained" and terminal.status(value).exit_code == 19)
 	assert(vim.deep_equal(assert(terminal.lines(value)), { "retained output" }))
 	assert(backend.dispose_count == 0, "quick failure discarded its backend view")
-end)
+end
 
-test("a synchronous exit while showing never focuses or revives a disposed terminal", function()
+T["a synchronous exit while showing never focuses or revives a disposed terminal"] = function()
 	local backend = setup_backend({ exit_during_show = 0 })
 	local record = assert(terminal.open(spec("show-exit")))
 	assert(record.state == "disposed" and terminal.status(record).state == "disposed")
 	assert(record.handle.focus_count == 0, "focus ran after show synchronously disposed the terminal")
 	assert(record.visible == false, "show revived the disposed terminal visibility")
 	assert(backend.dispose_count == 1, "the disposed terminal view was not closed exactly once")
-end)
+end
 
-test("a synchronous failure while showing retains output without stale focus", function()
+T["a synchronous failure while showing retains output without stale focus"] = function()
 	local backend = setup_backend({ exit_during_show = 9 })
 	local record = assert(terminal.open(spec("show-failure")))
 	assert(record.state == "exited-retained" and terminal.status(record).exit_code == 9)
 	assert(record.handle.focus_count == 0, "focus ran after show synchronously observed process exit")
 	assert(backend.dispose_count == 0, "synchronous failure discarded its retained output")
-end)
+end
 
-test("lines are tail-bounded and returned as caller-owned copies", function()
+T["lines are tail-bounded and returned as caller-owned copies"] = function()
 	terminal._reset()
 	local backend = fake_backend()
 	terminal.setup({
@@ -259,9 +260,9 @@ test("lines are tail-bounded and returned as caller-owned copies", function()
 	assert(not ok and terminal.effective_config().max_output_lines == 2, "invalid output bound mutated setup state")
 	ok = pcall(terminal.setup, { backend = backend, max_output_lines = 100001 })
 	assert(not ok and terminal.effective_config().max_output_lines == 2, "unsafe output bound escaped validation")
-end)
+end
 
-test("stop remains pending until exit and then retains output", function()
+T["stop remains pending until exit and then retains output"] = function()
 	local backend = setup_backend()
 	local value = spec("stop")
 	local record = assert(terminal.open(value))
@@ -274,9 +275,9 @@ test("stop remains pending until exit and then retains output", function()
 	assert(vim.deep_equal(assert(terminal.lines(value)), { "retained output" }))
 	assert(terminal.dispose(value) == record and record.state == "disposed")
 	assert(backend.dispose_count == 1 and terminal.status(value).state == "disposed")
-end)
+end
 
-test("dispose-on-stop policy closes the view only after exit", function()
+T["dispose-on-stop policy closes the view only after exit"] = function()
 	local backend = setup_backend()
 	local value = spec("stop-dispose", { policy = { dispose_on_stop = true } })
 	local record = assert(terminal.open(value))
@@ -284,9 +285,9 @@ test("dispose-on-stop policy closes the view only after exit", function()
 	assert(backend.stop_count == 1 and backend.dispose_count == 0)
 	record.handle.callbacks.on_exit(0)
 	assert(record.state == "disposed" and backend.dispose_count == 1)
-end)
+end
 
-test("repeated restart coalesces and launches the latest spec exactly once", function()
+T["repeated restart coalesces and launches the latest spec exactly once"] = function()
 	local backend = setup_backend()
 	local first = assert(terminal.open(spec("coalesced")))
 	local second_spec = spec("coalesced", { launch = { argv = { "printf", "second" } } })
@@ -298,9 +299,9 @@ test("repeated restart coalesces and launches the latest spec exactly once", fun
 	assert(#backend.opened == 2 and vim.deep_equal(backend.opened[2].spec.launch.argv, { "printf", "final" }))
 	first.handle.callbacks.on_exit(0)
 	assert(#backend.opened == 2, "duplicate exit created another replacement")
-end)
+end
 
-test("dispose wins over a queued restart without requesting a second stop", function()
+T["dispose wins over a queued restart without requesting a second stop"] = function()
 	local backend = setup_backend()
 	local first = assert(terminal.open(spec("dispose-wins")))
 	local changed = spec("dispose-wins", { launch = { argv = { "printf", "changed" } } })
@@ -310,18 +311,18 @@ test("dispose wins over a queued restart without requesting a second stop", func
 	assert(pending.dispose_pending and not pending.restart_pending and backend.stop_count == 1)
 	first.handle.callbacks.on_exit(0)
 	assert(first.state == "disposed" and #backend.opened == 1 and backend.dispose_count == 1)
-end)
+end
 
-test("synchronous exit during stop settles through the same state machine", function()
+T["synchronous exit during stop settles through the same state machine"] = function()
 	local backend = setup_backend({ exit_during_stop = 0 })
 	local value = spec("sync-stop")
 	local record = assert(terminal.open(value))
 	assert(terminal.stop(value) == record)
 	assert(record.state == "exited-retained" and not terminal.status(value).stop_pending)
 	assert(backend.stop_count == 1 and backend.dispose_count == 0)
-end)
+end
 
-test("live backend disposal requests stop and remains tracked until exit", function()
+T["live backend disposal requests stop and remains tracked until exit"] = function()
 	local backend = setup_backend()
 	local value = spec("backend-dispose")
 	local record = assert(terminal.open(value))
@@ -330,9 +331,9 @@ test("live backend disposal requests stop and remains tracked until exit", funct
 	assert(record.state == "running" and pending.dispose_pending and backend.stop_count == 1)
 	record.handle.callbacks.on_exit(0)
 	assert(record.state == "disposed" and terminal.status(value).state == "disposed")
-end)
+end
 
-test("backend disposal during open waits for the handle before requesting stop", function()
+T["backend disposal during open waits for the handle before requesting stop"] = function()
 	local backend = setup_backend({ dispose_during_open = true })
 	local value = spec("dispose-during-open")
 	local record = assert(terminal.open(value))
@@ -341,9 +342,9 @@ test("backend disposal during open waits for the handle before requesting stop",
 	assert(backend.stop_count == 1 and backend.dispose_count == 0)
 	record.handle.callbacks.on_exit(0)
 	assert(record.state == "disposed" and backend.dispose_count == 1)
-end)
+end
 
-test("backend replacement does not redirect existing records", function()
+T["backend replacement does not redirect existing records"] = function()
 	local first_backend = setup_backend()
 	local first = assert(terminal.open(spec("first-backend")))
 	local second_backend = fake_backend()
@@ -360,9 +361,9 @@ test("backend replacement does not redirect existing records", function()
 	assert(first_backend.dispose_count == 1)
 	assert(terminal.open(spec("second-backend")))
 	assert(#first_backend.opened == 1 and #second_backend.opened == 1)
-end)
+end
 
-test("configuration, mappings, events, and stop timeout stay observable without fake exit", function()
+T["configuration, mappings, events, and stop timeout stay observable without fake exit"] = function()
 	terminal._reset()
 	local initial = terminal.status()
 	assert(initial.configured == false and #initial.terminals == 0)
@@ -418,9 +419,9 @@ test("configuration, mappings, events, and stop timeout stay observable without 
 	assert(record.state == "exited-retained")
 	assert(terminal.dispose(record))
 	assert(terminal.teardown() and terminal.teardown(), "teardown was not repeatable")
-end)
+end
 
-test("list and filtered dispose_all are deterministic and caller-owned", function()
+T["list and filtered dispose_all are deterministic and caller-owned"] = function()
 	local backend = setup_backend()
 	local second = assert(terminal.open(spec("z", { metadata = { group = "keep" } })))
 	local first = assert(terminal.open(spec("a", { metadata = { group = "dispose" } })))
@@ -433,16 +434,8 @@ test("list and filtered dispose_all are deterministic and caller-owned", functio
 	assert(backend.stop_count == 1 and terminal.status(second).dispose_pending == false)
 	first.handle.callbacks.on_exit(0)
 	assert(terminal.status("a").state == "disposed" and terminal.status("z").state == "running")
-end)
-
-terminal._reset()
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("terminal_lifecycle_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = terminal._reset
+
+return T

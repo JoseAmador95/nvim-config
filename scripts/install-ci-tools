@@ -3,6 +3,7 @@
 set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 bin_dir=${1:-}
+test_deps_dir=${NVIM_CONFIG_TEST_DEPS:-$bin_dir/../test-deps}
 case $bin_dir in
  /*) ;;
  *) printf 'Usage: %s ABSOLUTE_BIN_DIR\n' "$0" >&2; exit 2 ;;
@@ -14,4 +15,6 @@ NVIM_CONFIG_ROOT="$repo_root" NVIM_CONFIG_TOOLS_BIN="$bin_dir" "${NVIM_BIN:-nvim
  --cmd 'lua vim.opt.runtimepath:prepend(vim.env.NVIM_CONFIG_ROOT)' \
  -c 'lua local ok,err=pcall(function() local t=require("config.toolchain"); local b=require("config.tool_bootstrap"); for _, name in ipairs(t.validation_order) do local command=t.tools[name].commands[1]; local path=assert(b.resolve(name,command)); local destination=vim.env.NVIM_CONFIG_TOOLS_BIN.."/"..command; local old=vim.uv.fs_lstat(destination); if old then assert(old.type=="file" or old.type=="link", "invalid validator destination"); assert(vim.uv.fs_unlink(destination)) end; assert(vim.uv.fs_symlink(path,destination)) end end); if not ok then vim.api.nvim_err_writeln(tostring(err)); vim.cmd("cquit 1") end' \
  -c 'quitall!'
+NVIM_CONFIG_ROOT="$repo_root" "${NVIM_BIN:-nvim}" --headless -u NONE -i NONE \
+ -l "$repo_root/tests/install-deps.lua" "$test_deps_dir"
 printf 'Installed exact validation tools in %s\n' "$bin_dir"

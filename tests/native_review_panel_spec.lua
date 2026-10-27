@@ -9,22 +9,12 @@ vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local panel = require("config.native_review").panel
 local review_lsp = require("config.native_review").lsp
 
-test("wide screens give the review panel more room", function()
+T["wide screens give the review panel more room"] = function()
 	local previous_columns = vim.o.columns
 	local ok, err = xpcall(function()
 		vim.o.columns = 240
@@ -35,7 +25,7 @@ test("wide screens give the review panel more room", function()
 	end, debug.traceback)
 	vim.o.columns = previous_columns
 	assert(ok, err)
-end)
+end
 
 local function item(id, sequence, kind, path, first, last, side)
 	return {
@@ -58,7 +48,7 @@ local function item(id, sequence, kind, path, first, last, side)
 	}
 end
 
-test("comment rows expose old and current sides without inventing one for general comments", function()
+T["comment rows expose old and current sides without inventing one for general comments"] = function()
 	local comment_workspace = {
 		session = {
 			items = {
@@ -89,7 +79,7 @@ test("comment rows expose old and current sides without inventing one for genera
 	local inactive_rows, _, inactive_decorations = panel._comment_lines({ workspace = comment_workspace })
 	assert(inactive_rows[4]:find("[· retired]", 1, true), "inactive type lost its historical label")
 	assert(inactive_decorations[4][1].group == "Comment", "inactive type did not use generic highlighting")
-end)
+end
 
 local workspace = {
 	root = "/tmp/example-repository",
@@ -122,7 +112,7 @@ local workspace = {
 	},
 }
 
-test("commit rows prioritize subjects and expand safely after resize", function()
+T["commit rows prioritize subjects and expand safely after resize"] = function()
 	vim.cmd("only")
 	vim.cmd("enew!")
 	local previous_columns = vim.o.columns
@@ -158,7 +148,7 @@ test("commit rows prioritize subjects and expand safely after resize", function(
 	end
 	vim.o.columns = previous_columns
 	assert(ok, err)
-end)
+end
 
 local function find_row(pane, predicate)
 	for line, row in pairs(pane.rows) do
@@ -195,7 +185,7 @@ local function visual_enter(pane, anchor_line, cursor_line, visual_mode)
 	vim.cmd("normal! \27")
 end
 
-test("three core floats preserve the ordinary tab and expose all panel roles", function()
+T["three core floats preserve the ordinary tab and expose all panel roles"] = function()
 	vim.cmd("only")
 	vim.cmd("enew!")
 	local source = vim.api.nvim_get_current_win()
@@ -287,9 +277,9 @@ test("three core floats preserve the ordinary tab and expose all panel roles", f
 	panel.reflow(state)
 	panel.close(state)
 	assert(vim.api.nvim_get_current_win() == source and #vim.api.nvim_list_tabpages() == tabs)
-end)
+end
 
-test("visual commit Enter applies every covered row without changing endpoints", function()
+T["visual commit Enter applies every covered row without changing endpoints"] = function()
 	vim.cmd("only")
 	vim.cmd("enew!")
 	local visual_workspace = vim.deepcopy(workspace)
@@ -349,9 +339,9 @@ test("visual commit Enter applies every covered row without changing endpoints",
 	vim.fn.maparg("<CR>", "n", false, true).callback()
 	assert(calls[4].first == state.commit_first and calls[4].second == state.commit_second)
 	panel.close(state)
-end)
+end
 
-test("visual commit Enter rejects selections containing a non-commit row", function()
+T["visual commit Enter rejects selections containing a non-commit row"] = function()
 	vim.cmd("only")
 	vim.cmd("enew!")
 	local notifications = {}
@@ -384,9 +374,9 @@ test("visual commit Enter rejects selections containing a non-commit row", funct
 	end, debug.traceback)
 	vim.notify = original_notify
 	assert(ok, err)
-end)
+end
 
-test("files render a colored stable tree and retain hidden selection state", function()
+T["files render a colored stable tree and retain hidden selection state"] = function()
 	vim.cmd("only")
 	vim.cmd("enew!")
 	local staged_identity = "staged\0src/deep/a.lua\0src/deep/a.lua"
@@ -578,9 +568,9 @@ test("files render a colored stable tree and retain hidden selection state", fun
 		"Enter did not expand the directory"
 	)
 	panel.close(state)
-end)
+end
 
-test("commit controls clear only endpoints and delegate scope back", function()
+T["commit controls clear only endpoints and delegate scope back"] = function()
 	vim.cmd("only")
 	vim.cmd("enew!")
 	local notifications = {}
@@ -623,9 +613,9 @@ test("commit controls clear only endpoints and delegate scope back", function()
 	end, debug.traceback)
 	vim.notify = original_notify
 	assert(ok, err)
-end)
+end
 
-test("presentation replacement refreshes the source without accepting panel floats", function()
+T["presentation replacement refreshes the source without accepting panel floats"] = function()
 	vim.cmd("only")
 	vim.cmd("enew!")
 	local replacement = vim.api.nvim_get_current_win()
@@ -663,13 +653,6 @@ test("presentation replacement refreshes the source without accepting panel floa
 	assert(vim.api.nvim_get_current_win() == comments_win, "source refresh changed Comments-pane focus")
 	panel.close(state)
 	assert(vim.api.nvim_get_current_win() == replacement, "panel did not restore the refreshed source")
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("review_panel_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+return T

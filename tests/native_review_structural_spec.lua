@@ -2,8 +2,6 @@ vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 vim.opt.runtimepath:prepend(vim.fn.getcwd() .. "/local-plugins/native-review.nvim")
 
-local failures = {}
-local count = 0
 local requests = {}
 local function adapter_run(request, callback)
 	local pending = { request = request, callback = callback, cancelled = false }
@@ -46,19 +44,9 @@ local function flush()
 		return done
 	end, 1))
 end
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	structural.close()
-	flush()
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
-test("frozen requests are copies and the float has no source or LSP authority", function()
+T["frozen requests are copies and the float has no source or LSP authority"] = function()
 	local origin = vim.api.nvim_get_current_win()
 	assert(structural.open(entry, function()
 		return true
@@ -88,9 +76,9 @@ test("frozen requests are copies and the float has no source or LSP authority", 
 	structural.close()
 	assert(pending.cancelled and not vim.api.nvim_buf_is_valid(buf))
 	assert(vim.api.nvim_get_current_win() == origin)
-end)
+end
 
-test("terminal controls are stripped while ANSI colors remain displayable", function()
+T["terminal controls are stripped while ANSI colors remain displayable"] = function()
 	assert(structural.open(entry, function()
 		return true
 	end))
@@ -113,9 +101,9 @@ test("terminal controls are stripped while ANSI colors remain displayable", func
 	end, 1))
 	assert(clipboard_events == 0)
 	vim.api.nvim_del_augroup_by_id(group)
-end)
+end
 
-test("superseded and manually closed requests cannot publish late output", function()
+T["superseded and manually closed requests cannot publish late output"] = function()
 	assert(structural.open(entry, function()
 		return true
 	end))
@@ -134,9 +122,9 @@ test("superseded and manually closed requests cannot publish late output", funct
 	pending.callback("late closed output", nil)
 	flush()
 	assert(pending.cancelled and not vim.api.nvim_buf_is_valid(buf))
-end)
+end
 
-test("owner invalidation suppresses successful output without modifying review data", function()
+T["owner invalidation suppresses successful output without modifying review data"] = function()
 	local valid = true
 	local before = vim.deepcopy(entry)
 	assert(structural.open(entry, function()
@@ -147,9 +135,9 @@ test("owner invalidation suppresses successful output without modifying review d
 	requests[#requests].callback("stale output", nil)
 	flush()
 	assert(not vim.api.nvim_buf_is_valid(buf) and vim.deep_equal(entry, before))
-end)
+end
 
-test("external window closure cancels the underlying render", function()
+T["external window closure cancels the underlying render"] = function()
 	assert(structural.open(entry, function()
 		return true
 	end))
@@ -157,9 +145,9 @@ test("external window closure cancels the underlying render", function()
 	vim.api.nvim_win_close(0, true)
 	flush()
 	assert(pending.cancelled)
-end)
+end
 
-test("adapter failures notify and leave the source window intact", function()
+T["adapter failures notify and leave the source window intact"] = function()
 	local notices = {}
 	local notify = vim.notify
 	vim.notify = function(value)
@@ -174,9 +162,9 @@ test("adapter failures notify and leave the source window intact", function()
 	vim.notify = notify
 	assert(vim.api.nvim_get_current_win() == origin)
 	assert(vim.deep_equal(notices, { "install difftastic explicitly" }))
-end)
+end
 
-test("binary and metadata-only changes never invoke the adapter", function()
+T["binary and metadata-only changes never invoke the adapter"] = function()
 	local total = #requests
 	for _, flag in ipairs({ "binary", "metadata_only" }) do
 		local value = vim.deepcopy(entry)
@@ -186,9 +174,9 @@ test("binary and metadata-only changes never invoke the adapter", function()
 		end)
 		assert(not opened and err and #requests == total)
 	end
-end)
+end
 
-test("optional adapter validation leaves the previous adapter unchanged", function()
+T["optional adapter validation leaves the previous adapter unchanged"] = function()
 	local previous = dependencies.get("structural_diff").run
 	local ok = pcall(dependencies.setup, {
 		repo = noop_adapter,
@@ -200,13 +188,6 @@ test("optional adapter validation leaves the previous adapter unchanged", functi
 		structural_diff = { run = true },
 	})
 	assert(not ok and dependencies.get("structural_diff").run == previous)
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("native_review_structural_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+return T

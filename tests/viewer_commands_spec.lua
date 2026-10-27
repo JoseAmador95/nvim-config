@@ -10,24 +10,10 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 package.loaded["config.pager"] = {
 	active = false,
@@ -76,7 +62,7 @@ end
 
 require("config.viewer_commands")
 
-test("SetFileType fires FileType once and probes the original buffer", function()
+T["SetFileType fires FileType once and probes the original buffer"] = function()
 	vim.cmd("enew!")
 	local target = vim.api.nvim_get_current_buf()
 	local filetype_events = 0
@@ -108,9 +94,9 @@ test("SetFileType fires FileType once and probes the original buffer", function(
 	vim.api.nvim_del_augroup_by_id(group)
 	vim.api.nvim_buf_delete(other, { force = true })
 	vim.api.nvim_buf_delete(target, { force = true })
-end)
+end
 
-test("LogWatchCurrentFile crosses only the audited deferred boundary", function()
+T["LogWatchCurrentFile crosses only the audited deferred boundary"] = function()
 	assert(package.loaded["config.log_watch"] == nil, "log watch adapter loaded during command registration")
 	vim.cmd("LogWatchCurrentFile pause")
 	equal({ "pause" }, log_watch_calls, "log command arguments changed")
@@ -118,18 +104,12 @@ test("LogWatchCurrentFile crosses only the audited deferred boundary", function(
 	local completions = vim.fn.getcompletion("LogWatchCurrentFile ", "cmdline")
 	equal({ "on", "off", "pause", "resume" }, completions, "log completion changed")
 	equal("config.log_watch", deferred_loads[#deferred_loads], "log completion bypassed deferred loading")
-end)
-
-vim.defer_fn = original_defer_fn
-vim.lsp.get_clients = original_get_clients
-vim.notify = original_notify
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("viewer_commands_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.defer_fn = original_defer_fn
+	vim.lsp.get_clients = original_get_clients
+	vim.notify = original_notify
+end
+
+return T

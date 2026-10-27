@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.code_review")
 local M = {}
 
 local deferred = require("config.deferred")
@@ -245,9 +246,9 @@ end
 
 local function setup_mappings()
 	for _, mapping in ipairs(MAPPINGS) do
-		vim.keymap.set("n", mapping.lhs, mapping.rhs, { silent = true, desc = mapping.desc })
+		usage_map("n", mapping.lhs, mapping.rhs, { silent = true, desc = mapping.desc })
 	end
-	vim.keymap.set("x", "<leader>ra", ":<C-U>'<,'>ReviewComment<CR>", {
+	usage_map("x", "<leader>ra", ":<C-U>'<,'>ReviewComment<CR>", {
 		silent = true,
 		desc = "Add review comment for selected lines",
 	})

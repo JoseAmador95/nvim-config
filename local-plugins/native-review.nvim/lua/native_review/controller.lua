@@ -18,6 +18,7 @@ local review_scope = require("native_review.scope")
 local review_store = require("native_review.store")
 local review_structural = require("native_review.structural")
 local review_engines = require("native_review.engines")
+local buffers = require("native_review.buffers")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comments")
 local PREVIEW_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_comment_preview")
@@ -153,12 +154,6 @@ local function clear_inline_preview()
 		pcall(vim.api.nvim_buf_clear_namespace, inline_preview.buf, PREVIEW_NAMESPACE, 0, -1)
 	end
 	inline_preview = nil
-end
-
-local function buffer_text(buf)
-	local separator = ({ dos = "\r\n", mac = "\r" })[vim.bo[buf].fileformat] or "\n"
-	local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), separator)
-	return vim.bo[buf].endofline and text .. separator or text
 end
 
 local function null(value)
@@ -2677,7 +2672,7 @@ local function normal_targets(workspace, buf, win)
 	if vim.bo[buf].modified then
 		return targets
 	end
-	local contents = buffer_text(buf)
+	local contents = buffers.text(buf)
 	for _, entry in ipairs(workspace.model.entries or {}) do
 		if
 			entry.new_path == path
@@ -2736,7 +2731,7 @@ local function capture_definition_origin(workspace, presentation, source)
 		name = vim.api.nvim_buf_get_name(source.buf),
 		presentation = presentation,
 		role = source.role,
-		text = buffer_text(source.buf),
+		text = buffers.text(source.buf),
 		win = source.win,
 	}
 	if source.role ~= "current" then
@@ -2806,7 +2801,7 @@ local function definition_origin_owned(workspace, state, captured)
 end
 
 local function definition_origin_valid(workspace, state, captured)
-	if not definition_origin_owned(workspace, state, captured) or buffer_text(captured.buf) ~= captured.text then
+	if not definition_origin_owned(workspace, state, captured) or buffers.text(captured.buf) ~= captured.text then
 		return false
 	end
 	if captured.role == "current" then
@@ -2840,7 +2835,7 @@ local function destination_text(workspace, resolved)
 		if valid_buf(buf) and vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) ~= "" then
 			local _, candidate = repo.relative_existing(workspace.root, vim.api.nvim_buf_get_name(buf))
 			if candidate and vim.fs.normalize(candidate) == vim.fs.normalize(resolved) then
-				if vim.bo[buf].buftype ~= "" or vim.bo[buf].modified or buffer_text(buf) ~= disk then
+				if vim.bo[buf].buftype ~= "" or vim.bo[buf].modified or buffers.text(buf) ~= disk then
 					return nil, "loaded CURRENT definition target differs from its file on disk"
 				end
 			end
@@ -2900,7 +2895,7 @@ local function real_target_matches_frozen(workspace, presentation, entry, target
 		not valid_buf(right.buf)
 		or vim.bo[right.buf].buftype ~= ""
 		or vim.bo[right.buf].modified
-		or buffer_text(right.buf) ~= entry.new_text
+		or buffers.text(right.buf) ~= entry.new_text
 	then
 		return nil, "LSP returned an invalid definition location"
 	end

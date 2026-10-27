@@ -5,26 +5,13 @@ vim.o.swapfile = false
 local repo = vim.fn.getcwd()
 local plugin = repo .. "/local-plugins/treesitter-runtime.nvim"
 vim.opt.runtimepath:prepend(plugin)
+vim.opt.runtimepath:prepend(repo .. "/local-plugins/_shared")
 package.path = table.concat({ plugin .. "/lua/?.lua", plugin .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function wait_for(predicate, message)
 	assert(vim.wait(1000, predicate, 5), message)
@@ -98,7 +85,7 @@ local function setup(options)
 	return runtime.setup(options)
 end
 
-test("installed-only setup waits for explicit retry and never installs", function()
+T["installed-only setup waits for explicit retry and never installs"] = function()
 	reset()
 	local commands_before = vim.api.nvim_get_commands({})
 	local buf = make_buffer("return true", "lua")
@@ -110,9 +97,9 @@ test("installed-only setup waits for explicit retry and never installs", functio
 	assert(runtime.retry(buf), "explicit retry did not attach an installed parser")
 	equal({ { buf = buf, language = "lua" } }, starts, "retry started the wrong parser")
 	assert(probes == 2, "installed parser state was not refreshed only by setup and retry")
-end)
+end
 
-test("current unsaved bytes stop on growth and reattach after shrink", function()
+T["current unsaved bytes stop on growth and reattach after shrink"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer("small", "lua", "LegacyIndent()")
@@ -134,9 +121,9 @@ test("current unsaved bytes stop on growth and reattach after shrink", function(
 		return #starts == 2
 	end, "unsaved shrink debounce did not complete")
 	equal(2, #starts, "unsaved shrink did not reattach")
-end)
+end
 
-test("initial oversized buffers stop a highlighter started before setup", function()
+T["initial oversized buffers stop a highlighter started before setup"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer(string.rep("x", 32), "lua", "PriorIndent()")
@@ -152,9 +139,9 @@ test("initial oversized buffers stop a highlighter started before setup", functi
 		return #starts == 1
 	end, "initial oversized buffer did not attach after shrinking")
 	equal({ { buf = buf, language = "lua" } }, starts, "shrink did not start policy-owned highlighting")
-end)
+end
 
-test("allowlist and disabled profile teardown owned state", function()
+T["allowlist and disabled profile teardown owned state"] = function()
 	reset()
 	installed = { "lua", "python" }
 	local buf = make_buffer("return true", "lua", "OriginalIndent()")
@@ -174,9 +161,9 @@ test("allowlist and disabled profile teardown owned state", function()
 	equal(3, #starts, "eligible filetype re-entry did not restart the parser")
 	setup({ enabled = false })
 	equal(3, #stops, "disabled profile did not stop the parser")
-end)
+end
 
-test("indent restoration is conditional on exact ownership", function()
+T["indent restoration is conditional on exact ownership"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer("return true", "lua", "PriorIndent()")
@@ -184,9 +171,9 @@ test("indent restoration is conditional on exact ownership", function()
 	vim.bo[buf].indentexpr = "ExternalIndent()"
 	setup({ enabled = false })
 	equal("ExternalIndent()", vim.bo[buf].indentexpr, "external indentation was overwritten during teardown")
-end)
+end
 
-test("pre-existing parser is managed across ineligible and eligible transitions", function()
+T["pre-existing parser is managed across ineligible and eligible transitions"] = function()
 	reset()
 	installed = { "lua" }
 	local target = "v:lua.require'nvim-treesitter'.indentexpr()"
@@ -211,9 +198,9 @@ test("pre-existing parser is managed across ineligible and eligible transitions"
 	end, "pre-existing parser restart debounce did not complete")
 	equal({ { buf = buf, language = "lua" } }, starts, "eligible re-entry did not restart the parser")
 	equal(target, vim.bo[buf].indentexpr, "eligible re-entry did not restore managed indentation")
-end)
+end
 
-test("retry recovers an externally stopped parser without reclaiming external indentation", function()
+T["retry recovers an externally stopped parser without reclaiming external indentation"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer("return true", "lua", "PriorIndent()")
@@ -231,9 +218,9 @@ test("retry recovers an externally stopped parser without reclaiming external in
 	assert(runtime.retry(buf), "second retry did not recover the externally stopped parser")
 	equal(3, #starts, "second retry did not restart the parser exactly once")
 	equal("ExternalIndent()", vim.bo[buf].indentexpr, "retry reclaimed externally changed indentation")
-end)
+end
 
-test("failed starts are retryable after the condition is repaired", function()
+T["failed starts are retryable after the condition is repaired"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer("return true", "lua")
@@ -243,9 +230,9 @@ test("failed starts are retryable after the condition is repaired", function()
 	fail_start = false
 	assert(runtime.retry(buf), "retry did not recover the start")
 	equal(2, #starts, "retry did not make exactly one new attempt")
-end)
+end
 
-test("setup is idempotent and full teardown supports re-entry", function()
+T["setup is idempotent and full teardown supports re-entry"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer("return true", "lua", "Before()")
@@ -262,9 +249,9 @@ test("setup is idempotent and full teardown supports re-entry", function()
 	assert(not runtime.retry(buf), "retry attached after full teardown")
 	setup()
 	equal(2, #starts, "setup did not re-enter after teardown")
-end)
+end
 
-test("highlight and indent options remain independent host choices", function()
+T["highlight and indent options remain independent host choices"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer("return true", "lua", "KeepIndent()")
@@ -276,9 +263,9 @@ test("highlight and indent options remain independent host choices", function()
 		vim.api.nvim_get_autocmds({ group = "TreesitterRuntime", event = "FileType" }),
 		"disabled profile watches FileType"
 	)
-end)
+end
 
-test("debounce coalesces reevaluation and reports exact eligibility reasons", function()
+T["debounce coalesces reevaluation and reports exact eligibility reasons"] = function()
 	reset()
 	installed = { "lua" }
 	local deferred = {}
@@ -304,9 +291,9 @@ test("debounce coalesces reevaluation and reports exact eligibility reasons", fu
 	equal(16, status.max_bytes, "status omitted the effective size limit")
 	status.reason = "mutated"
 	equal("max-bytes-exceeded", runtime.status(buf).reason, "status shares plugin state")
-end)
+end
 
-test("policy is a copied live query independent of recorded lifecycle state", function()
+T["policy is a copied live query independent of recorded lifecycle state"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer("tiny", "lua", "KeepIndent()")
@@ -335,9 +322,9 @@ test("policy is a copied live query independent of recorded lifecycle state", fu
 	equal(16, current.max_bytes, "policy result shares nested configuration")
 	vim.api.nvim_set_current_buf(buf)
 	equal(current, runtime.policy(0), "buffer zero did not resolve the current buffer")
-end)
+end
 
-test("partial language overrides inherit independent global policy fields", function()
+T["partial language overrides inherit independent global policy fields"] = function()
 	reset()
 	installed = { "lua", "python" }
 	local lua_buf = make_buffer("tiny", "lua", "LuaIndent()")
@@ -357,9 +344,9 @@ test("partial language overrides inherit independent global policy fields", func
 	local python_policy = runtime.policy(python_buf)
 	equal(16, python_policy.max_bytes, "absent language maximum did not inherit globally")
 	equal(false, python_policy.indent, "language indentation override was not selected")
-end)
+end
 
-test("language overrides and setup contracts remain copied and transactional", function()
+T["language overrides and setup contracts remain copied and transactional"] = function()
 	reset()
 	local initial = runtime.status()
 	assert(initial.configured == false and vim.deep_equal(initial.buffers, {}), "pre-setup status is unavailable")
@@ -389,9 +376,9 @@ test("language overrides and setup contracts remain copied and transactional", f
 	})
 	assert(not ok and tostring(err):find("unknown option: injected", 1, true), "unknown setup option was accepted")
 	equal(before, runtime.status(buf), "rejected setup mutated runtime status")
-end)
+end
 
-test("installed discovery is strict and setup snapshots it before publication", function()
+T["installed discovery is strict and setup snapshots it before publication"] = function()
 	reset()
 	installed = { "lua" }
 	local buf = make_buffer("return true", "lua", "Before()")
@@ -417,9 +404,9 @@ test("installed discovery is strict and setup snapshots it before publication", 
 		equal(before_config, runtime.effective_config(), "failed discovery published a new profile")
 		equal(before_status, runtime.status(buf), "failed discovery mutated the active attachment")
 	end
-end)
+end
 
-test("failed parser stop rejects reconfiguration without publishing it", function()
+T["failed parser stop rejects reconfiguration without publishing it"] = function()
 	reset()
 	installed = { "lua" }
 	local fail_stop = false
@@ -442,16 +429,10 @@ test("failed parser stop rejects reconfiguration without publishing it", functio
 	assert(runtime.status(buf).attached, "failed stop discarded the prior attachment")
 	assert(vim.bo[buf].indentexpr:find("nvim%-treesitter"), "failed stop restored owned indentation early")
 	fail_stop = false
-end)
-
-reset()
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("treesitter_runtime_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	reset()
+end
+
+return T

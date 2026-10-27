@@ -5,120 +5,53 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
+local T = MiniTest.new_set()
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local harness = require("config.local_plugins")
+local products = harness.products()
 
-local expected = {
-	"native-review.nvim",
-	"exact-editor.nvim",
-	"devcontainer-editor.nvim",
-	"tab-first.nvim",
-	"terminal-lifecycle.nvim",
-	"project-python.nvim",
-	"action-palette.nvim",
-	"diagram-view.nvim",
-	"log-workbench.nvim",
-	"repo-scratch.nvim",
-	"coverage-workbench.nvim",
-	"just-workbench.nvim",
-	"clangd-compile-db.nvim",
-	"trusted-workspace.nvim",
-	"treesitter-runtime.nvim",
-	"theme-router.nvim",
-}
-local support = { "_shared" }
-local local_root = vim.fs.joinpath(repo, "local-plugins")
-local modules = {
-	["native-review.nvim"] = "native_review",
-	["exact-editor.nvim"] = "exact_editor",
-	["devcontainer-editor.nvim"] = "devcontainer_editor",
-	["tab-first.nvim"] = "tab_first",
-	["terminal-lifecycle.nvim"] = "terminal_lifecycle",
-	["project-python.nvim"] = "project_python",
-	["action-palette.nvim"] = "action_palette",
-	["diagram-view.nvim"] = "diagram_view",
-	["log-workbench.nvim"] = "log_workbench",
-	["repo-scratch.nvim"] = "repo_scratch",
-	["coverage-workbench.nvim"] = "coverage_workbench",
-	["just-workbench.nvim"] = "just_workbench",
-	["clangd-compile-db.nvim"] = "clangd_compile_db",
-	["trusted-workspace.nvim"] = "trusted_workspace",
-	["treesitter-runtime.nvim"] = "treesitter_runtime",
-	["theme-router.nvim"] = "theme_router",
-}
-
-test("local plugin inventory and README boundaries are exact", function()
-	local actual = {}
-	for name, kind in vim.fs.dir(local_root) do
-		if kind == "directory" then
-			actual[#actual + 1] = name
-		end
-	end
-	local sorted_expected = vim.list_extend(vim.deepcopy(expected), support)
-	table.sort(actual)
-	table.sort(sorted_expected)
-	equal(sorted_expected, actual, "local plugin directory set drifted")
-	equal(expected, require("config.local_plugins").names(), "harness order drifted")
-	for _, name in ipairs(sorted_expected) do
-		local readme = vim.fs.joinpath(local_root, name, "README.md")
-		assert(vim.fn.filereadable(readme) == 1, name .. " has no README")
-		local contents = table.concat(vim.fn.readfile(readme), "\n")
-		assert(contents:find("Boundary:", 1, true), name .. " README does not identify its boundary")
-	end
-end)
-
-test("runtimepath harness loads local boundaries early and deterministically", function()
-	local init = table.concat(vim.fn.readfile(vim.fs.joinpath(repo, "init.lua")), "\n")
-	local harness_call = assert(init:find('require("config.local_plugins").setup()', 1, true))
-	local first_host_require = assert(init:find('require("config.local_config")', 1, true))
-	assert(harness_call < first_host_require, "local plugin harness is not loaded before host modules")
-
-	local harness = require("config.local_plugins")
+T["local runtimes are registered once and stay independently loadable"] = function()
 	local paths = harness.setup()
-	assert(#paths == 16, "runtimepath harness must expose exactly 16 products")
-	assert(not vim.tbl_contains(paths, vim.fs.joinpath(local_root, "_shared")), "shared library became a runtime")
-	assert(harness.shared_lua() == vim.fs.joinpath(local_root, "_shared", "lua"))
-	local runtimepath = vim.opt.runtimepath:get()
-	for index, path in ipairs(paths) do
-		equal(path, runtimepath[index], "local runtimepath order drifted at " .. expected[index])
+	local registered = vim.opt.runtimepath:get()
+	assert(#paths > 0, "no local products were registered")
+	for _, path in ipairs(paths) do
+		local count = 0
+		for _, entry in ipairs(registered) do
+			count = count + (entry == path and 1 or 0)
+		end
+		assert(count == 1, "runtime is missing or duplicated: " .. path)
 	end
-	equal(paths, harness.setup(), "repeated harness setup changed the canonical paths")
-end)
+	equal(paths, harness.setup(), "repeated setup changed runtime paths")
+	equal(registered, vim.opt.runtimepath:get(), "repeated setup duplicated runtimes")
+	local names = harness.names()
+	names[1] = "changed"
+	assert(harness.names()[1] ~= "changed", "inventory shares mutable state")
 
-test("local plugin runtime Lua has no host imports or global commands", function()
-	local files = vim.fn.globpath(local_root, "*/lua/**/*.lua", false, true)
-	assert(#files > 0, "shared contracts module is missing")
-	for _, path in ipairs(files) do
-		local contents = table.concat(vim.fn.readfile(path), "\n")
-		assert(
-			not contents:match([=[require%s*%(%s*["']config[%.'"]]=])
-				and not contents:match([=[require%s+["']config[%.'"]]=])
-				and not contents:match([=[require%s*,%s*["']config[%.'"]]=]),
-			path .. " imports host config"
-		)
-		assert(not contents:find("nvim_create_user_command", 1, true), path .. " creates a global user command")
+	local original_require = require
+	local original_command = vim.api.nvim_create_user_command
+	_G.require = function(name)
+		assert(not name:match("^config[%.]"), "local product imported host module " .. name)
+		return original_require(name)
 	end
-end)
+	vim.api.nvim_create_user_command = function(name)
+		error("local product registered global command " .. name)
+	end
+	local ok, err = xpcall(function()
+		for _, product in ipairs(products) do
+			assert(type(require(product.module)) == "table", product.name .. " is not independently loadable")
+		end
+	end, debug.traceback)
+	_G.require = original_require
+	vim.api.nvim_create_user_command = original_command
+	assert(ok, err)
+end
 
-test("every product exposes pure copied status and effective configuration", function()
-	for _, name in ipairs(expected) do
-		local plugin = require(assert(modules[name], "missing module mapping for " .. name))
+T["every product exposes pure copied status and effective configuration"] = function()
+	for _, product in ipairs(products) do
+		local name = product.name
+		local plugin = require(product.module)
 		assert(type(plugin.setup) == "function", name .. " has no setup()")
 		assert(type(plugin.status) == "function", name .. " has no status()")
 		assert(type(plugin.effective_config) == "function", name .. " has no effective_config()")
@@ -132,26 +65,28 @@ test("every product exposes pure copied status and effective configuration", fun
 		assert(plugin.status().__mutation_probe == nil, name .. " status() shares mutable state")
 		assert(plugin.effective_config().__mutation_probe == nil, name .. " effective_config() shares mutable state")
 	end
-end)
+end
 
-test("unknown setup options fail before changing product state", function()
-	for _, name in ipairs(expected) do
-		local plugin = require(modules[name])
+T["unknown setup options fail before changing product state"] = function()
+	for _, product in ipairs(products) do
+		local name = product.name
+		local plugin = require(product.module)
 		local before = plugin.status()
 		local called, result = pcall(plugin.setup, { __unknown_contract_option = true })
 		assert(not called or result == nil, name .. " accepted an unknown setup option")
 		equal(before, plugin.status(), name .. " mutated state before rejecting an unknown setup option")
 	end
-end)
+end
 
-test("local plugins never acquire lazy lockfile entries", function()
+T["local plugins never acquire lazy lockfile entries"] = function()
 	local lock = vim.json.decode(table.concat(vim.fn.readfile(vim.fs.joinpath(repo, "lazy-lock.json")), "\n"))
-	for _, name in ipairs(expected) do
+	for _, product in ipairs(products) do
+		local name = product.name
 		assert(lock[name] == nil, name .. " unexpectedly has a lazy lockfile entry")
 	end
-end)
+end
 
-test("shared workspace and action contracts validate and copy values", function()
+T["shared workspace and action contracts validate and copy values"] = function()
 	local contracts = require("local_plugins.contracts")
 	local workspace = assert(contracts.normalize_workspace_key({
 		runtime = "host",
@@ -179,9 +114,9 @@ test("shared workspace and action contracts validate and copy values", function(
 		changedtick = 4,
 		injected = true,
 	}))
-end)
+end
 
-test("Snapshot recursively copies value and validity", function()
+T["Snapshot recursively copies value and validity"] = function()
 	local contracts = require("local_plugins.contracts")
 	local input = {
 		generation = 2,
@@ -199,9 +134,9 @@ test("Snapshot recursively copies value and validity", function()
 	second.value.nested.label = "second"
 	assert(snapshot.value.nested.label == "original", "normalized Snapshots share nested tables")
 	assert(not contracts.normalize_snapshot({ generation = -1, source = "host", validity = true, value = {} }))
-end)
+end
 
-test("TerminalSpec validates launch data and returns independent tables", function()
+T["TerminalSpec validates launch data and returns independent tables"] = function()
 	local contracts = require("local_plugins.contracts")
 	local input = {
 		key = '["host","/repo","shell"]',
@@ -230,32 +165,6 @@ test("TerminalSpec validates launch data and returns independent tables", functi
 		launch = { argv = {}, cwd = "/repo", env = {} },
 	})))
 	assert(not contracts.normalize_terminal_spec(vim.tbl_deep_extend("force", {}, input, { key = { id = "shell" } })))
-end)
-
-test("ToolIdentity requires every exact scalar and an absolute install root", function()
-	local contracts = require("local_plugins.contracts")
-	local identity = assert(contracts.normalize_tool_identity({
-		backend = "release",
-		name = "plantuml",
-		version = "1.2026.6",
-		target = "darwin-arm64",
-		digest = "sha256:fixture",
-		install_root = "/managed/tools",
-	}))
-	assert(identity.name == "plantuml" and identity.install_root == "/managed/tools")
-	assert(not contracts.normalize_tool_identity({
-		backend = "release",
-		name = "plantuml",
-		version = "1.2026.6",
-		target = "darwin-arm64",
-		digest = "sha256:fixture",
-		install_root = "relative",
-	}))
-end)
-
-if #failures > 0 then
-	error(table.concat(failures, "\n\n"))
 end
 
-print(string.format("local_plugins_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("plugins.gitsigns")
 return {
 	"lewis6991/gitsigns.nvim",
 	event = "BufReadPre",
@@ -18,7 +19,7 @@ return {
 			on_attach = function(bufnr)
 				local gs = require("gitsigns")
 				local function map(mode, lhs, rhs, desc)
-					vim.keymap.set(mode, lhs, rhs, { buffer = bufnr, desc = desc })
+					usage_map(mode, lhs, rhs, { buffer = bufnr, desc = desc })
 				end
 
 				-- Hunk navigation (]c/[c are taken by treesitter class motions).

@@ -9,17 +9,7 @@ vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local review = require("config.code_review")
 
@@ -33,7 +23,7 @@ local function assert_native_review_unloaded(context)
 	end
 end
 
-test("host registration and neutral observers preserve the first-action boundary", function()
+T["host registration and neutral observers preserve the first-action boundary"] = function()
 	assert_native_review_unloaded("requiring config.code_review")
 	local status = review.status()
 	assert(vim.deep_equal(status, { active = false, mode_on = false }))
@@ -148,9 +138,9 @@ test("host registration and neutral observers preserve the first-action boundary
 		#vim.api.nvim_get_autocmds({ group = "NvimConfigCodeReview" }) == #first_autocmds,
 		"second Review action duplicated controller setup"
 	)
-end)
+end
 
-test("ReviewOpen parser keeps the exact native scope vocabulary", function()
+T["ReviewOpen parser keeps the exact native scope vocabulary"] = function()
 	assert(vim.deep_equal(review._parse_open({}), { kind = "branch" }))
 	assert(vim.deep_equal(review._parse_open({ "working" }), { kind = "working" }))
 	assert(vim.deep_equal(review._parse_open({ "commit", "topic" }), { kind = "commit", rev = "topic" }))
@@ -167,9 +157,9 @@ test("ReviewOpen parser keeps the exact native scope vocabulary", function()
 	}))
 	assert(review._parse_open({ "range", "missing" }) == nil)
 	assert(review._parse_open({ "tuicr", "round" }) == nil)
-end)
+end
 
-test("mapping table uses only the approved lowercase review vocabulary", function()
+T["mapping table uses only the approved lowercase review vocabulary"] = function()
 	local expected = {
 		"<leader>rr",
 		"<leader>ro",
@@ -205,9 +195,9 @@ test("mapping table uses only the approved lowercase review vocabulary", functio
 	end, review.mapping_specs())
 	assert(vim.deep_equal(actual, expected))
 	assert(review.help_groups().common == "review")
-end)
+end
 
-test("host adapter owns global review commands and mappings without retired publication", function()
+T["host adapter owns global review commands and mappings without retired publication"] = function()
 	review.setup()
 	for _, command in ipairs({
 		"ReviewOpen",
@@ -225,9 +215,9 @@ test("host adapter owns global review commands and mappings without retired publ
 		assert(vim.fn.exists(":" .. command) == 0, command .. " survived retirement")
 	end
 	assert(vim.fn.maparg("<leader>ro", "n", false, true).desc == "Open default review", "host review mapping")
-end)
+end
 
-test("inline comment previews use status, range, first content, and Unicode-safe ellipsis", function()
+T["inline comment previews use status, range, first content, and Unicode-safe ellipsis"] = function()
 	local item = {
 		type = "suggestion",
 		body = "  \n\t  \ná🙂 first content\nsecond line",
@@ -256,9 +246,9 @@ test("inline comment previews use status, range, first content, and Unicode-safe
 	item.body = "short body"
 	local short = review._inline_preview_text(item, 80)
 	assert(short:find("short body", 1, true) and short:sub(-3) ~= "…")
-end)
+end
 
-test("inactive comment types keep their label and rail under an issue-only catalogue", function()
+T["inactive comment types keep their label and rail under an issue-only catalogue"] = function()
 	local types = require("native_review.comment_types")
 	local extras = {}
 	for index, definition in ipairs(types.all()) do
@@ -342,9 +332,9 @@ test("inactive comment types keep their label and rail under an issue-only catal
 	types.configure(extras)
 	require("config.native_review").controller.setup()
 	assert(ok, err)
-end)
+end
 
-test("inclusive cursor matching covers multiline overlaps", function()
+T["inclusive cursor matching covers multiline overlaps"] = function()
 	local location = { path = "lua/example.lua", side = "right", layer = "history", line = 5 }
 	assert(review._contains_line({
 		kind = "range",
@@ -383,9 +373,9 @@ test("inclusive cursor matching covers multiline overlaps", function()
 			end_line = 4,
 		}, shared))
 	end
-end)
+end
 
-test("comment rails compact each line and type with stable priorities", function()
+T["comment rails compact each line and type with stable priorities"] = function()
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three", "four", "five" })
 	vim.b[buf].nvim_review_path = "lua/example.lua"
@@ -497,9 +487,9 @@ test("comment rails compact each line and type with stable priorities", function
 		"review rails replaced another sign provider"
 	)
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("file comments render as virtual line zero only on their exact side", function()
+T["file comments render as virtual line zero only on their exact side"] = function()
 	local function comment(sequence, item_type, body, anchor)
 		return {
 			id = ("%064d"):format(sequence),
@@ -580,9 +570,9 @@ test("file comments render as virtual line zero only on their exact side", funct
 	assert(left_text == "0 │ [OLD][? question][draft] old-only comment")
 	vim.api.nvim_buf_delete(right_buf, { force = true })
 	vim.api.nvim_buf_delete(left_buf, { force = true })
-end)
+end
 
-test("comment sign highlights are theme-linked, restored, and user-overridable", function()
+T["comment sign highlights are theme-linked, restored, and user-overridable"] = function()
 	local links = {
 		NvimReviewCommentIssue = "DiagnosticSignError",
 		NvimReviewCommentSuggestion = "DiagnosticSignWarn",
@@ -600,7 +590,7 @@ test("comment sign highlights are theme-linked, restored, and user-overridable",
 	vim.cmd("highlight clear NvimReviewCommentIssue")
 	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "review-comment-default-link" })
 	assert(vim.api.nvim_get_hl(0, { name = "NvimReviewCommentIssue", link = true }).link == "DiagnosticSignError")
-end)
+end
 
 local function structural_model_regression(workspace, build, structural)
 	local fixture = vim.fn.tempname()
@@ -688,7 +678,7 @@ local function structural_model_regression(workspace, build, structural)
 	assert(ok, err)
 end
 
-test("open owns one reusable review tab and preserves its ordinary invocation", function()
+T["open owns one reusable review tab and preserves its ordinary invocation"] = function()
 	local native_review = require("config.native_review")
 	local review_lsp = native_review.lsp
 	local scope_module = native_review.scope
@@ -4074,13 +4064,6 @@ test("open owns one reusable review tab and preserves its ordinary invocation", 
 	vim.ui.input = original_input
 	package.loaded.trouble = original_trouble
 	assert(ok, err)
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("code_review_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+return T

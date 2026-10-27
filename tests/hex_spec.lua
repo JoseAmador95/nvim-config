@@ -5,24 +5,10 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function write_bytes(path, data)
 	local file = assert(io.open(path, "wb"))
@@ -110,7 +96,7 @@ assert(plugin.config == nil, "hex.nvim still runs its upstream setup")
 local hex = require("config.hex")
 hex.setup()
 
-test("automatic dump treats a hostile binary filename as argv", function()
+T["automatic dump treats a hostile binary filename as argv"] = function()
 	local sentinel = vim.fs.joinpath(fixture, "hex-pwned")
 	local path = vim.fs.joinpath(fixture, [[payload "$(touch hex-pwned)" `touch hex-pwned` ".bin]])
 	local original = string.char(0, 1, 2, 10, 255, 65)
@@ -134,9 +120,9 @@ test("automatic dump treats a hostile binary filename as argv", function()
 	vim.cmd("HexToggle")
 	assert(vim.b.hex == true, "HexToggle did not dump the buffer")
 	assert(vim.uv.fs_stat(sentinel) == nil, "hostile manual filename executed shell code")
-end)
+end
 
-test("writing a hostile binary path round-trips through the hex view", function()
+T["writing a hostile binary path round-trips through the hex view"] = function()
 	local sentinel = vim.fs.joinpath(fixture, "hex-pwned")
 	local path = vim.fs.joinpath(fixture, [[write "$(touch hex-pwned)" `touch hex-pwned` ".bin]])
 	write_bytes(path, "before")
@@ -155,9 +141,9 @@ test("writing a hostile binary path round-trips through the hex view", function(
 
 	vim.cmd("HexToggle")
 	equal(desired, buffer_bytes(), "post-write HexToggle did not recover the saved bytes")
-end)
+end
 
-test("all byte values round-trip and restore the original options", function()
+T["all byte values round-trip and restore the original options"] = function()
 	local chunks = {}
 	for byte = 0, 255 do
 		chunks[#chunks + 1] = string.char(byte)
@@ -173,9 +159,9 @@ test("all byte values round-trip and restore the original options", function()
 	equal(false, vim.bo.binary, "assemble did not restore the original binary option")
 	equal("", vim.bo.filetype, "assemble did not restore the original filetype")
 	equal(false, vim.bo.endofline, "assemble invented a final newline")
-end)
+end
 
-test("dump and assemble never expose the other representation through undo", function()
+T["dump and assemble never expose the other representation through undo"] = function()
 	local path = vim.fs.joinpath(fixture, "undo-boundary.bin")
 	local original = string.char(0, 1, 2, 65, 10, 66)
 	write_bytes(path, original)
@@ -196,9 +182,9 @@ test("dump and assemble never expose the other representation through undo", fun
 	vim.cmd("silent! earlier 1")
 	equal(assembled, buffer_snapshot(), "earlier restored xxd text after leaving hex mode")
 	equal(original, read_bytes(path), "undo boundary changed the file")
-end)
+end
 
-test("manual dump rejects modified buffers without changing their state", function()
+T["manual dump rejects modified buffers without changing their state"] = function()
 	local path = vim.fs.joinpath(fixture, "modified.txt")
 	write_bytes(path, "clean\n")
 	edit(path)
@@ -209,9 +195,9 @@ test("manual dump rejects modified buffers without changing their state", functi
 	assert(not hex.dump(), "HexDump accepted a modified buffer")
 	equal(before, buffer_snapshot(), "rejected HexDump changed the buffer")
 	equal("clean\n", read_bytes(path), "rejected HexDump changed the file")
-end)
+end
 
-test("strict decoder rejects malformed, discontinuous, and oversized records", function()
+T["strict decoder rejects malformed, discontinuous, and oversized records"] = function()
 	local canonical = xxd_lines("AB")[1]
 	reject_decode(hex, { "not xxd" }, "canonical xxd record")
 	reject_decode(hex, { "FFFFFFFF" .. canonical:sub(9) }, "non-contiguous xxd offset")
@@ -223,9 +209,9 @@ test("strict decoder rejects malformed, discontinuous, and oversized records", f
 	hex.setup({ max_bytes = 16 })
 	reject_decode(hex, xxd_lines(string.rep("A", 32)), "configured line limit")
 	hex.setup()
-end)
+end
 
-test("invalid hex writes fail without changing the file or view", function()
+T["invalid hex writes fail without changing the file or view"] = function()
 	local path = vim.fs.joinpath(fixture, "invalid-write.bin")
 	write_bytes(path, "safe")
 	edit(path)
@@ -238,9 +224,9 @@ test("invalid hex writes fail without changing the file or view", function()
 	equal("safe", read_bytes(path), "invalid hex write changed the file")
 	equal(before, buffer_snapshot(), "invalid hex write changed the view")
 	assert(vim.b.hex == true, "invalid write left hex mode")
-end)
+end
 
-test("writing another path never redirects or cleans the hex buffer", function()
+T["writing another path never redirects or cleans the hex buffer"] = function()
 	local path = vim.fs.joinpath(fixture, "write-source.bin")
 	local destination = vim.fs.joinpath(fixture, "write-destination.bin")
 	write_bytes(path, "source")
@@ -253,9 +239,9 @@ test("writing another path never redirects or cleans the hex buffer", function()
 	equal("source", read_bytes(path), "redirected write changed the original path")
 	assert(vim.uv.fs_lstat(destination) == nil, "redirected write created the destination")
 	equal(before, buffer_snapshot(), "redirected write changed or cleaned the hex view")
-end)
+end
 
-test("atomic write failure preserves the target and a retry succeeds", function()
+T["atomic write failure preserves the target and a retry succeeds"] = function()
 	local path = vim.fs.joinpath(fixture, "atomic-failure.bin")
 	write_bytes(path, "before")
 	assert(vim.uv.fs_chmod(path, tonumber("640", 8)))
@@ -287,9 +273,9 @@ test("atomic write failure preserves the target and a retry succeeds", function(
 	set_hex_bytes("second")
 	vim.cmd.write()
 	equal("second", read_bytes(path), "a second atomic write used stale identity")
-end)
+end
 
-test("atomic writes preserve extended metadata when the host exposes xattr", function()
+T["atomic writes preserve extended metadata when the host exposes xattr"] = function()
 	local xattr = vim.fn.exepath("xattr")
 	if xattr == "" then
 		return
@@ -306,9 +292,9 @@ test("atomic writes preserve extended metadata when the host exposes xattr", fun
 	local read_attribute = vim.system({ xattr, "-p", attribute, path }):wait()
 	equal(0, read_attribute.code, "atomic write removed the xattr")
 	equal("retained", vim.trim(read_attribute.stdout or ""), "atomic write changed the xattr")
-end)
+end
 
-test("atomic writes reject special mode bits before changing bytes or metadata", function()
+T["atomic writes reject special mode bits before changing bytes or metadata"] = function()
 	for _, special in ipairs({ tonumber("4000", 8), tonumber("2000", 8), tonumber("1000", 8) }) do
 		local path = vim.fs.joinpath(fixture, ("special-%04o.bin"):format(special))
 		write_bytes(path, "before")
@@ -343,9 +329,9 @@ test("atomic writes reject special mode bits before changing bytes or metadata",
 		equal(tonumber("755", 8), assert(vim.uv.fs_lstat(path)).mode % 512, "fixture permissions changed")
 		equal(before, buffer_snapshot(), ("write changed the view for mode %04o"):format(special))
 	end
-end)
+end
 
-test("external target changes are never overwritten", function()
+T["external target changes are never overwritten"] = function()
 	local path = vim.fs.joinpath(fixture, "external-change.bin")
 	write_bytes(path, "original")
 	edit(path)
@@ -357,9 +343,9 @@ test("external target changes are never overwritten", function()
 	assert(not wrote, "write overwrote an externally changed target")
 	equal("external-change", read_bytes(path), "external target contents were lost")
 	equal(before, buffer_snapshot(), "external-change rejection changed the view")
-end)
+end
 
-test("short reads and post-rename races never report a successful write", function()
+T["short reads and post-rename races never report a successful write"] = function()
 	local short = vim.fs.joinpath(fixture, "short-read.bin")
 	write_bytes(short, "0123456789")
 	with_uv_override("fs_read", function()
@@ -388,9 +374,9 @@ test("short reads and post-rename races never report a successful write", functi
 	end)
 	equal("replace", read_bytes(path), "same-size post-rename competitor was overwritten")
 	equal(before, buffer_snapshot(), "post-rename race cleaned or changed the hex view")
-end)
+end
 
-test("decoder validates buffer bounds before fetching and reads valid data in batches", function()
+T["decoder validates buffer bounds before fetching and reads valid data in batches"] = function()
 	local data = string.rep("0123456789abcdef", 1250)
 	local path = vim.fs.joinpath(fixture, "batched.bin")
 	write_bytes(path, data)
@@ -431,9 +417,9 @@ test("decoder validates buffer bounds before fetching and reads valid data in ba
 	ok, assembled = xpcall(hex.assemble, debug.traceback)
 	vim.api.nvim_buf_get_lines = original_get_lines
 	assert(ok and not assembled, "oversized rendered line reached the decoder")
-end)
+end
 
-test("reloading or replacing a hex buffer resets and rebuilds its lifecycle", function()
+T["reloading or replacing a hex buffer resets and rebuilds its lifecycle"] = function()
 	local path = vim.fs.joinpath(fixture, "reload.bin")
 	local original = string.char(0, 1, 65, 10)
 	write_bytes(path, original)
@@ -460,9 +446,9 @@ test("reloading or replacing a hex buffer resets and rebuilds its lifecycle", fu
 	vim.cmd.edit(vim.fn.fnameescape(text))
 	assert(vim.b.hex ~= true, "editing a text file inherited hex lifecycle state")
 	equal("plain text\n", buffer_bytes(), "editing a text file retained xxd contents")
-end)
+end
 
-test("automatic hex mode refuses links and oversized files", function()
+T["automatic hex mode refuses links and oversized files"] = function()
 	local target = vim.fs.joinpath(fixture, "symlink-target")
 	local link = vim.fs.joinpath(fixture, "symlink.bin")
 	write_bytes(target, "target")
@@ -484,9 +470,9 @@ test("automatic hex mode refuses links and oversized files", function()
 	assert(vim.b.hex ~= true, "oversized file entered automatic hex mode")
 	equal(string.rep("x", 17), buffer_bytes(), "oversized rejection changed the buffer")
 	hex.setup()
-end)
+end
 
-test("CRLF files leave hex mode with their text options intact", function()
+T["CRLF files leave hex mode with their text options intact"] = function()
 	local path = vim.fs.joinpath(fixture, "dos.txt")
 	write_bytes(path, "one\r\ntwo\r\n")
 	edit(path)
@@ -496,9 +482,9 @@ test("CRLF files leave hex mode with their text options intact", function()
 	assert(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find("0D 0A", 1, true), "hex view lost CRLF bytes")
 	assert(hex.assemble(), "manual CRLF assemble failed")
 	equal(before, buffer_snapshot(), "CRLF assemble did not restore text state")
-end)
+end
 
-test("BOM files assemble and write without duplicating their marker", function()
+T["BOM files assemble and write without duplicating their marker"] = function()
 	local utf8 = vim.fs.joinpath(fixture, "utf8-bom.txt")
 	write_bytes(utf8, "\239\187\191A\n")
 	edit(utf8)
@@ -520,9 +506,9 @@ test("BOM files assemble and write without duplicating their marker", function()
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "B" })
 	vim.cmd.write()
 	equal("\255\254B\0\n\0", read_bytes(utf16), "UTF-16LE BOM was duplicated or removed")
-end)
+end
 
-test("binary mode treats a leading BOM marker as payload", function()
+T["binary mode treats a leading BOM marker as payload"] = function()
 	local path = vim.fs.joinpath(fixture, "binary-bom.dat")
 	local original = "\239\187\191A"
 	write_bytes(path, original)
@@ -536,9 +522,9 @@ test("binary mode treats a leading BOM marker as payload", function()
 	assert(vim.bo.binary and vim.bo.bomb and not vim.bo.endofline, "binary BOM options were not restored")
 	vim.cmd.write()
 	equal(original, read_bytes(path), "binary write removed or duplicated the BOM payload")
-end)
+end
 
-test("a BOM incompatible with fileencoding is rejected without normalization", function()
+T["a BOM incompatible with fileencoding is rejected without normalization"] = function()
 	local path = vim.fs.joinpath(fixture, "mismatched-bom.txt")
 	write_bytes(path, "\239\187\191A\n")
 	edit(path)
@@ -548,9 +534,9 @@ test("a BOM incompatible with fileencoding is rejected without normalization", f
 	assert(not hex.assemble(), "mismatched BOM was accepted")
 	equal(before, buffer_snapshot(), "mismatched BOM rejection changed the view")
 	equal("\239\187\191A\n", read_bytes(path), "mismatched BOM rejection changed the file")
-end)
+end
 
-test("invalid encoded byte sequences never reach iconv or change the view", function()
+T["invalid encoded byte sequences never reach iconv or change the view"] = function()
 	local utf16 = vim.fs.joinpath(fixture, "invalid-utf16le.txt")
 	local valid_utf16 = "\255\254A\0"
 	write_bytes(utf16, valid_utf16)
@@ -602,9 +588,9 @@ test("invalid encoded byte sequences never reach iconv or change the view", func
 		equal(before, buffer_snapshot(), "invalid UTF-8 assemble changed the hex view")
 		equal(valid_utf8, read_bytes(utf8), "invalid UTF-8 assemble changed the file")
 	end
-end)
+end
 
-test("failed setup reentry preserves the active lifecycle transactionally", function()
+T["failed setup reentry preserves the active lifecycle transactionally"] = function()
 	hex.setup({ max_bytes = 64, timeout_ms = 1000 })
 	local path = vim.fs.joinpath(fixture, "setup-reentry.bin")
 	write_bytes(path, "active")
@@ -621,9 +607,9 @@ test("failed setup reentry preserves the active lifecycle transactionally", func
 	assert(hex.assemble(), "failed setup broke the active assemble handler")
 	assert(hex.dump(), "failed setup replaced the prior xxd path or byte limit")
 	hex.setup()
-end)
+end
 
-test("errors are control-free, UTF-8 safe, bounded, and setup options are strict", function()
+T["errors are control-free, UTF-8 safe, bounded, and setup options are strict"] = function()
 	local sanitized = hex._sanitize(string.rep("é", 200) .. "\0\27]8;;unsafe\7\194\128\n")
 	assert(#sanitized <= 259, "sanitized error exceeded its bound")
 	assert(not sanitized:find("[%z\1-\31\127]"), "sanitized error retained a control byte")
@@ -641,24 +627,18 @@ test("errors are control-free, UTF-8 safe, bounded, and setup options are strict
 		assert(not pcall(hex.setup, opts), "invalid setup options were accepted: " .. vim.inspect(opts))
 	end
 	hex.setup()
-end)
+end
 
-test("manual dump rejects unnamed buffers without invoking xxd", function()
+T["manual dump rejects unnamed buffers without invoking xxd"] = function()
 	vim.cmd("enew!")
 	assert(not hex.dump(), "HexDump accepted an unnamed buffer")
 	assert(vim.b.hex ~= true, "unnamed buffer entered hex mode")
-end)
-
-vim.cmd("enew!")
-vim.fn.chdir(original_cwd)
-assert(vim.fn.delete(fixture, "rf") == 0)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("hex_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.cmd("enew!")
+	vim.fn.chdir(original_cwd)
+	assert(vim.fn.delete(fixture, "rf") == 0)
+end
+
+return T

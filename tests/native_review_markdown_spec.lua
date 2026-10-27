@@ -1,3 +1,4 @@
+local MiniTest = require("mini.test")
 -- Real pinned-renderer snapshots, canonical anchors and screen geometry.
 -- Run after screen allocation with -c 'lua dofile(...)', not -l.
 vim.o.shadafile = "NONE"
@@ -18,16 +19,9 @@ local markdown = require("native_review.markdown")
 local adapter = require("config.review_markdown")
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p", 448) == 1)
-local failures, count = {}, 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 local function entry(old, new)
 	return {
 		identity = "history\0sample.md\0sample.md",
@@ -64,7 +58,7 @@ local function changed_text(result, kind)
 	end
 	return table.concat(words)
 end
-test("visual words retain exact paragraph ranges on both sides", function()
+T["visual words retain exact paragraph ranges on both sides"] = function()
 	local result = prepare(
 		"# Wait\n\nWait **30 seconds** before\ncontinuing.\n",
 		"# Wait\n\nWait **60 seconds** before\ncontinuing.\n"
@@ -84,8 +78,8 @@ test("visual words retain exact paragraph ranges on both sides", function()
 		assert(range.start_line == 3 and range.end_line == 4)
 	end
 	assert(not review.projection.resolve_range(result.projection, old_row, new_row))
-end)
-test("source wrapping, whitespace, link destinations and line endings can be visually equal", function()
+end
+T["source wrapping, whitespace, link destinations and line endings can be visually equal"] = function()
 	for _, values in ipairs({
 		{ "Wait 30 seconds before\ncontinuing.\n", "Wait 30 seconds before continuing.\n" },
 		{ "Wait 30 seconds.\n", "Wait  30 seconds.\n" },
@@ -95,8 +89,8 @@ test("source wrapping, whitespace, link destinations and line endings can be vis
 	}) do
 		assert(prepare(values[1], values[2]).status == "unchanged", vim.inspect(values))
 	end
-end)
-test("styles and structure remain visual changes", function()
+end
+T["styles and structure remain visual changes"] = function()
 	for _, values in ipairs({
 		{ "**bold**\n", "bold\n" },
 		{ "# Heading\n", "## Heading\n" },
@@ -105,8 +99,8 @@ test("styles and structure remain visual changes", function()
 	}) do
 		assert(prepare(values[1], values[2]).status == "changed")
 	end
-end)
-test("structural replacements keep whole-block emphasis", function()
+end
+T["structural replacements keep whole-block emphasis"] = function()
 	for _, values in ipairs({
 		{ "# Heading\n", "## Heading\n" },
 		{ "- item\n", "item\n" },
@@ -129,8 +123,8 @@ test("structural replacements keep whole-block emphasis", function()
 		local result = prepare(values[1], values[2])
 		assert(changed_text(result, "old") == "30" and changed_text(result, "new") == "60")
 	end
-end)
-test("ambiguous unmatched block runs keep whole-block emphasis after resize", function()
+end
+T["ambiguous unmatched block runs keep whole-block emphasis after resize"] = function()
 	for _, values in ipairs({
 		{ "Alpha old paragraph.\n\nBeta old paragraph.\n\nTail\n", "Beta new paragraph.\n\nTail\n" },
 		{ "Alpha old paragraph.\n\nTail\n", "Alpha new paragraph.\n\nBeta new paragraph.\n\nTail\n" },
@@ -147,8 +141,8 @@ test("ambiguous unmatched block runs keep whole-block emphasis after resize", fu
 			assert(changed_text(rendered, "old") == "" and changed_text(rendered, "new") == "")
 		end
 	end
-end)
-test("table cells have word detail and never truncate", function()
+end
+T["table cells have word detail and never truncate"] = function()
 	local result =
 		prepare("| Key | Value |\n| --- | --- |\n| delay | 30 |\n", "| Key | Value |\n| --- | --- |\n| delay | 60 |\n")
 	assert(changed_text(result, "old") == "30" and changed_text(result, "new") == "60")
@@ -162,8 +156,8 @@ test("table cells have word detail and never truncate", function()
 	for _, row in ipairs(narrow.projection.rows) do
 		assert(vim.fn.strdisplaywidth(row.text) <= 20 and not row.text:find("…", 1, true))
 	end
-end)
-test("a table cell change marks only its logical row across widths", function()
+end
+T["a table cell change marks only its logical row across widths"] = function()
 	local before = "| Key | Value |\n| --- | --- |\n| alpha | stable |\n| delay | 30 |\n| gamma | stable |\n"
 	for _, replacement in ipairs({ "60", "a much longer changed value" }) do
 		local result, value = prepare(before, (before:gsub("30", replacement)))
@@ -188,8 +182,8 @@ test("a table cell change marks only its logical row across widths", function()
 			end
 		end
 	end
-end)
-test("table row insertion and deletion retain shifted and repeated context rows", function()
+end
+T["table row insertion and deletion retain shifted and repeated context rows"] = function()
 	local before =
 		"| Key | Value |\n| --- | --- |\n| alpha | stable |\n| beta | stable |\n| beta | stable |\n| gamma | stable |\n"
 	local after = before:gsub("| alpha | stable |\n", "| alpha | stable |\n| inserted | new |\n", 1)
@@ -215,8 +209,8 @@ test("table row insertion and deletion retain shifted and repeated context rows"
 			assert(footer.kind == "context" and not footer.anchorable)
 		end
 	end
-end)
-test("wrapped table rows anchor one source line and border frames have no anchor", function()
+end
+T["wrapped table rows anchor one source line and border frames have no anchor"] = function()
 	local before =
 		"| Alpha | Beta | Gamma | Delay |\n| --- | --- | --- | --- |\n| one | two | three | 30 |\n| four | five | six | 40 |\n"
 	local result, value = prepare(before, (before:gsub("30", "60")))
@@ -239,8 +233,8 @@ test("wrapped table rows anchor one source line and border frames have no anchor
 			assert(not review.projection.resolve_range(projection, #projection.rows, #projection.rows))
 		end
 	end
-end)
-test("table row blocks preserve surrounding spacing and visible content", function()
+end
+T["table row blocks preserve surrounding spacing and visible content"] = function()
 	local text = "Before\n\n| Key | Value |\n| --- | --- |\n| alpha | stable |\n| beta | stable |\n\nAfter\n"
 	for _, width in ipairs({ 60, 20, 4 }) do
 		local snapshot = assert(adapter.build_snapshot({ text = text, path = "sample.md", width = width }))
@@ -258,8 +252,8 @@ test("table row blocks preserve surrounding spacing and visible content", functi
 		assert(tables == 1)
 		assert(prepare(text, text, width).status == "unchanged")
 	end
-end)
-test("table word spans survive grid, field/value and very narrow reflow", function()
+end
+T["table word spans survive grid, field/value and very narrow reflow"] = function()
 	for _, before in ipairs({
 		"| Alpha | Beta | Gamma | Delay |\n| --- | --- | --- | --- |\n| one | two | three | 30 |\n",
 		"| Café│日本語 | Beta | Gamma | Delay |\n| --- | --- | --- | --- |\n| one │ two | | same | **30** |\n| other | | same | **30** |\n",
@@ -279,8 +273,8 @@ test("table word spans survive grid, field/value and very narrow reflow", functi
 			end
 		end
 	end
-end)
-test("stacked tables highlight repeated changed headers beside every source row", function()
+end
+T["stacked tables highlight repeated changed headers beside every source row"] = function()
 	local before =
 		"| Alpha | Beta | Gamma | Delay |\n| --- | --- | --- | --- |\n| one | two | three | 30 |\n| four | five | six | 40 |\n"
 	local result, value = prepare(before, (before:gsub("Delay", "Delay v2")))
@@ -289,8 +283,8 @@ test("stacked tables highlight repeated changed headers beside every source row"
 	assert(resized.comparison == result.comparison)
 	assert(changed_text(resized, "new") == "v2v2", changed_text(resized, "new"))
 	assert(changed_text(resized, "old") == "")
-end)
-test("resize preserves visual equality and code bytes while reflowing", function()
+end
+T["resize preserves visual equality and code bytes while reflowing"] = function()
 	local text = "# Title\n\nA paragraph with **styled words** and a longlonglonglonglongword.\n\n```lua\nlocal value = '"
 		.. string.rep("a", 100)
 		.. "'\n```\n"
@@ -311,8 +305,8 @@ test("resize preserves visual equality and code bytes while reflowing", function
 			end
 		end
 	end
-end)
-test("media references stay visible and cannot access live files or network", function()
+end
+T["media references stay visible and cannot access live files or network"] = function()
 	local image = require("md-render.image")
 	local resolve = image.resolve
 	local bad = {
@@ -346,8 +340,8 @@ test("media references stay visible and cannot access live files or network", fu
 	end
 	assert(image.resolve == resolve, "review replaced the reading-view guard")
 	assert(prepare("![image](old.png)\n", "![image](new.png)\n").status == "changed")
-end)
-test("footnotes anchor their complete definition and code receives word detail", function()
+end
+T["footnotes anchor their complete definition and code receives word detail"] = function()
 	local before = "Body[^x]\n\n[^x]: Wait 30 seconds\n  before continuing.\n\nTail\n"
 	local after = before:gsub("30", "60")
 	local result = prepare(before, after, 24)
@@ -360,8 +354,8 @@ test("footnotes anchor their complete definition and code receives word detail",
 	assert(changed_text(result, "old") == "30" and changed_text(result, "new") == "60")
 	local code = prepare("```lua\nreturn 30\n```\n", "```lua\nreturn 60\n```\n", 8)
 	assert(changed_text(code, "old") == "30" and changed_text(code, "new") == "60")
-end)
-test("resize reuses comparison and maps word edits through fresh Unicode rows", function()
+end
+T["resize reuses comparison and maps word edits through fresh Unicode rows"] = function()
 	local result, value = prepare("日本語 café é **30**\n\n---\n", "日本語 café é **60**\n\n---\n", 60)
 	local resized = assert(markdown.prepare(value, 8, result))
 	assert(resized.comparison == result.comparison, "resize reran the comparison")
@@ -369,8 +363,8 @@ test("resize reuses comparison and maps word edits through fresh Unicode rows", 
 	for _, row in ipairs(resized.projection.rows) do
 		assert(vim.fn.strdisplaywidth(row.text) <= 8)
 	end
-end)
-test("added, deleted and empty documents have only real block anchors", function()
+end
+T["added, deleted and empty documents have only real block anchors"] = function()
 	for _, deleted in ipairs({ false, true }) do
 		local value = entry(deleted and "Text\n" or "", deleted and "" or "Text\n")
 		if deleted then
@@ -384,8 +378,8 @@ test("added, deleted and empty documents have only real block anchors", function
 		assert(not review.projection.resolve_range(filler, 1, 1))
 	end
 	assert(prepare("", "").status == "unchanged")
-end)
-test("rendered selections cannot skip hidden source or reverse original block order", function()
+end
+T["rendered selections cannot skip hidden source or reverse original block order"] = function()
 	local text = "# Heading\n\n[ref]: https://example.invalid\n\nParagraph\n"
 	local result = prepare(text, text)
 	local projection = result.projection
@@ -416,8 +410,8 @@ test("rendered selections cannot skip hidden source or reverse original block or
 	local large = string.rep("word ", 4200)
 	local bounded = prepare(large .. "old\n", large .. "new\n")
 	assert(bounded.status == "changed" and changed_text(bounded, "old") == "" and changed_text(bounded, "new") == "")
-end)
-test("inline and split preserve read-only buffers, block anchors and screen alignment", function()
+end
+T["inline and split preserve read-only buffers, block anchors and screen alignment"] = function()
 	local before = "# Title\n\nA short old paragraph.\n\n```lua\nreturn 1\n```\n\nTail\n"
 	local after =
 		"# Title\n\nA longer new paragraph that occupies several rows when wrapped.\n\n```lua\nreturn 2\n```\n\nTail\n"
@@ -471,8 +465,8 @@ test("inline and split preserve read-only buffers, block anchors and screen alig
 			assert(ok, err)
 		end
 	end
-end)
-test("table backgrounds and visible split alignment follow rows after resize", function()
+end
+T["table backgrounds and visible split alignment follow rows after resize"] = function()
 	local before = "| Key | Value |\n| --- | --- |\n| alpha | stable |\n| delay | 30 |\n| gamma | stable |\n"
 	local after = before:gsub("30", "a much longer changed value that wraps")
 	for _, layout in ipairs({ "inline", "split" }) do
@@ -536,8 +530,8 @@ test("table backgrounds and visible split alignment follow rows after resize", f
 			assert(ok, err)
 		end
 	end
-end)
-test("code edits mark only original lines across containers and widths", function()
+end
+T["code edits mark only original lines across containers and widths"] = function()
 	local body = "local stable = 1\nlocal delay = 30\nreturn stable\n"
 	for _, sample in ipairs({
 		{ "```lua\n" .. body .. "```\n", 3 },
@@ -569,8 +563,8 @@ test("code edits mark only original lines across containers and widths", functio
 			end
 		end
 	end
-end)
-test("inserted and deleted code lines preserve repeated and blank context", function()
+end
+T["inserted and deleted code lines preserve repeated and blank context"] = function()
 	local before = "```lua\nprint('repeat')\n\nprint('repeat')\nreturn 1\n```\n"
 	local after = before:gsub("\n\n", "\n\nlocal added = 2\n")
 	for _, deleted in ipairs({ false, true }) do
@@ -590,8 +584,8 @@ test("inserted and deleted code lines preserve repeated and blank context", func
 			assert(changed > 0 and stable >= 4)
 		end
 	end
-end)
-test("code line blocks preserve text, spacing, labels and exact wrapped anchors", function()
+end
+T["code line blocks preserve text, spacing, labels and exact wrapped anchors"] = function()
 	local text =
 		"Before\n\n```lua\nlocal message = '日本語 café é longlonglongword'\n\nreturn message\n```\n\nAfter\n"
 	for _, width in ipairs({ 60, 18, 4 }) do
@@ -617,8 +611,8 @@ test("code line blocks preserve text, spacing, labels and exact wrapped anchors"
 			end
 		end
 	end
-end)
-test("syntax captures use full frozen fences, aliases and multiline byte ranges", function()
+end
+T["syntax captures use full frozen fences, aliases and multiline byte ranges"] = function()
 	for _, sample in ipairs({
 		{ "lua", "local message = [[\n日本語 café é\n]]\nreturn 30", "lua", "@string.lua" },
 		{ "py", "def value():\n    text = '''日本語\ncafé é'''\n    return 30", "python", "@string.python" },
@@ -657,8 +651,8 @@ test("syntax captures use full frozen fences, aliases and multiline byte ranges"
 	end, debug.traceback)
 	vim.treesitter.get_string_parser = parser
 	assert(ok, err)
-end)
-test("OLD multiline syntax cannot bleed into NEW code or change line identity", function()
+end
+T["OLD multiline syntax cannot bleed into NEW code or change line identity"] = function()
 	local before = "```py\ndef value():\n    text = '''open\n    return 30\n```\n"
 	local after = before:gsub("'''open", "'''closed'''"):gsub("30", "60")
 	local result = prepare(before, after)
@@ -680,8 +674,8 @@ test("OLD multiline syntax cannot bleed into NEW code or change line identity", 
 		unchanged_line.rows[assert(unchanged_line.by_source.new[4])].kind == "context",
 		"syntax recoloring fabricated an edit"
 	)
-end)
-test("code line backgrounds preserve visible syntax through layouts and resize", function()
+end
+T["code line backgrounds preserve visible syntax through layouts and resize"] = function()
 	local before = "```lua\nlocal stable = 1\nlocal value = 30\nreturn stable\n```\n"
 	local value = entry(before, (before:gsub("30", "60")))
 	local previous = {}
@@ -795,8 +789,8 @@ test("code line backgrounds preserve visible syntax through layouts and resize",
 	end
 	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "markdown-code-restored" })
 	assert(ok, err)
-end)
-test("renderer failure retains the previous presentation", function()
+end
+T["renderer failure retains the previous presentation"] = function()
 	vim.cmd("enew!")
 	local value = entry("old\n", "new\n")
 	local state = review.mode.new({ root = fixture, model = { entries = { value } } })
@@ -811,14 +805,10 @@ test("renderer failure retains the previous presentation", function()
 	adapter.build_snapshot = original
 	assert(not shown and err == "deliberate renderer failure" and state.presentation == previous)
 	review.mode.disable(state)
-end)
-review.controller.teardown()
-vim.fn.delete(fixture, "rf")
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("native_review_markdown_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	review.controller.teardown()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

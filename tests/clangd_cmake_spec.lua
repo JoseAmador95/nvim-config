@@ -200,19 +200,10 @@ local function launch_argv(config)
 	return observed
 end
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
-test("CMake build directory restarts only clangd clients for the same root", function()
+T["CMake build directory restarts only clangd clients for the same root"] = function()
 	assert(clangd.set_cmake(fixture .. "/one", fixture .. "/one/build"))
 	assert(#stopped == 1 and stopped[1] == clients[1])
 	assert(#started == 1 and started[1].options.attach == false)
@@ -228,9 +219,9 @@ test("CMake build directory restarts only clangd clients for the same root", fun
 		vim.fn.filereadable(fixture .. "/one/compile_commands.json") == 0,
 		"integration copied/symlinked the database"
 	)
-end)
+end
 
-test("host reconciliation absorbs a client autoactivated during restart", function()
+T["host reconciliation absorbs a client autoactivated during restart"] = function()
 	stopped = {}
 	started = {}
 	attached = {}
@@ -284,9 +275,9 @@ test("host reconciliation absorbs a client autoactivated during restart", functi
 		end
 		return clients
 	end
-end)
+end
 
-test("manual compile database override wins without touching other roots", function()
+T["manual compile database override wins without touching other roots"] = function()
 	stopped = {}
 	started = {}
 	attached = {}
@@ -295,9 +286,9 @@ test("manual compile database override wins without touching other roots", funct
 	assert(state.state == "active" and state.source == "manual" and state.directory == fixture .. "/one/manual")
 	assert(vim.tbl_contains(clangd.command(fixture .. "/one"), "--compile-commands-dir=" .. fixture .. "/one/manual"))
 	assert(#stopped == 1 and stopped[1] == clients[1] and #started == 1)
-end)
+end
 
-test("clearing the only manual database restarts clangd without a compile directory flag", function()
+T["clearing the only manual database restarts clangd without a compile directory flag"] = function()
 	stopped = {}
 	started = {}
 	attached = {}
@@ -314,16 +305,16 @@ test("clearing the only manual database restarts clangd without a compile direct
 	assert(not vim.iter(launch_argv(started[1].config)):any(function(arg)
 		return arg:find("^%-%-compile%-commands%-dir=") ~= nil
 	end))
-end)
+end
 
-test("full profile and configured executable have an explicit flag surface", function()
+T["full profile and configured executable have an explicit flag surface"] = function()
 	local full = clangd.command(fixture .. "/one")
 	assert(full[1] == "/verified/bin/clangd-custom")
 	assert(vim.tbl_contains(full, "--background-index") and vim.tbl_contains(full, "--clang-tidy"))
 	assert(clangd.status(fixture .. "/one").profile == "full")
-end)
+end
 
-test("cmake-tools successful generate feeds its actual root, preset, and build directory", function()
+T["cmake-tools successful generate feeds its actual root, preset, and build directory"] = function()
 	local callback_result
 	local fake = {
 		get_config = function()
@@ -355,9 +346,9 @@ test("cmake-tools successful generate feeds its actual root, preset, and build d
 	state.valid = false
 	assert(cmake_config.status(fixture .. "/two").valid, "CMake status exposed mutable internal state")
 	assert(clangd.status(fixture .. "/two").source == "cmake")
-end)
+end
 
-test("CMake publishes invalid state when generated metadata is unusable", function()
+T["CMake publishes invalid state when generated metadata is unusable"] = function()
 	local fake = {
 		get_config = function()
 			return { cwd = fixture .. "/two" }
@@ -372,9 +363,9 @@ test("CMake publishes invalid state when generated metadata is unusable", functi
 	assert(state and state.valid == false and state.error:find("build lookup exploded", 1, true))
 	state.error = "mutated"
 	assert(cmake_config.status(fixture .. "/two").error ~= "mutated", "invalid CMake status was not copied")
-end)
+end
 
-test("nested generate operations synchronize once and always deliver callbacks", function()
+T["nested generate operations synchronize once and always deliver callbacks"] = function()
 	local original_sync = cmake_config.sync
 	local original_notify = vim.notify
 	local notifications = {}
@@ -428,9 +419,9 @@ test("nested generate operations synchronize once and always deliver callbacks",
 	cmake_config.sync = original_sync
 	vim.notify = original_notify
 	assert(ok, err)
-end)
+end
 
-test(":CMakeGenerate resolves the current wrapped function at invocation time", function()
+T[":CMakeGenerate resolves the current wrapped function at invocation time"] = function()
 	local fake = {
 		generate = function(_, callback)
 			callback({
@@ -447,9 +438,9 @@ test(":CMakeGenerate resolves the current wrapped function at invocation time", 
 	end
 	vim.cmd("CMakeGenerate! --fresh=value")
 	assert(called and called.bang and vim.deep_equal(called.fargs, { "--fresh=value" }))
-end)
+end
 
-test("CMake central utilities enforce build and test grants exactly once", function()
+T["CMake central utilities enforce build and test grants exactly once"] = function()
 	local fake = {
 		generate = function() end,
 		get_config = function()
@@ -513,9 +504,9 @@ test("CMake central utilities enforce build and test grants exactly once", funct
 	assert(callback_calls == 1, "invalid CMake cwd completed its callback more than once")
 	assert(cmake_notifications[#cmake_notifications].message:find("cwd is unavailable", 1, true))
 	cmake_gate_mode = "allow"
-end)
+end
 
-test("source/header switch uses clangd and shared tab navigation", function()
+T["source/header switch uses clangd and shared tab navigation"] = function()
 	local opened
 	package.loaded["config.editor"] = {
 		open_file_in_tab = function(path)
@@ -544,30 +535,24 @@ test("source/header switch uses clangd and shared tab navigation", function()
 		return opened ~= nil
 	end)
 	assert(opened == fixture .. "/one/header.hpp")
-end)
-
-package.loaded["config.local_config"] = original_local
-package.loaded["config.editor"] = original_editor
-package.loaded["config.workflow_execution"] = original_workflow
-package.loaded["cmake-tools.utils"] = original_cmake_utils
-package.loaded["cmake-tools.result"] = original_cmake_result
-package.loaded["cmake-tools.types"] = original_cmake_types
-vim.lsp.get_clients = original_clients
-vim.lsp.start = original_start
-vim.lsp.buf_attach_client = original_attach
-vim.lsp.get_client_by_id = original_get_client
-vim.lsp.config = original_config
-vim.lsp.rpc.start = original_rpc_start
-lsp_runtime._resolve = original_lsp_resolve
-vim.defer_fn = original_defer
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("clangd_cmake_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	package.loaded["config.local_config"] = original_local
+	package.loaded["config.editor"] = original_editor
+	package.loaded["config.workflow_execution"] = original_workflow
+	package.loaded["cmake-tools.utils"] = original_cmake_utils
+	package.loaded["cmake-tools.result"] = original_cmake_result
+	package.loaded["cmake-tools.types"] = original_cmake_types
+	vim.lsp.get_clients = original_clients
+	vim.lsp.start = original_start
+	vim.lsp.buf_attach_client = original_attach
+	vim.lsp.get_client_by_id = original_get_client
+	vim.lsp.config = original_config
+	vim.lsp.rpc.start = original_rpc_start
+	lsp_runtime._resolve = original_lsp_resolve
+	vim.defer_fn = original_defer
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

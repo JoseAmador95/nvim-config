@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.jqx")
 -- Safe host replacement for nvim-jqx's shell-string execution. Every jq
 -- invocation uses the absolute path from verified-tools and argv/stdin rather
 -- than PATH lookup or shell interpolation.
@@ -355,7 +356,7 @@ local function open_result(title, contents)
 	})
 	vim.wo[winid].wrap = geometry.wrap ~= false
 	for _, lhs in ipairs({ "q", config.close_window_key or "<Esc>" }) do
-		vim.keymap.set("n", lhs, function()
+		usage_map("n", lhs, function()
 			if vim.api.nvim_win_is_valid(winid) then
 				vim.api.nvim_win_close(winid, true)
 			end
@@ -452,7 +453,7 @@ function M.list(kind)
 			vim.cmd("copen")
 			listbuf = vim.api.nvim_get_current_buf()
 		end
-		vim.keymap.set("n", config.query_key or "X", function()
+		usage_map("n", config.query_key or "X", function()
 			local state = config.use_quickfix == false and vim.fn.getloclist(0, { idx = 0, items = 0 })
 				or vim.fn.getqflist({ idx = 0, items = 0 })
 			local item = state.items and state.items[state.idx] or nil

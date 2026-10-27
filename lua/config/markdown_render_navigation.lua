@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.markdown_render_navigation")
 -- Follow rendered Markdown links through the source navigation policy. The
 -- renderer's link metadata uses byte columns and is updated on every rebuild.
 local M = {}
@@ -109,7 +110,7 @@ function M.attach(session)
 	then
 		return false
 	end
-	vim.keymap.set("n", "gd", function()
+	usage_map("n", "gd", function()
 		M.follow(session)
 	end, { buffer = session.buf, silent = true, desc = "Open rendered Markdown link" })
 	return true

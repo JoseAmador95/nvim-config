@@ -30,7 +30,6 @@ absolute override must still match the selected launcher; project configuration
 cannot redirect the managed executable.
 
 Rust remains host/user-only, excluding Mise and retired managed/Mason/shim roots.
-Just retains its canonical host executable and build grant. CMake/CTest,
-`rsvg-convert`, clipboard helpers and platform utilities remain host facilities.
+CMake/CTest, `rsvg-convert`, clipboard helpers and platform utilities remain host facilities.
 On macOS x64, the pinned PlantUML JAR uses host Java. The selected Python project
 environment remains separate from the managed Python used by tooling.

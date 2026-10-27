@@ -11,6 +11,7 @@ local review_projection = require("native_review.projection")
 local review_diff = require("native_review.diff")
 local review_relations = require("native_review.relations")
 local review_markdown = require("native_review.markdown")
+local buffers = require("native_review.buffers")
 M.supports_markdown = review_markdown.supports
 
 local BAND_HIGHLIGHT = "NvimReviewNativeHunkBand"
@@ -159,26 +160,6 @@ local function fit_display_width(value, width)
 	return value .. string.rep(" ", math.max(0, width - display_width))
 end
 
-local function scope_namespace(win, namespace)
-	if type(vim.api.nvim_win_add_ns) == "function" and type(vim.api.nvim_win_remove_ns) == "function" then
-		return pcall(vim.api.nvim_win_add_ns, win, namespace)
-	end
-	if type(vim.api.nvim__ns_set) == "function" then
-		return pcall(vim.api.nvim__ns_set, namespace, { wins = { win } })
-	end
-	return false, "window-scoped namespaces are unavailable"
-end
-
-local function unscope_namespace(win, namespace)
-	if type(vim.api.nvim_win_add_ns) == "function" and type(vim.api.nvim_win_remove_ns) == "function" then
-		if valid_win(win) then
-			pcall(vim.api.nvim_win_remove_ns, win, namespace)
-		end
-	elseif type(vim.api.nvim__ns_set) == "function" then
-		pcall(vim.api.nvim__ns_set, namespace, { wins = {} })
-	end
-end
-
 local function text_lines(text)
 	if text == "" then
 		return { "" }, false, "unix"
@@ -200,12 +181,6 @@ end
 
 local function source_line_count(text)
 	return text == "" and 0 or #text_lines(text)
-end
-
-local function buffer_text(buf)
-	local separator = ({ dos = "\r\n", mac = "\r" })[vim.bo[buf].fileformat] or "\n"
-	local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), separator)
-	return vim.bo[buf].endofline and text .. separator or text
 end
 
 local function read_file(path)
@@ -254,7 +229,7 @@ local function current_buffer(state, entry)
 		return nil, "current file differs from the selected review content"
 	end
 	local buf = named_buffer(path)
-	if vim.bo[buf].modified or buffer_text(buf) ~= entry.new_text then
+	if vim.bo[buf].modified or buffers.text(buf) ~= entry.new_text then
 		return nil, "current buffer differs from the selected review content"
 	end
 	local enrolled, enroll_err = review_mode.enroll(state, buf)
@@ -299,6 +274,25 @@ local function definition_options(state, buf, win, generation, buffer_role)
 	})
 end
 
+local function fill_scratch(buf, entry, lines, endofline, fileformat)
+	vim.bo[buf].buftype = "nofile"
+	vim.bo[buf].bufhidden = "wipe"
+	vim.bo[buf].swapfile = false
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	vim.bo[buf].fileformat = fileformat or "unix"
+	vim.bo[buf].endofline = endofline or false
+	vim.bo[buf].fixendofline = false
+	vim.b[buf].nvim_review_layer = entry.layer or "history"
+end
+
+local function protect_scratch(state, buf, label)
+	local protected, err = review_mode.protect_transient(state, buf)
+	if not protected then
+		pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		error("Could not protect " .. label .. ": " .. tostring(err))
+	end
+end
+
 local function scratch(entry, side, state)
 	local buf = vim.api.nvim_create_buf(false, true)
 	local is_old = side == "old"
@@ -319,9 +313,6 @@ local function scratch(entry, side, state)
 	}
 	-- The role deliberately precedes filetype assignment and all FileType consumers.
 	review_lsp.mark(buf, role, metadata)
-	vim.bo[buf].buftype = "nofile"
-	vim.bo[buf].bufhidden = "wipe"
-	vim.bo[buf].swapfile = false
 	local lines
 	local endofline = false
 	local fileformat = "unix"
@@ -330,19 +321,11 @@ local function scratch(entry, side, state)
 	else
 		lines, endofline, fileformat = text_lines(is_old and entry.old_text or entry.new_text)
 	end
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-	vim.bo[buf].fileformat = fileformat
-	vim.bo[buf].endofline = endofline
-	vim.bo[buf].fixendofline = false
+	fill_scratch(buf, entry, lines, endofline, fileformat)
 	vim.b[buf].nvim_review_path = path
 	vim.b[buf].nvim_review_side = is_old and "left" or "right"
-	vim.b[buf].nvim_review_layer = entry.layer or "history"
 	set_filetype(buf, path)
-	local protected, protect_err = review_mode.protect_transient(state, buf)
-	if not protected then
-		pcall(vim.api.nvim_buf_delete, buf, { force = true })
-		error("Could not protect review scratch buffer: " .. tostring(protect_err))
-	end
+	protect_scratch(state, buf, "review scratch buffer")
 	return buf
 end
 
@@ -373,24 +356,15 @@ local function unified_scratch(entry, projection, generation, state, side)
 			return definition_options(state, buf, win, generation, "unified")
 		end,
 	}
-	vim.bo[buf].buftype = "nofile"
-	vim.bo[buf].bufhidden = "wipe"
-	vim.bo[buf].swapfile = false
-	vim.api.nvim_buf_set_lines(
+	-- This is a synthetic projection. Exact per-source terminators live in the projection model.
+	fill_scratch(
 		buf,
-		0,
-		-1,
-		false,
+		entry,
 		vim.tbl_map(function(row)
 			return row.text
 		end, projection.rows)
 	)
-	-- This is a synthetic projection. Exact per-source terminators live in the projection model.
-	vim.bo[buf].fileformat = "unix"
-	vim.bo[buf].endofline = false
-	vim.bo[buf].fixendofline = false
 	vim.b[buf].nvim_review_entry_identity = entry.identity
-	vim.b[buf].nvim_review_layer = entry.layer or "history"
 	vim.b[buf].nvim_review_projection_generation = generation
 	if not review_lsp.mark(buf, projection.rendered and "markdown" or "unified", metadata) then
 		pcall(vim.api.nvim_buf_delete, buf, { force = true })
@@ -401,11 +375,7 @@ local function unified_scratch(entry, projection, generation, state, side)
 	else
 		set_filetype(buf, side == "old" and entry.old_path or entry.new_path or entry.old_path)
 	end
-	local protected, protect_err = review_mode.protect_transient(state, buf)
-	if not protected then
-		pcall(vim.api.nvim_buf_delete, buf, { force = true })
-		error("Could not protect unified review projection: " .. tostring(protect_err))
-	end
+	protect_scratch(state, buf, "unified review projection")
 	vim.keymap.set("n", "[h", function()
 		M.prev_hunk(state)
 	end, { buffer = buf, silent = true, desc = "Previous review hunk" })
@@ -1011,7 +981,7 @@ local function decorate(state, entry, buf, win, side, context, inline)
 	local scoped = false
 	if not unified then
 		local scope_err
-		scoped, scope_err = scope_namespace(win, namespace)
+		scoped, scope_err = buffers.scope_namespace(win, namespace)
 		if not scoped then
 			return nil, "Could not scope review decorations: " .. tostring(scope_err)
 		end
@@ -1752,7 +1722,7 @@ local function clear_decoration(item)
 		pcall(vim.api.nvim_buf_clear_namespace, item.buf, item.namespace, 0, -1)
 	end
 	if item.scoped then
-		unscope_namespace(item.win, item.namespace)
+		buffers.unscope_namespace(item.win, item.namespace)
 	end
 end
 

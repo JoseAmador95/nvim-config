@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.exact_editor")
 -- Host policy adapter for exact-editor.nvim.
 local deferred = require("config.deferred")
 local editor = require("config.editor")
@@ -116,7 +117,7 @@ end
 
 local function install_finish_mapping(buf, callback)
 	local lhs = "<leader>q"
-	vim.keymap.set("n", lhs, callback, {
+	usage_map("n", lhs, callback, {
 		buffer = buf,
 		nowait = true,
 		silent = true,

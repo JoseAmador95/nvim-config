@@ -10,24 +10,9 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 package.loaded["config.pager"] = { active = false }
 local opened = {}
@@ -61,14 +46,7 @@ local function reset_editor()
 	opened = {}
 end
 
-test("generic Snacks scratch state is isolated from repo-scratch leases", function()
-	local generic = snacks.opts.scratch.root
-	local leased = vim.fs.joinpath(vim.fn.stdpath("state"), "nvim-config", "scratch")
-	equal(vim.fs.joinpath(vim.fn.stdpath("state"), "nvim-config", "snacks-scratch"), generic, "generic scratch root")
-	assert(generic ~= leased, "generic Snacks scratch shares repo-scratch lease state")
-end)
-
-test("review choices keep their native callback and hide only their own text filter", function()
+T["review choices keep their native callback and hide only their own text filter"] = function()
 	local select = snacks.opts.picker.sources.select
 	local options = select.kinds.native_review
 	assert(select.confirm == false, "global file confirm would replace the select callback")
@@ -82,9 +60,9 @@ test("review choices keep their native callback and hide only their own text fil
 	assert(options.actions.focus_input == options.actions.review_noop)
 	assert(options.actions.toggle_focus == options.actions.review_noop)
 	assert(options.actions.cycle_win == options.actions.review_noop)
-end)
+end
 
-test("short review menus confirm digits and long menus preserve native counts", function()
+T["short review menus confirm digits and long menus preserve native counts"] = function()
 	local options = snacks.opts.picker.sources.select.kinds.native_review
 	local buf = vim.api.nvim_create_buf(false, true)
 	local instance = {
@@ -128,9 +106,9 @@ test("short review menus confirm digits and long menus preserve native counts", 
 	options.on_show(instance)
 	equal({}, vim.api.nvim_buf_get_keymap(buf, "n"), "long list consumed native number counts")
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("unnamed buffer picker items focus their buffer instead of opening the label", function()
+T["unnamed buffer picker items focus their buffer instead of opening the label"] = function()
 	reset_editor()
 	local bufnr = vim.api.nvim_create_buf(true, false)
 	local instance = picker()
@@ -139,9 +117,9 @@ test("unnamed buffer picker items focus their buffer instead of opening the labe
 	equal(bufnr, vim.api.nvim_get_current_buf(), "unnamed item did not focus its exact buffer")
 	equal({}, opened, "unnamed item label was treated as a filesystem path")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("special buffer picker items focus the existing tab and window", function()
+T["special buffer picker items focus the existing tab and window"] = function()
 	reset_editor()
 	local origin = vim.api.nvim_get_current_tabpage()
 	vim.cmd("tabnew")
@@ -159,9 +137,9 @@ test("special buffer picker items focus the existing tab and window", function()
 	equal({}, opened, "special buffer label was treated as a filesystem path")
 	vim.bo[bufnr].modified = false
 	vim.cmd("tabclose")
-end)
+end
 
-test("regular file buffers retain tab-first path and cursor routing", function()
+T["regular file buffers retain tab-first path and cursor routing"] = function()
 	reset_editor()
 	local bufnr = vim.api.nvim_create_buf(true, false)
 	local path = vim.fn.tempname() .. "-picker.lua"
@@ -172,14 +150,6 @@ test("regular file buffers retain tab-first path and cursor routing", function()
 	equal(1, instance.closed, "picker was not closed")
 	equal({ { path = path, options = { lnum = 8, col = 4 } } }, opened, "regular file bypassed tab-first routing")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("snacks_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

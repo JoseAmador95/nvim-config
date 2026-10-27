@@ -29,23 +29,6 @@ local function canonical_directory(path, label)
 	return uv.fs_realpath(normalized) or normalized
 end
 
-local function normalize_spec(spec)
-	local instance, load_err = ensure_lifecycle()
-	if not instance then
-		return nil, load_err
-	end
-	local normalized, err = instance._normalize(spec)
-	if not normalized then
-		return nil, err
-	end
-	local layout = normalized.view.layout or "bottom"
-	if layout ~= "bottom" and layout ~= "float" then
-		return nil, "view.layout must be bottom or float"
-	end
-	normalized.view.layout = layout
-	return normalized
-end
-
 local function key_for(identity)
 	if type(identity) == "string" then
 		return identity ~= "" and not identity:find("\0", 1, true) and identity or nil, "terminal key must be non-empty"
@@ -156,6 +139,15 @@ local function window_options(spec, callbacks)
 end
 
 local snacks_backend = {}
+
+function snacks_backend.normalize_view(view)
+	local layout = view.layout or "bottom"
+	if layout ~= "bottom" and layout ~= "float" then
+		return nil, "view.layout must be bottom or float"
+	end
+	view.layout = layout
+	return view
+end
 
 function snacks_backend.open(spec, callbacks)
 	local window, bind = window_options(spec, callbacks)
@@ -313,11 +305,11 @@ ensure_lifecycle = function()
 end
 
 local function call_with_spec(method, spec)
-	local normalized, err = normalize_spec(spec)
-	if not normalized then
+	local instance, err = ensure_lifecycle()
+	if not instance then
 		return nil, err
 	end
-	return lifecycle[method](normalized)
+	return instance[method](spec)
 end
 
 function M.open(spec)
@@ -470,7 +462,6 @@ function M.toggle_shell()
 	end
 end
 
-M._normalize = normalize_spec
 M._key = workspace_key
 M._reset = function()
 	local instance = assert(ensure_lifecycle())

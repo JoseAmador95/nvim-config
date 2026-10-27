@@ -13,19 +13,11 @@ package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.pa
 require("config.local_plugins").setup()
 local review = require("config.native_review")
 local difftastic = require("native_review.difftastic")
-local textual = require("native_review.textual")
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p", 448) == 1)
-local failures, count = {}, 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. tostring(err)
-	end
-end
+
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 local function entry(old, new)
 	return {
 		identity = "history\0sample.lua\0sample.lua",
@@ -134,7 +126,7 @@ end
 local function text(lines)
 	return table.concat(lines, "\n") .. "\n"
 end
-test("insertion-only hunks align both panes before and after scrolling", function()
+T["insertion-only hunks align both panes before and after scrolling"] = function()
 	local new = vim.deepcopy(common)
 	table.insert(new, 15, "local extra = 1")
 	local alignment = {}
@@ -152,8 +144,8 @@ test("insertion-only hunks align both panes before and after scrolling", functio
 		{ { rhs = line_change(15, "local extra = 1") } },
 		{ { 14, 14 }, { 15, 16 }, { 16, 17 } }
 	)
-end)
-test("deletion-only hunks align both panes before and after scrolling", function()
+end
+T["deletion-only hunks align both panes before and after scrolling"] = function()
 	local old = vim.deepcopy(common)
 	table.insert(old, 15, "local extra = 1")
 	local alignment = {}
@@ -171,8 +163,8 @@ test("deletion-only hunks align both panes before and after scrolling", function
 		{ { lhs = line_change(15, "local extra = 1") } },
 		{ { 14, 14 }, { 16, 15 }, { 17, 16 } }
 	)
-end)
-test("separate insertion and deletion hunks share visible geometry", function()
+end
+T["separate insertion and deletion hunks share visible geometry"] = function()
 	local new, alignment, new_line = {}, {}, 1
 	for old_line = 1, #common do
 		if old_line == 10 then
@@ -196,8 +188,8 @@ test("separate insertion and deletion hunks share visible geometry", function()
 		{ { rhs = line_change(10, "local extra = 1") }, { lhs = line_change(25, common[25]) } },
 		{ { 9, 9 }, { 10, 11 }, { 24, 25 }, { 26, 26 } }
 	)
-end)
-test("switching to split keeps structural sections independent of canonical Git hunks", function()
+end
+T["switching to split keeps structural sections independent of canonical Git hunks"] = function()
 	local new, alignment = {}, {}
 	for line, value in ipairs(common) do
 		new[line] = value:gsub(" = ", "=")
@@ -211,8 +203,8 @@ test("switching to split keeps structural sections independent of canonical Git 
 		{ lhs = line_change(8, common[8]), rhs = line_change(8, new[8]) },
 		{ lhs = line_change(28, common[28]), rhs = line_change(28, new[28]) },
 	}, { { 7, 7 }, { 8, 8 }, { 27, 27 }, { 28, 28 } }, true)
-end)
-test("CR-only bytes retain canonical single-line split coordinates", function()
+end
+T["CR-only bytes retain canonical single-line split coordinates"] = function()
 	local value = entry("local a=1\rlocal b=2\r", "local a=1\rlocal b=3\r")
 	local analysis = assert(difftastic.normalize(value, {
 		language = "Lua",
@@ -249,8 +241,8 @@ test("CR-only bytes retain canonical single-line split coordinates", function()
 	local location = assert(review.presenter.capture_location(state))
 	assert(location.line == 1 and location.col == 19)
 	review.mode.disable(state)
-end)
-test("textual moves survive every layout/context with exact anchors and labels", function()
+end
+T["textual moves survive every layout/context with exact anchors and labels"] = function()
 	local block = "local alpha = 1\nlocal beta = 2\nreturn alpha + beta\n"
 	local context = {}
 	for line = 1, 20 do
@@ -260,82 +252,77 @@ test("textual moves survive every layout/context with exact anchors and labels",
 	local value = entry(block .. middle, middle .. block)
 	local original = vim.deepcopy(value)
 	local diffopt = vim.o.diffopt
-	for _, id in ipairs({ "main", "patience" }) do
-		local analysis = assert(id == "patience" and textual.patience(value) or textual.main(value))
-		assert(#analysis.relations == 1)
-		analysis.origin_engine = { id = id, version = "fixture" }
-		analysis.selected_engine = id
-		local state = review.mode.new({ root = fixture, model = { entries = { value } } })
-		assert(review.mode.enable(state))
-		local ok, err = xpcall(function()
-			for _, layout in ipairs({ "inline", "split" }) do
-				for _, visibility in ipairs({ "hunks", "full" }) do
-					assert(
-						review.presenter.show(
-							state,
-							value,
-							{ layout = layout, context = visibility, engine_result = analysis }
+	local analysis
+	review.engines.prepare("main", value, function(prepared, err)
+		analysis = assert(prepared, err)
+	end)
+	assert(#analysis.relations == 1)
+	local state = review.mode.new({ root = fixture, model = { entries = { value } } })
+	assert(review.mode.enable(state))
+	local ok, err = xpcall(function()
+		for _, layout in ipairs({ "inline", "split" }) do
+			for _, visibility in ipairs({ "hunks", "full" }) do
+				assert(
+					review.presenter.show(
+						state,
+						value,
+						{ layout = layout, context = visibility, engine_result = analysis }
+					)
+				)
+				local p = state.presentation
+				assert(not p.structural)
+				assert(not p.projected)
+				assert(vim.o.diffopt == diffopt and vim.deep_equal(original, value))
+				local labels = {}
+				for _, decoration in ipairs(p.decorations) do
+					for _, mark in
+						ipairs(
+							vim.api.nvim_buf_get_extmarks(
+								decoration.buf,
+								decoration.namespace,
+								0,
+								-1,
+								{ details = true }
+							)
 						)
-					)
-					local p = state.presentation
-					assert(not p.structural)
-					assert((p.projected ~= nil) == (id == "patience"))
-					assert(vim.o.diffopt == diffopt and vim.deep_equal(original, value))
-					local labels = {}
-					for _, decoration in ipairs(p.decorations) do
-						for _, mark in
-							ipairs(
-								vim.api.nvim_buf_get_extmarks(
-									decoration.buf,
-									decoration.namespace,
-									0,
-									-1,
-									{ details = true }
-								)
-							)
-						do
-							for _, text in ipairs(mark[4].virt_text or {}) do
-								labels[#labels + 1] = text[1]
-							end
+					do
+						for _, text in ipairs(mark[4].virt_text or {}) do
+							labels[#labels + 1] = text[1]
 						end
-					end
-					local joined = table.concat(labels, "\n")
-					assert(
-						joined:find("M1 move → NEW 21:1", 1, true) and joined:find("M1 move → OLD 1:1", 1, true),
-						joined
-					)
-					for _, side in ipairs({ "old", "new" }) do
-						local pane = layout == "inline" and p.inline or side == "old" and p.left or p.right
-						local mapping = layout == "inline" and p.projection or pane.projection
-						local source_line = side == "old" and 1 or 21
-						local display = mapping and mapping.by_source[side][source_line] or source_line
-						vim.api.nvim_set_current_win(pane.win)
-						vim.api.nvim_win_set_cursor(pane.win, { display, 0 })
-						vim.cmd("redraw!")
-						local location = assert(review.presenter.capture_location(state))
-						assert(location.line == source_line and location.side == side)
-						if mapping then
-							local range = assert(
-								review.presenter.resolve_range(state, display, display, p.generation, side, pane.win)
-							)
-							assert(range.start_line == source_line and range.end_line == source_line)
-						end
-						assert(vim.fn.screenpos(pane.win, display, 1).row > 0)
 					end
 				end
+				local joined = table.concat(labels, "\n")
+				assert(
+					joined:find("M1 move → NEW 21:1", 1, true) and joined:find("M1 move → OLD 1:1", 1, true),
+					joined
+				)
+				for _, side in ipairs({ "old", "new" }) do
+					local pane = layout == "inline" and p.inline or side == "old" and p.left or p.right
+					local mapping = layout == "inline" and p.projection or pane.projection
+					local source_line = side == "old" and 1 or 21
+					local display = mapping and mapping.by_source[side][source_line] or source_line
+					vim.api.nvim_set_current_win(pane.win)
+					vim.api.nvim_win_set_cursor(pane.win, { display, 0 })
+					vim.cmd("redraw!")
+					local location = assert(review.presenter.capture_location(state))
+					assert(location.line == source_line and location.side == side)
+					if mapping then
+						local range = assert(
+							review.presenter.resolve_range(state, display, display, p.generation, side, pane.win)
+						)
+						assert(range.start_line == source_line and range.end_line == source_line)
+					end
+					assert(vim.fn.screenpos(pane.win, display, 1).row > 0)
+				end
 			end
-		end, debug.traceback)
-		review.mode.disable(state)
-		assert(ok, err)
-	end
-end)
-
-vim.fn.delete(fixture, "rf")
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
+		end
+	end, debug.traceback)
+	review.mode.disable(state)
+	assert(ok, err)
 end
-print(("native_review_engine_presenter_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

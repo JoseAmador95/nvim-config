@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("plugins.grug-far")
 return {
 	"MagicDuck/grug-far.nvim",
 	cond = function()
@@ -92,14 +93,14 @@ return {
 					end
 
 					for _, opt in ipairs(option_toggles) do
-						vim.keymap.set("n", "<localleader>g" .. opt.key, function()
+						usage_map("n", "<localleader>g" .. opt.key, function()
 							gf.toggle_option(ev.buf, opt.flag)
 						end, { buffer = ev.buf, desc = opt.desc })
 					end
 
 					-- <CR>: toggle the fold on a file path line, or open the
 					-- match under the cursor in a new tab
-					vim.keymap.set("n", "<cr>", function()
+					usage_map("n", "<cr>", function()
 						gf.on_enter(ev.buf)
 					end, { buffer = ev.buf, desc = "Toggle fold / open match in tab" })
 
@@ -108,7 +109,7 @@ return {
 					-- API, which dismisses the float reliably where :q sometimes
 					-- doesn't.
 					for _, lhs in ipairs({ "q", "<esc>" }) do
-						vim.keymap.set("n", lhs, function()
+						usage_map("n", lhs, function()
 							gf.dismiss(ev.buf)
 						end, { buffer = ev.buf, desc = "Close search panel" })
 					end

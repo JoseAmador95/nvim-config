@@ -20,31 +20,23 @@ package.loaded["config.local_config"] = {
 package.loaded["config.redraw_profile"] = nil
 
 local redraw = require("config.redraw_profile")
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function event(name)
 	vim.api.nvim_exec_autocmds(name, { modeline = false })
 end
 
-test("the selected profile is frozen for the process", function()
+T["the selected profile is frozen for the process"] = function()
 	redraw._reset_for_tests()
 	assert(redraw.current() == "low-bandwidth")
 	profile = "full"
 	assert(redraw.configured() == "low-bandwidth")
 	assert(redraw.current() == "low-bandwidth")
-end)
+end
 
-test("full-profile presentation costs adapt to SSH and accept explicit host overrides", function()
+T["full-profile presentation costs adapt to SSH and accept explicit host overrides"] = function()
 	local original_ssh_tty = vim.env.SSH_TTY
 	local original_ssh_connection = vim.env.SSH_CONNECTION
 	local original_appname = vim.env.NVIM_APPNAME
@@ -94,9 +86,9 @@ test("full-profile presentation costs adapt to SSH and accept explicit host over
 	inline_mode = nil
 	ui_overrides = {}
 	redraw._reset_for_tests()
-end)
+end
 
-test("inline defaults are transport-aware without changing the redraw profile", function()
+T["inline defaults are transport-aware without changing the redraw profile"] = function()
 	local original_ssh_tty = vim.env.SSH_TTY
 	local original_ssh_connection = vim.env.SSH_CONNECTION
 	local original_appname = vim.env.NVIM_APPNAME
@@ -142,9 +134,9 @@ test("inline defaults are transport-aware without changing the redraw profile", 
 	profile = "low-bandwidth"
 	inline_mode = nil
 	redraw._reset_for_tests()
-end)
+end
 
-test("only a last detach followed by a reconnect schedules recovery", function()
+T["only a last detach followed by a reconnect schedules recovery"] = function()
 	redraw._reset_for_tests()
 	profile = "low-bandwidth"
 	local uis = 0
@@ -182,9 +174,9 @@ test("only a last detach followed by a reconnect schedules recovery", function()
 	scheduled[1]()
 	assert(vim.deep_equal(recovered, { "low-bandwidth" }), "reconnect did not recover the fixed profile")
 	assert(not redraw.status().pending and not redraw.status().detached)
-end)
+end
 
-test("detach and teardown invalidate stale scheduled recovery", function()
+T["detach and teardown invalidate stale scheduled recovery"] = function()
 	redraw._reset_for_tests()
 	profile = "low-bandwidth"
 	local uis = 1
@@ -218,9 +210,9 @@ test("detach and teardown invalidate stale scheduled recovery", function()
 	assert(redraw.teardown())
 	cancelled()
 	assert(recoveries == 0, "recovery survived teardown")
-end)
+end
 
-test("failed recovery stays detached and can be retried explicitly", function()
+T["failed recovery stays detached and can be retried explicitly"] = function()
 	redraw._reset_for_tests()
 	local uis = 1
 	local scheduled = {}
@@ -254,9 +246,9 @@ test("failed recovery stays detached and can be retried explicitly", function()
 	scheduled[2]()
 	local recovered = redraw.status()
 	assert(not recovered.detached and recovered.last_error == nil and attempts == 2)
-end)
+end
 
-test("loaded repaint hooks are protected and cannot suppress the final redraw", function()
+T["loaded repaint hooks are protected and cannot suppress the final redraw"] = function()
 	redraw._reset_for_tests()
 	local uis = 1
 	local scheduled = {}
@@ -297,18 +289,12 @@ test("loaded repaint hooks are protected and cannot suppress the final redraw", 
 	assert(redraw.retry())
 	scheduled[2]()
 	assert(healthy_calls == 2 and not redraw.status().detached)
-end)
-
-redraw._reset_for_tests()
-package.loaded["config.redraw_profile"] = nil
-package.loaded["config.local_config"] = original_local_config
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("redraw_profile_lifecycle_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	redraw._reset_for_tests()
+	package.loaded["config.redraw_profile"] = nil
+	package.loaded["config.local_config"] = original_local_config
+end
+
+return T

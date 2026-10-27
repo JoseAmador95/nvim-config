@@ -186,19 +186,18 @@ Only the host knows renderer internals; the plugin never imports
 [ADR 0004](../../docs/adr/0004-markdown-visual-review.md).
 
 `:ReviewEngine` or `<leader>rD` opens the numbered engine picker; use
-`:ReviewEngine main|patience|difftastic` to choose directly. Main is
-the default at startup. Selection belongs to the workspace, travels with its
-layout/context preferences, and is never saved in the review store. All four
+`:ReviewEngine main|difftastic` to choose directly.
+Main is the default at startup.
+Selection belongs to the workspace, travels with its
+layout/context preferences, and is never saved in the review store.
+Both
 engines use the existing inline and split reviewer, file panel and comments.
 The optional Difftastic engine requires the explicitly installed, verified
 0.71.0 tool; selecting it never installs anything or falls back to a host binary.
 
-Patience computes display hunks from the full frozen documents with Neovim's
-`patience` algorithm, indentation heuristic and `linematch=60`, retaining every
-whitespace change and character refinement. Its split panes use owned, aligned
-buffers; selecting it never changes global `diffopt`. Main keeps native split
-alignment. Both engines mark exact moved blocks with shared `M` identifiers and
-original counterpart line/byte-column coordinates. Matches must be unique among
+Main keeps native split alignment and marks exact moved blocks with shared `M` identifiers and
+original counterpart line/byte-column coordinates.
+Matches must be unique among
 removed/added runs, contain at least three nonempty lines and twenty ASCII
 alphanumeric characters, and be byte-identical including line terminators.
 Longer blocks win; overlapping or ambiguous matches are omitted. Analysis skips
@@ -222,10 +221,10 @@ are blocked while a composer is active. File presentation retains a synchronous
 API with a bounded, event-pumping wait for uncached analysis.
 
 Each new comment and reply captures `origin_engine = { id, version }` when its
-composer opens, using the effective engine for that file. Main records
-`builtin-v2` and the Neovim runtime version; Patience records `builtin-v1` and
-Neovim; Difftastic records `0.71.0`. Historical GumTree origins remain inert
-metadata and round-trip without loading an engine.
+composer opens, using the effective engine for that file.
+Main records
+`builtin-v2` and the Neovim runtime version; Difftastic records `0.71.0`.
+Historical Patience and GumTree origins remain inert metadata and round-trip without loading an engine.
 Edits, resolution and reanchoring preserve this origin. Older comments show
 `not recorded`. Markdown exports and recovery exports include the origin and
 state that coordinates reference frozen original OLD/NEW sources. V1/v2 loads
@@ -386,9 +385,10 @@ The component specs in the repository exercise projection, frozen Git models,
 store/recovery, export, reanchoring, sessions, panels, presenters and the
 CURRENT-only LSP bridge without loading the complete editor profile.
 
-Run an individual spec from the configuration root, for example:
+After installing the pinned [test dependency](../../tests/README.md),
+run an individual spec from the configuration root:
 
 ```sh
-nvim --headless -u NONE -i NONE \
-  -l local-plugins/native-review.nvim/tests/native_review_spec.lua
+NVIM_CONFIG_TEST_DEPS=/absolute/path/to/test-deps nvim --headless -u NONE -i NONE \
+  -l tests/runner.lua local-plugins/native-review.nvim/tests/native_review_spec.lua
 ```

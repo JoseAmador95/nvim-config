@@ -5,24 +5,9 @@ local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "could not 
 local plugin = vim.fs.dirname(vim.fs.dirname(vim.fn.fnamemodify(source, ":p")))
 vim.opt.runtimepath:prepend(plugin)
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local repo = {
 	clean_git_command = function(argv)
@@ -132,7 +117,7 @@ local function setup(overrides)
 	}, overrides))
 end
 
-test("lifecycle defaults are copied and unknown setup options do not mutate state", function()
+T["lifecycle defaults are copied and unknown setup options do not mutate state"] = function()
 	local defaults = native_review.effective_config()
 	equal({
 		hunk_context = 3,
@@ -154,9 +139,9 @@ test("lifecycle defaults are copied and unknown setup options do not mutate stat
 	local ok, err = pcall(native_review.setup, { unknown = true })
 	assert(not ok and tostring(err):find("unknown option", 1, true), tostring(err))
 	equal(before, native_review.status(), "rejected setup mutated status")
-end)
+end
 
-test("plugin defaults to issue and configured types own cycle, rail, icon, severity, and description", function()
+T["plugin defaults to issue and configured types own cycle, rail, icon, severity, and description"] = function()
 	local catalogue = native_review.comment_types or require("native_review.comment_types")
 	equal({ "issue" }, catalogue.ids(), "issue must be the only plugin default")
 	equal("Defect or concern that needs action.", catalogue.get("issue").description, "issue description")
@@ -240,18 +225,18 @@ test("plugin defaults to issue and configured types own cycle, rail, icon, sever
 	equal(described.description, catalogue.get("suggestion").description, "valid UTF-8 description was changed")
 	setup()
 	equal({ "issue" }, catalogue.ids(), "repeated setup retained stale custom types")
-end)
+end
 
-test("composer style accepts only card or minimal without mutating rejected config", function()
+T["composer style accepts only card or minimal without mutating rejected config"] = function()
 	local before = native_review.status()
 	for _, composer in ipairs({ { style = "animated" }, { style = "card", extra = true } }) do
 		local ok, err = pcall(setup, { composer = composer })
 		assert(not ok and tostring(err):find("composer", 1, true), tostring(err))
 		equal(before, native_review.status(), "rejected composer config mutated status")
 	end
-end)
+end
 
-test("model limits are positive integers and rejected setup is transactional", function()
+T["model limits are positive integers and rejected setup is transactional"] = function()
 	local before = native_review.status()
 	for _, limits in ipairs({
 		{ max_files = 0 },
@@ -270,9 +255,9 @@ test("model limits are positive integers and rejected setup is transactional", f
 	configured.max_files = 99
 	equal(7, native_review.effective_config().max_files, "effective model limits leaked mutable state")
 	setup()
-end)
+end
 
-test("setup requires every transient tab lease method atomically", function()
+T["setup requires every transient tab lease method atomically"] = function()
 	local before = native_review.status()
 	for _, method in ipairs({
 		"acquire_transient",
@@ -287,9 +272,9 @@ test("setup requires every transient tab lease method atomically", function()
 		assert(not ok and tostring(err):find("tabs." .. method, 1, true), tostring(err))
 		equal(before, native_review.status(), "rejected tabs adapter mutated setup state")
 	end
-end)
+end
 
-test("Markdown adapter validation is atomic and optional across repeated setup", function()
+T["Markdown adapter validation is atomic and optional across repeated setup"] = function()
 	setup({ markdown = {
 		version = "test-v1",
 		build_snapshot = function()
@@ -312,9 +297,9 @@ test("Markdown adapter validation is atomic and optional across repeated setup",
 	setup()
 	local document, err = proxy.build_snapshot({})
 	assert(not document and err:find("No Markdown renderer", 1, true))
-end)
+end
 
-test("clipboard adapter is optional, strict, and replaced through its stable proxy", function()
+T["clipboard adapter is optional, strict, and replaced through its stable proxy"] = function()
 	local before = native_review.status()
 	for _, adapter in ipairs({ true, {}, { available = function() end }, { setreg = function() end } }) do
 		local ok, err = pcall(setup, { clipboard = adapter })
@@ -343,11 +328,12 @@ test("clipboard adapter is optional, strict, and replaced through its stable pro
 	} })
 	assert(not proxy.available() and proxy.setreg("+", "review") == 1, "clipboard proxy retained a stale adapter")
 	setup()
-end)
+end
 
-setup()
+local configured = MiniTest.new_set({ hooks = { pre_once = setup } })
 
-test("plugin setup creates no global commands or mappings and imports no host module", function()
+T["configured review"] = configured
+configured["plugin setup creates no global commands or mappings and imports no host module"] = function()
 	native_review.controller.setup()
 	for _, command in ipairs({
 		"ReviewOpen",
@@ -365,9 +351,9 @@ test("plugin setup creates no global commands or mappings and imports no host mo
 	end
 	assert(native_review.controller.publish == nil, "TUICR publication API survived")
 	assert(native_review.controller.link_tuicr == nil, "TUICR linking API survived")
-end)
+end
 
-test("unified projection keeps shared context once and orders OLD before NEW", function()
+configured["unified projection keeps shared context once and orders OLD before NEW"] = function()
 	local projection = assert(native_review.projection.build({
 		old_path = "sample.lua",
 		new_path = "sample.lua",
@@ -388,18 +374,18 @@ test("unified projection keeps shared context once and orders OLD before NEW", f
 	}, rows, "OLD/NEW projection order changed")
 	local crossed, crossed_err = native_review.projection.resolve_range(projection, 3, 4)
 	assert(crossed == nil and crossed_err:find("crosses OLD-only and NEW-only", 1, true), crossed_err)
-end)
+end
 
-test("CURRENT mapping accepts unchanged lines and rejects changed rows", function()
+configured["CURRENT mapping accepts unchanged lines and rejects changed rows"] = function()
 	local snapshot = { "one", "two", "three", "four" }
 	local current = { "zero", "one", "changed", "three", "four" }
 	equal(2, native_review.lsp.map_line(snapshot, current, 1), "unchanged CURRENT row did not map")
 	local mapped, err = native_review.lsp.map_line(snapshot, current, 2)
 	assert(mapped == nil and err:find("changed hunk", 1, true), err)
 	equal(4, native_review.lsp.map_line(snapshot, current, 3), "trailing unchanged CURRENT row did not map")
-end)
+end
 
-test("historical OLD buffers remain LSP-blocked with buffer-local guards", function()
+configured["historical OLD buffers remain LSP-blocked with buffer-local guards"] = function()
 	local buf = vim.api.nvim_create_buf(false, true)
 	assert(native_review.lsp.mark(buf, "old"), "OLD buffer was not marked")
 	assert(native_review.lsp.blocked(buf), "OLD buffer was not blocked")
@@ -411,9 +397,9 @@ test("historical OLD buffers remain LSP-blocked with buffer-local guards", funct
 	assert(local_mapping.buffer == 1, "OLD guard was not buffer-local")
 	native_review.lsp.clear(buf)
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("discarding a suspended export preview wipes only its private receipt buffer", function()
+configured["discarding a suspended export preview wipes only its private receipt buffer"] = function()
 	local preview_buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_name(preview_buf, "review-export://markdown")
 	vim.bo[preview_buf].bufhidden = "hide"
@@ -425,9 +411,9 @@ test("discarding a suspended export preview wipes only its private receipt buffe
 	assert(not native_review.export.discard_preview({ buf = unrelated }), "discard accepted an unrelated buffer")
 	assert(vim.api.nvim_buf_is_valid(unrelated), "discard deleted an unrelated buffer")
 	vim.api.nvim_buf_delete(unrelated, { force = true })
-end)
+end
 
-test("legacy bridge and delivery metadata stay renderable but never drive the controller", function()
+configured["legacy bridge and delivery metadata stay renderable but never drive the controller"] = function()
 	local session = {
 		version = 2,
 		id = string.rep("a", 64),
@@ -464,9 +450,9 @@ test("legacy bridge and delivery metadata stay renderable but never drive the co
 	assert(native_review.controller.publish == nil and native_review.controller.link_tuicr == nil)
 	assert(native_review.store.link_tuicr == nil and native_review.store.mark_tuicr_delivered == nil)
 	assert(native_review.store.mark_exported == nil and native_review.store.item_status(session.items[1]) == "draft")
-end)
+end
 
-test("session preferences override normalized defaults", function()
+configured["session preferences override normalized defaults"] = function()
 	equal(
 		{ layout = "inline", context = "hunks", engine = "main", markdown_view = "source", inline_comments = true },
 		native_review.controller._workspace_preferences(nil, nil),
@@ -483,9 +469,9 @@ test("session preferences override normalized defaults", function()
 		}),
 		"session preference override"
 	)
-end)
+end
 
-test("repeated setup replaces adapters, copied status is pure, and teardown is repeatable", function()
+configured["repeated setup replaces adapters, copied status is pure, and teardown is repeatable"] = function()
 	local first = require("native_review.dependencies").get("repo")
 	local first_tabs = require("native_review.dependencies").get("tabs")
 	equal("first", first.root("first"), "initial adapter")
@@ -507,14 +493,6 @@ test("repeated setup replaces adapters, copied status is pure, and teardown is r
 	equal("inline", native_review.effective_config().layout, "teardown did not restore defaults")
 	setup()
 	assert(native_review.status().configured)
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("native_review_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

@@ -5,18 +5,8 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local load_calls = 0
 local resolution
@@ -46,12 +36,12 @@ vim.lsp.rpc.start = function(argv, dispatchers, options)
 	return { rpc = true }
 end
 
-test("requiring the runtime does not resolve or spawn a tool", function()
+T["requiring the runtime does not resolve or spawn a tool"] = function()
 	assert(load_calls == 0, "verified-tools loaded during module discovery")
 	assert(#rpc_calls == 0, "an LSP process started during module discovery")
-end)
+end
 
-test("every managed catalog server has one exact manifest command", function()
+T["every managed catalog server has one exact manifest command"] = function()
 	for _, server in ipairs(catalog.servers) do
 		assert(type(server.args) == "table" or server.args == nil, server.name .. " has invalid argv")
 		if server.package then
@@ -64,9 +54,9 @@ test("every managed catalog server has one exact manifest command", function()
 			assert(server.name == "rust_analyzer" and server.external == "rust-analyzer")
 		end
 	end
-end)
+end
 
-test("managed startup resolves once at the final RPC seam and uses the absolute path", function()
+T["managed startup resolves once at the final RPC seam and uses the absolute path"] = function()
 	load_calls = 0
 	rpc_calls = {}
 	resolution = function(tool, command)
@@ -84,9 +74,9 @@ test("managed startup resolves once at the final RPC seam and uses the absolute 
 	assert(vim.deep_equal(rpc_calls[1].argv, { "/verified/bin/bash-language-server", "start" }))
 	assert(rpc_calls[1].dispatchers == dispatchers)
 	assert(vim.deep_equal(rpc_calls[1].options, { cwd = "/repo", env = { TEST = "1" }, detached = true }))
-end)
+end
 
-test("absence, drift, and malformed paths fail before RPC spawn", function()
+T["absence, drift, and malformed paths fail before RPC spawn"] = function()
 	for _, denied in ipairs({
 		{ path = nil, err = "absent" },
 		{ path = nil, err = "drift: metadata changed" },
@@ -104,9 +94,9 @@ test("absence, drift, and malformed paths fail before RPC spawn", function()
 		)
 		assert(#rpc_calls == 0, "denied runtime reached vim.lsp.rpc.start")
 	end
-end)
+end
 
-test("native root gating turns ordinary absence into a quiet non-start", function()
+T["native root gating turns ordinary absence into a quiet non-start"] = function()
 	local upstream = 0
 	local roots = 0
 	local notifications = 0
@@ -139,9 +129,9 @@ test("native root gating turns ordinary absence into a quiet non-start", functio
 		assert(root == "/repo")
 	end)
 	assert(upstream == 1 and roots == 1, "verified runtime did not reach native root resolution")
-end)
+end
 
-test("clangd absolute override must match the catalog launcher", function()
+T["clangd absolute override must match the catalog launcher"] = function()
 	resolution = function()
 		return "/verified/bin/clangd"
 	end
@@ -152,9 +142,9 @@ test("clangd absolute override must match the catalog launcher", function()
 	assert(#rpc_calls == 0)
 	assert(runtime.managed_start(binding, {}, {}, { "--clang-tidy" }, "/verified/bin/clangd").rpc)
 	assert(vim.deep_equal(rpc_calls[1].argv, { "/verified/bin/clangd", "--clang-tidy" }))
-end)
+end
 
-test("Rust host lookup is deferred and never changes argv through a shell", function()
+T["Rust host lookup is deferred and never changes argv through a shell"] = function()
 	rpc_calls = {}
 	local lookups = 0
 	runtime._rust_analyzer = function()
@@ -173,16 +163,10 @@ test("Rust host lookup is deferred and never changes argv through a shell", func
 	local ok, err = pcall(runtime.external_rust_start, assert(catalog.server("rust_analyzer")), {}, {})
 	assert(not ok and tostring(err):find("explicit host/user PATH", 1, true))
 	assert(#rpc_calls == 0)
-end)
-
-vim.lsp.rpc.start = original_rpc_start
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("lsp_runtime_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.lsp.rpc.start = original_rpc_start
+end
+
+return T

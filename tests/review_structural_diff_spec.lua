@@ -7,27 +7,9 @@ package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", p
 local mise = vim.fn.exepath("mise")
 local expected_path = "/verified/bin:" .. (mise ~= "" and vim.fs.dirname(mise) .. ":" or "") .. "/usr/bin:/bin"
 
-local failures = {}
-local count = 0
 local directories = {}
 local cancellations = {}
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	for _, cancel in ipairs(cancellations) do
-		cancel()
-	end
-	cancellations = {}
-	for _, path in ipairs(directories) do
-		vim.fn.delete(path, "rf")
-	end
-	directories = {}
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local function request(overrides)
 	return vim.tbl_deep_extend("force", {
@@ -124,7 +106,7 @@ local function read_binary(path)
 	return bytes
 end
 
-test("loading the adapter does not activate tool lifecycle or probe a process", function()
+T["loading the adapter does not activate tool lifecycle or probe a process"] = function()
 	local original_core = package.loaded["config.tool_bootstrap"]
 	local original_preload = package.preload["config.tool_bootstrap"]
 	local original_system = vim.system
@@ -143,9 +125,9 @@ test("loading the adapter does not activate tool lifecycle or probe a process", 
 	assert(ok, result)
 	assert(type(result.run) == "function")
 	assert(type(result.analyze) == "function")
-end)
+end
 
-test("explicit execution resolves only the registered difftastic command", function()
+T["explicit execution resolves only the registered difftastic command"] = function()
 	local adapter, calls = fixture()
 	local original_core = package.loaded["config.tool_bootstrap"]
 	package.loaded["config.tool_bootstrap"] = {
@@ -167,9 +149,9 @@ test("explicit execution resolves only the registered difftastic command", funct
 	end, debug.traceback)
 	package.loaded["config.tool_bootstrap"] = original_core
 	assert(ok, err)
-end)
+end
 
-test("frozen bytes use private files and safe argv with modes and object IDs", function()
+T["frozen bytes use private files and safe argv with modes and object IDs"] = function()
 	local _, calls = fixture()
 	local input =
 		request({ entry = { path = "-- odd name.lua", old_path = "-- odd name.lua", new_path = "-- odd name.lua" } })
@@ -210,9 +192,9 @@ test("frozen bytes use private files and safe argv with modes and object IDs", f
 	assert(#calls.callbacks == 1, "process completion published twice")
 	assert(calls.timer.closed and calls.timer.stopped)
 	calls:clean()
-end)
+end
 
-test("rename labels use the nine-argument Git form and explicit light background", function()
+T["rename labels use the nine-argument Git form and explicit light background"] = function()
 	local _, calls = fixture()
 	calls:run(request({ background = "light", entry = { old_path = "old thing.py", new_path = "-renamed.py" } }))
 	assert(#calls.argv == 16)
@@ -232,9 +214,9 @@ test("rename labels use the nine-argument Git form and explicit light background
 	calls.exit({ code = 0, signal = 0 })
 	assert(calls:wait().output == "")
 	calls:clean()
-end)
+end
 
-test("added and deleted frozen sides keep zero modes without reading live paths", function()
+T["added and deleted frozen sides keep zero modes without reading live paths"] = function()
 	for _, side in ipairs({ "old", "new" }) do
 		local _, calls = fixture()
 		local input = request()
@@ -252,9 +234,9 @@ test("added and deleted frozen sides keep zero modes without reading live paths"
 		calls:wait()
 		calls:clean()
 	end
-end)
+end
 
-test("invalid snapshots and arguments fail before tool resolution", function()
+T["invalid snapshots and arguments fail before tool resolution"] = function()
 	for _, change in ipairs({
 		{ entry = { old_text = false } },
 		{ entry = { new_text = false } },
@@ -271,9 +253,9 @@ test("invalid snapshots and arguments fail before tool resolution", function()
 		assert(calls.resolutions == 0 and calls.directory == nil and calls.argv == nil)
 		assert(calls:wait().err ~= nil)
 	end
-end)
+end
 
-test("resolver exceptions return actionable scheduled errors", function()
+T["resolver exceptions return actionable scheduled errors"] = function()
 	local adapter, calls = fixture()
 	adapter._resolve = function()
 		error("injected resolve failure")
@@ -283,9 +265,9 @@ test("resolver exceptions return actionable scheduled errors", function()
 	assert(result.err:find("injected resolve failure", 1, true))
 	assert(result.err:find(":NvimConfigToolsInstall difftastic", 1, true))
 	assert(calls.directory == nil and calls.argv == nil)
-end)
+end
 
-test("temporary-directory errors and exceptions do not spawn", function()
+T["temporary-directory errors and exceptions do not spawn"] = function()
 	for _, throwing in ipairs({ false, true }) do
 		local adapter, calls = fixture()
 		adapter._mkdtemp = function()
@@ -298,9 +280,9 @@ test("temporary-directory errors and exceptions do not spawn", function()
 		assert(calls:wait().err:find("injected temp failure", 1, true))
 		assert(calls.argv == nil)
 	end
-end)
+end
 
-test("spawn exceptions clean both private inputs", function()
+T["spawn exceptions clean both private inputs"] = function()
 	local adapter, calls = fixture()
 	adapter._system = function()
 		error("injected spawn failure")
@@ -308,9 +290,9 @@ test("spawn exceptions clean both private inputs", function()
 	calls:run()
 	assert(calls:wait().err:find("injected spawn failure", 1, true))
 	calls:clean()
-end)
+end
 
-test("failed processes expose bounded stderr and clean snapshots", function()
+T["failed processes expose bounded stderr and clean snapshots"] = function()
 	local _, calls = fixture()
 	calls:run()
 	calls.options.stdout(nil, "partial output")
@@ -320,9 +302,9 @@ test("failed processes expose bounded stderr and clean snapshots", function()
 	assert(result.output == nil and result.err:find("exit 2", 1, true))
 	assert(#result.err < 2200 and #calls.kills == 0)
 	calls:clean()
-end)
+end
 
-test("combined stdout and stderr are capped before publishing", function()
+T["combined stdout and stderr are capped before publishing"] = function()
 	local _, calls = fixture()
 	calls:run()
 	calls.options.stdout(nil, string.rep("a", 4 * 1024 * 1024))
@@ -336,18 +318,18 @@ test("combined stdout and stderr are capped before publishing", function()
 	calls.exit({ code = 0, signal = 0 })
 	assert(#calls.callbacks == 1)
 	calls:clean()
-end)
+end
 
-test("stream read failures terminate and clean the subprocess", function()
+T["stream read failures terminate and clean the subprocess"] = function()
 	local _, calls = fixture()
 	calls:run()
 	calls.options.stdout("read failure", nil)
 	assert(calls:wait().err:find("read failure", 1, true))
 	assert(vim.deep_equal(calls.kills, { 9 }))
 	calls:clean()
-end)
+end
 
-test("the independent deadline kills a process that ignores the system timeout", function()
+T["the independent deadline kills a process that ignores the system timeout"] = function()
 	local _, calls = fixture()
 	calls:run()
 	assert(calls.timer.timeout == 5000 and calls.timer.interval == 0)
@@ -358,17 +340,17 @@ test("the independent deadline kills a process that ignores the system timeout",
 	calls.exit({ code = 0, signal = 0 })
 	assert(#calls.callbacks == 1)
 	calls:clean()
-end)
+end
 
-test("system timeout exit results clean up and report the deadline", function()
+T["system timeout exit results clean up and report the deadline"] = function()
 	local _, calls = fixture()
 	calls:run()
 	calls.exit({ code = 124, signal = 15 })
 	assert(calls:wait().err:find("timed out after 5000 ms", 1, true))
 	calls:clean()
-end)
+end
 
-test("cancellation kills once, removes private inputs, and suppresses late callbacks", function()
+T["cancellation kills once, removes private inputs, and suppresses late callbacks"] = function()
 	local _, calls = fixture()
 	local cancel = calls:run()
 	cancel()
@@ -382,9 +364,9 @@ test("cancellation kills once, removes private inputs, and suppresses late callb
 		return false
 	end, 1)
 	assert(#calls.callbacks == 0)
-end)
+end
 
-test("cancellation suppresses an already scheduled completion without killing a closed process", function()
+T["cancellation suppresses an already scheduled completion without killing a closed process"] = function()
 	local _, calls = fixture()
 	local cancel = calls:run()
 	calls.options.stdout(nil, "ready output")
@@ -395,9 +377,9 @@ test("cancellation suppresses an already scheduled completion without killing a 
 	end, 1)
 	assert(#calls.callbacks == 0 and #calls.kills == 0)
 	calls:clean()
-end)
+end
 
-test("timer setup failures terminate the process and clean snapshots", function()
+T["timer setup failures terminate the process and clean snapshots"] = function()
 	for _, failing_start in ipairs({ false, true }) do
 		local adapter, calls = fixture()
 		if failing_start then
@@ -414,9 +396,9 @@ test("timer setup failures terminate the process and clean snapshots", function(
 		assert(vim.deep_equal(calls.kills, { 9 }))
 		calls:clean()
 	end
-end)
+end
 
-test("JSON analysis defaults geometry and returns raw output in a private environment", function()
+T["JSON analysis defaults geometry and returns raw output in a private environment"] = function()
 	local _, calls = fixture()
 	local input = request()
 	input.width, input.background = nil, nil
@@ -442,9 +424,9 @@ test("JSON analysis defaults geometry and returns raw output in a private enviro
 	calls.exit({ code = 0, signal = 0 })
 	assert(calls:wait().output == output, "host parsed or rewrote plugin-owned JSON")
 	calls:clean()
-end)
+end
 
-test("analysis preserves explicit geometry and rejects invalid requests before resolution", function()
+T["analysis preserves explicit geometry and rejects invalid requests before resolution"] = function()
 	local _, calls = fixture()
 	calls:analyze(request({ width = 123, background = "light" }))
 	assert(calls.argv[4] == "--background=light" and calls.argv[5] == "--width=123")
@@ -460,9 +442,9 @@ test("analysis preserves explicit geometry and rejects invalid requests before r
 		assert(invalid.resolutions == 0 and invalid.argv == nil and invalid.directory == nil)
 		assert(invalid:wait().err)
 	end
-end)
+end
 
-test("analysis shares output bounds deadline cancellation and scheduled-completion suppression", function()
+T["analysis shares output bounds deadline cancellation and scheduled-completion suppression"] = function()
 	for _, scenario in ipairs({ "overflow", "timeout", "cancel", "queued" }) do
 		local _, calls = fixture()
 		local cancel = calls:analyze()
@@ -490,14 +472,6 @@ test("analysis shares output bounds deadline cancellation and scheduled-completi
 		assert(calls.timer.closed and calls.timer.stopped)
 		calls:clean()
 	end
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("review_structural_diff_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

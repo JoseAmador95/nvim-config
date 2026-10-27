@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.navigation_history")
 local M = {}
 
 -- Ensure the shared runtime has the full-editor policies before exposing the
@@ -74,13 +75,13 @@ function M.setup()
 		desc = "Show semantic navigation history",
 		force = true,
 	})
-	vim.keymap.set("n", "<C-o>", function()
+	usage_map("n", "<C-o>", function()
 		M.back({ count = vim.v.count1 })
 	end, { silent = true, desc = "Navigation back" })
-	vim.keymap.set("n", "<C-i>", function()
+	usage_map("n", "<C-i>", function()
 		M.forward({ count = vim.v.count1 })
 	end, { silent = true, desc = "Navigation forward" })
-	vim.keymap.set("n", "<leader>nh", M.select, { silent = true, desc = "Show navigation history" })
+	usage_map("n", "<leader>nh", M.select, { silent = true, desc = "Show navigation history" })
 end
 
 return M

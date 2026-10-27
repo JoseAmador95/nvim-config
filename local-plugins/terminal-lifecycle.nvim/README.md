@@ -9,7 +9,7 @@ dependency on this repository's `config.*` modules.
 ## Contract
 
 Call `require("terminal_lifecycle").setup(opts)` with a replaceable visual
-backend, then pass normalized `TerminalSpec` values to the lifecycle methods:
+backend, then pass `TerminalSpec` values to the lifecycle methods; the plugin normalizes each input once:
 
 ```lua
 local spec = {
@@ -85,6 +85,8 @@ Plugin buffers are tagged with `b:terminal_lifecycle.ephemeral = true` and
 terminal buffers rather than attempting to resurrect their processes.
 
 ## Backend
+
+An optional `backend.normalize_view(view)` applies host layout policy to the copied view and returns it or `nil, error`, before any session mutation. It must be a pure transformation.
 
 `backend.open(spec, callbacks)` returns an opaque handle. It may call
 `callbacks.on_buffer(bufnr)`, `callbacks.on_exit(exit_code)`, and

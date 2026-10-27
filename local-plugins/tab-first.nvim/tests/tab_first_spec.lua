@@ -7,29 +7,15 @@ local plugin = vim.fs.dirname(vim.fs.dirname(vim.fn.fnamemodify(source, ":p")))
 vim.opt.runtimepath:prepend(plugin)
 package.path = table.concat({ plugin .. "/lua/?.lua", plugin .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local tab_first = require("tab_first")
 local paths = {}
 
-test("workspace history defaults are copied and rejected setup is non-mutating", function()
+T["workspace history defaults are copied and rejected setup is non-mutating"] = function()
 	equal({ history = { enabled = true, max_entries = 200, scope = "workspace" } }, tab_first.effective_config())
 	assert(tab_first.status().configured == false)
 	local config = tab_first.effective_config()
@@ -39,7 +25,7 @@ test("workspace history defaults are copied and rejected setup is non-mutating",
 	local ok, err = pcall(tab_first.setup, { history = { unknown = true } })
 	assert(not ok and tostring(err):find("unknown option", 1, true), tostring(err))
 	equal(before, tab_first.status(), "rejected setup mutated state")
-end)
+end
 
 local function make_file(label)
 	local path = vim.fn.tempname() .. "-" .. label
@@ -80,7 +66,7 @@ local function reset_editor()
 	})
 end
 
-test("setup creates no host command or global mapping and imports no config module", function()
+T["setup creates no host command or global mapping and imports no config module"] = function()
 	reset_editor()
 	tab_first.setup({})
 	for _, command in ipairs({ "CloseTab", "NavigationBack", "NavigationForward", "NavigationHistory" }) do
@@ -91,9 +77,9 @@ test("setup creates no host command or global mapping and imports no config modu
 	for name in pairs(package.loaded) do
 		assert(not name:match("^config%."), "plugin imported host module " .. name)
 	end
-end)
+end
 
-test("canonical opening reuses the exact visible split", function()
+T["canonical opening reuses the exact visible split"] = function()
 	reset_editor()
 	local first = make_file("visible-first")
 	local second = make_file("visible-second")
@@ -107,9 +93,9 @@ test("canonical opening reuses the exact visible split", function()
 	equal(expected_win, vim.api.nvim_get_current_win(), "opening focused a different split")
 	equal({ 3, 1 }, vim.api.nvim_win_get_cursor(expected_win), "visible split reuse lost the cursor")
 	assert(vim.api.nvim_win_is_valid(other_win), "opening replaced the neighboring split")
-end)
+end
 
-test("canonical opening prefers the current duplicate tab", function()
+T["canonical opening prefers the current duplicate tab"] = function()
 	reset_editor()
 	local path = make_file("duplicate-current")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
@@ -122,9 +108,9 @@ test("canonical opening prefers the current duplicate tab", function()
 	equal(preferred_win, vim.api.nvim_get_current_win(), "opening selected another duplicate window")
 	equal("visible", opened.reused, "current duplicate was not classified as visible reuse")
 	equal({ 2, 1 }, vim.api.nvim_win_get_cursor(0), "current duplicate lost the requested cursor")
-end)
+end
 
-test("opening reuses only a pristine marked home tab", function()
+T["opening reuses only a pristine marked home tab"] = function()
 	reset_editor()
 	local home = vim.api.nvim_get_current_tabpage()
 	local path = make_file("home-target")
@@ -142,9 +128,9 @@ test("opening reuses only a pristine marked home tab", function()
 	vim.cmd("vsplit")
 	tab_first.open(path)
 	equal(2, #vim.api.nvim_list_tabpages(), "multi-split home was reused")
-end)
+end
 
-test("home presenter is injected and recovery requests coalesce", function()
+T["home presenter is injected and recovery requests coalesce"] = function()
 	reset_editor()
 	local queue = {}
 	local presentations = 0
@@ -169,9 +155,9 @@ test("home presenter is injected and recovery requests coalesce", function()
 	queue[1]()
 	equal(1, presentations, "injected presenter did not run exactly once")
 	assert(tab_first.is_home(home), "presented dashboard is not a valid home")
-end)
+end
 
-test("home classification is injected and the plugin has no Snacks filetype literal", function()
+T["home classification is injected and the plugin has no Snacks filetype literal"] = function()
 	reset_editor()
 	local buf = vim.api.nvim_get_current_buf()
 	vim.bo[buf].buftype = "nofile"
@@ -186,9 +172,9 @@ test("home classification is injected and the plugin has no Snacks filetype lite
 	assert(tab_first.mark_home(vim.api.nvim_get_current_tabpage()), "injected classifier was ignored")
 	local implementation = table.concat(vim.fn.readfile(plugin .. "/lua/tab_first/init.lua"), "\n")
 	assert(not implementation:find("snacks_dashboard", 1, true), "plugin retained a Snacks-specific classifier")
-end)
+end
 
-test("queued closes use stable handles and coalesce duplicate clicks", function()
+T["queued closes use stable handles and coalesce duplicate clicks"] = function()
 	reset_editor()
 	local queue = {}
 	tab_first.setup({
@@ -209,9 +195,9 @@ test("queued closes use stable handles and coalesce duplicate clicks", function(
 	assert(not vim.api.nvim_tabpage_is_valid(target), "queued target remains valid")
 	assert(vim.api.nvim_tabpage_is_valid(first), "queued close removed the first tab")
 	assert(vim.api.nvim_tabpage_is_valid(neighbour), "queued close removed the neighbor")
-end)
+end
 
-test("safe final close retains modified output and uses injected host callbacks", function()
+T["safe final close retains modified output and uses injected host callbacks"] = function()
 	reset_editor()
 	local presented = 0
 	local dismissed = 0
@@ -242,9 +228,9 @@ test("safe final close retains modified output and uses injected host callbacks"
 	assert(vim.api.nvim_buf_is_valid(user_buf) and vim.bo[user_buf].modified, "close discarded the user buffer")
 	equal(1, dismissed, "current-tab close did not dismiss host UI")
 	assert(tab_first.is_home(vim.api.nvim_get_current_tabpage()), "final close did not leave a home tab")
-end)
+end
 
-test("transient leases create one dedicated tab per owner key and reuse it exactly", function()
+T["transient leases create one dedicated tab per owner key and reuse it exactly"] = function()
 	reset_editor()
 	local origin = vim.api.nvim_get_current_tabpage()
 	local tabs_before = #vim.api.nvim_list_tabpages()
@@ -287,9 +273,9 @@ test("transient leases create one dedicated tab per owner key and reuse it exact
 	equal(1, #closed, "owner release did not notify closure exactly once")
 	equal({ handle = first, reason = "released" }, closed[1], "owner release callback changed")
 	assert(not vim.api.nvim_buf_is_valid(owned_buf), "hidden owned blank scratch buffer survived release")
-end)
+end
 
-test("supported transient closes honor vetoes and callback errors", function()
+T["supported transient closes honor vetoes and callback errors"] = function()
 	reset_editor()
 	local queue = {}
 	local preflights = {}
@@ -351,9 +337,9 @@ test("supported transient closes honor vetoes and callback errors", function()
 	queue[1]()
 	assert(not tab_first.valid_transient(handle), "approved supported close retained the lease")
 	equal({ handle = handle, reason = "supported" }, closed[1], "supported close callback changed")
-end)
+end
 
-test("owner release bypasses close preflight", function()
+T["owner release bypasses close preflight"] = function()
 	reset_editor()
 	local preflights = 0
 	local closed
@@ -378,9 +364,9 @@ test("owner release bypasses close preflight", function()
 	assert(vim.api.nvim_buf_is_valid(retained_buf), "release deleted a nonblank owner buffer")
 	equal({ "owner content" }, vim.api.nvim_buf_get_lines(retained_buf, 0, -1, false), "release changed owner content")
 	vim.api.nvim_buf_delete(retained_buf, { force = true })
-end)
+end
 
-test("releasing the final transient tab preserves user buffers and creates a safe home", function()
+T["releasing the final transient tab preserves user buffers and creates a safe home"] = function()
 	reset_editor()
 	local origin = vim.api.nvim_get_current_tabpage()
 	local user_buf = vim.api.nvim_get_current_buf()
@@ -397,9 +383,9 @@ test("releasing the final transient tab preserves user buffers and creates a saf
 	assert(tab_first.release_transient(handle), "final transient release failed")
 	assert(tab_first.is_home(vim.api.nvim_get_current_tabpage()), "final transient release did not create a safe home")
 	assert(vim.api.nvim_buf_is_valid(user_buf) and vim.bo[user_buf].modified, "final release deleted user changes")
-end)
+end
 
-test("raw tab close reconciles once and stale generations cannot affect reacquisition", function()
+T["raw tab close reconciles once and stale generations cannot affect reacquisition"] = function()
 	reset_editor()
 	local preflights = {}
 	local closed = {}
@@ -432,9 +418,9 @@ test("raw tab close reconciles once and stale generations cannot affect reacquis
 	assert(tab_first.valid_transient(second), "stale handle operation invalidated the replacement lease")
 	equal("Review: replacement", tab_first.transient_title(second.tabpage), "stale handle changed replacement title")
 	assert(tab_first.release_transient(second), "replacement lease cleanup failed")
-end)
+end
 
-test("teardown clears lease callbacks without closing the visible tab", function()
+T["teardown clears lease callbacks without closing the visible tab"] = function()
 	reset_editor()
 	local closed = {}
 	local handle = assert(tab_first.acquire_transient({
@@ -457,9 +443,9 @@ test("teardown clears lease callbacks without closing the visible tab", function
 	vim.cmd("tabclose")
 	equal(1, #closed, "closed callback survived lifecycle teardown")
 	assert(tab_first.setup({}), "tab-first setup after teardown failed")
-end)
+end
 
-test("semantic history never falls through after entries exist", function()
+T["semantic history never falls through after entries exist"] = function()
 	reset_editor()
 	local first = make_file("history-first")
 	local second = make_file("history-second")
@@ -482,9 +468,9 @@ test("semantic history never falls through after entries exist", function()
 	assert(tab_first.forward(), "semantic forward did not restore the destination")
 	assert(not tab_first.forward(), "exhausted forward reported a semantic traversal")
 	equal({}, fallbacks, "exhausted forward escaped into native history")
-end)
+end
 
-test("semantic history honors counts without forwarding residual steps", function()
+T["semantic history honors counts without forwarding residual steps"] = function()
 	reset_editor()
 	local first = make_file("history-count-first")
 	local second = make_file("history-count-second")
@@ -517,9 +503,9 @@ test("semantic history honors counts without forwarding residual steps", functio
 	equal({}, fallbacks, "residual forward count escaped into native history")
 	assert(not tab_first.forward({ count = 4, fallback = false }), "disabled fallback reported movement")
 	equal(0, #fallbacks, "fallback=false still invoked native history")
-end)
+end
 
-test("empty history delegates one counted request and propagates fallback errors", function()
+T["empty history delegates one counted request and propagates fallback errors"] = function()
 	reset_editor()
 	local calls = {}
 	tab_first.setup({
@@ -541,9 +527,9 @@ test("empty history delegates one counted request and propagates fallback errors
 	})
 	local ok, err = pcall(tab_first.back)
 	assert(not ok and tostring(err):find("native fallback failed", 1, true), "fallback error was silently swallowed")
-end)
+end
 
-test("unrecorded same-file movement is appended before traversal", function()
+T["unrecorded same-file movement is appended before traversal"] = function()
 	reset_editor()
 	local path = make_file("history-native-same-file")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
@@ -555,9 +541,9 @@ test("unrecorded same-file movement is appended before traversal", function()
 	equal({ 2, 0 }, vim.api.nvim_win_get_cursor(0), "first back skipped the semantic endpoint")
 	assert(tab_first.back({ fallback = false }), "second back did not return to the semantic origin")
 	equal({ 1, 0 }, vim.api.nvim_win_get_cursor(0), "second back lost the semantic origin")
-end)
+end
 
-test("explicit open origins remain immutable across delayed navigation", function()
+T["explicit open origins remain immutable across delayed navigation"] = function()
 	reset_editor()
 	local first = make_file("history-explicit-first")
 	local intermediate = make_file("history-explicit-intermediate")
@@ -571,9 +557,9 @@ test("explicit open origins remain immutable across delayed navigation", functio
 	equal(2, #snapshot.entries, "delayed open recorded an extra location")
 	equal(vim.uv.fs_realpath(first), snapshot.entries[1].path, "delayed open recaptured its late origin")
 	equal(vim.uv.fs_realpath(destination), snapshot.entries[2].path, "delayed open lost its destination")
-end)
+end
 
-test("provider history captures, restores, and skips stale entries", function()
+T["provider history captures, restores, and skips stale entries"] = function()
 	reset_editor()
 	local current
 	local restores = {}
@@ -615,9 +601,9 @@ test("provider history captures, restores, and skips stale entries", function()
 	assert(tab_first.back({ fallback = false }), "stale provider entry consumed the traversal")
 	equal({ "2:1", "1:1" }, restores, "provider restoration order changed")
 	equal("1:1", current.location_key, "provider traversal landed at the wrong location")
-end)
+end
 
-test("recorded history owns immutable copies of provider entries", function()
+T["recorded history owns immutable copies of provider entries"] = function()
 	reset_editor()
 	local origin = {
 		kind = "provider",
@@ -646,9 +632,9 @@ test("recorded history owns immutable copies of provider entries", function()
 	equal(1, snapshot.entries[1].payload.location.line, "origin payload remained caller-owned")
 	equal("session:second.lua", snapshot.entries[2].document_key, "destination key remained caller-owned")
 	equal(3, snapshot.entries[2].payload.location.col, "destination payload remained caller-owned")
-end)
+end
 
-test("provider callback failures are notified without crashing capture or traversal", function()
+T["provider callback failures are notified without crashing capture or traversal"] = function()
 	reset_editor()
 	local notifications = {}
 	local named_path = make_file("history-provider-capture-error")
@@ -753,9 +739,9 @@ test("provider callback failures are notified without crashing capture or traver
 		#notifications,
 		"provider failure reported by its owner was notified twice"
 	)
-end)
+end
 
-test("malformed public history entries are rejected without poisoning the stack", function()
+T["malformed public history entries are rejected without poisoning the stack"] = function()
 	reset_editor()
 	local valid = { path = "/tmp/valid-history-entry", lnum = 1, col = 1 }
 	for _, malformed in ipairs({
@@ -775,9 +761,9 @@ test("malformed public history entries are rejected without poisoning the stack"
 		assert(not tab_first.record_transition(valid, malformed), "malformed destination entered history")
 	end
 	equal({ entries = {}, index = 0 }, tab_first.history_snapshot(), "malformed entries changed history")
-end)
+end
 
-test("counted traversal skips stale entries without consuming a step", function()
+T["counted traversal skips stale entries without consuming a step"] = function()
 	reset_editor()
 	local first = make_file("history-stale-first")
 	local stale = make_file("history-stale-middle")
@@ -791,9 +777,9 @@ test("counted traversal skips stale entries without consuming a step", function(
 
 	assert(tab_first.back({ count = 1, fallback = false }), "stale entry consumed the requested step")
 	equal(vim.uv.fs_realpath(first), vim.uv.fs_realpath(vim.api.nvim_buf_get_name(0)), "stale skip landed incorrectly")
-end)
+end
 
-test("closed history locations reopen through the injected host adapter", function()
+T["closed history locations reopen through the injected host adapter"] = function()
 	reset_editor()
 	local first = make_file("history-adapter-first")
 	local second = make_file("history-adapter-second")
@@ -820,9 +806,9 @@ test("closed history locations reopen through the injected host adapter", functi
 	assert(tab_first.back({ fallback = false }), "closed history location was not restored")
 	equal(1, reopened, "history bypassed or repeated the injected open adapter")
 	equal(vim.uv.fs_realpath(first), vim.uv.fs_realpath(vim.api.nvim_buf_get_name(0)), "adapter reopened wrong path")
-end)
+end
 
-test("closed-location adapter errors are visible and do not advance history", function()
+T["closed-location adapter errors are visible and do not advance history"] = function()
 	reset_editor()
 	local first = make_file("history-adapter-error-first")
 	local second = make_file("history-adapter-error-second")
@@ -850,9 +836,9 @@ test("closed-location adapter errors are visible and do not advance history", fu
 		notifications[#notifications]:find("adapter exploded", 1, true),
 		"closed-location adapter failure was not notified"
 	)
-end)
+end
 
-test("closed-location adapters must confirm restoration explicitly", function()
+T["closed-location adapters must confirm restoration explicitly"] = function()
 	reset_editor()
 	local first = make_file("history-adapter-nil-first")
 	local second = make_file("history-adapter-nil-second")
@@ -872,9 +858,9 @@ test("closed-location adapters must confirm restoration explicitly", function()
 	local before = tab_first.history_snapshot()
 	assert(not tab_first.back({ fallback = false }), "unconfirmed adapter reported a traversal")
 	equal(before.index, tab_first.history_snapshot().index, "unconfirmed adapter advanced the history index")
-end)
+end
 
-test("semantic history can be disabled without changing canonical opening", function()
+T["semantic history can be disabled without changing canonical opening"] = function()
 	reset_editor()
 	local first = make_file("disabled-first")
 	local second = make_file("disabled-second")
@@ -893,9 +879,9 @@ test("semantic history can be disabled without changing canonical opening", func
 	equal(0, #tab_first.history_snapshot().entries, "disabled history recorded a transition")
 	assert(not tab_first.back(), "disabled history reported a semantic traversal")
 	equal(-1, fallback, "disabled history did not delegate to the native fallback")
-end)
+end
 
-test("disabling populated history delegates to the native fallback", function()
+T["disabling populated history delegates to the native fallback"] = function()
 	reset_editor()
 	local first = make_file("disabled-populated-first")
 	local second = make_file("disabled-populated-second")
@@ -912,9 +898,9 @@ test("disabling populated history delegates to the native fallback", function()
 	})
 	assert(not tab_first.back({ count = 3 }), "disabled populated history reported a semantic traversal")
 	equal({ -1, 3 }, fallback, "disabled populated history did not delegate the native count")
-end)
+end
 
-test("history events are isolated and repeated teardown/setup resets lifecycle state", function()
+T["history events are isolated and repeated teardown/setup resets lifecycle state"] = function()
 	reset_editor()
 	local events = {}
 	tab_first.setup({
@@ -937,23 +923,17 @@ test("history events are isolated and repeated teardown/setup resets lifecycle s
 	equal(200, tab_first.effective_config().history.max_entries)
 	assert(tab_first.setup())
 	assert(tab_first.status().configured)
-end)
+end
 
-for _, path in ipairs(paths) do
-	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then
-			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+hooks.post_once = function()
+	for _, path in ipairs(paths) do
+		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then
+				pcall(vim.api.nvim_buf_delete, buf, { force = true })
+			end
 		end
+		vim.fn.delete(path)
 	end
-	vim.fn.delete(path)
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
-end
-
-print(string.format("tab_first_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

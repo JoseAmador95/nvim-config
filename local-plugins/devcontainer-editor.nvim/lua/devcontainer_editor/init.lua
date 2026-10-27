@@ -1,8 +1,6 @@
--- Dev Container lifecycle and authenticated editor transport core.
+-- Editor callbacks and a bounded bridge to the Python lifecycle/transport owner.
 local M = {}
 local contracts = require("local_plugins.contracts")
-local bit = require("bit")
-local ffi = require("ffi")
 
 local uv = vim.uv
 local configured = {}
@@ -20,21 +18,12 @@ local transport_status = {
 	remaining = 0,
 	records = {},
 }
-local temp_counter = 0
-local test_hook
 
 local MAX_MESSAGE = 64 * 1024
-local MAX_LOG = 256 * 1024
 local MAX_WARNING = 512
 local DEFAULT_ACK_TIMEOUT_MS = 5000
 local DEFAULT_MAX_MESSAGES_PER_TICK = 32
 local DEFAULT_POLL_INTERVAL_MS = 100
-local MESSAGE_VERSION = 2
-local LEGACY_RECORD_VERSION = 2
-local CLI_RECORD_VERSION = 3
-local RUNTIME_RECORD_VERSION = 4
-local PHASE_RECORD_VERSION = 5
-local RECORD_VERSION = 6
 
 local function public_defaults()
 	return {
@@ -66,176 +55,6 @@ local SETUP_KEYS = {
 	state_root = true,
 	uuid = true,
 	watch = true,
-}
-
-local declared, declare_err = pcall(
-	ffi.cdef,
-	[[
-	int openat(int dirfd, const char *pathname, int flags, ...);
-	int mkdirat(int dirfd, const char *pathname, unsigned int mode);
-	int unlinkat(int dirfd, const char *pathname, int flags);
-	int renameatx_np(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags);
-	int renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags);
-	int dup(int fd);
-	void *fdopendir(int fd);
-	void *readdir(void *directory);
-	int closedir(void *directory);
-	char *strerror(int error_number);
-	struct devcontainer_darwin_dirent {
-		uint64_t d_ino;
-		uint64_t d_seekoff;
-		uint16_t d_reclen;
-		uint16_t d_namlen;
-		uint8_t d_type;
-		char d_name[1024];
-	};
-	struct devcontainer_linux_dirent {
-		uint64_t d_ino;
-		int64_t d_off;
-		uint16_t d_reclen;
-		uint8_t d_type;
-		char d_name[256];
-	};
-	]]
-)
-if not declared and tostring(declare_err):find("redefin", 1, true) then
-	declared = true
-end
-
-local descriptor_api
-if declared and ffi.abi("64bit") then
-	local sysname = uv.os_uname().sysname
-	if sysname == "Darwin" then
-		descriptor_api = {
-			O_RDONLY = 0,
-			O_WRONLY = 1,
-			O_CREAT = 0x00000200,
-			O_EXCL = 0x00000800,
-			O_NOFOLLOW = 0x00000100,
-			O_DIRECTORY = 0x00100000,
-			O_CLOEXEC = 0x01000000,
-			EEXIST = 17,
-			ENOENT = 2,
-			dirent = "darwin",
-			rename = "renameatx_np",
-			rename_noreplace_flag = 0x00000004, -- RENAME_EXCL
-		}
-	elseif sysname == "Linux" then
-		descriptor_api = {
-			O_RDONLY = 0,
-			O_WRONLY = 1,
-			O_CREAT = 0x00000040,
-			O_EXCL = 0x00000080,
-			O_NOFOLLOW = 0x00020000,
-			O_DIRECTORY = 0x00010000,
-			O_CLOEXEC = 0x00080000,
-			EEXIST = 17,
-			ENOENT = 2,
-			dirent = "linux",
-			rename = "renameat2",
-			rename_noreplace_flag = 0x00000001, -- RENAME_NOREPLACE
-		}
-	end
-end
-local HOST_ACTIONS = {
-	container_log = true,
-	editor_ready = true,
-	host_editor = true,
-	lazygit = true,
-	tmux_dev_refresh = true,
-	tmux_dev_refresh_check = true,
-}
-local RECORD_KEYS_V4 = {
-	version = true,
-	host_root = true,
-	config_path = true,
-	container_root = true,
-	container_id = true,
-	claim_id = true,
-	workspace_key = true,
-	pid = true,
-	status = true,
-	network_authorized = true,
-	ssh_agent_forwarding = true,
-	tmux_pane = true,
-	pane_pid = true,
-	log_path = true,
-	updated_at = true,
-	exit_code = true,
-	error = true,
-	cli_path = true,
-	docker_path = true,
-}
-local RECORD_KEYS_V5 = vim.tbl_extend("force", {}, RECORD_KEYS_V4)
-RECORD_KEYS_V5.phase = true
-local RECORD_KEYS_V6 = vim.tbl_extend("force", {}, RECORD_KEYS_V5)
-RECORD_KEYS_V6.podman_connection = true
-local RECORD_KEYS_V3 = vim.tbl_extend("force", {}, RECORD_KEYS_V4)
-RECORD_KEYS_V3.docker_path = nil
-local RECORD_KEYS_V2 = vim.tbl_extend("force", {}, RECORD_KEYS_V3)
-RECORD_KEYS_V2.cli_path = nil
-local RECORD_KEYS_BY_VERSION = {
-	[LEGACY_RECORD_VERSION] = RECORD_KEYS_V2,
-	[CLI_RECORD_VERSION] = RECORD_KEYS_V3,
-	[RUNTIME_RECORD_VERSION] = RECORD_KEYS_V4,
-	[PHASE_RECORD_VERSION] = RECORD_KEYS_V5,
-	[RECORD_VERSION] = RECORD_KEYS_V6,
-}
-local RECORD_PHASES = {
-	claimed = true,
-	["preparing-config"] = true,
-	["starting-container"] = true,
-	["checking-ssh-agent"] = true,
-	["checking-editor-config"] = true,
-	["opening-editor"] = true,
-	["monitoring-editor"] = true,
-	["returning-host"] = true,
-}
-local CLI_PATH_RECORD_VERSIONS = {
-	[CLI_RECORD_VERSION] = true,
-	[RUNTIME_RECORD_VERSION] = true,
-	[PHASE_RECORD_VERSION] = true,
-	[RECORD_VERSION] = true,
-}
-local DOCKER_PATH_RECORD_VERSIONS = {
-	[RUNTIME_RECORD_VERSION] = true,
-	[PHASE_RECORD_VERSION] = true,
-	[RECORD_VERSION] = true,
-}
-local PHASE_RECORD_VERSIONS = {
-	[PHASE_RECORD_VERSION] = true,
-	[RECORD_VERSION] = true,
-}
-local PODMAN_CONNECTION_KEYS = {
-	name = true,
-	machine_pin = true,
-}
-local REQUEST_KEYS = {
-	version = true,
-	auth = true,
-	request_id = true,
-	action = true,
-	path = true,
-	line = true,
-	column = true,
-	created_at = true,
-}
-local ACK_KEYS = {
-	version = true,
-	auth = true,
-	request_id = true,
-	ok = true,
-	action = true,
-	error = true,
-}
-local AUTH_KEYS = {
-	version = true,
-	token = true,
-}
-local MESSAGE_FIELDS = {
-	open_location = { "version", "request_id", "action", "path", "line", "column", "created_at" },
-	host_request = { "version", "request_id", "action", "created_at" },
-	ack = { "version", "request_id", "ok", "action", "error" },
 }
 
 local function copy(value)
@@ -291,22 +110,6 @@ local function bounded_warning(value, maximum)
 		detail = detail:sub(1, math.max(maximum - 3, 0)) .. "..."
 	end
 	return detail
-end
-
-local function append_warning(current, warning)
-	if warning == nil or warning == "" then
-		return current
-	end
-	local combined = current and (tostring(current) .. "; " .. tostring(warning)) or tostring(warning)
-	return bounded_warning(combined, MAX_WARNING)
-end
-
-local function fire_test_hook(event, details)
-	if not test_hook then
-		return true
-	end
-	local ok, err = pcall(test_hook, event, vim.deepcopy(details or {}))
-	return ok and true or nil, ok and nil or tostring(err)
 end
 
 local function validate_setup(opts)
@@ -374,916 +177,6 @@ local function validate_setup(opts)
 	return candidate
 end
 
-local function report_warning(dependencies, label, warning)
-	if warning == nil or warning == "" then
-		return
-	end
-	local detail = bounded_warning(warning, MAX_WARNING)
-	local prefix = label .. ": "
-	local available = MAX_WARNING - #prefix
-	if #detail > available then
-		detail = detail:sub(1, math.max(available - 3, 0)) .. "..."
-	end
-	local report = (dependencies or {}).notify or configured.notify
-	if type(report) == "function" then
-		pcall(report, prefix .. detail, vim.log.levels.WARN)
-	end
-end
-
-local function report_commit_warning(dependencies, label, warning)
-	report_warning(dependencies, label .. " committed with a durability warning", warning)
-end
-
-local function append_cleanup_failure(primary, cleanup)
-	if cleanup == nil or cleanup == "" then
-		return primary
-	end
-	if primary == nil or primary == "" then
-		return tostring(cleanup)
-	end
-	return tostring(primary) .. "; cleanup failed: " .. tostring(cleanup)
-end
-
-local function exact_keys(value, allowed, label)
-	if type(value) ~= "table" or vim.islist(value) then
-		return nil, label .. " must be one object"
-	end
-	for key in pairs(value) do
-		if type(key) ~= "string" or not allowed[key] then
-			return nil, label .. " contains an unknown field"
-		end
-	end
-	for key in pairs(allowed) do
-		if value[key] == nil then
-			return nil, label .. " is missing a required field"
-		end
-	end
-	return true
-end
-
-local function state_root()
-	local root = configured.state_root
-	if type(root) == "function" then
-		local ok, resolved = pcall(root)
-		if not ok then
-			return nil, "state_root callback failed: " .. tostring(resolved)
-		end
-		if type(resolved) ~= "string" or resolved == "" or resolved:find("\0", 1, true) then
-			return nil, "state_root callback must return a non-empty string without NUL bytes"
-		end
-		root = resolved
-	end
-	if root == nil then
-		root = vim.env.NVIM_DEVCONTAINER_STATE_HOME
-	end
-	if root == nil or root == "" then
-		local state = vim.env.XDG_STATE_HOME or (vim.env.HOME and vim.fs.joinpath(vim.env.HOME, ".local", "state"))
-		root = state and vim.fs.joinpath(state, "nvim-devcontainer") or nil
-	end
-	if root == nil then
-		return nil, "state root is unavailable"
-	end
-	if type(root) ~= "string" or root == "" or root:find("\0", 1, true) then
-		return nil, "state root must be a non-empty string without NUL bytes"
-	end
-	local ok, normalized = pcall(function()
-		return vim.fs.normalize(vim.fn.fnamemodify(root, ":p"))
-	end)
-	return ok and normalized or nil, ok and nil or "state root is invalid: " .. tostring(normalized)
-end
-
-local function ensure_directory(path)
-	local before = uv.fs_lstat(path)
-	if before and before.type ~= "directory" then
-		return nil, "state path is not a real directory: " .. path
-	end
-	if not before and vim.fn.mkdir(path, "p", tonumber("700", 8)) == 0 then
-		return nil, "could not create state directory: " .. path
-	end
-	local stat = uv.fs_lstat(path)
-	if not stat or stat.type ~= "directory" or (uv.getuid and stat.uid ~= uv.getuid()) then
-		return nil, "state path is not a real directory: " .. path
-	end
-	local ok, err = uv.fs_chmod(path, tonumber("700", 8))
-	return ok and true or nil, ok and nil or "could not secure state directory: " .. tostring(err)
-end
-
-local function descriptor_error(label, number)
-	number = number or ffi.errno()
-	return label .. ": " .. ffi.string(ffi.C.strerror(number))
-end
-
-local function private_name(name)
-	if
-		type(name) ~= "string"
-		or name == ""
-		or name == "."
-		or name == ".."
-		or name:find("/", 1, true)
-		or name:find("%z")
-	then
-		return nil, "private spool entry is not one basename"
-	end
-	return name
-end
-
-local function close_fd(fd)
-	if not fd then
-		return true
-	end
-	local closed, close_err = uv.fs_close(fd)
-	if not closed then
-		return nil, tostring(close_err)
-	end
-	return true
-end
-
-local function private_snapshot(stat)
-	if
-		not stat
-		or stat.type ~= "file"
-		or stat.nlink ~= 1
-		or stat.mode % 512 ~= tonumber("600", 8)
-		or (uv.getuid and stat.uid ~= uv.getuid())
-		or stat.size > MAX_MESSAGE
-	then
-		return nil
-	end
-	return {
-		dev = stat.dev,
-		ino = stat.ino,
-		size = stat.size,
-		mode = stat.mode,
-		nlink = stat.nlink,
-		uid = stat.uid,
-	}
-end
-
-local function same_snapshot(left, right)
-	return left
-		and right
-		and left.dev == right.dev
-		and left.ino == right.ino
-		and left.size == right.size
-		and left.mode == right.mode
-		and left.nlink == right.nlink
-		and left.uid == right.uid
-end
-
-local function openat(parent_fd, name, flags, mode)
-	local valid, valid_err = private_name(name)
-	if not valid then
-		return nil, valid_err
-	end
-	ffi.errno(0)
-	local fd
-	if mode then
-		fd = ffi.C.openat(parent_fd, name, flags, ffi.cast("unsigned int", mode))
-	else
-		fd = ffi.C.openat(parent_fd, name, flags)
-	end
-	if fd < 0 then
-		return nil, descriptor_error("could not open anchored spool entry"), ffi.errno()
-	end
-	return tonumber(fd)
-end
-
-local function open_root_directory(path)
-	local fd, open_err = uv.fs_open(path, "r", 0)
-	if not fd then
-		return nil, "could not open spool root: " .. tostring(open_err)
-	end
-	local opened = uv.fs_fstat(fd)
-	local lexical = uv.fs_lstat(path)
-	if
-		not opened
-		or not lexical
-		or opened.type ~= "directory"
-		or lexical.type ~= "directory"
-		or opened.dev ~= lexical.dev
-		or opened.ino ~= lexical.ino
-		or opened.mode % 512 ~= tonumber("700", 8)
-		or (uv.getuid and opened.uid ~= uv.getuid())
-	then
-		close_fd(fd)
-		return nil, "spool root changed while opening"
-	end
-	return fd
-end
-
-local function same_directory_identity(left, right)
-	return left
-		and right
-		and left.type == "directory"
-		and right.type == "directory"
-		and left.dev == right.dev
-		and left.ino == right.ino
-		and left.mode == right.mode
-		and left.uid == right.uid
-end
-
-local function private_directory(stat, owner)
-	return stat and stat.type == "directory" and stat.mode % 512 == tonumber("700", 8) and stat.uid == owner
-end
-
-local function open_canonical_private_directory(path, label, owner)
-	local real = uv.fs_realpath(path)
-	if not real or vim.fs.normalize(real) ~= path then
-		return nil, label .. " is not one canonical real directory"
-	end
-	local fd, open_err = open_root_directory(path)
-	if not fd then
-		return nil, label .. " is unsafe: " .. tostring(open_err)
-	end
-	local opened = uv.fs_fstat(fd)
-	local lexical = uv.fs_lstat(path)
-	if not private_directory(opened, owner) or not same_directory_identity(opened, lexical) then
-		close_fd(fd)
-		return nil, label .. " is not one owner-only real directory"
-	end
-	return fd
-end
-
-local function open_existing_private_child_directory(parent_fd, parent_path, name, label, owner)
-	local path = vim.fs.joinpath(parent_path, name)
-	local real = uv.fs_realpath(path)
-	local before = uv.fs_lstat(path)
-	if not real or vim.fs.normalize(real) ~= path or not private_directory(before, owner) then
-		return nil, label .. " is not one canonical owner-only real directory"
-	end
-	local flags = bit.bor(
-		descriptor_api.O_RDONLY,
-		descriptor_api.O_DIRECTORY,
-		descriptor_api.O_NOFOLLOW,
-		descriptor_api.O_CLOEXEC
-	)
-	local fd, open_err = openat(parent_fd, name, flags)
-	if not fd then
-		return nil, label .. " could not be opened safely: " .. tostring(open_err)
-	end
-	local opened = uv.fs_fstat(fd)
-	local after = uv.fs_lstat(path)
-	if
-		not private_directory(opened, owner)
-		or not same_directory_identity(before, opened)
-		or not same_directory_identity(opened, after)
-	then
-		close_fd(fd)
-		return nil, label .. " changed while opening"
-	end
-	return fd, path
-end
-
-local function private_log_snapshot(stat, owner)
-	if
-		not stat
-		or stat.type ~= "file"
-		or stat.nlink ~= 1
-		or stat.mode % 512 ~= tonumber("600", 8)
-		or stat.uid ~= owner
-		or stat.size > MAX_LOG
-	then
-		return nil
-	end
-	return {
-		dev = stat.dev,
-		ino = stat.ino,
-		mode = stat.mode,
-		nlink = stat.nlink,
-		uid = stat.uid,
-	}
-end
-
-local function same_log_identity(left, right)
-	return left
-		and right
-		and left.dev == right.dev
-		and left.ino == right.ino
-		and left.mode == right.mode
-		and left.nlink == right.nlink
-		and left.uid == right.uid
-end
-
-local function validate_log_at(parent_fd, path, name, owner)
-	local before = private_log_snapshot(uv.fs_lstat(path), owner)
-	if not before then
-		return nil, "Dev Container lifecycle log is missing or unsafe"
-	end
-	local flags = bit.bor(descriptor_api.O_RDONLY, descriptor_api.O_NOFOLLOW, descriptor_api.O_CLOEXEC)
-	local fd, open_err = openat(parent_fd, name, flags)
-	if not fd then
-		return nil, "Dev Container lifecycle log could not be opened safely: " .. tostring(open_err)
-	end
-	local opened = private_log_snapshot(uv.fs_fstat(fd), owner)
-	local hooked, hook_err = fire_test_hook("before_log_revalidation", { path = path })
-	local after = private_log_snapshot(uv.fs_lstat(path), owner)
-	local closed, close_err = close_fd(fd)
-	if not hooked then
-		return nil, "Dev Container lifecycle log validation hook failed: " .. tostring(hook_err)
-	end
-	if not opened or not after or not same_log_identity(before, opened) or not same_log_identity(opened, after) then
-		return nil, "Dev Container lifecycle log changed while validating"
-	end
-	if not closed then
-		return nil, "Dev Container lifecycle log could not be closed safely: " .. tostring(close_err)
-	end
-	return true
-end
-
-local function open_child_directory(parent_fd, name)
-	ffi.errno(0)
-	if ffi.C.mkdirat(parent_fd, name, ffi.cast("unsigned int", tonumber("700", 8))) ~= 0 then
-		local number = ffi.errno()
-		if number ~= descriptor_api.EEXIST then
-			return nil, descriptor_error("could not create anchored spool directory", number)
-		end
-	end
-	local flags = bit.bor(
-		descriptor_api.O_RDONLY,
-		descriptor_api.O_DIRECTORY,
-		descriptor_api.O_NOFOLLOW,
-		descriptor_api.O_CLOEXEC
-	)
-	local fd, open_err = openat(parent_fd, name, flags)
-	if not fd then
-		return nil, open_err
-	end
-	local stat = uv.fs_fstat(fd)
-	if
-		not stat
-		or stat.type ~= "directory"
-		or stat.mode % 512 ~= tonumber("700", 8)
-		or (uv.getuid and stat.uid ~= uv.getuid())
-	then
-		close_fd(fd)
-		return nil, "anchored spool child is not one owner-only directory"
-	end
-	return fd
-end
-
-local function close_spool(spool)
-	local first_err
-	for _, name in ipairs({ "acks_fd", "outbox_fd", "inbox_fd", "root_fd" }) do
-		local _, close_err = close_fd(spool and spool[name])
-		first_err = first_err or close_err
-		if spool then
-			spool[name] = nil
-		end
-	end
-	return first_err and nil or true, first_err
-end
-
-local function prepare_spool_descriptors(root)
-	if not descriptor_api then
-		return nil, "descriptor-relative spool APIs require 64-bit Darwin or Linux"
-	end
-	local prepared, prepare_err = ensure_directory(root)
-	if not prepared then
-		return nil, prepare_err
-	end
-	local spool = { root = root }
-	spool.root_fd, prepare_err = open_root_directory(root)
-	if not spool.root_fd then
-		return nil, prepare_err
-	end
-	for _, item in ipairs({ { "inbox_fd", "inbox" }, { "outbox_fd", "outbox" }, { "acks_fd", "acks" } }) do
-		spool[item[1]], prepare_err = open_child_directory(spool.root_fd, item[2])
-		if not spool[item[1]] then
-			close_spool(spool)
-			return nil, prepare_err
-		end
-	end
-	return spool
-end
-
-local function snapshot_at(parent_fd, name)
-	local flags = bit.bor(descriptor_api.O_RDONLY, descriptor_api.O_NOFOLLOW, descriptor_api.O_CLOEXEC)
-	local fd, open_err, number = openat(parent_fd, name, flags)
-	if not fd then
-		return nil, open_err, number
-	end
-	local stat, stat_err = uv.fs_fstat(fd)
-	local snapshot = private_snapshot(stat)
-	local closed, close_err = close_fd(fd)
-	if not snapshot then
-		return nil, "private spool entry is not one owner-only single-link file", -1
-	end
-	if not closed then
-		return nil, "could not close private spool entry: " .. tostring(close_err), -1
-	end
-	return snapshot, stat_err
-end
-
-local function fsync_directory_fd(fd)
-	local synced, sync_err = uv.fs_fsync(fd)
-	if not synced then
-		return nil, "could not persist anchored spool directory: " .. tostring(sync_err)
-	end
-	return true
-end
-
-local function exclusive_rename_at(parent_fd, source, destination, error_label)
-	local source_valid, source_err = private_name(source)
-	local destination_valid, destination_err = private_name(destination)
-	if not source_valid or not destination_valid then
-		return nil, source_err or destination_err
-	end
-	ffi.errno(0)
-	local called, result = pcall(function()
-		if descriptor_api.rename == "renameatx_np" then
-			return ffi.C.renameatx_np(parent_fd, source, parent_fd, destination, descriptor_api.rename_noreplace_flag)
-		end
-		return ffi.C.renameat2(parent_fd, source, parent_fd, destination, descriptor_api.rename_noreplace_flag)
-	end)
-	if not called then
-		return nil, "descriptor-relative exclusive rename is unavailable: " .. tostring(result), -1
-	end
-	if result == 0 then
-		return true
-	end
-	local number = ffi.errno()
-	return nil, descriptor_error(error_label or "could not reserve anchored spool entry", number), number
-end
-
-local function conditional_unlink_at(parent_fd, name, expected)
-	if not expected then
-		return nil, "conditional spool retirement requires an exact snapshot"
-	end
-	local reserved
-	for _ = 1, 64 do
-		temp_counter = temp_counter + 1
-		reserved = (".%s.%d.%d.retire"):format(name, uv.os_getpid(), temp_counter)
-		local moved, move_err, number = exclusive_rename_at(parent_fd, name, reserved)
-		if moved then
-			break
-		end
-		if number == descriptor_api.ENOENT then
-			return nil, "spool entry disappeared before conditional retirement"
-		end
-		if number ~= descriptor_api.EEXIST then
-			return nil, move_err
-		end
-		reserved = nil
-	end
-	if not reserved then
-		return nil, "could not allocate conditional spool retirement reservation"
-	end
-	local actual = snapshot_at(parent_fd, reserved)
-	if not same_snapshot(actual, expected) then
-		local restored, restore_err = exclusive_rename_at(parent_fd, reserved, name)
-		if not restored then
-			return nil, "spool replacement remains preserved at " .. reserved .. ": " .. tostring(restore_err)
-		end
-		return nil, "spool entry changed during conditional retirement; replacement was restored"
-	end
-	if ffi.C.unlinkat(parent_fd, reserved, 0) ~= 0 then
-		return nil, descriptor_error("could not retire anchored spool entry")
-	end
-	local _, sync_err = fsync_directory_fd(parent_fd)
-	return true, sync_err
-end
-
-local function secure_read_at(parent_fd, name, label)
-	local flags = bit.bor(descriptor_api.O_RDONLY, descriptor_api.O_NOFOLLOW, descriptor_api.O_CLOEXEC)
-	local fd, open_err = openat(parent_fd, name, flags)
-	if not fd then
-		return nil, "could not open " .. label .. ": " .. tostring(open_err)
-	end
-	local opened = uv.fs_fstat(fd)
-	local snapshot = private_snapshot(opened)
-	if not snapshot then
-		close_fd(fd)
-		return nil, label .. " is missing or not one owner-only single-link file"
-	end
-	local data, read_err = uv.fs_read(fd, opened.size, 0)
-	local closed, close_err = close_fd(fd)
-	if data == nil or not closed then
-		return nil, "could not read " .. label .. ": " .. tostring(read_err or close_err)
-	end
-	local after, after_err = snapshot_at(parent_fd, name)
-	if not same_snapshot(after, snapshot) then
-		return nil, label .. " changed while validating: " .. tostring(after_err or "identity mismatch")
-	end
-	return data, snapshot
-end
-
-local function write_all(fd, payload)
-	local offset = 0
-	local write_err
-	while offset < #payload do
-		local written
-		written, write_err = uv.fs_write(fd, payload:sub(offset + 1), offset)
-		if not written or written <= 0 then
-			break
-		end
-		offset = offset + written
-	end
-	local secured, secure_err = uv.fs_fchmod(fd, tonumber("600", 8))
-	local synced, sync_err = uv.fs_fsync(fd)
-	return offset == #payload and secured and synced and true or nil,
-		"could not persist private file: " .. tostring(write_err or secure_err or sync_err)
-end
-
-local function atomic_create_at(parent_fd, name, payload, opts)
-	local valid, valid_err = private_name(name)
-	if not valid then
-		return nil, valid_err
-	end
-	temp_counter = temp_counter + 1
-	local temporary = (".%s.%d.%d.tmp"):format(name, uv.os_getpid(), temp_counter)
-	local flags = bit.bor(
-		descriptor_api.O_WRONLY,
-		descriptor_api.O_CREAT,
-		descriptor_api.O_EXCL,
-		descriptor_api.O_NOFOLLOW,
-		descriptor_api.O_CLOEXEC
-	)
-	local fd, open_err = openat(parent_fd, temporary, flags, tonumber("600", 8))
-	if not fd then
-		return nil, open_err
-	end
-	local written, write_err = write_all(fd, payload)
-	local staged = private_snapshot(uv.fs_fstat(fd))
-	local closed, close_err = close_fd(fd)
-	if not written or not staged or not closed then
-		ffi.C.unlinkat(parent_fd, temporary, 0)
-		return nil, write_err or (not staged and "private message staging file is invalid") or close_err
-	end
-	local published, publish_err =
-		exclusive_rename_at(parent_fd, temporary, name, "could not publish private message without clobbering")
-	if not published then
-		ffi.errno(0)
-		local cleaned = ffi.C.unlinkat(parent_fd, temporary, 0) == 0
-		local cleanup_number = ffi.errno()
-		if not cleaned then
-			publish_err = append_cleanup_failure(
-				publish_err,
-				descriptor_error("could not retire unpublished private message staging file", cleanup_number)
-			)
-		else
-			local _, cleanup_sync_err = fsync_directory_fd(parent_fd)
-			publish_err = append_cleanup_failure(publish_err, cleanup_sync_err)
-		end
-		return nil, publish_err
-	end
-	local warning
-	if not opts or opts.fire_test_hook ~= false then
-		local hook_ok, hook_err = fire_test_hook("after_message_publish", { name = name })
-		if not hook_ok then
-			warning = append_warning(warning, "after_message_publish hook failed: " .. tostring(hook_err))
-		end
-	end
-	local persisted, persist_err, persist_number = snapshot_at(parent_fd, name)
-	if persisted and not same_snapshot(persisted, staged) then
-		warning = append_warning(warning, "published private message identity changed before post-commit validation")
-		persisted = nil
-	elseif not persisted and persist_number == descriptor_api.ENOENT then
-		warning = append_warning(warning, "published private message was consumed before post-commit validation")
-	elseif not persisted then
-		warning = append_warning(
-			warning,
-			"could not revalidate published private message: " .. tostring(persist_err or "identity is anomalous")
-		)
-	end
-	local _, sync_err = fsync_directory_fd(parent_fd)
-	warning = append_warning(warning, sync_err)
-	return true, warning, persisted
-end
-
-local function list_json_at(parent_fd)
-	local flags = bit.bor(
-		descriptor_api.O_RDONLY,
-		descriptor_api.O_DIRECTORY,
-		descriptor_api.O_NOFOLLOW,
-		descriptor_api.O_CLOEXEC
-	)
-	local enumerated = ffi.C.openat(parent_fd, ".", flags)
-	if enumerated < 0 then
-		return nil, descriptor_error("could not reopen anchored inbox descriptor")
-	end
-	local directory = ffi.C.fdopendir(enumerated)
-	if directory == nil then
-		uv.fs_close(tonumber(enumerated))
-		return nil, descriptor_error("could not enumerate anchored inbox")
-	end
-	local names = {}
-	while true do
-		ffi.errno(0)
-		local raw = ffi.C.readdir(directory)
-		if raw == nil then
-			local number = ffi.errno()
-			ffi.C.closedir(directory)
-			if number ~= 0 then
-				return nil, descriptor_error("could not enumerate anchored inbox", number)
-			end
-			break
-		end
-		local entry = descriptor_api.dirent == "darwin" and ffi.cast("struct devcontainer_darwin_dirent *", raw)
-			or ffi.cast("struct devcontainer_linux_dirent *", raw)
-		local name = ffi.string(entry.d_name)
-		if not name:match("^%.") and name:match("%.json$") then
-			names[#names + 1] = name
-		end
-	end
-	table.sort(names)
-	return names
-end
-
-local function unlink_regular(path)
-	local stat = uv.fs_lstat(path)
-	if stat and stat.type == "file" then
-		pcall(uv.fs_unlink, path)
-	end
-end
-
-local function fsync_parent(path)
-	local fd, open_err = uv.fs_open(vim.fs.dirname(path), "r", 0)
-	if not fd then
-		return nil, "could not open private parent directory: " .. tostring(open_err)
-	end
-	local synced, sync_err = uv.fs_fsync(fd)
-	local closed, close_err = uv.fs_close(fd)
-	if not synced or not closed then
-		return nil, "could not persist private parent directory: " .. tostring(sync_err or close_err)
-	end
-	return true
-end
-
-local function atomic_write(path, payload)
-	local current = uv.fs_lstat(path)
-	if current and current.type ~= "file" then
-		return nil, "target is not a regular file"
-	end
-	temp_counter = temp_counter + 1
-	local temporary = ("%s.tmp.%d.%d"):format(path, uv.os_getpid(), temp_counter)
-	local fd, open_err = uv.fs_open(temporary, "wx", tonumber("600", 8))
-	if not fd then
-		return nil, "could not create private temporary file: " .. tostring(open_err)
-	end
-	local offset = 0
-	local write_err
-	while offset < #payload do
-		local written
-		written, write_err = uv.fs_write(fd, payload:sub(offset + 1), offset)
-		if not written or written <= 0 then
-			break
-		end
-		offset = offset + written
-	end
-	local secured, secure_err = uv.fs_fchmod(fd, tonumber("600", 8))
-	local synced, sync_err = uv.fs_fsync(fd)
-	local closed, close_err = uv.fs_close(fd)
-	if offset ~= #payload or not secured or not synced or not closed then
-		unlink_regular(temporary)
-		return nil, "could not persist private file: " .. tostring(write_err or secure_err or sync_err or close_err)
-	end
-	local renamed, rename_err = uv.fs_rename(temporary, path)
-	if not renamed then
-		unlink_regular(temporary)
-		return nil, "could not replace private file: " .. tostring(rename_err)
-	end
-	return fsync_parent(path)
-end
-
-local function atomic_create(path, payload)
-	local parent_fd, open_err = open_root_directory(vim.fs.dirname(path))
-	if not parent_fd then
-		return nil, open_err
-	end
-	local committed, warning_or_err, snapshot =
-		atomic_create_at(parent_fd, vim.fs.basename(path), payload, { fire_test_hook = false })
-	local closed, close_err = close_fd(parent_fd)
-	if not committed then
-		if not closed then
-			warning_or_err = append_cleanup_failure(warning_or_err, close_err)
-		end
-		return nil, warning_or_err
-	end
-	if not closed then
-		warning_or_err =
-			append_warning(warning_or_err, "could not close private message parent: " .. tostring(close_err))
-	end
-	return true, warning_or_err, snapshot
-end
-
-local function secure_read(path, label)
-	local before = uv.fs_lstat(path)
-	if not before or before.type ~= "file" or before.nlink ~= 1 or (uv.getuid and before.uid ~= uv.getuid()) then
-		return nil, label .. " is missing or not a regular file"
-	end
-	if before.mode % 512 ~= tonumber("600", 8) then
-		return nil, label .. " is not owner-only"
-	end
-	if before.size > MAX_MESSAGE then
-		return nil, label .. " exceeds 64 KiB"
-	end
-	local fd, open_err = uv.fs_open(path, "r", 0)
-	if not fd then
-		return nil, "could not open " .. label .. ": " .. tostring(open_err)
-	end
-	local opened = uv.fs_fstat(fd)
-	if
-		not opened
-		or opened.type ~= "file"
-		or opened.dev ~= before.dev
-		or opened.ino ~= before.ino
-		or opened.size ~= before.size
-		or opened.nlink ~= before.nlink
-	then
-		pcall(uv.fs_close, fd)
-		return nil, label .. " changed while opening"
-	end
-	local data, read_err = uv.fs_read(fd, opened.size, 0)
-	local closed, close_err = uv.fs_close(fd)
-	if data == nil or not closed then
-		return nil, "could not read " .. label .. ": " .. tostring(read_err or close_err)
-	end
-	local after = uv.fs_lstat(path)
-	if
-		not after
-		or after.type ~= "file"
-		or after.dev ~= opened.dev
-		or after.ino ~= opened.ino
-		or after.size ~= opened.size
-		or after.mode ~= opened.mode
-		or after.nlink ~= opened.nlink
-	then
-		return nil, label .. " changed while validating"
-	end
-	return data
-end
-
-local function canonical_directory(path, label)
-	if type(path) ~= "string" or path == "" or path:sub(1, 1) ~= "/" or path:find("%z") then
-		return nil, label .. " must be an absolute path"
-	end
-	local normalized = vim.fs.normalize(path)
-	local resolved = uv.fs_realpath(normalized)
-	local stat = resolved and uv.fs_lstat(resolved) or nil
-	if not resolved or normalized ~= resolved or not stat or stat.type ~= "directory" then
-		return nil, label .. " must be a canonical real directory"
-	end
-	return normalized
-end
-
-local function contained(root, path)
-	return path == root or path:sub(1, #root + 1) == root .. "/"
-end
-
-local function positive_integer(value)
-	return type(value) == "number" and value >= 1 and value % 1 == 0
-end
-
-local function valid_id(value)
-	if type(value) ~= "string" or #value ~= 36 or value:lower() ~= value then
-		return false
-	end
-	if value:sub(9, 9) ~= "-" or value:sub(14, 14) ~= "-" or value:sub(19, 19) ~= "-" or value:sub(24, 24) ~= "-" then
-		return false
-	end
-	if value:sub(15, 15) ~= "4" or not value:sub(20, 20):match("[89ab]") then
-		return false
-	end
-	return value:gsub("%-", ""):match("^[0-9a-f]+$") ~= nil
-end
-
-local function recent_timestamp(value)
-	if type(value) ~= "string" then
-		return false
-	end
-	local parsed = vim.fn.strptime("%Y-%m-%dT%H:%M:%SZ", value)
-	if type(parsed) ~= "number" or parsed < 0 then
-		return false
-	end
-	local now = type(configured.epoch) == "function" and configured.epoch() or os.time()
-	if type(configured.epoch) ~= "function" then
-		local sign, hours, minutes = os.date("%z", now):match("^([+-])(%d%d)(%d%d)$")
-		if sign then
-			local offset = tonumber(hours) * 3600 + tonumber(minutes) * 60
-			parsed = parsed + (sign == "+" and offset or -offset)
-		end
-	end
-	return parsed <= now + 300 and now - parsed <= 600
-end
-
-local function scalar(value)
-	if value == nil or value == vim.NIL then
-		return ""
-	end
-	if value == true then
-		return "1"
-	end
-	if value == false then
-		return "0"
-	end
-	if type(value) == "string" then
-		return value
-	end
-	if type(value) == "number" and value % 1 == 0 then
-		return tostring(value)
-	end
-	return nil
-end
-
-local function message_payload(kind, value)
-	local fields = MESSAGE_FIELDS[kind]
-	if not fields then
-		return nil, "authenticated message kind is invalid"
-	end
-	local parts = { kind }
-	for _, field in ipairs(fields) do
-		local encoded = scalar(value[field])
-		if encoded == nil then
-			return nil, "authenticated message contains an invalid scalar"
-		end
-		parts[#parts + 1] = tostring(#encoded) .. ":" .. encoded
-	end
-	return table.concat(parts, "|")
-end
-
-local function hex_bytes(value)
-	return (value:gsub("..", function(pair)
-		return string.char(tonumber(pair, 16))
-	end))
-end
-
-local function xor_pad(key, pad)
-	local bytes = {}
-	for index = 1, 64 do
-		bytes[index] = string.char(bit.bxor(key:byte(index) or 0, pad))
-	end
-	return table.concat(bytes)
-end
-
-local function hmac_sha256(token, payload)
-	local key = #token > 64 and hex_bytes(vim.fn.sha256(token)) or token
-	local inner = hex_bytes(vim.fn.sha256(xor_pad(key, 0x36) .. payload))
-	return vim.fn.sha256(xor_pad(key, 0x5C) .. inner)
-end
-
-local function authenticate(token, kind, value)
-	local payload, payload_err = message_payload(kind, value)
-	return payload and hmac_sha256(token, payload) or nil, payload_err
-end
-
-local function constant_time_equal(left, right)
-	if type(left) ~= "string" or type(right) ~= "string" or #left ~= #right then
-		return false
-	end
-	local difference = 0
-	for index = 1, #left do
-		difference = bit.bor(difference, bit.bxor(left:byte(index), right:byte(index)))
-	end
-	return difference == 0
-end
-
-local function valid_auth(token, kind, value)
-	local expected = authenticate(token, kind, value)
-	return expected ~= nil and constant_time_equal(value.auth, expected)
-end
-
-local function prepare_spool(root)
-	for _, path in ipairs({
-		root,
-		vim.fs.joinpath(root, "inbox"),
-		vim.fs.joinpath(root, "outbox"),
-		vim.fs.joinpath(root, "acks"),
-	}) do
-		local ok, err = ensure_directory(path)
-		if not ok then
-			return nil, err
-		end
-	end
-	return true
-end
-
-local function decode_secure(path, label, keys)
-	local payload, read_err = secure_read(path, label)
-	if not payload then
-		return nil, read_err
-	end
-	local decoded, value = pcall(vim.json.decode, payload)
-	if not decoded then
-		return nil, label .. " is not JSON"
-	end
-	local exact, exact_err = exact_keys(value, keys, label)
-	return exact and value or nil, exact and nil or exact_err
-end
-
-local function decode_secure_at(parent_fd, name, label, keys)
-	local payload, snapshot_or_err = secure_read_at(parent_fd, name, label)
-	if not payload then
-		return nil, nil, snapshot_or_err
-	end
-	local snapshot = snapshot_or_err
-	local decoded, value = pcall(vim.json.decode, payload)
-	if not decoded then
-		return nil, snapshot, label .. " is not JSON"
-	end
-	local exact, exact_err = exact_keys(value, keys, label)
-	return exact and value or nil, snapshot, exact and nil or exact_err
-end
-
 function M.workspace_key(value)
 	local workspace, workspace_err = contracts.normalize_workspace_key(value)
 	if not workspace then
@@ -1299,30 +192,6 @@ function M.workspace_key(value)
 	return { runtime = workspace.runtime, root = root, repo_identity = workspace.repo_identity }
 end
 
-function M.route(path, from_root, to_root, kind)
-	local source, source_err = canonical_directory(from_root, "source root")
-	if not source then
-		return nil, source_err
-	end
-	if type(to_root) ~= "string" or to_root == "" or to_root:sub(1, 1) ~= "/" or to_root:find("%z") then
-		return nil, "destination root must be absolute"
-	end
-	if type(path) ~= "string" or path == "" or path:find("%z") then
-		return nil, "path must be non-empty"
-	end
-	local absolute = path:sub(1, 1) == "/" and vim.fs.normalize(path) or vim.fs.normalize(vim.fs.joinpath(source, path))
-	local resolved = uv.fs_realpath(absolute)
-	if not resolved or not contained(source, resolved) then
-		return nil, "path resolves outside the source root"
-	end
-	local stat = uv.fs_lstat(resolved)
-	if not stat or (kind and stat.type ~= kind) then
-		return nil, "path has the wrong type"
-	end
-	local relative = resolved == source and "." or resolved:sub(#source + 2)
-	return relative == "." and vim.fs.normalize(to_root) or vim.fs.joinpath(to_root, relative)
-end
-
 function M.in_workspace()
 	return vim.env.NVIM_DEVCONTAINER == "1"
 end
@@ -1331,576 +200,337 @@ function M.network_authorized()
 	return vim.env.NVIM_CONFIG_OFFLINE ~= "1"
 end
 
-local function workspace_record_path(host_root, resolved_state_root)
-	if type(host_root) ~= "string" or host_root == "" or host_root:find("%z") then
-		return nil, "host root must be a non-empty string"
+local function valid_id(value)
+	if type(value) ~= "string" or #value ~= 36 or value:lower() ~= value then
+		return false
 	end
-	local root, root_err = resolved_state_root, nil
-	if root == nil then
-		root, root_err = state_root()
+	if value:sub(9, 9) ~= "-" or value:sub(14, 14) ~= "-" or value:sub(19, 19) ~= "-" or value:sub(24, 24) ~= "-" then
+		return false
 	end
-	if not root then
-		return nil, root_err or "state root is unavailable"
+	if value:sub(15, 15) ~= "4" or not value:sub(20, 20):match("[89ab]") then
+		return false
 	end
-	return vim.fs.joinpath(root, "workspaces", vim.fn.sha256(host_root) .. ".json")
+	return value:gsub("%-", ""):match("^[0-9a-f]+$") ~= nil
 end
 
-local function decode_workspace_record(path)
-	local payload, read_err = secure_read(path, "workspace record")
-	if not payload then
-		return nil, read_err
+local bridge
+local bridge_failure
+local correlation = 0
+local MAX_PENDING = 128
+
+local function report_error(deps, message)
+	local report = (deps or {}).notify or configured.notify
+	if report then
+		pcall(report, message, vim.log.levels.ERROR)
 	end
-	local decoded, value = pcall(vim.json.decode, payload)
-	if not decoded or type(value) ~= "table" then
-		return nil, "workspace record is not JSON"
-	end
-	local keys = RECORD_KEYS_BY_VERSION[value.version]
-	if not keys then
-		return nil, "workspace record version is unsupported"
-	end
-	local exact, exact_err = exact_keys(value, keys, "workspace record")
-	return exact and value or nil, exact and nil or exact_err
 end
 
-local function workspace_status(host_root, resolved_state_root)
-	local path, path_err = workspace_record_path(host_root, resolved_state_root)
-	if not path then
-		return nil, path_err
+local function fail_bridge(current, message)
+	if bridge ~= current then
+		return
 	end
-	local value, err = decode_workspace_record(path)
-	if not value then
-		return nil, err
+	bridge = nil
+	bridge_failure = message
+	for _, pending in pairs(current.pending) do
+		pending.error, pending.done = message, true
 	end
-	if not RECORD_KEYS_BY_VERSION[value.version] or value.host_root ~= host_root then
-		return nil, "workspace record identity does not match"
+	for _, callback in pairs(current.host) do
+		callback(nil, message)
 	end
-	if PHASE_RECORD_VERSIONS[value.version] and not RECORD_PHASES[value.phase] then
-		return nil, "workspace record phase is invalid"
+	current.host = {}
+	if current.job then
+		vim.fn.jobstop(current.job)
 	end
-	if not ({ starting = true, running = true, stopped = true, error = true, dead = true })[value.status] then
-		return nil, "workspace record status is invalid"
-	end
+end
+
+local function bridge_message(current, line)
+	local ok, value = pcall(vim.json.decode, line)
 	if
-		not positive_integer(value.pid)
-		or not positive_integer(value.pane_pid)
-		or not valid_id(value.claim_id)
-		or type(value.tmux_pane) ~= "string"
-		or not value.tmux_pane:match("^%%%d+$")
-		or type(value.network_authorized) ~= "boolean"
-		or type(value.ssh_agent_forwarding) ~= "boolean"
+		not ok
+		or type(value) ~= "table"
+		or type(value.id) ~= "number"
+		or value.id < 1
+		or value.id % 1 ~= 0
+		or (value.event ~= nil and value.event ~= "host_result")
+		or (value.result ~= nil) == (value.error ~= nil)
+		or (value.error ~= nil and type(value.error) ~= "string")
 	then
-		return nil, "workspace record lifecycle fields are invalid"
+		fail_bridge(current, "Dev Container bridge returned an invalid response")
+		return
 	end
-	if
-		type(value.container_root) ~= "string"
-		or value.container_root:sub(1, 1) ~= "/"
-		or value.container_root:find("%z")
-	then
-		return nil, "workspace record container root is invalid"
-	end
-	if CLI_PATH_RECORD_VERSIONS[value.version] then
-		local cli = value.cli_path
-		if cli == vim.NIL then
-			cli = nil
+	if value.event == "host_result" then
+		local callback = current.host[value.id]
+		current.host[value.id] = nil
+		if not callback then
+			fail_bridge(current, "Dev Container bridge returned an unknown host correlation")
+			return
 		end
-		if
-			cli ~= nil
-			and (
-				type(cli) ~= "string"
-				or cli:sub(1, 1) ~= "/"
-				or cli:sub(1, 2) == "//"
-				or cli:find("%z")
-				or vim.fs.normalize(cli) ~= cli
-			)
-		then
-			return nil, "workspace record Dev Containers CLI path is invalid"
+		local called, callback_err = pcall(callback, value.result, value.error)
+		if not called then
+			report_error(nil, "Dev Container host callback failed: " .. tostring(callback_err))
 		end
-		if cli == nil and value.status ~= "starting" and value.status ~= "error" then
-			return nil, "workspace record Dev Containers CLI path is missing"
-		end
-		value.cli_path = cli
-	end
-	if DOCKER_PATH_RECORD_VERSIONS[value.version] then
-		local docker = value.docker_path
-		if docker == vim.NIL then
-			docker = nil
-		end
-		if
-			docker ~= nil
-			and (
-				type(docker) ~= "string"
-				or docker:sub(1, 1) ~= "/"
-				or docker:sub(1, 2) == "//"
-				or docker:find("%z")
-				or vim.fs.normalize(docker) ~= docker
-			)
-		then
-			return nil, "workspace record Docker-compatible engine path is invalid"
-		end
-		if docker == nil and value.status ~= "starting" and value.status ~= "error" then
-			return nil, "workspace record Docker-compatible engine path is missing"
-		end
-		value.docker_path = docker
-	end
-	if value.version == RECORD_VERSION then
-		local connection = value.podman_connection
-		if connection == vim.NIL then
-			connection = nil
-		end
-		if connection ~= nil then
-			local exact, exact_err =
-				exact_keys(connection, PODMAN_CONNECTION_KEYS, "workspace record Podman connection")
-			if not exact then
-				return nil, exact_err
-			end
-			if
-				type(connection.name) ~= "string"
-				or #connection.name > 128
-				or not connection.name:match("^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-				or type(connection.machine_pin) ~= "string"
-				or #connection.machine_pin ~= 64
-				or not connection.machine_pin:match("^[0-9a-f]+$")
-			then
-				return nil, "workspace record Podman connection is invalid"
-			end
-		end
-		value.podman_connection = connection
-	end
-	local workspace, workspace_err = M.workspace_key(value.workspace_key)
-	if not workspace then
-		return nil, workspace_err
-	end
-	if
-		workspace.runtime ~= "container"
-		or workspace.repo_identity ~= host_root
-		or workspace.root ~= value.container_root
-	then
-		return nil, "workspace record workspace identity does not match"
-	end
-	value.workspace_key = workspace
-	return copy(value)
-end
-
-function M.status(host_root)
-	if host_root == nil then
-		return copy({
-			configured = is_configured,
-			transport = transport_status,
-			watcher = {
-				active = watcher ~= nil,
-				failures = watcher_failures,
-			},
-		})
-	end
-	return workspace_status(host_root)
-end
-
-function M.log_path(host_root)
-	if not descriptor_api or type(uv.getuid) ~= "function" then
-		return nil, "secure lifecycle log inspection is unavailable on this platform"
-	end
-	local root, root_err = state_root()
-	if not root then
-		return nil, root_err
-	end
-	local owner = uv.getuid()
-	local root_fd, open_err = open_canonical_private_directory(root, "state root", owner)
-	if not root_fd then
-		return nil, open_err
-	end
-	local value, status_err = workspace_status(host_root, root)
-	if not value then
-		close_fd(root_fd)
-		return nil, status_err
-	end
-	local name = vim.fn.sha256(host_root) .. ".log"
-	local expected = vim.fs.joinpath(root, "logs", name)
-	if type(value.log_path) ~= "string" or value.log_path ~= expected then
-		close_fd(root_fd)
-		return nil, "workspace record lifecycle log path does not match"
-	end
-	local logs_fd, logs_path_or_err =
-		open_existing_private_child_directory(root_fd, root, "logs", "logs directory", owner)
-	if not logs_fd then
-		close_fd(root_fd)
-		return nil, logs_path_or_err
-	end
-	local valid, valid_err = validate_log_at(logs_fd, expected, name, owner)
-	local logs_closed, logs_close_err = close_fd(logs_fd)
-	local root_closed, root_close_err = close_fd(root_fd)
-	if not valid then
-		return nil, valid_err
-	end
-	if not logs_closed or not root_closed then
-		return nil, "could not close lifecycle log hierarchy: " .. tostring(logs_close_err or root_close_err)
-	end
-	return expected
-end
-
-local function spool_root()
-	local value = configured.spool_root
-	if type(value) == "function" then
-		local ok, resolved = pcall(value)
-		if not ok then
-			return nil, "spool_root callback failed: " .. tostring(resolved)
-		end
-		if type(resolved) ~= "string" or resolved == "" or resolved:find("\0", 1, true) then
-			return nil, "spool_root callback must return a non-empty string without NUL bytes"
-		end
-		value = resolved
-	end
-	if value == nil then
-		value = vim.env.NVIM_DEVCONTAINER_SPOOL_ROOT
-	end
-	if value == nil or value == "" then
-		return nil, "spool root is not registered"
-	end
-	if type(value) ~= "string" or value:find("\0", 1, true) then
-		return nil, "spool root must be a non-empty string without NUL bytes"
-	end
-	local ok, normalized = pcall(vim.fs.normalize, value)
-	return ok and normalized or nil, ok and nil or "spool root is invalid: " .. tostring(normalized)
-end
-
-local function auth_token(spool)
-	if type(spool) == "string" then
-		local pinned, prepare_err = prepare_spool_descriptors(spool)
-		if not pinned then
-			return nil, prepare_err
-		end
-		local token, token_err = auth_token(pinned)
-		local _, close_err = close_spool(pinned)
-		return token, token_err or close_err
-	end
-	local value, _, err = decode_secure_at(spool.root_fd, "auth.json", "spool authentication", AUTH_KEYS)
-	if not value then
-		return nil, err
-	end
-	if
-		value.version ~= MESSAGE_VERSION
-		or type(value.token) ~= "string"
-		or #value.token < 32
-		or value.token:find("%z")
-	then
-		return nil, "spool authentication schema is invalid"
-	end
-	return value.token
-end
-
-local function acknowledge(spool, token, request, ok, err)
-	local ack = {
-		version = MESSAGE_VERSION,
-		request_id = request.request_id,
-		ok = ok == true,
-		action = request.action,
-		error = err or vim.NIL,
-	}
-	local auth, auth_err = authenticate(token, "ack", ack)
-	if not auth then
-		return nil, auth_err
-	end
-	ack.auth = auth
-	local committed, warning_or_err, snapshot =
-		atomic_create_at(spool.acks_fd, request.request_id .. ".json", vim.json.encode(ack) .. "\n")
-	if committed then
-		report_commit_warning(nil, "Dev Container acknowledgement", warning_or_err)
-	end
-	return committed, warning_or_err, snapshot
-end
-
-local function consume_request(spool, name, token)
-	local request, snapshot, decode_err = decode_secure_at(spool.inbox_fd, name, "spool request", REQUEST_KEYS)
-	local retired, retire_err
-	if snapshot then
-		retired, retire_err = conditional_unlink_at(spool.inbox_fd, name, snapshot)
-	end
-	if request and not retired then
-		return nil, retire_err
-	end
-	if retired then
-		report_commit_warning(nil, "Dev Container inbound request retirement", retire_err)
-	end
-	if not request then
-		if snapshot and not retired then
-			decode_err = append_cleanup_failure(decode_err, retire_err)
-		end
-		return nil, decode_err
-	end
-	if
-		request.version ~= MESSAGE_VERSION
-		or not valid_id(request.request_id)
-		or name ~= request.request_id .. ".json"
-		or request.action ~= "open_location"
-		or type(request.path) ~= "string"
-		or not positive_integer(request.line)
-		or not positive_integer(request.column)
-		or not recent_timestamp(request.created_at)
-		or not valid_auth(token, "open_location", request)
-	then
-		return nil, "spool request authentication or schema is invalid"
-	end
-	local container_root = vim.env.NVIM_DEVCONTAINER_CONTAINER_ROOT
-	local target, route_err = M.route(request.path, container_root, container_root, "file")
-	if not target then
-		acknowledge(spool, token, request, false, route_err)
-		return nil, route_err
-	end
-	local open = configured.open
-	if type(open) ~= "function" then
-		acknowledge(spool, token, request, false, "open callback is not configured")
-		return nil, "open callback is not configured"
-	end
-	local ok, open_err = pcall(open, target, { lnum = request.line, col = request.column })
-	local acknowledged, ack_err = acknowledge(spool, token, request, ok, ok and nil or tostring(open_err))
-	if not acknowledged then
-		return nil, ack_err
-	end
-	if ok then
-		return true
-	end
-	return nil, tostring(open_err)
-end
-
-function M.consume_spool_once()
-	if not M.in_workspace() then
-		local err = "not running inside a Dev Container editor"
-		return nil, err, publish_transport("error", { error = err })
-	end
-	local root, root_err = spool_root()
-	if not root then
-		local err = root_err or "spool root is not registered"
-		return nil, err, publish_transport("error", { error = err })
-	end
-	local spool, prepare_err = prepare_spool_descriptors(root)
-	if not spool then
-		return nil, prepare_err, publish_transport("error", { error = prepare_err })
-	end
-	local token, token_err = auth_token(spool)
-	if not token then
-		local _, close_err = close_spool(spool)
-		local err = append_cleanup_failure(token_err, close_err)
-		return nil, err, publish_transport("error", { error = err })
-	end
-	local names, scan_err = list_json_at(spool.inbox_fd)
-	if not names then
-		local _, close_err = close_spool(spool)
-		local primary = scan_err or "could not enumerate anchored inbox"
-		local err = append_cleanup_failure(primary, close_err)
-		return nil, err, publish_transport("error", { error = err })
-	end
-	local consumed = 0
-	local first_error
-	local records = {}
-	local limit = configured.max_messages_per_tick or DEFAULT_MAX_MESSAGES_PER_TICK
-	for index = 1, math.min(#names, limit) do
-		local name = names[index]
-		local ok, request_err = consume_request(spool, name, token)
-		first_error = first_error or request_err
-		consumed = consumed + 1
-		records[#records + 1] = { name = name, ok = ok == true, error = request_err }
-	end
-	local _, close_err = close_spool(spool)
-	if first_error then
-		first_error = append_cleanup_failure(first_error, close_err)
+	elseif current.pending[value.id] then
+		local pending = current.pending[value.id]
+		pending.result, pending.error, pending.done = value.result, value.error, true
 	else
-		report_warning(nil, "Dev Container inbound spool result completed but close failed", close_err)
+		fail_bridge(current, "Dev Container bridge returned an unknown correlation")
 	end
-	local failed = 0
-	for _, record in ipairs(records) do
-		failed = failed + (record.ok and 0 or 1)
-	end
-	local report = publish_transport(first_error and "partial" or (#names > consumed and "backlog" or "idle"), {
-		processed = consumed,
-		succeeded = consumed - failed,
-		failed = failed,
-		remaining = math.max(#names - consumed, 0),
-		records = records,
-		error = first_error,
-		warning = first_error and nil or close_err,
-	})
-	if first_error then
-		return nil, first_error, report
-	end
-	return consumed, nil, report
 end
 
-local function uuid()
-	if type(configured.uuid) == "function" then
-		local ok, value = pcall(configured.uuid)
-		if ok and valid_id(value) then
-			return value
+local function bridge_output(current, data)
+	if bridge ~= current then
+		return
+	end
+	current.input = current.input .. table.concat(data, "\n")
+	while bridge == current do
+		local newline = current.input:find("\n", 1, true)
+		if not newline then
+			break
 		end
+		if newline > MAX_MESSAGE then
+			break
+		end
+		local line = current.input:sub(1, newline - 1)
+		current.input = current.input:sub(newline + 1)
+		bridge_message(current, line)
 	end
-	local random_ok, bytes = pcall(uv.random, 16)
-	if not random_ok or type(bytes) ~= "string" or #bytes ~= 16 then
-		return nil, "could not generate a lifecycle UUID"
+	if #current.input >= MAX_MESSAGE then
+		fail_bridge(current, "Dev Container bridge response exceeds 64 KiB")
 	end
-	local values = { bytes:byte(1, 16) }
-	values[7] = values[7] % 16 + 64
-	values[9] = values[9] % 64 + 128
-	return string.format("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", unpack(values))
 end
 
-function M.new_claim_id()
-	local value, uuid_err = uuid()
-	if not valid_id(value) then
-		return nil, uuid_err or "lifecycle claim id is not one canonical UUIDv4"
+local function configured_path(name)
+	local value = configured[name]
+	if type(value) == "function" then
+		local ok, result = pcall(value)
+		if not ok then
+			return nil, name .. " callback failed: " .. tostring(result)
+		end
+		value = result
+	end
+	if value ~= nil and (type(value) ~= "string" or value == "" or value:find("%z")) then
+		return nil, name .. " must resolve to a non-empty string without NUL bytes"
 	end
 	return value
 end
 
-local function request_ack(spool, token, request, dependencies, callback)
-	local deps = dependencies or {}
-	local name = request.request_id .. ".json"
-	local attempts = 0
-	local interval = deps.interval_ms or 50
-	local timeout = deps.ack_timeout_ms or configured.ack_timeout_ms or DEFAULT_ACK_TIMEOUT_MS
-	local maximum = deps.max_attempts or math.max(math.ceil(timeout / interval) + 1, 1)
-	local defer = deps.defer or vim.defer_fn
-	local function poll()
-		attempts = attempts + 1
-		local present, inspect_err, number = snapshot_at(spool.acks_fd, name)
-		if present then
-			local ack, snapshot, decode_err = decode_secure_at(spool.acks_fd, name, "spool acknowledgement", ACK_KEYS)
-			local retired, retire_err
-			if snapshot then
-				retired, retire_err = conditional_unlink_at(spool.acks_fd, name, snapshot)
-			end
-			if retired then
-				report_commit_warning(deps, "Dev Container acknowledgement retirement", retire_err)
-			end
-			local _, close_err = close_spool(spool)
-			local validation_err = decode_err
-			if
-				ack
-				and (
-					ack.version ~= MESSAGE_VERSION
-					or ack.request_id ~= request.request_id
-					or ack.action ~= request.action
-					or type(ack.ok) ~= "boolean"
-					or (ack.error ~= vim.NIL and type(ack.error) ~= "string")
-					or not valid_auth(token, "ack", ack)
-					or ack.ok ~= true
-				)
-			then
-				validation_err = ack.error ~= vim.NIL and type(ack.error) == "string" and ack.error
-					or "host request was rejected"
-			end
-			if snapshot and not retired then
-				validation_err = append_cleanup_failure(validation_err, retire_err)
-			end
-			if validation_err then
-				validation_err = append_cleanup_failure(validation_err, close_err)
-				callback(nil, validation_err)
-			else
-				report_warning(deps, "Dev Container acknowledgement accepted but spool close failed", close_err)
-				callback(copy(ack))
-			end
-			return
-		end
-		if number and number ~= descriptor_api.ENOENT then
-			local _, close_err = close_spool(spool)
-			local primary = inspect_err or "could not inspect host acknowledgement"
-			callback(nil, append_cleanup_failure(primary, close_err))
-			return
-		end
-		if attempts >= maximum then
-			local _, close_err = close_spool(spool)
-			callback(nil, append_cleanup_failure("host request timed out", close_err))
-			return
-		end
-		defer(poll, interval)
+local function start_bridge()
+	if bridge then
+		return bridge
 	end
-	poll()
+	if bridge_failure then
+		return nil, bridge_failure
+	end
+	local python = vim.fn.exepath("python3")
+	if python == "" then
+		return nil, "Dev Container requires Python 3 on the host and inside the container"
+	end
+	if not configured.launcher then
+		return nil, "devcontainer launcher is not configured"
+	end
+	local environment = vim.empty_dict()
+	for option, variable in pairs({
+		state_root = "NVIM_DEVCONTAINER_STATE_HOME",
+		spool_root = "NVIM_DEVCONTAINER_SPOOL_ROOT",
+	}) do
+		local value, err = configured_path(option)
+		if err then
+			return nil, err
+		end
+		environment[variable] = value
+	end
+	local current = { pending = {}, host = {}, input = "", diagnostic = "" }
+	bridge = current
+	local ok, job = pcall(vim.fn.jobstart, {
+		python,
+		"-I",
+		"-S",
+		configured.launcher,
+		"bridge",
+		"--ack-timeout-ms",
+		string.format("%.0f", configured.ack_timeout_ms),
+		"--max-messages-per-tick",
+		string.format("%.0f", configured.max_messages_per_tick),
+	}, {
+		env = environment,
+		on_stdout = function(_, data)
+			bridge_output(current, data)
+		end,
+		on_stderr = function(_, data)
+			current.diagnostic = (current.diagnostic .. table.concat(data, "\n")):sub(-4096)
+			local warning = vim.trim(table.concat(data, "\n"))
+			if warning ~= "" and configured.notify then
+				pcall(configured.notify, bounded_warning(warning, MAX_WARNING), vim.log.levels.WARN)
+			end
+		end,
+		on_exit = function(_, code)
+			fail_bridge(current, "Dev Container bridge exited (" .. code .. "): " .. vim.trim(current.diagnostic))
+		end,
+	})
+	if not ok or job <= 0 then
+		fail_bridge(current, "could not start Dev Container Python bridge: " .. tostring(job))
+		return nil, bridge_failure
+	end
+	current.job = job
+	return current
+end
+
+local function bridge_call(method, params, on_host_result)
+	local current, start_err = start_bridge()
+	if not current then
+		return nil, start_err
+	end
+	if vim.tbl_count(current.pending) + vim.tbl_count(current.host) >= MAX_PENDING then
+		return nil, "too many pending Dev Container bridge calls"
+	end
+	correlation = correlation + 1
+	local id = correlation
+	local pending = {}
+	local payload = vim.json.encode({ id = id, method = method, params = params or vim.empty_dict() }) .. "\n"
+	if #payload > MAX_MESSAGE then
+		return nil, "Dev Container bridge request exceeds 64 KiB"
+	end
+	current.pending[id], current.host[id] = pending, on_host_result
+	local sent, send_err = pcall(vim.fn.chansend, current.job, payload)
+	if not sent or send_err == 0 then
+		fail_bridge(current, "Dev Container bridge pipe failed: " .. tostring(send_err))
+	end
+	if
+		not pending.done
+		and not vim.wait(configured.ack_timeout_ms, function()
+			return pending.done == true
+		end, 10, false)
+	then
+		fail_bridge(current, "Dev Container bridge timed out; pending actions will not be replayed")
+	end
+	current.pending[id] = nil
+	if pending.error then
+		current.host[id] = nil
+		return nil, pending.error
+	end
+	return pending.result
+end
+
+local function supplied_uuid()
+	if not configured.uuid then
+		return vim.NIL
+	end
+	local ok, value = pcall(configured.uuid)
+	return ok and value or nil, not ok and tostring(value) or nil
+end
+
+function M.new_claim_id()
+	local value, err = supplied_uuid()
+	if value == nil then
+		return nil, err or "UUID provider did not return an id"
+	end
+	return bridge_call("new_claim_id", { request_id = value })
+end
+
+function M.route(path, from_root, to_root, kind)
+	return bridge_call("route", { path = path, from_root = from_root, to_root = to_root, kind = kind or vim.NIL })
+end
+
+function M.status(host_root)
+	if host_root ~= nil then
+		return bridge_call("status", { root = host_root })
+	end
+	return copy({
+		configured = is_configured,
+		transport = transport_status,
+		watcher = { active = watcher ~= nil, failures = watcher_failures },
+		bridge = { active = bridge ~= nil, error = bridge_failure },
+	})
+end
+
+function M.log_path(host_root)
+	return bridge_call("log_path", { root = host_root })
+end
+
+local function cursor_column(line, column)
+	column = math.min(column, #line)
+	while column > 0 do
+		local byte = line:byte(column + 1)
+		if not byte or byte < 128 or byte > 191 then
+			break
+		end
+		column = column - 1
+	end
+	return column
+end
+
+local function confirm_open(record)
+	local opened, result = pcall(configured.open or error, record.path, { lnum = record.line, col = record.column })
+	local row = math.min(record.line, vim.api.nvim_buf_line_count(0))
+	local text = vim.api.nvim_buf_get_lines(0, row - 1, row, false)[1] or ""
+	local column = cursor_column(text, record.column - 1)
+	local position = vim.api.nvim_win_get_cursor(0)
+	local at_column = position[2] == column
+		or (column == #text and position[2] == cursor_column(text, math.max(#text - 1, 0)))
+	local confirmed = opened
+		and result ~= false
+		and vim.api.nvim_buf_get_name(0) == record.path
+		and position[1] == row
+		and at_column
+	local message = opened and "editor did not confirm opening the requested location" or tostring(result)
+	return bridge_call("complete_open", {
+		request_id = record.request_id,
+		ok = confirmed,
+		error = confirmed and vim.NIL or bounded_warning(message, MAX_WARNING),
+	})
+end
+
+function M.consume_spool_once()
+	local batch, err = bridge_call("poll")
+	if not batch then
+		return nil, err, publish_transport("error", { error = err })
+	end
+	local records, first_error, succeeded = {}, nil, 0
+	for _, record in ipairs(batch.records) do
+		local ok, failure
+		if record.error then
+			failure = record.error
+		else
+			ok, failure = confirm_open(record)
+		end
+		first_error = first_error or failure
+		succeeded = succeeded + (ok and 1 or 0)
+		records[#records + 1] = { name = record.name, ok = ok == true, error = failure }
+	end
+	local report = publish_transport(first_error and "partial" or (batch.remaining > 0 and "backlog" or "idle"), {
+		processed = #records,
+		succeeded = succeeded,
+		failed = #records - succeeded,
+		remaining = batch.remaining,
+		records = records,
+		error = first_error,
+	})
+	return not first_error and #records or nil, first_error, report
 end
 
 function M.request_host(action, dependencies, on_success)
 	if type(dependencies) == "function" and on_success == nil then
-		on_success = dependencies
-		dependencies = nil
-	end
-	if not M.in_workspace() then
-		return nil, "not running inside a Dev Container editor"
-	end
-	if not HOST_ACTIONS[action] then
-		return nil, "unsupported host action"
+		on_success, dependencies = dependencies, nil
 	end
 	if on_success ~= nil and type(on_success) ~= "function" then
 		return nil, "host success callback must be a function"
 	end
-	local root, root_err = spool_root()
-	if not root then
-		return nil, root_err or "authenticated host spool is not registered"
+	local supplied, uuid_err = supplied_uuid()
+	if supplied == nil then
+		return nil, uuid_err or "UUID provider did not return an id"
 	end
-	local spool, prepare_err = prepare_spool_descriptors(root)
-	if not spool then
-		return nil, prepare_err
-	end
-	local token, token_err = auth_token(spool)
-	if not token then
-		local _, close_err = close_spool(spool)
-		return nil, append_cleanup_failure(token_err, close_err)
-	end
-	local request_id, uuid_err = uuid()
-	if not valid_id(request_id) then
-		local _, close_err = close_spool(spool)
-		return nil, append_cleanup_failure(uuid_err or "host request id is not one canonical UUIDv4", close_err)
-	end
-	local request = {
-		version = MESSAGE_VERSION,
-		request_id = request_id,
+	local request_id, err = bridge_call("request_host", {
 		action = action,
-		created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-	}
-	local auth, auth_err = authenticate(token, "host_request", request)
-	if not auth then
-		local _, close_err = close_spool(spool)
-		return nil, append_cleanup_failure(auth_err, close_err)
-	end
-	request.auth = auth
-	local written, write_warning_or_err =
-		atomic_create_at(spool.outbox_fd, request_id .. ".json", vim.json.encode(request) .. "\n")
-	if not written then
-		local _, close_err = close_spool(spool)
-		return nil, append_cleanup_failure(write_warning_or_err, close_err)
-	end
-	report_commit_warning(dependencies, "Dev Container host request", write_warning_or_err)
-	request_ack(spool, token, request, dependencies, function(value, err)
-		if value then
-			if on_success then
-				on_success(value)
-			end
-			return
-		end
-		local report = (dependencies or {}).notify or configured.notify
-		if type(report) == "function" then
-			report(err, vim.log.levels.ERROR)
+		request_id = supplied,
+		timeout_ms = (dependencies or {}).ack_timeout_ms or configured.ack_timeout_ms,
+	}, function(value, failure)
+		if failure then
+			report_error(dependencies, failure)
+		elseif on_success then
+			on_success(value)
 		end
 	end)
-	return true, request_id
-end
-
-local function canonical_executable(value, label)
-	if type(value) ~= "string" or value == "" or value:find("%z") then
-		return nil, label .. " must resolve to a non-empty executable path"
-	end
-	local selected = value:sub(1, 1) == "/" and value or vim.fn.exepath(value)
-	if selected == "" or selected:sub(1, 1) ~= "/" or selected:sub(1, 2) == "//" then
-		return nil, label .. " is unavailable"
-	end
-	selected = vim.fs.normalize(selected)
-	local resolved = uv.fs_realpath(selected)
-	local stat = resolved and uv.fs_stat(resolved) or nil
-	if
-		not resolved
-		or resolved:sub(1, 1) ~= "/"
-		or not stat
-		or stat.type ~= "file"
-		or vim.fn.executable(resolved) ~= 1
-	then
-		return nil, label .. " is not one executable regular file"
-	end
-	return vim.fs.normalize(resolved)
+	return request_id and true or nil, request_id or err
 end
 
 function M.resolve_runtime()
@@ -1914,15 +544,7 @@ function M.resolve_runtime()
 	if selected == nil then
 		return nil, tostring(resolve_err or "no certified Dev Containers CLI is active")
 	end
-	local cli, cli_err = canonical_executable(selected, "certified Dev Containers CLI")
-	if not cli then
-		return nil, cli_err
-	end
-	local docker, docker_err = canonical_executable(configured.docker_path, "Docker-compatible engine")
-	if not docker then
-		return nil, docker_err
-	end
-	return { cli_path = cli, docker_path = docker }
+	return bridge_call("runtime", { cli_path = selected, docker_path = configured.docker_path })
 end
 
 function M.lifecycle_argv(action, spec)
@@ -1948,12 +570,10 @@ function M.lifecycle_argv(action, spec)
 		local runtime
 		local runtime_err
 		if type(spec) == "table" and (spec.cli_path ~= nil or spec.docker_path ~= nil) then
-			local cli, cli_err = canonical_executable(spec.cli_path, "recorded Dev Containers CLI")
-			local docker, docker_err = canonical_executable(spec.docker_path, "recorded Docker-compatible engine")
-			if not cli or not docker then
-				return nil, cli_err or docker_err
-			end
-			runtime = { cli_path = cli, docker_path = docker }
+			runtime, runtime_err = bridge_call("runtime", {
+				cli_path = spec.cli_path,
+				docker_path = spec.docker_path,
+			})
 		else
 			runtime, runtime_err = M.resolve_runtime()
 		end
@@ -1997,7 +617,7 @@ function M.lifecycle_argv(action, spec)
 end
 
 function M.stop()
-	if not is_configured and not watcher then
+	if not is_configured and not watcher and not bridge then
 		return M
 	end
 	watcher_generation = watcher_generation + 1
@@ -2006,6 +626,9 @@ function M.stop()
 		watcher = nil
 		current:stop()
 		current:close()
+	end
+	if bridge then
+		fail_bridge(bridge, "Dev Container bridge stopped; pending actions will not be replayed")
 	end
 	publish_transport("stopped")
 	emit("stopped")
@@ -2065,6 +688,12 @@ function M.transport_status()
 	return copy(transport_status)
 end
 
+function M.reconnect()
+	-- Explicit commands can begin fresh calls after failure; queued actions are gone.
+	bridge_failure = nil
+	return M
+end
+
 function M.teardown()
 	if not is_configured then
 		return M
@@ -2088,6 +717,7 @@ function M.setup(opts)
 	if is_configured then
 		M.teardown()
 	end
+	bridge_failure = nil
 	configured = candidate
 	is_configured = true
 	watcher_failures = 0
@@ -2100,19 +730,5 @@ function M.setup(opts)
 	end
 	return M
 end
-
-M._atomic_write = atomic_write
-M._atomic_create = atomic_create
-M._secure_read = secure_read
-M._prepare_spool = prepare_spool
-M._authenticate = authenticate
-M._auth_token = auth_token
-M._set_test_hook = function(callback)
-	assert(callback == nil or type(callback) == "function", "test hook must be a function or nil")
-	test_hook = callback
-end
-M._record_keys = RECORD_KEYS_V6
-M._request_keys = REQUEST_KEYS
-M._ack_keys = ACK_KEYS
 
 return M

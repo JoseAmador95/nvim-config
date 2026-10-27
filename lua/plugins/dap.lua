@@ -322,7 +322,6 @@ return {
 			},
 		},
 		dependencies = {
-			"nvim-neotest/nvim-nio",
 			"mfussenegger/nvim-dap-python",
 		},
 		config = function()
@@ -351,11 +350,6 @@ return {
 			-- of silently ignoring adapter-specific settings.
 			install_codelldb(dap, workflow)
 		end,
-	},
-	{
-		"rcarriga/nvim-dap-ui",
-		lazy = true,
-		cond = terminal_editor,
 	},
 	{
 		"igorlfs/nvim-dap-view",

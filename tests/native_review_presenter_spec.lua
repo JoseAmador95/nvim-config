@@ -9,17 +9,8 @@ vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. tostring(err)
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local native_review = require("config.native_review")
 local mode = native_review.mode
@@ -569,7 +560,7 @@ local function assert_transient_immutable(buf)
 	assert(not pcall(vim.api.nvim_buf_set_lines, buf, 0, -1, false, { "mutated" }))
 end
 
-test("inline hunks use configured context and keep only the review window out of concealed gaps", function()
+T["inline hunks use configured context and keep only the review window out of concealed gaps"] = function()
 	local state, buf, selected = setup_cursor_state()
 	local review_win = state.origin.win
 	local ordinary_win
@@ -681,9 +672,9 @@ test("inline hunks use configured context and keep only the review window out of
 		vim.api.nvim_win_close(ordinary_win, true)
 	end
 	assert(ok, err)
-end)
+end
 
-test("inline hunk scrolling retains the same rows as a complete redraw", function()
+T["inline hunk scrolling retains the same rows as a complete redraw"] = function()
 	local state = setup_state()
 	local win = state.origin.win
 	local previous_scrolloff = vim.o.scrolloff
@@ -754,9 +745,9 @@ test("inline hunk scrolling retains the same rows as a complete redraw", functio
 	vim.o.scrolloff = previous_scrolloff
 	vim.wo[win].cursorline = previous_cursorline
 	assert(ok, err)
-end)
+end
 
-test("inline hunk redraws are coalesced and stop with their owning presentation", function()
+T["inline hunk redraws are coalesced and stop with their owning presentation"] = function()
 	local state, source, selected = setup_cursor_state()
 	local win = state.origin.win
 	local original_redraw = vim.api.nvim__redraw
@@ -809,9 +800,9 @@ test("inline hunk redraws are coalesced and stop with their owning presentation"
 	vim.api.nvim__redraw = original_redraw
 	pcall(mode.disable, state)
 	assert(ok, err)
-end)
+end
 
-test("inline isolation avoids namespace scoping while split remains fail-closed", function()
+T["inline isolation avoids namespace scoping while split remains fail-closed"] = function()
 	local state, real = setup_state()
 	local original_ns_set = vim.api.nvim__ns_set
 	local ok, err = xpcall(function()
@@ -833,9 +824,9 @@ test("inline isolation avoids namespace scoping while split remains fail-closed"
 	pcall(presenter.clear, state)
 	pcall(mode.disable, state)
 	assert(ok, err)
-end)
+end
 
-test("presenter reads the single configured hunk context for its visibility plan", function()
+T["presenter reads the single configured hunk context for its visibility plan"] = function()
 	configure_hunk_context(1)
 	local state, _, selected = setup_cursor_state()
 	local called, shown, show_err = pcall(presenter.show, state, selected)
@@ -848,9 +839,9 @@ test("presenter reads the single configured hunk context for its visibility plan
 		{ first = 16, hunks = { 2 }, last = 19 },
 	}))
 	mode.disable(state)
-end)
+end
 
-test("hunk bands use silent Tree-sitter textobject symbols only when declarations are hidden", function()
+T["hunk bands use silent Tree-sitter textobject symbols only when declarations are hidden"] = function()
 	vim.treesitter.query.set("lua", "textobjects", "[(function_declaration) @function.outer]")
 	local state = setup_state(nil, symbol_path, "symbol.lua")
 	assert(presenter.show(state, symbol_entry({ 3 }), { layout = "inline", context = "hunks" }))
@@ -877,9 +868,9 @@ test("hunk bands use silent Tree-sitter textobject symbols only when declaration
 	end
 	assert(hidden_header and hidden_header:find("HUNK 1/1 · function outer", 1, true), vim.inspect(hidden_header))
 	mode.disable(state)
-end)
+end
 
-test("native hunk bands fill only the text area and refresh in place", function()
+T["native hunk bands fill only the text area and refresh in place"] = function()
 	local state, buf, selected = setup_cursor_state()
 	local review_win = state.origin.win
 	local sibling
@@ -1099,9 +1090,9 @@ test("native hunk bands fill only the text area and refresh in place", function(
 		vim.api.nvim_win_close(sibling, true)
 	end
 	assert(ok, err)
-end)
+end
 
-test("inline hunks without hunks install neither concealment nor cursor guard", function()
+T["inline hunks without hunks install neither concealment nor cursor guard"] = function()
 	local state, buf, selected = setup_cursor_state()
 	selected.old_text = selected.new_text
 	selected.hunks = {}
@@ -1114,9 +1105,9 @@ test("inline hunks without hunks install neither concealment nor cursor guard", 
 	assert(move_and_fire(state.origin.win, projection_buf, 6) == 6, "empty diff trapped the cursor")
 	presenter.clear(state)
 	mode.disable(state)
-end)
+end
 
-test("split winbars identify both sides and restore the ordinary origin winbar", function()
+T["split winbars identify both sides and restore the ordinary origin winbar"] = function()
 	local original = "%#Comment#ordinary %% split%*"
 	local state = setup_state(function(win)
 		vim.wo[win].winbar = original
@@ -1139,9 +1130,9 @@ test("split winbars identify both sides and restore the ordinary origin winbar",
 	presenter.clear(state)
 	assert(vim.wo[state.origin.win].winbar == original, "origin winbar was not restored")
 	mode.disable(state)
-end)
+end
 
-test("split code panes enforce absolute line numbers and restore invocation options", function()
+T["split code panes enforce absolute line numbers and restore invocation options"] = function()
 	local original_statuscolumn = "%s"
 	local state = setup_state(function(win)
 		vim.wo[win].number = false
@@ -1167,9 +1158,9 @@ test("split code panes enforce absolute line numbers and restore invocation opti
 	pcall(presenter.clear, state)
 	pcall(mode.disable, state)
 	assert(ok, err)
-end)
+end
 
-test("split highlight namespaces are side-local and restore only their own ownership", function()
+T["split highlight namespaces are side-local and restore only their own ownership"] = function()
 	local state, buf = setup_state()
 	local origin_win = state.origin.win
 	local sibling
@@ -1250,9 +1241,9 @@ test("split highlight namespaces are side-local and restore only their own owner
 	pcall(mode.disable, state)
 	assert(vim.api.nvim_buf_is_valid(buf))
 	assert(ok, err)
-end)
+end
 
-test("inline uses one protected unified buffer with cursorable OLD and NEW rows", function()
+T["inline uses one protected unified buffer with cursorable OLD and NEW rows"] = function()
 	local original_statuscolumn = "%=%l "
 	local state, real = setup_state(function(win)
 		vim.wo[win].number = false
@@ -1384,9 +1375,9 @@ test("inline uses one protected unified buffer with cursorable OLD and NEW rows"
 	assert(not vim.wo[state.origin.win].number and vim.wo[state.origin.win].relativenumber)
 	assert(vim.wo[state.origin.win].numberwidth == 7 and vim.wo[state.origin.win].statuscolumn == original_statuscolumn)
 	mode.disable(state)
-end)
+end
 
-test("unified renames retain distinct OLD and NEW paths across layout toggles", function()
+T["unified renames retain distinct OLD and NEW paths across layout toggles"] = function()
 	local state, real = setup_state()
 	local selected = entry()
 	selected.old_path = "before.lua"
@@ -1415,9 +1406,9 @@ test("unified renames retain distinct OLD and NEW paths across layout toggles", 
 	presenter.clear(state)
 	assert(vim.api.nvim_win_get_buf(state.origin.win) == real)
 	mode.disable(state)
-end)
+end
 
-test("logical locations survive unified projection rebuilds and reveal concealed rows", function()
+T["logical locations survive unified projection rebuilds and reveal concealed rows"] = function()
 	local state, _, selected = setup_cursor_state()
 	assert(presenter.show(state, selected, { layout = "inline", context = "full" }))
 	local full = state.presentation
@@ -1447,9 +1438,9 @@ test("logical locations survive unified projection rebuilds and reveal concealed
 	assert(vim.deep_equal(vim.api.nvim_win_get_cursor(hunks.inline.win), { target_line, 3 }))
 	assert(move_and_fire(hunks.inline.win, hunks.inline.buf, target_line) == target_line)
 	mode.disable(state)
-end)
+end
 
-test("logical split locations restore exact OLD and NEW source cursors", function()
+T["logical split locations restore exact OLD and NEW source cursors"] = function()
 	local state = setup_state()
 	local selected = entry()
 	assert(presenter.show(state, selected, { layout = "split", context = "full" }))
@@ -1476,9 +1467,9 @@ test("logical split locations restore exact OLD and NEW source cursors", functio
 	assert(vim.api.nvim_get_current_win() == left.win)
 	assert(vim.deep_equal(vim.api.nvim_win_get_cursor(left.win), { 2, 1 }))
 	mode.disable(state)
-end)
+end
 
-test("unified context retains the restored OLD logical side", function()
+T["unified context retains the restored OLD logical side"] = function()
 	local state = setup_state()
 	local selected = entry()
 	selected.old_path = "before.lua"
@@ -1504,9 +1495,9 @@ test("unified context retains the restored OLD logical side", function()
 	local revisited = assert(presenter.capture_location(state))
 	assert(revisited.side == "new" and revisited.path == selected.new_path, "departed logical side remained sticky")
 	mode.disable(state)
-end)
+end
 
-test("empty unified entries retain the restored OLD logical side", function()
+T["empty unified entries retain the restored OLD logical side"] = function()
 	local state = setup_state()
 	local selected = entry("")
 	selected.old_text = ""
@@ -1526,9 +1517,9 @@ test("empty unified entries retain the restored OLD logical side", function()
 	assert(presenter.restore_location(state, old_empty, state.presentation.generation))
 	assert(vim.deep_equal(presenter.capture_location(state), old_empty), "empty projection changed the OLD identity")
 	mode.disable(state)
-end)
+end
 
-test("unified projections retain restored file-level locations on an empty side", function()
+T["unified projections retain restored file-level locations on an empty side"] = function()
 	for _, fixture in ipairs({
 		{ side = "old", old_text = "", new_text = "new line\n", path = "before.txt" },
 		{ side = "new", old_text = "old line\n", new_text = "", path = "after.txt" },
@@ -1568,9 +1559,9 @@ test("unified projections retain restored file-level locations on an empty side"
 		)
 		mode.disable(state)
 	end
-end)
+end
 
-test("unified pure insertions are real rows at BOF and after unchanged rows", function()
+T["unified pure insertions are real rows at BOF and after unchanged rows"] = function()
 	local state = setup_state()
 	local selected = entry()
 	selected.old_text = "one\nthree\n"
@@ -1601,9 +1592,9 @@ test("unified pure insertions are real rows at BOF and after unchanged rows", fu
 	assert(assert(presenter.source_at(state, 1)).side == "new")
 	assert(assert(presenter.source_at(state, 3)).source_line == 3)
 	mode.disable(state)
-end)
+end
 
-test("unified added and deleted files expose only their existing source side", function()
+T["unified added and deleted files expose only their existing source side"] = function()
 	local state, real = setup_state()
 	local added = entry()
 	added.status = "A"
@@ -1663,9 +1654,9 @@ test("unified added and deleted files expose only their existing source side", f
 	assert(new_file.display_line == 1 and new_file.source_line == 0 and new_file.side == "new")
 	assert(review_lsp.blocked(state.presentation.inline.buf))
 	mode.disable(state)
-end)
+end
 
-test("inline full context opens all manual folds and restores every fold option", function()
+T["inline full context opens all manual folds and restores every fold option"] = function()
 	local state = setup_state(function(win)
 		vim.wo[win].foldmethod = "manual"
 		vim.wo[win].foldenable = true
@@ -1687,9 +1678,9 @@ test("inline full context opens all manual folds and restores every fold option"
 	assert(vim.wo[win].foldlevel == 0)
 	assert(vim.fn.foldclosed(1) == 1, "cleanup did not restore the closed manual fold")
 	mode.disable(state)
-end)
+end
 
-test("inline historical snapshot restores exact manual fold states", function()
+T["inline historical snapshot restores exact manual fold states"] = function()
 	local state, origin_buf = setup_fold_state()
 	local win = state.origin.win
 	assert(vim.fn.foldclosed(1) == -1 and vim.fn.foldclosed(5) == 5, "manual fold fixture has the wrong state")
@@ -1709,9 +1700,9 @@ test("inline historical snapshot restores exact manual fold states", function()
 	assert(restored.foldmethod == "manual" and restored.foldenable and restored.foldlevel == 0)
 	assert(restored.first == -1, "cleanup closed the manually opened fold")
 	assert(restored.second == 5, "cleanup opened the manually closed fold")
-end)
+end
 
-test("inline disable restores nested same-start manual folds exactly", function()
+T["inline disable restores nested same-start manual folds exactly"] = function()
 	local state, origin_buf = setup_nested_fold_state()
 	local win = state.origin.win
 	assert_nested_folds(win)
@@ -1721,9 +1712,9 @@ test("inline disable restores nested same-start manual folds exactly", function(
 	assert(vim.api.nvim_win_get_buf(win) == origin_buf, "disable did not restore the ordinary buffer")
 	assert(vim.wo[win].foldmethod == "manual" and vim.wo[win].foldenable and vim.wo[win].foldlevel == 0)
 	assert_nested_folds(win)
-end)
+end
 
-test("unified projection retains exact CRLF metadata while split snapshots stay native", function()
+T["unified projection retains exact CRLF metadata while split snapshots stay native"] = function()
 	local handle = assert(vim.uv.fs_open(path, "w", tonumber("600", 8)))
 	assert(vim.uv.fs_write(handle, "one\r\nnew\r\nthree\r\n", 0))
 	assert(vim.uv.fs_close(handle))
@@ -1750,9 +1741,9 @@ test("unified projection retains exact CRLF metadata while split snapshots stay 
 		end
 	end
 	mode.disable(state)
-end)
+end
 
-test("unified pure middle deletions are real OLD rows after preceding context", function()
+T["unified pure middle deletions are real OLD rows after preceding context"] = function()
 	local state = setup_state()
 	local value = entry("one\nthree\n")
 	value.hunks = vim.diff(value.old_text, value.new_text, { result_type = "indices" })
@@ -1774,9 +1765,9 @@ test("unified pure middle deletions are real OLD rows after preceding context", 
 	local source = assert(presenter.source_at(state, 2))
 	assert(source.side == "old" and source.source_line == 2)
 	mode.disable(state)
-end)
+end
 
-test("split uses isolated old and snapshot buffers when current bytes differ", function()
+T["split uses isolated old and snapshot buffers when current bytes differ"] = function()
 	local state, origin_buf = setup_state()
 	local wins_before = #vim.api.nvim_tabpage_list_wins(state.origin.tab)
 	local previous_scrollopt = vim.o.scrollopt
@@ -1825,9 +1816,9 @@ test("split uses isolated old and snapshot buffers when current bytes differ", f
 	assert(vim.o.scrollopt == "ver", "split changed the global scroll options")
 	vim.o.scrollopt = previous_scrollopt
 	mode.disable(state)
-end)
+end
 
-test("clearing a split restores window options without replacing a user-selected buffer", function()
+T["clearing a split restores window options without replacing a user-selected buffer"] = function()
 	local state = setup_state()
 	assert(presenter.show(state, entry("one\nhistorical\nthree\n"), { layout = "split", context = "full" }))
 	local replacement = vim.api.nvim_create_buf(false, true)
@@ -1839,9 +1830,9 @@ test("clearing a split restores window options without replacing a user-selected
 	assert(not vim.wo[state.origin.win].diff and not vim.wo[state.origin.win].scrollbind)
 	mode.disable(state)
 	vim.api.nvim_buf_delete(replacement, { force = true })
-end)
+end
 
-test("clearing a split restores a reused right window and preserves unrelated scroll options", function()
+T["clearing a split restores a reused right window and preserves unrelated scroll options"] = function()
 	local state = setup_state()
 	local previous_scrollopt = vim.o.scrollopt
 	vim.o.scrollopt = "ver"
@@ -1864,9 +1855,9 @@ test("clearing a split restores a reused right window and preserves unrelated sc
 	vim.api.nvim_win_close(right_win, true)
 	vim.api.nvim_buf_delete(replacement, { force = true })
 	vim.o.scrollopt = previous_scrollopt
-end)
+end
 
-test("clearing adopts the right split when the origin window was closed", function()
+T["clearing adopts the right split when the origin window was closed"] = function()
 	local state, origin_buf = setup_state()
 	local old_origin = state.origin.win
 	local origin_options = vim.deepcopy(state.window_snapshots[old_origin].options)
@@ -1894,9 +1885,9 @@ test("clearing adopts the right split when the origin window was closed", functi
 	assert(presenter.show(state, entry(), { layout = "inline", context = "full" }))
 	mode.disable(state)
 	assert(vim.api.nvim_win_get_buf(right_win) == origin_buf and vim.bo[origin_buf].modifiable)
-end)
+end
 
-test("layout and context toggles adopt the right survivor after the left window closes", function()
+T["layout and context toggles adopt the right survivor after the left window closes"] = function()
 	local state, origin_buf = setup_nested_fold_state()
 	local old_origin = state.origin.win
 	assert(presenter.show(state, fold_entry(), { layout = "split", context = "full" }))
@@ -1924,9 +1915,9 @@ test("layout and context toggles adopt the right survivor after the left window 
 	assert(vim.api.nvim_win_get_buf(second_right) == origin_buf, "toggle cleanup did not restore the ordinary buffer")
 	assert(vim.wo[second_right].foldmethod == "manual" and vim.wo[second_right].foldcolumn == "2")
 	assert_nested_folds(second_right)
-end)
+end
 
-test("adopted origin window restores nested same-start manual folds and states", function()
+T["adopted origin window restores nested same-start manual folds and states"] = function()
 	local state, origin_buf = setup_nested_fold_state()
 	local old_origin = state.origin.win
 	assert(presenter.show(state, fold_entry(), { layout = "split", context = "full" }))
@@ -1943,9 +1934,9 @@ test("adopted origin window restores nested same-start manual folds and states",
 	assert(restored.foldmethod == "manual" and restored.foldenable)
 	assert_nested_folds(right_win)
 	mode.disable(state)
-end)
+end
 
-test("split hunk context keeps native alignment with custom visibility in both windows", function()
+T["split hunk context keeps native alignment with custom visibility in both windows"] = function()
 	local state, _, selected = setup_cursor_state()
 	local previous_diffopt = vim.o.diffopt
 	vim.o.diffopt = "internal,filler,closeoff,context:11"
@@ -1965,9 +1956,9 @@ test("split hunk context keeps native alignment with custom visibility in both w
 	end
 	mode.disable(state)
 	vim.o.diffopt = previous_diffopt
-end)
+end
 
-test("split hunk rows stay aligned across insertion and deletion boundaries", function()
+T["split hunk rows stay aligned across insertion and deletion boundaries"] = function()
 	local state = setup_state()
 	local selected = alignment_entry()
 	local original_laststatus = vim.o.laststatus
@@ -1998,9 +1989,9 @@ test("split hunk rows stay aligned across insertion and deletion boundaries", fu
 	pcall(presenter.clear, state)
 	pcall(mode.disable, state)
 	assert(ok, err)
-end)
+end
 
-test("split boundary hunks omit only bands without matching source anchors", function()
+T["split boundary hunks omit only bands without matching source anchors"] = function()
 	local state = setup_state()
 	local selected = boundary_entry()
 	local original_laststatus = vim.o.laststatus
@@ -2026,9 +2017,9 @@ test("split boundary hunks omit only bands without matching source anchors", fun
 	pcall(presenter.clear, state)
 	pcall(mode.disable, state)
 	assert(ok, err)
-end)
+end
 
-test("NEW definition locations reveal concealed rows in inline and split review layouts", function()
+T["NEW definition locations reveal concealed rows in inline and split review layouts"] = function()
 	local function concealed(item, row)
 		for _, hidden in ipairs(item.omitted or {}) do
 			if hidden.first <= row and row <= hidden.last then
@@ -2077,9 +2068,9 @@ test("NEW definition locations reveal concealed rows in inline and split review 
 		assert(stale == nil and stale_err:find("generation changed", 1, true), stale_err)
 		mode.disable(state)
 	end
-end)
+end
 
-test("deleted and binary entries remain metadata-safe without a right pane", function()
+T["deleted and binary entries remain metadata-safe without a right pane"] = function()
 	local state = setup_state()
 	local deleted = entry("")
 	deleted.status = "D"
@@ -2124,9 +2115,9 @@ test("deleted and binary entries remain metadata-safe without a right pane", fun
 	assert(presenter.restore_location(state, old_location, state.presentation.generation))
 	assert(vim.deep_equal(presenter.capture_location(state), old_location))
 	mode.disable(state)
-end)
+end
 
-test("presenter FileType keeps historical guards and ordinary mappings", function()
+T["presenter FileType keeps historical guards and ordinary mappings"] = function()
 	local global_description = "User global implementation mapping"
 	vim.keymap.set("n", "gri", function() end, { desc = global_description })
 	lsp_navigation.setup()
@@ -2188,7 +2179,7 @@ test("presenter FileType keeps historical guards and ordinary mappings", functio
 	mode.disable(state)
 	vim.api.nvim_del_augroup_by_id(role_group)
 	vim.keymap.del("n", "gri")
-end)
+end
 
 local function intraline_entry()
 	local value = entry()
@@ -2200,7 +2191,7 @@ end
 
 for _, layout in ipairs({ "inline", "split" }) do
 	for _, context in ipairs({ "full", "hunks" }) do
-		test(layout .. "/" .. context .. " maps character and word detail to canonical OLD/NEW coordinates", function()
+		T[layout .. "/" .. context .. " maps character and word detail to canonical OLD/NEW coordinates"] = function()
 			local state = setup_state()
 			local value = intraline_entry()
 			local hunks = vim.deepcopy(value.hunks)
@@ -2238,11 +2229,11 @@ for _, layout in ipairs({ "inline", "split" }) do
 			assert(presenter.show(state, value, { layout = layout, context = context == "full" and "hunks" or "full" }))
 			assert(state.intraline_cache == cached, "context change recomputed frozen characters")
 			mode.disable(state)
-		end)
+		end
 	end
 end
 
-test("rendered changed characters remain distinct across themes and resizing", function()
+T["rendered changed characters remain distinct across themes and resizing"] = function()
 	local state = setup_state()
 	local value = intraline_entry()
 	local previous = {}
@@ -2329,14 +2320,10 @@ test("rendered changed characters remain distinct across themes and resizing", f
 		vim.api.nvim_set_hl(0, name, definition)
 	end
 	vim.api.nvim_exec_autocmds("ColorScheme", { pattern = "intraline-spec-restored" })
-end)
-
-vim.fn.delete(fixture, "rf")
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("review_presenter_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

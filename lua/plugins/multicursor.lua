@@ -1,3 +1,5 @@
+local usage = require("config.usage")
+local usage_map = usage.mapper("plugins.multicursor")
 return {
 	{
 		"jake-stewart/multicursor.nvim",
@@ -11,7 +13,7 @@ return {
 			mc.setup()
 			local multicursor = require("config.multicursor")
 
-			local k = vim.keymap.set
+			local k = usage_map
 			k({ "n", "x" }, "<leader>mc", mc.addCursorOperator, { desc = "Create cursor" })
 			k({ "n" }, "<leader>mC", mc.clearCursors, { desc = "Cancel/Clear all cursors" })
 			k({ "n", "x" }, "<leader>mi", function()
@@ -41,6 +43,7 @@ return {
 			})
 
 			mc.addKeymapLayer(function(layer)
+				layer = usage.mapper("plugins.multicursor.layer", layer)
 				layer({ "n", "x" }, "<C-o>", mc.jumpBackward, { desc = "Multicursor jump backward" })
 				layer({ "n", "x" }, "<C-i>", mc.jumpForward, { desc = "Multicursor jump forward" })
 				layer({ "n", "x" }, "s", function()

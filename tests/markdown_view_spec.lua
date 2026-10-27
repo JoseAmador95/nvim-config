@@ -1,3 +1,4 @@
+local MiniTest = require("mini.test")
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 vim.o.hidden = true
@@ -24,18 +25,7 @@ package.loaded["config.lazy_lock"] = {
 	end,
 }
 
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local function contains(buf, fragment)
 	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
@@ -115,7 +105,7 @@ end
 
 -- Widths of the virtual page margin drawn on each rendered row.
 local function page_margins(buf)
-	local namespace = require("config.markdown_layout").namespace
+	local namespace = require("markdown_view.layout").namespace
 	local widths = {}
 	for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, namespace, 0, -1, { details = true })) do
 		local details = mark[4]
@@ -158,7 +148,7 @@ require("config.markdown_navigation").setup({
 	end,
 })
 
-test("pinned renderer installs the guarded image policy", function()
+T["pinned renderer installs the guarded image policy"] = function()
 	assert(view.PIN == pinned, "host pin drifted")
 	assert(view.configure_renderer(), "pinned renderer could not initialize")
 	local image = require("md-render.image")
@@ -171,9 +161,9 @@ test("pinned renderer installs the guarded image policy", function()
 	require("config.viewer_commands")
 	assert(vim.fn.exists(":MarkdownView") == 2, "MarkdownView command is missing")
 	assert(vim.fn.exists(":MarkdownImages") == 2, "MarkdownImages command is missing")
-end)
+end
 
-test("editor opens one focused, live, read-only tab and preserves the editable source", function()
+T["editor opens one focused, live, read-only tab and preserves the editable source"] = function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	local source = vim.api.nvim_create_buf(true, false)
@@ -282,9 +272,9 @@ test("editor opens one focused, live, read-only tab and preserves the editable s
 	vim.wo[source_win].winhighlight = prior_winhighlight
 	vim.system = system
 	vim.api.nvim_buf_delete(source, { force = true })
-end)
+end
 
-test("manual tab close can reopen the live view", function()
+T["manual tab close can reopen the live view"] = function()
 	vim.cmd("tabonly")
 	local source = vim.api.nvim_create_buf(true, false)
 	vim.api.nvim_set_current_buf(source)
@@ -300,9 +290,9 @@ test("manual tab close can reopen the live view", function()
 	assert(contains(vim.api.nvim_get_current_buf(), "Reopen me"), "reopened tab lost the source text")
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
-end)
+end
 
-test("centered page reflows on resize and keeps links aligned", function()
+T["centered page reflows on resize and keeps links aligned"] = function()
 	vim.cmd("tabonly")
 	local columns = vim.o.columns
 	vim.o.columns = 180
@@ -328,7 +318,7 @@ test("centered page reflows on resize and keeps links aligned", function()
 	local win = vim.api.nvim_get_current_win()
 	local buf = vim.api.nvim_get_current_buf()
 	local session = assert(require("md-render").preview._toggle_sessions[source])
-	local layout = require("config.markdown_layout")
+	local layout = require("markdown_view.layout")
 	local expected_width, expected_margin = layout.measure(win)
 	assert(expected_width == 120, "wide page did not cap at 120 columns")
 	assert(session.opts.max_width == layout.render_width(expected_width), "renderer used the wrong page width")
@@ -393,11 +383,11 @@ test("centered page reflows on resize and keeps links aligned", function()
 	vim.api.nvim_set_current_tabpage(source_tab)
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
-end)
+end
 
 -- Headless Neovim 0.12 aborts when it redraws two tab pages after 'columns'
 -- changed at runtime, so screen checks use the startup width.
-test("the cursor and Visual selections stay out of the page margin", function()
+T["the cursor and Visual selections stay out of the page margin"] = function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	assert(vim.o.columns == 80, "screen checks need the startup width")
@@ -439,10 +429,10 @@ test("the cursor and Visual selections stay out of the page margin", function()
 	vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "nx", false)
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
-end)
+end
 
-test("the virtual page margin keeps rendered text and byte columns intact", function()
-	local layout = require("config.markdown_layout")
+T["the virtual page margin keeps rendered text and byte columns intact"] = function()
+	local layout = require("markdown_view.layout")
 	local content = {
 		lines = { "abc", "xyz", "" },
 		highlights = { { line = 0, groups = { { col = 0, end_col = 3 }, { col = 0, end_col = -1 } } } },
@@ -472,9 +462,9 @@ test("the virtual page margin keeps rendered text and byte columns intact", func
 	layout.pad(buf, 0)
 	assert(#page_margins(buf) == 0, "a zero margin left virtual padding behind")
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("wide tables open without losing cell text and never collapse", function()
+T["wide tables open without losing cell text and never collapse"] = function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	local columns = vim.o.columns
@@ -560,7 +550,7 @@ test("wide tables open without losing cell text and never collapse", function()
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
-end)
+end
 
 local function keymap_callback(buf, lhs)
 	for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
@@ -590,7 +580,7 @@ local function max_width(buf, fragment)
 	return width
 end
 
-test("clicks and keys never change blocks or wrap", function()
+T["clicks and keys never change blocks or wrap"] = function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	local columns = vim.o.columns
@@ -661,9 +651,9 @@ test("clicks and keys never change blocks or wrap", function()
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
-end)
+end
 
-test("ToggleWrap owns the reading layout", function()
+T["ToggleWrap owns the reading layout"] = function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	local columns = vim.o.columns
@@ -688,7 +678,7 @@ test("ToggleWrap owns the reading layout", function()
 	local win = vim.api.nvim_get_current_win()
 	local buf = vim.api.nvim_win_get_buf(win)
 	local session = assert(require("md-render").preview._toggle_sessions[source])
-	local text_width = require("config.markdown_layout").text_width(win)
+	local text_width = require("markdown_view.layout").text_width(win)
 	local function assert_wrapped(context)
 		assert(vim.wo[win].wrap and vim.wo[win].linebreak, context .. ": reading view is not wrapped")
 		assert(session.opts.nvim_config_wrap ~= false, context .. ": session lost the wrap mode")
@@ -736,9 +726,9 @@ test("ToggleWrap owns the reading layout", function()
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
-end)
+end
 
-test("wrap actions reflow tables when OptionSet is suppressed", function()
+T["wrap actions reflow tables when OptionSet is suppressed"] = function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	local columns = vim.o.columns
@@ -757,7 +747,7 @@ test("wrap actions reflow tables when OptionSet is suppressed", function()
 	local win = vim.api.nvim_get_current_win()
 	local buf = vim.api.nvim_win_get_buf(win)
 	local session = assert(require("md-render").preview._toggle_sessions[source])
-	local text_width = require("config.markdown_layout").text_width(win)
+	local text_width = require("markdown_view.layout").text_width(win)
 	local editor_actions = require("config.editor_actions")
 	local target = { bufnr = buf, winid = win }
 	local group = vim.api.nvim_create_augroup("MarkdownWrapActionSpec", { clear = true })
@@ -828,9 +818,9 @@ test("wrap actions reflow tables when OptionSet is suppressed", function()
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
-end)
+end
 
-test("wrapped tables stay inside the page while code may use the window", function()
+T["wrapped tables stay inside the page while code may use the window"] = function()
 	vim.cmd("tabonly")
 	vim.cmd("only")
 	local columns = vim.o.columns
@@ -854,7 +844,7 @@ test("wrapped tables stay inside the page while code may use the window", functi
 	local win = vim.api.nvim_get_current_win()
 	local buf = vim.api.nvim_win_get_buf(win)
 	local session = assert(require("md-render").preview._toggle_sessions[source])
-	local layout = require("config.markdown_layout")
+	local layout = require("markdown_view.layout")
 	local page_width, _, block_width = layout.measure(win)
 	assert(page_width == 120 and block_width == 180, "unexpected 240-column page geometry")
 	assert(session.opts.nvim_config_block_width == layout.render_width(block_width), "renderer lacks the block width")
@@ -874,9 +864,9 @@ test("wrapped tables stay inside the page while code may use the window", functi
 	view.toggle()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
-end)
+end
 
-test("centered tables keep wide Unicode cells inside the page", function()
+T["centered tables keep wide Unicode cells inside the page"] = function()
 	local value = vim.trim(string.rep("長い日本語 ", 35))
 	local content = require("md-render").preview.build_content({
 		"| A | B |",
@@ -898,9 +888,9 @@ test("centered tables keep wide Unicode cells inside the page", function()
 		end
 	end
 	assert(table.concat(parts) == value:gsub("%s", ""), "page wrapping lost Unicode cell text")
-end)
+end
 
-test("every block builds complete within the block width", function()
+T["every block builds complete within the block width"] = function()
 	local preview = require("md-render").preview
 	local lines = {
 		"---",
@@ -953,9 +943,9 @@ test("every block builds complete within the block width", function()
 			assert(table_width > 70, "natural-width table was wrapped: " .. table_width)
 		end
 	end
-end)
+end
 
-test("narrow tables keep full linked cells and outer borders", function()
+T["narrow tables keep full linked cells and outer borders"] = function()
 	local tables = require("md-render").MarkdownTable
 	local url = "https://example.com/very/long/segment/without/spaces"
 	local parsed = assert(tables.parse({
@@ -993,9 +983,9 @@ test("narrow tables keep full linked cells and outer borders", function()
 	}))
 	local _, _, _, _, literal_offsets = tables.render(literal, "", 25, true)
 	assert(literal_offsets[2] == 0, "literal ellipsis incorrectly triggered the stacked layout")
-end)
+end
 
-test("table caps follow highlighted borders and preserve shifted metadata", function()
+T["table caps follow highlighted borders and preserve shifted metadata"] = function()
 	local line = "  │ A │ literal │ text │"
 	local borders = {}
 	local next_byte = 1
@@ -1014,17 +1004,7 @@ test("table caps follow highlighted borders and preserve shifted metadata", func
 		{ col = borders[4] - 1, end_col = borders[4] - 1 + #"│", hl = "FloatBorder" },
 	}
 	local link = { col_start = borders[2] + #"│ ", col_end = borders[2] + #"│ " + 7, url = "example" }
-	local adapter = dofile(repo .. "/lua/config/markdown_tables.lua")
-	local fake_preview = {
-		build_content = function()
-			return {}
-		end,
-	}
-	local fake_wrap = {
-		split_ascii_syllables = function()
-			return {}
-		end,
-	}
+	local adapter = require("markdown_view.tables")
 	local fake_table = {
 		parse = function()
 			return {}
@@ -1039,8 +1019,7 @@ test("table caps follow highlighted borders and preserve shifted metadata", func
 			}, { 0, 2 }
 		end,
 	}
-	assert(adapter.configure(fake_preview, fake_wrap, fake_table), "fake table adapter could not initialize")
-	local lines, highlights, links, images, offsets = fake_table.render({}, "  ", nil, true)
+	local lines, highlights, links, images, offsets = adapter.render(fake_table.render, nil, {}, "  ", nil, true)
 	assert(lines[1]:match("^  ┌") and lines[1]:match("┐$"), "top cap has wrong corners")
 	assert(lines[#lines]:match("^  └") and lines[#lines]:match("┘$"), "bottom cap has wrong corners")
 	local _, junctions = lines[1]:gsub("┬", "")
@@ -1054,7 +1033,7 @@ test("table caps follow highlighted borders and preserve shifted metadata", func
 	local previous_ambiwidth = vim.o.ambiwidth
 	vim.o.ambiwidth = "double"
 	local double_ok, double_error = pcall(function()
-		local double_lines = fake_table.render({}, "  ", nil, true)
+		local double_lines = adapter.render(fake_table.render, nil, {}, "  ", nil, true)
 		assert(vim.api.nvim_strwidth(double_lines[1]) == vim.api.nvim_strwidth(line), "double-width top cap shifted")
 		assert(
 			vim.api.nvim_strwidth(double_lines[#double_lines]) == vim.api.nvim_strwidth(line),
@@ -1063,11 +1042,11 @@ test("table caps follow highlighted borders and preserve shifted metadata", func
 	end)
 	vim.o.ambiwidth = previous_ambiwidth
 	assert(double_ok, double_error)
-	local empty_lines = fake_table.render({ empty = true }, "  ", nil, true)
+	local empty_lines = adapter.render(fake_table.render, nil, { empty = true }, "  ", nil, true)
 	assert(#empty_lines == 0, "empty renderer output acquired a cap")
-end)
+end
 
-test("pager opens wide Markdown tables with their complete cells", function()
+T["pager opens wide Markdown tables with their complete cells"] = function()
 	pager.active = true
 	vim.cmd("only")
 	local columns = vim.o.columns
@@ -1145,9 +1124,9 @@ test("pager opens wide Markdown tables with their complete cells", function()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
 	pager.active = false
-end)
+end
 
-test("pager blocks use the window width and keep the wrap mode", function()
+T["pager blocks use the window width and keep the wrap mode"] = function()
 	pager.active = true
 	local columns = vim.o.columns
 	-- A headless window follows 'columns' only after a layout change.
@@ -1195,9 +1174,9 @@ test("pager blocks use the window width and keep the wrap mode", function()
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.o.columns = columns
 	pager.active = false
-end)
+end
 
-test("pager keeps the source for filetype changes and diagram extraction", function()
+T["pager keeps the source for filetype changes and diagram extraction"] = function()
 	pager.active = true
 	vim.cmd("only")
 	local source = vim.api.nvim_create_buf(true, false)
@@ -1274,9 +1253,9 @@ test("pager keeps the source for filetype changes and diagram extraction", funct
 	vim.wo[win].winhighlight = prior_winhighlight
 	vim.api.nvim_buf_delete(source, { force = true })
 	pager.active = false
-end)
+end
 
-test("missing private media guard fails closed", function()
+T["missing private media guard fails closed"] = function()
 	local image = require("md-render.image")
 	local guard = image._set_kitty_supported
 	image._set_kitty_supported = nil
@@ -1286,14 +1265,6 @@ test("missing private media guard fails closed", function()
 	view.toggle()
 	assert(#vim.api.nvim_list_tabpages() == before, "view opened after media guard failure")
 	image._set_kitty_supported = guard
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("markdown_view_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

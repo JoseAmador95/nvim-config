@@ -8,30 +8,10 @@ vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(
-			(message or "values differ")
-				.. "\nexpected: "
-				.. vim.inspect(expected)
-				.. "\nactual: "
-				.. vim.inspect(actual)
-		)
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p") == 1)
@@ -69,7 +49,7 @@ local second = command({ "rev-parse", "HEAD" })
 
 local changes = require("config.native_review").changes
 
-test("historical ranges preserve exact bytes, paths, hunks, and ordered commits", function()
+T["historical ranges preserve exact bytes, paths, hunks, and ordered commits"] = function()
 	local scope = {
 		kind = "range",
 		root = vim.uv.fs_realpath(fixture),
@@ -105,9 +85,9 @@ test("historical ranges preserve exact bytes, paths, hunks, and ordered commits"
 	local copied_entries = model.entries
 	table.remove(copied_entries)
 	assert(#model.entries == 1, "mutating a projected entry list changed the model")
-end)
+end
 
-test("multi-commit selection rejects topo-adjacent commits that are not one linear span", function()
+T["multi-commit selection rejects topo-adjacent commits that are not one linear span"] = function()
 	local main = string.rep("3", 40)
 	local side = string.rep("4", 40)
 	local merge = string.rep("5", 40)
@@ -126,9 +106,9 @@ test("multi-commit selection rejects topo-adjacent commits that are not one line
 	request, err = changes.selection_request(model, main, side)
 	assert(not request and err.message:find("not in one linear history", 1, true), vim.inspect(err))
 	equal({ kind = "commit", rev = merge, backend_id = "native" }, assert(changes.selection_request(model, merge)))
-end)
+end
 
-test("working reviews keep staged, unstaged, and untracked identities distinct", function()
+T["working reviews keep staged, unstaged, and untracked identities distinct"] = function()
 	write("b.txt", "staged\n")
 	command({ "add", "b.txt" })
 	write("b.txt", "unstaged\n")
@@ -152,9 +132,9 @@ test("working reviews keep staged, unstaged, and untracked identities distinct",
 	equal("untracked\n", untracked.new_text)
 	assert(changes.find(model, "b.txt") == nil, "an ambiguous layered lookup was not rejected")
 	equal(before, command({ "status", "--porcelain=v1", "-z" }), "model construction changed repository state")
-end)
+end
 
-test("root commits compare against an empty tree without parser noise", function()
+T["root commits compare against an empty tree without parser noise"] = function()
 	local scope = {
 		kind = "commit",
 		root = vim.uv.fs_realpath(fixture),
@@ -167,9 +147,9 @@ test("root commits compare against an empty tree without parser noise", function
 	local entry = model.entries[1]
 	assert(entry.added and entry.old_path == nil and entry.new_path == "a.txt", vim.inspect(entry))
 	equal("one\r\ntwo\r\nstable one\r\nstable two\r\n", entry.new_text)
-end)
+end
 
-test("model limits are preflighted with structured OLD/NEW details before blob reads", function()
+T["model limits are preflighted with structured OLD/NEW details before blob reads"] = function()
 	local scope = {
 		kind = "range",
 		root = vim.uv.fs_realpath(fixture),
@@ -212,9 +192,9 @@ test("model limits are preflighted with structured OLD/NEW details before blob r
 	equal("max_model_bytes", err.details.limit, "aggregate limit was not enforced")
 	equal(old_size + new_size, err.details.actual, "aggregate represented-side size was incorrect")
 	equal("NEW", err.details.side, "aggregate overflow was attributed to the wrong side")
-end)
+end
 
-test("file-count and cooperative cancellation stop the whole model before content reads", function()
+T["file-count and cooperative cancellation stop the whole model before content reads"] = function()
 	local working = {
 		kind = "working",
 		root = vim.uv.fs_realpath(fixture),
@@ -256,9 +236,9 @@ test("file-count and cooperative cancellation stop the whole model before conten
 		return argv[4] == "cat-file" and argv[5] == "blob"
 	end, commands)
 	equal({}, blob_reads, "cancelled model read Git content")
-end)
+end
 
-test("worktree reads reject same-size metadata ABA before publication", function()
+T["worktree reads reject same-size metadata ABA before publication"] = function()
 	local canonical = assert(vim.uv.fs_realpath(fixture))
 	local target = vim.fs.joinpath(canonical, "new.txt")
 	local changed = false
@@ -290,16 +270,10 @@ test("worktree reads reject same-size metadata ABA before publication", function
 	assert(not model and err.code == "working_tree_changed", vim.inspect(err))
 	equal("new.txt", err.details.path, "metadata drift was attributed to the wrong file")
 	assert(err.message:find("metadata changed", 1, true), vim.inspect(err))
-end)
-
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(("review_changes_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

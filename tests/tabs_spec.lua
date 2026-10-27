@@ -15,24 +15,10 @@ package.path = table.concat({
 }, ";")
 vim.g.mapleader = " "
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local dashboard_opens = 0
 local menu_dismisses = 0
@@ -81,7 +67,7 @@ end
 
 local owned_paths = {}
 
-test("host adapter exposes the complete transient lease contract", function()
+T["host adapter exposes the complete transient lease contract"] = function()
 	for _, name in ipairs({
 		"acquire_transient",
 		"focus_transient",
@@ -91,7 +77,7 @@ test("host adapter exposes the complete transient lease contract", function()
 	}) do
 		assert(type(tabs[name]) == "function", "missing tabs adapter method " .. name)
 	end
-end)
+end
 
 local function drain()
 	for _ = 1, 3 do
@@ -149,7 +135,7 @@ local function named_buffer(label)
 	return buf
 end
 
-test("home requires an explicit marker and exactly one pristine normal window", function()
+T["home requires an explicit marker and exactly one pristine normal window"] = function()
 	reset_editor()
 	local home = vim.api.nvim_get_current_tabpage()
 	assert(not tabs.is_home(home), "an arbitrary scratch tab became home")
@@ -163,9 +149,9 @@ test("home requires an explicit marker and exactly one pristine normal window", 
 
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "changed" })
 	assert(not tabs.is_home(home), "modified scratch buffer remained home")
-end)
+end
 
-test("home recovery repairs one stale dashboard and coalesces queued requests", function()
+T["home recovery repairs one stale dashboard and coalesces queued requests"] = function()
 	reset_editor()
 	local home = stale_dashboard()
 
@@ -179,9 +165,9 @@ test("home recovery repairs one stale dashboard and coalesces queued requests", 
 	assert(tabs.ensure_home(), "idempotency check was not queued")
 	drain()
 	equal(1, dashboard_opens, "rendered dashboard was opened again")
-end)
+end
 
-test("home recovery adopts a rendered dashboard without reopening it", function()
+T["home recovery adopts a rendered dashboard without reopening it"] = function()
 	reset_editor()
 	local home, buf = stale_dashboard()
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Rendered dashboard" })
@@ -191,9 +177,9 @@ test("home recovery adopts a rendered dashboard without reopening it", function(
 	drain()
 	equal(0, dashboard_opens, "rendered dashboard was reopened")
 	assert(tabs.is_home(home), "rendered dashboard did not regain its home marker")
-end)
+end
 
-test("home recovery remains retryable after Snacks fails", function()
+T["home recovery remains retryable after Snacks fails"] = function()
 	reset_editor()
 	local home = stale_dashboard()
 	local original_open = package.loaded.snacks.dashboard.open
@@ -221,9 +207,9 @@ test("home recovery remains retryable after Snacks fails", function()
 	end, debug.traceback)
 	package.loaded.snacks.dashboard.open = original_open
 	assert(ok, err)
-end)
+end
 
-test("home recovery refuses non-dashboard and unsafe editor state", function()
+T["home recovery refuses non-dashboard and unsafe editor state"] = function()
 	local function refused(label, prepare)
 		reset_editor()
 		prepare()
@@ -283,15 +269,15 @@ test("home recovery refuses non-dashboard and unsafe editor state", function()
 
 	reset_editor()
 	stale_dashboard()
-	package.loaded["config.pager"] = { active = true }
+	package.loaded["config.pager"].active = true
 	local pager_queued = tabs.ensure_home()
 	drain()
-	package.loaded["config.pager"] = { active = false }
+	package.loaded["config.pager"].active = false
 	assert(not pager_queued, "pager queued dashboard recovery")
 	equal(0, dashboard_opens, "pager state was replaced with the dashboard")
-end)
+end
 
-test("transient tabs expose a stable title without becoming reusable home tabs", function()
+T["transient tabs expose a stable title without becoming reusable home tabs"] = function()
 	reset_editor()
 	local tabpage = vim.api.nvim_get_current_tabpage()
 	assert(tabs.mark_home(tabpage), "could not mark transient fixture home")
@@ -319,9 +305,9 @@ test("transient tabs expose a stable title without becoming reusable home tabs",
 	tabs.unmark_transient(tabpage)
 	equal(false, tabs.is_transient(tabpage), "transient marker survived unmark")
 	equal(nil, tabs.transient_title(tabpage), "transient title survived unmark")
-end)
+end
 
-test("dashboard new file reuses the home tab as an unnamed normal buffer", function()
+T["dashboard new file reuses the home tab as an unnamed normal buffer"] = function()
 	reset_editor()
 	local home = vim.api.nvim_get_current_tabpage()
 	local dashboard_buf = vim.api.nvim_get_current_buf()
@@ -380,9 +366,9 @@ test("dashboard new file reuses the home tab as an unnamed normal buffer", funct
 	end
 	assert(not tabs.is_home(home), "new-file work tab retained its home marker")
 	equal(nil, tabs.find_home(), "new-file work tab is still discoverable as home")
-end)
+end
 
-test("closing the last work tab preserves its modified buffer and opens dashboard home", function()
+T["closing the last work tab preserves its modified buffer and opens dashboard home"] = function()
 	reset_editor()
 	local target = vim.api.nvim_get_current_tabpage()
 	local user_buf = vim.api.nvim_get_current_buf()
@@ -399,9 +385,9 @@ test("closing the last work tab preserves its modified buffer and opens dashboar
 	assert(tabs.is_home(remaining[1]), "remaining tab is not a pristine marked home")
 	equal(1, menu_dismisses, "current tab menu was not dismissed before close")
 	equal(1, dashboard_opens, "dashboard did not open exactly once")
-end)
+end
 
-test("closing a tab with multiple splits never deletes its user buffers", function()
+T["closing a tab with multiple splits never deletes its user buffers"] = function()
 	reset_editor()
 	local first = named_buffer("first-split")
 	vim.cmd("vnew")
@@ -413,9 +399,9 @@ test("closing a tab with multiple splits never deletes its user buffers", functi
 	assert(vim.api.nvim_buf_is_valid(first), "first split buffer was deleted")
 	assert(vim.api.nvim_buf_is_valid(second), "second split buffer was deleted")
 	assert(tabs.is_home(vim.api.nvim_get_current_tabpage()), "multi-split close did not land at home")
-end)
+end
 
-test("nohidden close failure rolls back only the owned landing tab", function()
+T["nohidden close failure rolls back only the owned landing tab"] = function()
 	reset_editor()
 	local target = vim.api.nvim_get_current_tabpage()
 	local user_buf = vim.api.nvim_get_current_buf()
@@ -434,9 +420,9 @@ test("nohidden close failure rolls back only the owned landing tab", function()
 		"failure was not notified"
 	)
 	vim.o.hidden = true
-end)
+end
 
-test("closing a non-current penultimate work tab focuses the existing home", function()
+T["closing a non-current penultimate work tab focuses the existing home"] = function()
 	reset_editor()
 	local home = vim.api.nvim_get_current_tabpage()
 	assert(tabs.mark_home(home), "could not mark fixture home")
@@ -451,9 +437,9 @@ test("closing a non-current penultimate work tab focuses the existing home", fun
 	equal(home, vim.api.nvim_get_current_tabpage(), "home was not focused")
 	equal(0, menu_dismisses, "closing a non-current tab dismissed the current tab menu")
 	equal(1, dashboard_opens, "home dashboard did not open")
-end)
+end
 
-test("queued close coalesces double clicks and retains a stable non-current handle", function()
+T["queued close coalesces double clicks and retains a stable non-current handle"] = function()
 	reset_editor()
 	local first = vim.api.nvim_get_current_tabpage()
 	named_buffer("first")
@@ -476,9 +462,9 @@ test("queued close coalesces double clicks and retains a stable non-current hand
 	assert(vim.api.nvim_tabpage_is_valid(first), "first tab was closed")
 	assert(vim.api.nvim_tabpage_is_valid(neighbour), "double click closed the following tab")
 	assert(not tabs.request_close(target), "stale handle was accepted")
-end)
+end
 
-test("editor reuses only a valid marked home tab", function()
+T["editor reuses only a valid marked home tab"] = function()
 	reset_editor()
 	local home = vim.api.nvim_get_current_tabpage()
 	assert(tabs.mark_home(home), "could not mark editor fixture home")
@@ -498,9 +484,9 @@ test("editor reuses only a valid marked home tab", function()
 	vim.cmd("vsplit")
 	require("config.editor").open_file_in_tab(path)
 	equal(2, #vim.api.nvim_list_tabpages(), "invalid multi-split home was reused")
-end)
+end
 
-test("tab labels retain the last focused normal window while a float is active", function()
+T["tab labels retain the last focused normal window while a float is active"] = function()
 	reset_editor()
 	tabs.setup()
 	local tabpage = vim.api.nvim_get_current_tabpage()
@@ -561,9 +547,9 @@ test("tab labels retain the last focused normal window while a float is active",
 	)
 	vim.api.nvim_win_close(float_win, true)
 	vim.api.nvim_buf_delete(float_buf, { force = true })
-end)
+end
 
-test("bufferline exposes native safe close callbacks and dynamic selected highlights", function()
+T["bufferline exposes native safe close callbacks and dynamic selected highlights"] = function()
 	reset_editor()
 	local captured
 	local original_bufferline = package.loaded.bufferline
@@ -648,13 +634,13 @@ test("bufferline exposes native safe close callbacks and dynamic selected highli
 	vim.g.vscode = true
 	assert(not spec.cond(), "bufferline leaked into VS Code")
 	vim.g.vscode = false
-	package.loaded["config.pager"] = { active = true }
+	package.loaded["config.pager"].active = true
 	assert(not spec.cond(), "bufferline leaked into nvimpager")
-	package.loaded["config.pager"] = { active = false }
+	package.loaded["config.pager"].active = false
 	vim.g.vscode = original_vscode
-end)
+end
 
-test("UI startup recovers a dashboard restored without its Snacks instance", function()
+T["UI startup recovers a dashboard restored without its Snacks instance"] = function()
 	reset_editor()
 	local home = stale_dashboard()
 	tabs.setup()
@@ -662,9 +648,9 @@ test("UI startup recovers a dashboard restored without its Snacks instance", fun
 	drain()
 	equal(1, dashboard_opens, "startup did not recover the stale dashboard")
 	assert(tabs.is_home(home), "startup recovery did not restore the home marker")
-end)
+end
 
-test("setup owns CloseTab only in the full terminal editor", function()
+T["setup owns CloseTab only in the full terminal editor"] = function()
 	reset_editor()
 	assert(_G.NvimConfigCloseTab == nil, "obsolete global tabline callback exists before setup")
 	tabs.setup()
@@ -688,29 +674,23 @@ test("setup owns CloseTab only in the full terminal editor", function()
 	local home = vim.api.nvim_get_current_tabpage()
 	package.loaded.snacks.dashboard.open({ buf = 0, win = 0 })
 	assert(tabs.is_home(home), "startup dashboard event did not mark the reusable home tab")
-end)
-
-vim.notify = original_notify
-vim.o.hidden = true
-for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-	if vim.api.nvim_buf_is_valid(buf) then
-		vim.bo[buf].modified = false
-	end
-end
-for _, path in ipairs(owned_paths) do
-	local buf = vim.fn.bufnr(path)
-	if buf >= 0 and vim.api.nvim_buf_is_valid(buf) then
-		pcall(vim.api.nvim_buf_delete, buf, { force = true })
-	end
-	vim.fn.delete(path)
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	vim.notify = original_notify
+	vim.o.hidden = true
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_valid(buf) then
+			vim.bo[buf].modified = false
+		end
 	end
-	vim.cmd("cquit")
+	for _, path in ipairs(owned_paths) do
+		local buf = vim.fn.bufnr(path)
+		if buf >= 0 and vim.api.nvim_buf_is_valid(buf) then
+			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		end
+		vim.fn.delete(path)
+	end
 end
 
-print(string.format("tabs_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

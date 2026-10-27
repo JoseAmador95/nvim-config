@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.diagnostics")
 local inline_diagnostics = require("config.inline_diagnostics")
 
 vim.diagnostic.config({
@@ -16,21 +17,21 @@ if vim.g.vscode then
 end
 
 -- Open diagnostics in a floating inline window
-vim.keymap.set("n", "<leader>ld", function()
+usage_map("n", "<leader>ld", function()
 	vim.diagnostic.open_float({ border = "rounded", focusable = false })
 end, { desc = "Show diagnostics in floating window" })
 
 -- Jump to next diagnostic
-vim.keymap.set("n", "]d", function()
+usage_map("n", "]d", function()
 	vim.diagnostic.jump({ count = 1 })
 end, { desc = "Next diagnostic" })
 
 -- Jump to previous diagnostic
-vim.keymap.set("n", "[d", function()
+usage_map("n", "[d", function()
 	vim.diagnostic.jump({ count = -1 })
 end, { desc = "Prev diagnostic" })
 
 -- Populate location list with diagnostics
-vim.keymap.set("n", "<leader>lq", vim.diagnostic.setloclist, {
+usage_map("n", "<leader>lq", vim.diagnostic.setloclist, {
 	desc = "Send diagnostics to location list",
 })

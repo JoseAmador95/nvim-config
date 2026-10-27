@@ -1,3 +1,4 @@
+local MiniTest = require("mini.test")
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 vim.o.hidden = true
@@ -23,18 +24,8 @@ package.loaded["config.lazy_lock"] = {
 	end,
 }
 
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 -- A complete 1x1 RGBA PNG.
 local PNG = vim.text.hexdecode(
@@ -110,7 +101,10 @@ require("config.markdown_navigation").setup({
 assert(view.configure_renderer(), "pinned renderer could not initialize")
 require("config.viewer_commands")
 local image = require("md-render.image")
-local preview = require("md-render").preview
+local engine = require("md-render")
+local wrap = require("md-render.wrap")
+local reader = require("markdown_view")
+local preview = engine.preview
 
 local function reset()
 	images._reset({ supported = true, state_path = state_path })
@@ -177,7 +171,7 @@ end
 
 write(vim.fs.joinpath(root, "pixel.png"), PNG)
 
-test("guard keeps diagrams, video and document paths inert", function()
+T["guard keeps diagrams, video and document paths inert"] = function()
 	reset()
 	assert(not image.has_mmdc() and not image.has_plantuml(), "diagram fences may render automatically")
 	assert(not image.is_video_file("clip.mp4"), "video files may render automatically")
@@ -195,9 +189,9 @@ test("guard keeps diagrams, video and document paths inert", function()
 	assert(image.resolve("*.png", root) == nil, "an image path expanded a glob")
 	assert(image.resolve("pixel.png", root), "a plain relative image path did not resolve")
 	assert(#curls == 0, "a build without a document fetched an image")
-end)
+end
 
-test("unapproved remote images stay text and ask once", function()
+T["unapproved remote images stay text and ask once"] = function()
 	reset()
 	local url = remote("blocked")
 	local source, session = open("blocked.md", {
@@ -245,9 +239,9 @@ test("unapproved remote images stay text and ask once", function()
 	)
 	assert(not vim.fn.execute("messages"):find("W10", 1, true), "image placement raised a readonly warning")
 	close(source)
-end)
+end
 
-test("load this time fetches over https once and renders images and table cells", function()
+T["load this time fetches over https once and renders images and table cells"] = function()
 	reset()
 	local url = remote("once")
 	local cell = remote("cell")
@@ -287,9 +281,9 @@ test("load this time fetches over https once and renders images and table cells"
 	close(source)
 	forget_cache(url)
 	forget_cache(cell)
-end)
+end
 
-test("always persists an owner-only approval that survives a restart and can be revoked", function()
+T["always persists an owner-only approval that survives a restart and can be revoked"] = function()
 	reset()
 	local url = remote("always")
 	local source, session = open("always.md", { ("![remote](%s)"):format(url) })
@@ -336,9 +330,9 @@ test("always persists an owner-only approval that survives a restart and can be 
 	end), "a revoked document still shows its remote image")
 	close(source)
 	forget_cache(url)
-end)
+end
 
-test("offline mode refuses downloads and reports them", function()
+T["offline mode refuses downloads and reports them"] = function()
 	reset()
 	vim.env.NVIM_CONFIG_OFFLINE = "1"
 	local url = remote("offline")
@@ -367,9 +361,9 @@ test("offline mode refuses downloads and reports them", function()
 		return placement.src_url ~= nil
 	end), "a failed download left a placeholder")
 	close(source)
-end)
+end
 
-test("tmux and terminals without Kitty graphics keep images as text", function()
+T["tmux and terminals without Kitty graphics keep images as text"] = function()
 	local tmux = vim.env.TMUX
 	local ghostty = vim.env.GHOSTTY_RESOURCES_DIR
 	vim.env.TMUX = "/tmp/tmux-test,1,0"
@@ -386,15 +380,26 @@ test("tmux and terminals without Kitty graphics keep images as text", function()
 	vim.env.TMUX = tmux
 	vim.env.GHOSTTY_RESOURCES_DIR = ghostty
 	vim.cmd("bwipeout!")
-end)
-
-vim.fn.delete(root, "rf")
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("markdown_images_spec: %d tests passed", count))
-vim.cmd("quitall!")
+T["standalone reader offers only session approval without a preference store"] = function()
+	reset()
+	assert(reader.setup({ engine = engine, image = image, wrap = wrap }))
+	local source = open("standalone.md", { ("![remote](%s)"):format(remote("standalone")) })
+	assert(
+		vim.wait(1000, function()
+			return #selects == 1
+		end),
+		"standalone image approval was not offered"
+	)
+	assert(offered("load") and offered("deny"), "session choices are missing")
+	assert(not offered("always") and not offered("revoke"), "reader offered persistence without a store")
+	choose("deny")
+	close(source)
+end
+
+hooks.post_once = function()
+	vim.fn.delete(root, "rf")
+end
+
+return T

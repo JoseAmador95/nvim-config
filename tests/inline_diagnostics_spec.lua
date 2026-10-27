@@ -4,17 +4,8 @@ vim.o.swapfile = false
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local original_redraw = package.loaded["config.redraw_profile"]
 local original_inline = package.loaded["config.inline_diagnostics"]
@@ -65,8 +56,13 @@ vim.diagnostic.handlers.virtual_lines = {
 		hides[#hides + 1] = { namespace = namespace, buf = buf }
 	end,
 }
-vim.schedule = function(callback)
-	scheduled[#scheduled + 1] = callback
+hooks.pre_case = function()
+	vim.schedule = function(callback)
+		scheduled[#scheduled + 1] = callback
+	end
+end
+hooks.post_case = function()
+	vim.schedule = original_schedule
 end
 
 local inline = require("config.inline_diagnostics")
@@ -97,7 +93,7 @@ local function hold_at(row, column)
 	event("CursorHold")
 end
 
-test("native and disabled policies use only the global diagnostic handler", function()
+T["native and disabled policies use only the global diagnostic handler"] = function()
 	setup("current-line")
 	assert(inline.status().mode == "current-line")
 	assert(inline.toggle() == "off")
@@ -113,9 +109,9 @@ test("native and disabled policies use only the global diagnostic handler", func
 	assert(inline.toggle() == "off")
 	event("CursorHold")
 	assert(#gets == 0 and #shows == 0, "off mode performed settled diagnostic work")
-end)
+end
 
-test("settled mode owns only non-insert idle and row-change events", function()
+T["settled mode owns only non-insert idle and row-change events"] = function()
 	setup("settled-line")
 	local events = {}
 	for _, autocmd in ipairs(vim.api.nvim_get_autocmds({ group = "NvimConfigInlineDiagnostics" })) do
@@ -127,9 +123,9 @@ test("settled mode owns only non-insert idle and row-change events", function()
 	assert(not events.CursorMovedI, "settled diagnostics repaint while moving in insert mode")
 	assert(events.BufLeave and events.WinLeave and events.TabLeave and events.InsertEnter)
 	assert(applied_config.virtual_lines == false, "settled mode enabled the native CursorMoved handler")
-end)
+end
 
-test("settled mode renders one row per namespace and ignores horizontal movement", function()
+T["settled mode renders one row per namespace and ignores horizontal movement"] = function()
 	setup("settled-line")
 	diagnostics = {
 		{ namespace = 20, lnum = 1, col = 8, severity = vim.diagnostic.severity.WARN, message = "later" },
@@ -153,9 +149,9 @@ test("settled mode renders one row per namespace and ignores horizontal movement
 	assert(#hides == before.hides + 2, "row move did not clear every rendered namespace")
 	hold_at(2, 0)
 	assert(#gets == before.gets + 1 and #shows == before.shows + 2, "new row did not render after settling")
-end)
+end
 
-test("settled marks clear on inactive views and entering insert mode", function()
+T["settled marks clear on inactive views and entering insert mode"] = function()
 	setup("settled-line")
 	diagnostics = {
 		{ namespace = 10, lnum = 0, col = 0, severity = vim.diagnostic.severity.ERROR, message = "error" },
@@ -169,9 +165,9 @@ test("settled marks clear on inactive views and entering insert mode", function(
 	local before = #shows
 	event("CursorHoldI")
 	assert(#shows == before, "insert idle repainted settled diagnostics")
-end)
+end
 
-test("diagnostic bursts coalesce and stale work cannot resurrect a presenter", function()
+T["diagnostic bursts coalesce and stale work cannot resurrect a presenter"] = function()
 	setup("settled-line")
 	diagnostics = {
 		{ namespace = 10, lnum = 0, col = 0, severity = vim.diagnostic.severity.ERROR, message = "first" },
@@ -193,9 +189,9 @@ test("diagnostic bursts coalesce and stale work cannot resurrect a presenter", f
 	reset_observations()
 	stale()
 	assert(#gets == 0 and #shows == 0, "stale diagnostic work resurrected a disabled presenter")
-end)
+end
 
-test("failed row reads retry and BufWipeout drops queued work", function()
+T["failed row reads retry and BufWipeout drops queued work"] = function()
 	setup("settled-line")
 	diagnostics = {
 		{ namespace = 10, lnum = 0, col = 0, severity = vim.diagnostic.severity.ERROR, message = "error" },
@@ -214,25 +210,17 @@ test("failed row reads retry and BufWipeout drops queued work", function()
 	reset_observations()
 	pending()
 	assert(#gets == 0 and #shows == 0, "BufWipeout did not invalidate queued diagnostic work")
-end)
-
-local cleanup_ok, cleanup_err = pcall(inline.teardown)
-vim.diagnostic.config = original_config
-vim.diagnostic.get = original_get
-vim.diagnostic.handlers.virtual_lines = original_handler
-vim.schedule = original_schedule
-package.loaded["config.inline_diagnostics"] = original_inline
-package.loaded["config.redraw_profile"] = original_redraw
-
-if not cleanup_ok then
-	failures[#failures + 1] = "cleanup\n" .. tostring(cleanup_err)
-end
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(("inline_diagnostics_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	local cleanup_ok, cleanup_err = pcall(inline.teardown)
+	vim.diagnostic.config = original_config
+	vim.diagnostic.get = original_get
+	vim.diagnostic.handlers.virtual_lines = original_handler
+	vim.schedule = original_schedule
+	package.loaded["config.inline_diagnostics"] = original_inline
+	package.loaded["config.redraw_profile"] = original_redraw
+	assert(cleanup_ok, cleanup_err)
+end
+
+return T

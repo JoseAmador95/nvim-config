@@ -1,3 +1,6 @@
+local MiniTest = require("mini.test")
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
@@ -6,24 +9,11 @@ vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
 local cli = require("config.devcontainer_runtime_cli")
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
-
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p", tonumber("700", 8)) == 1)
 local root = assert(vim.uv.fs_realpath(fixture))
 
-test("prepare-up emits exactly one tab-delimited runtime line", function()
+T["prepare-up emits exactly one tab-delimited runtime line"] = function()
 	local seen
 	local output, err = cli.execute({ "prepare-up", root }, {
 		prepare_up = function(actual)
@@ -33,9 +23,9 @@ test("prepare-up emits exactly one tab-delimited runtime line", function()
 	})
 	assert(err == nil and seen == root)
 	assert(output == "/managed/devcontainer\t/managed/podman\n")
-end)
+end
 
-test("preflight-record emits no output and uses the exact repository", function()
+T["preflight-record emits no output and uses the exact repository"] = function()
 	local seen
 	local output, err = cli.execute({ "preflight-record", root }, {
 		preflight_record = function(actual)
@@ -44,9 +34,9 @@ test("preflight-record emits no output and uses the exact repository", function(
 		end,
 	})
 	assert(err == nil and seen == root and output == "")
-end)
+end
 
-test("adapter failures are preserved exactly", function()
+T["adapter failures are preserved exactly"] = function()
 	local output, err = cli.execute({ "prepare-up", root }, {
 		prepare_up = function()
 			return nil, "certified runtime is unavailable"
@@ -60,9 +50,9 @@ test("adapter failures are preserved exactly", function()
 		end,
 	})
 	assert(output == nil and err == "recorded engine changed")
-end)
+end
 
-test("commands and repositories are strict", function()
+T["commands and repositories are strict"] = function()
 	for _, arguments in ipairs({
 		{},
 		{ "prepare-up" },
@@ -74,9 +64,9 @@ test("commands and repositories are strict", function()
 		local output = cli.execute(arguments, {})
 		assert(output == nil, "invalid arguments were accepted: " .. vim.inspect(arguments))
 	end
-end)
+end
 
-test("runtime output rejects missing relative or control-bearing paths", function()
+T["runtime output rejects missing relative or control-bearing paths"] = function()
 	for _, runtime in ipairs({
 		{},
 		{ cli_path = "devcontainer", docker_path = "/managed/podman" },
@@ -91,9 +81,9 @@ test("runtime output rejects missing relative or control-bearing paths", functio
 		})
 		assert(output == nil, "invalid runtime was emitted: " .. vim.inspect(runtime))
 	end
-end)
+end
 
-test("adapter exceptions and missing methods fail closed", function()
+T["adapter exceptions and missing methods fail closed"] = function()
 	local output, err = cli.execute({ "prepare-up", root }, {
 		prepare_up = function()
 			error("resolver exploded")
@@ -102,14 +92,10 @@ test("adapter exceptions and missing methods fail closed", function()
 	assert(output == nil and err:find("resolver exploded", 1, true))
 	output, err = cli.execute({ "preflight-record", root }, {})
 	assert(output == nil and err:find("does not implement preflight_record", 1, true))
-end)
-
-vim.fn.delete(fixture, "rf")
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(string.format("devcontainer_runtime_spec: %d tests passed", count))
-vim.cmd("quitall!")
+
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

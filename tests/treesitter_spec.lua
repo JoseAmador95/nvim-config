@@ -21,24 +21,13 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
 local paths = {}
 local buffers = {}
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function make_buffer(suffix, contents, ft)
 	local path = vim.fn.tempname() .. suffix
@@ -128,7 +117,7 @@ local function starts_for(buf)
 	return result
 end
 
-test("starts installed parsers for already-loaded editor buffers", function()
+T["starts installed parsers for already-loaded editor buffers"] = function()
 	reset_runtime()
 	local buf = make_buffer(".lua", "return true", "lua")
 	installed = { "lua" }
@@ -140,9 +129,9 @@ test("starts installed parsers for already-loaded editor buffers", function()
 		vim.bo[buf].indentexpr,
 		"editor Tree-sitter indentation was not enabled"
 	)
-end)
+end
 
-test("skips buffers larger than 200 KiB", function()
+T["skips buffers larger than 200 KiB"] = function()
 	reset_runtime()
 	local buf = make_buffer(".lua", string.rep("x", 200 * 1024 + 1), "lua")
 	installed = { "lua" }
@@ -150,9 +139,9 @@ test("skips buffers larger than 200 KiB", function()
 
 	equal({}, starts_for(buf), "oversized buffer unexpectedly started Tree-sitter")
 	equal("", vim.bo[buf].indentexpr, "oversized buffer unexpectedly enabled Tree-sitter indentation")
-end)
+end
 
-test("stops an oversized highlighter that predates host setup", function()
+T["stops an oversized highlighter that predates host setup"] = function()
 	reset_runtime()
 	local buf = make_buffer(".lua", string.rep("x", 200 * 1024 + 1), "lua")
 	installed = { "lua" }
@@ -163,9 +152,9 @@ test("stops an oversized highlighter that predates host setup", function()
 	equal({ buf }, stops, "oversized pre-existing highlighter was not stopped")
 	local policy = runtime.policy(buf)
 	assert(not policy.eligible and policy.reason == "max-bytes-exceeded", "host did not expose live size policy")
-end)
+end
 
-test("host observers receive copied live eligibility edges", function()
+T["host observers receive copied live eligibility edges"] = function()
 	reset_runtime()
 	local buf = make_buffer(".lua", "tiny", "lua")
 	installed = { "lua" }
@@ -199,9 +188,9 @@ test("host observers receive copied live eligibility edges", function()
 	)
 	assert(not changes[2].previous.eligible and changes[2].current.eligible, "shrink edge was reversed")
 	runtime.observe_policy("treesitter-spec", nil)
-end)
+end
 
-test("starts only configured parsers that are installed", function()
+T["starts only configured parsers that are installed"] = function()
 	reset_runtime()
 	local missing = make_buffer(".py", "print('missing')", "python")
 	local excluded = make_buffer(".json", "{}", "json")
@@ -210,9 +199,9 @@ test("starts only configured parsers that are installed", function()
 
 	equal({}, starts_for(missing), "missing Python parser was started")
 	equal({}, starts_for(excluded), "installed but unconfigured JSON parser was started")
-end)
+end
 
-test("pager-style profile highlights without changing indentation", function()
+T["pager-style profile highlights without changing indentation"] = function()
 	reset_runtime()
 	local buf = make_buffer(".md", "# pager", "markdown")
 	installed = { "markdown" }
@@ -221,9 +210,9 @@ test("pager-style profile highlights without changing indentation", function()
 
 	equal({ "markdown" }, starts_for(buf), "pager buffer was not highlighted with its installed parser")
 	equal("", vim.bo[buf].indentexpr, "pager profile changed indentation")
-end)
+end
 
-test("VSCode-style profile exposes parsers without starting highlighting", function()
+T["VSCode-style profile exposes parsers without starting highlighting"] = function()
 	reset_runtime()
 	local buf = make_buffer(".lua", "return 'vscode'", "lua")
 	installed = { "lua" }
@@ -236,9 +225,9 @@ test("VSCode-style profile exposes parsers without starting highlighting", funct
 		"VSCode-style profile registered a highlighting lifecycle"
 	)
 	assert(vim.fn.exists(":NvimConfigParsersInstall") == 2, "explicit parser install command is missing")
-end)
+end
 
-test("async install awaits completion and retries eligible buffers", function()
+T["async install awaits completion and retries eligible buffers"] = function()
 	reset_runtime()
 	local buf = make_buffer(".lua", "return 'retry'", "lua")
 	installed = {}
@@ -268,18 +257,18 @@ test("async install awaits completion and retries eligible buffers", function()
 		"install completion did not retry the loaded buffer"
 	)
 	equal({ "lua" }, starts_for(buf), "install completion retried the buffer more than once")
-end)
+end
 
-test("parser installation reports missing Mise before starting a task", function()
+T["parser installation reports missing Mise before starting a task"] = function()
 	local before = #install_calls
 	tool_error = "Mise is missing; run :NvimConfigMiseInstall"
 	local ok, err = runtime.install({ "lua" })
 	tool_error = nil
 	assert(not ok and err:find("NvimConfigMiseInstall", 1, true))
 	assert(#install_calls == before)
-end)
+end
 
-test("blocking install API honors timeout and returns the Task result", function()
+T["blocking install API honors timeout and returns the Task result"] = function()
 	reset_runtime()
 	runtime.setup({ parsers = { "lua" }, highlight = false, indent = false })
 	local received_timeout
@@ -295,9 +284,9 @@ test("blocking install API honors timeout and returns the Task result", function
 	assert(ok and task == install_task, "blocking install did not return success and its Task")
 	equal(1234, received_timeout, "blocking install did not forward its timeout")
 	equal(false, install_calls[1].opts.summary, "blocking install did not forward its summary option")
-end)
+end
 
-test("exact provisioning is offline-safe selective and idempotent", function()
+T["exact provisioning is offline-safe selective and idempotent"] = function()
 	reset_runtime()
 	runtime.setup({ parsers = { "lua" }, highlight = false, indent = false })
 	local parser_path = vim.fn.tempname() .. ".so"
@@ -339,9 +328,9 @@ test("exact provisioning is offline-safe selective and idempotent", function()
 	local calls = #install_calls
 	ok, _, changed = runtime.provision_exact({ allow_network = true, timeout = 1234 })
 	assert(ok and changed == false and #install_calls == calls, "exact second run reinstalled a parser")
-end)
+end
 
-test("editor parser manifest is exactly 19 languages and keeps Rust", function()
+T["editor parser manifest is exactly 19 languages and keeps Rust"] = function()
 	reset_runtime()
 	installed = {}
 	local specs = require("plugins.treesitter")
@@ -370,9 +359,9 @@ test("editor parser manifest is exactly 19 languages and keeps Rust", function()
 		"xml",
 		"yaml",
 	}, install_calls[1].parsers, "editor parser manifest drifted")
-end)
+end
 
-test("editor and pager plugin specs never install parsers implicitly", function()
+T["editor and pager plugin specs never install parsers implicitly"] = function()
 	reset_runtime()
 	installed = {}
 	local specs = require("plugins.treesitter")
@@ -397,9 +386,9 @@ test("editor and pager plugin specs never install parsers implicitly", function(
 	assert(specs[3].cond() == false, "Tree-sitter context is enabled in VSCode")
 	assert(specs[4].cond() == false, "rainbow-delimiters is enabled in VSCode")
 	vim.g.vscode = previous_vscode
-end)
+end
 
-test("UFO selects from live policy and reselects only attached buffers", function()
+T["UFO selects from live policy and reselects only attached buffers"] = function()
 	reset_runtime()
 	local original_policy = runtime.policy
 	local original_observe = runtime.observe_policy
@@ -457,29 +446,22 @@ test("UFO selects from live policy and reselects only attached buffers", functio
 	runtime.policy = original_policy
 	runtime.observe_policy = original_observe
 	package.loaded.ufo = original_ufo
-end)
+end
 
-runtime.teardown()
-vim.treesitter.start = original_start
-vim.treesitter.stop = original_stop
-vim.treesitter.language.get_lang = original_get_lang
-package.loaded["nvim-treesitter"] = nil
-
-for _, buf in ipairs(buffers) do
-	if vim.api.nvim_buf_is_valid(buf) then
-		pcall(vim.api.nvim_buf_delete, buf, { force = true })
+hooks.post_once = function()
+	runtime.teardown()
+	vim.treesitter.start = original_start
+	vim.treesitter.stop = original_stop
+	vim.treesitter.language.get_lang = original_get_lang
+	package.loaded["nvim-treesitter"] = nil
+	for _, buf in ipairs(buffers) do
+		if vim.api.nvim_buf_is_valid(buf) then
+			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		end
+	end
+	for _, path in ipairs(paths) do
+		vim.fn.delete(path)
 	end
 end
-for _, path in ipairs(paths) do
-	vim.fn.delete(path)
-end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
-end
-
-print(string.format("treesitter_spec: %d tests passed", 13))
-vim.cmd("quitall!")
+return T

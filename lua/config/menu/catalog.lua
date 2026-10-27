@@ -289,19 +289,7 @@ function M.definitions()
 			palette_item("picker.git_status", "Status"),
 			palette_item("picker.git_stash", "Stash"),
 		}),
-		section("tests", "Tests", {
-			item("test.nearest", "Run Nearest"),
-			item("test.file", "Run File", nil, function(context)
-				return not cmake_filetypes[context.filetype]
-			end),
-			item("test.last", "Run Last"),
-			item("test.stop", "Stop"),
-			item("test.output_panel", "Toggle Output Panel"),
-			item("test.summary", "Toggle Summary"),
-			item("test.next_failed", "Next Failed"),
-			item("test.prev_failed", "Prev Failed"),
-			palette_item("test.debug_nearest", "Debug Nearest", "<leader>Td"),
-		}),
+
 		section("cmake", "CMake", {
 			item("command.cmake_generate", "Generate"),
 			item("command.cmake_build", "Build"),
@@ -351,10 +339,7 @@ function M.definitions()
 				"save session",
 			}),
 		}),
-		section("just", "Just", {
-			item("command.just_run", "Run Recipe"),
-			item("command.just_import_last", "Import Last Locations"),
-		}),
+
 		section("log_highlights", "Log Highlights", {
 			item("log.highlight_exact", "Add Highlight (exact)"),
 			item("log.highlight_regex", "Add Highlight (regex)"),
@@ -398,12 +383,7 @@ function M.definitions()
 			palette_item("multicursor.next", "Go to Next Cursor", "]mc"),
 			palette_item("multicursor.prev", "Go to Previous Cursor", "[mc"),
 		}),
-		section("coverage", "Coverage", {
-			palette_item("coverage.load_report", "Load Report..."),
-			palette_item("command.coverage_load", "Load Default Report"),
-			palette_item("command.coverage_summary", "Show Summary"),
-			palette_item("command.coverage_clear", "Clear Loaded Coverage"),
-		}),
+
 		section("logs", "Logs", {
 			palette_item("command.log_watch", "Toggle Follow Current File"),
 			palette_item("command.log_watch_enable", "Start Following Current File"),
@@ -455,20 +435,12 @@ function M.definitions()
 			palette_item("command.review_export", "Export Complete Review", "<leader>rE"),
 			palette_item("command.review_refresh", "Refresh Review", "<leader>ru"),
 			palette_item("command.review_structural_diff", "Open Structural Diff", nil, nil, { "difftastic", "AST" }),
-			palette_item(
-				"command.review_engine",
-				"Select Diff Engine",
-				nil,
-				nil,
-				{ "main", "patience", "difftastic", "moved" }
-			),
+			palette_item("command.review_engine", "Select Diff Engine", nil, nil, { "main", "difftastic", "moved" }),
 			palette_item("command.review_next", "Next Review Comment", "]r"),
 			palette_item("command.review_prev", "Previous Review Comment", "[r"),
 			palette_item("command.review_close", "Close Review", "<leader>rq"),
 		}),
 		section("tools", "Tools", {
-			palette_item("command.theme", "Select Theme..."),
-			palette_item("command.theme_reset", "Reset Theme"),
 			palette_item("clangd.compile_commands", "Set clangd Compile Database...", nil, function(context)
 				return cmake_filetypes[context.filetype] == true
 			end),
@@ -502,7 +474,6 @@ function M.definitions()
 		section("view", "View / Utils", {
 			item("view.oil", "File Explorer (oil)"),
 			item("view.terminal", "Terminal", "<leader>t"),
-			item("command.scratch", "Project Scratch", "<leader>."),
 			item("picker.diagnostics", "Diagnostics"),
 			item("command.fold_open", "Fold Open All"),
 			item("command.fold_close", "Fold Close All"),

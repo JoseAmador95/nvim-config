@@ -5,18 +5,7 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local deferred_loads = 0
 package.loaded["config.deferred"] = {
@@ -60,11 +49,11 @@ local function json_array_buffer()
 	return bufnr
 end
 
-test("module discovery never resolves jq or starts a process", function()
+T["module discovery never resolves jq or starts a process"] = function()
 	assert(deferred_loads == 0)
-end)
+end
 
-test("missing or drifted jq blocks before spawn", function()
+T["missing or drifted jq blocks before spawn"] = function()
 	local bufnr = json_buffer()
 	for _, reason in ipairs({ "absent", "drift: executable metadata changed" }) do
 		local spawns = 0
@@ -79,9 +68,9 @@ test("missing or drifted jq blocks before spawn", function()
 		assert(spawns == 0, "unverified jq reached the process boundary")
 	end
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("YAML is blocked without resolving PATH-only yq", function()
+T["YAML is blocked without resolving PATH-only yq"] = function()
 	local bufnr = json_buffer()
 	vim.bo[bufnr].filetype = "yaml"
 	local resolves = 0
@@ -97,9 +86,9 @@ test("YAML is blocked without resolving PATH-only yq", function()
 	assert(process == nil and tostring(err):find("verified yq is not configured", 1, true))
 	assert(resolves == 0 and spawns == 0, "YAML fell through to a PATH executable")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("oversized JSON is rejected before a full read, decode, or spawn", function()
+T["oversized JSON is rejected before a full read, decode, or spawn"] = function()
 	local bufnr = json_buffer()
 	local original_offset = vim.api.nvim_buf_get_offset
 	local original_lines = vim.api.nvim_buf_get_lines
@@ -145,9 +134,9 @@ test("oversized JSON is rejected before a full read, decode, or spawn", function
 	assert(decodes == 0, "oversized JSON reached vim.json.decode")
 	assert(spawns == 0, "oversized JSON reached the process boundary")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("JSON tree uses verified absolute jq and stdin without shell interpolation", function()
+T["JSON tree uses verified absolute jq and stdin without shell interpolation"] = function()
 	local bufnr = json_buffer()
 	local observed
 	jqx._resolve = function()
@@ -186,9 +175,9 @@ test("JSON tree uses verified absolute jq and stdin without shell interpolation"
 	vim.cmd("close")
 	vim.cmd("cclose")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("top-level arrays keep typed numeric keys and query indices with argjson", function()
+T["top-level arrays keep typed numeric keys and query indices with argjson"] = function()
 	local bufnr = json_array_buffer()
 	local observed = {}
 	vim.fn.setqflist({}, "r")
@@ -232,9 +221,9 @@ test("top-level arrays keep typed numeric keys and query indices with argjson", 
 	vim.cmd("close")
 	vim.cmd("cclose")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("type-filtered JSON tree keeps the upstream JQX query contract", function()
+T["type-filtered JSON tree keeps the upstream JQX query contract"] = function()
 	local bufnr = json_buffer()
 	local observed
 	jqx._resolve = function()
@@ -255,9 +244,9 @@ test("type-filtered JSON tree keeps the upstream JQX query contract", function()
 	assert(observed[6]:find("select(.value|type == $kind)", 1, true))
 	vim.cmd("cclose")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("query text remains one inert argv item", function()
+T["query text remains one inert argv item"] = function()
 	local bufnr = json_buffer()
 	local observed
 	local original_columns = vim.o.columns
@@ -285,9 +274,9 @@ test("query text remains one inert argv item", function()
 	vim.o.columns = original_columns
 	vim.o.lines = original_lines
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("a changed buffer invalidates asynchronous tree results", function()
+T["a changed buffer invalidates asynchronous tree results"] = function()
 	local bufnr = json_buffer()
 	local pending
 	vim.fn.setqflist({}, "r")
@@ -308,9 +297,9 @@ test("a changed buffer invalidates asynchronous tree results", function()
 	end))
 	assert(#vim.fn.getqflist() == 0)
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("key queries reject a list snapshot changed before spawn", function()
+T["key queries reject a list snapshot changed before spawn"] = function()
 	local bufnr = json_buffer()
 	local spawns = 0
 	jqx._resolve = function()
@@ -342,9 +331,9 @@ test("key queries reject a list snapshot changed before spawn", function()
 	assert(notifications[#notifications].message:find("results were discarded", 1, true))
 	vim.cmd("cclose")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("an in-flight query never publishes a result after the source changes", function()
+T["an in-flight query never publishes a result after the source changes"] = function()
 	local bufnr = json_buffer()
 	local pending
 	local windows = #vim.api.nvim_list_wins()
@@ -366,9 +355,9 @@ test("an in-flight query never publishes a result after the source changes", fun
 	end))
 	assert(#vim.api.nvim_list_wins() == windows, "stale query opened a result window")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("too many query result lines fail before a float is materialized", function()
+T["too many query result lines fail before a float is materialized"] = function()
 	local bufnr = json_buffer()
 	local output_lines = {}
 	for index = 1, 4097 do
@@ -391,9 +380,9 @@ test("too many query result lines fail before a float is materialized", function
 	end))
 	assert(#vim.api.nvim_list_wins() == windows, "oversized query result opened a float")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("too many keys stop at the item bound without publishing a partial quickfix", function()
+T["too many keys stop at the item bound without publishing a partial quickfix"] = function()
 	local bufnr = json_buffer()
 	vim.fn.setqflist({}, " ", {
 		title = "existing",
@@ -431,17 +420,17 @@ test("too many keys stop at the item bound without publishing a partial quickfix
 	local state = vim.fn.getqflist({ title = 0, items = 0 })
 	assert(state.title == "existing" and #state.items == 1 and state.items[1].text == "sentinel")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("the pinned upstream plugin remains UI-only and has no command trigger", function()
+T["the pinned upstream plugin remains UI-only and has no command trigger"] = function()
 	package.loaded["plugins.jqx"] = nil
 	local specs = require("plugins.jqx")
 	assert(#specs == 1 and specs[1][1] == "gennaro-tedesco/nvim-jqx")
 	assert(specs[1].event == "User NvimConfigJqxUi")
 	assert(specs[1].cmd == nil, "upstream shell-string commands remain directly triggerable")
-end)
+end
 
-test("the host facade synchronously reclaims upstream shell-string entries", function()
+T["the host facade synchronously reclaims upstream shell-string entries"] = function()
 	vim.api.nvim_create_user_command("JqxList", function() end, { force = true })
 	vim.api.nvim_create_user_command("JqxQuery", function() end, { force = true })
 	vim.api.nvim_exec2("function! FileKeys(A, L, P)\nreturn []\nendfunction", { output = false })
@@ -459,14 +448,6 @@ test("the host facade synchronously reclaims upstream shell-string entries", fun
 	local query = vim.api.nvim_get_commands({ builtin = false }).JqxQuery
 	assert(list and list.nargs == "?" and list.definition:find("verified jq", 1, true))
 	assert(query and query.nargs == "?" and query.definition:find("verified jq", 1, true))
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("jqx_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

@@ -5,18 +5,9 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 
 local attestation = require("config.lazy_attestation")
-local failures = {}
-local count = 0
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p") == 1)
@@ -54,7 +45,7 @@ local function prime_checkout(root, head, cache)
 	assert(committed and commit_status.cached, commit_status.reason)
 end
 
-test("metadata cache hits avoid the authoritative flag scan", function()
+T["metadata cache hits avoid the authoritative flag scan"] = function()
 	local root, head = checkout("metadata-cache-hit", true)
 	local cache = fixture .. "/attestation/cache.json"
 	local scans = 0
@@ -90,9 +81,9 @@ test("metadata cache hits avoid the authoritative flag scan", function()
 	})
 	assert(second and second_status.cache_hit == false)
 	assert(scans == 2, "allow_cache=false accepted the positive cache")
-end)
+end
 
-test("index replacement invalidates the metadata cache even at the same size", function()
+T["index replacement invalidates the metadata cache even at the same size"] = function()
 	local root = fixture .. "/metadata"
 	local git_dir = root .. "/.git"
 	local cache = fixture .. "/metadata-cache/cache.json"
@@ -128,17 +119,17 @@ test("index replacement invalidates the metadata cache even at the same size", f
 	})
 	assert(verified and status.cache_hit == false)
 	assert(scans == 2, "same-size index replacement reused stale hidden-flag authority")
-end)
+end
 
-test("regular reads are bound to the identity used by the caller", function()
+T["regular reads are bound to the identity used by the caller"] = function()
 	local path = fixture .. "/index"
 	assert(vim.fn.writefile({ "before" }, path, "b") == 0)
 	local expected = assert(vim.uv.fs_lstat(path))
 	assert(vim.fn.writefile({ "replacement with a different identity snapshot" }, path, "b") == 0)
 	assert(attestation._read_regular(path, 1024, expected) == nil, "changed index material was accepted")
-end)
+end
 
-test("aggregate index material remains bounded", function()
+T["aggregate index material remains bounded"] = function()
 	local root = fixture .. "/bounded"
 	local git_dir = root .. "/.git"
 	assert(vim.fn.mkdir(git_dir, "p") == 1)
@@ -150,9 +141,9 @@ test("aggregate index material remains bounded", function()
 	assert(vim.uv.fs_close(shared))
 	local snapshot, err = attestation._index_snapshot(root)
 	assert(snapshot == nil and err:find("cache bound", 1, true), tostring(err))
-end)
+end
 
-test("complete checkout cache hit is subprocess-free authority", function()
+T["complete checkout cache hit is subprocess-free authority"] = function()
 	local root, head = checkout("a-checkout", true)
 	local cache = fixture .. "/a-cache/cache.json"
 	prime_checkout(root, head, cache)
@@ -180,9 +171,9 @@ test("complete checkout cache hit is subprocess-free authority", function()
 	-- rest of the worktree mutable authority.
 	assert(vim.fn.writefile({ "updated-help\tlazy.txt" }, root .. "/doc/tags", "b") == 0)
 	assert(attestation.checkout_begin({ root = root, head = head, cache_path = cache }))
-end)
+end
 
-test("cache miss enumerates the worktree once before and once after Git authority", function()
+T["cache miss enumerates the worktree once before and once after Git authority"] = function()
 	local root, head = checkout("b-bounded-miss", false)
 	local cache = fixture .. "/b-bounded-miss-cache/cache.json"
 	local original_dir = vim.fs.dir
@@ -205,9 +196,9 @@ test("cache miss enumerates the worktree once before and once after Git authorit
 	vim.fs.dir = original_dir
 	assert(committed and commit_status.cached, commit_status.reason)
 	assert(root_enumerations == 2, "cache miss repeated an exhaustive worktree snapshot")
-end)
+end
 
-test("cache-disabled staging validation never publishes a movable receipt", function()
+T["cache-disabled staging validation never publishes a movable receipt"] = function()
 	local root, head = checkout("c-no-staging-receipt", false)
 	local cache = fixture .. "/c-no-staging-receipt-cache/cache.json"
 	local hit, status = attestation.checkout_begin({
@@ -226,9 +217,9 @@ test("cache-disabled staging validation never publishes a movable receipt", func
 	})
 	assert(committed and commit_status.cached == false)
 	assert(vim.uv.fs_lstat(cache) == nil, "cache-disabled staging validation wrote a receipt")
-end)
+end
 
-test("tracked, ignored, untracked, index, and HEAD drift all invalidate fast authority", function()
+T["tracked, ignored, untracked, index, and HEAD drift all invalidate fast authority"] = function()
 	local cases = {
 		{
 			name = "d-tracked",
@@ -271,9 +262,9 @@ test("tracked, ignored, untracked, index, and HEAD drift all invalidate fast aut
 		local hit = attestation.checkout_begin({ root = root, head = head, cache_path = cache })
 		assert(hit == false, case.name .. " drift retained fast checkout authority")
 	end
-end)
+end
 
-test("same-inode mutation between cached identity rounds cannot retain authority", function()
+T["same-inode mutation between cached identity rounds cannot retain authority"] = function()
 	local root, head = checkout("i-tree-race", false)
 	local cache = fixture .. "/i-tree-race-cache/cache.json"
 	prime_checkout(root, head, cache)
@@ -308,9 +299,9 @@ test("same-inode mutation between cached identity rounds cannot retain authority
 	assert(before_file.ino == after_file.ino and before_file.size == after_file.size)
 	assert(before_directory.mtime.sec == after_directory.mtime.sec)
 	assert(before_directory.mtime.nsec == after_directory.mtime.nsec)
-end)
+end
 
-test("checkout cache races and hostile cache metadata fail closed", function()
+T["checkout cache races and hostile cache metadata fail closed"] = function()
 	local root, head = checkout("j-race", false)
 	local cache = fixture .. "/j-cache/cache.json"
 	local hit, status = attestation.checkout_begin({ root = root, head = head, cache_path = cache })
@@ -370,16 +361,10 @@ test("checkout cache races and hostile cache metadata fail closed", function()
 	vim.uv.fs_lstat = original_lstat
 	assert(record_hit == false, "hostile cached path retained checkout authority")
 	assert(not outside_inspected, "hostile cached path was inspected outside the checkout")
-end)
-
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("lazy_attestation_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

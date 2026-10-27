@@ -33,9 +33,8 @@
 --           auto_open_log_on_error = true,
 --         },
 --       },
---       theme_router = { background = "auto", transparent = false },
 --     },
---     dap = { ui = "dap-ui" }, -- dap-ui | dap-view
+--     theme = { background = "auto", transparent = false, italic_comments = true },
 --     ui = {
 --       redraw_profile = "full", -- full | low-bandwidth
 --       -- inline_diagnostics = "settled-line", -- current-line | settled-line | off
@@ -337,7 +336,6 @@ local SCHEMA = {
 			project_python = {
 				type = "table",
 				fields = {
-					test_runner = { type = "enum", values = { "pytest", "unittest" }, default = "pytest" },
 					repl = {
 						type = "table",
 						fields = {
@@ -394,42 +392,6 @@ local SCHEMA = {
 					scan_lines_per_tick = integer(1000, 1, 10000),
 				},
 			},
-			repo_scratch = {
-				type = "table",
-				fields = {
-					retention_days = integer(30, 1, 3650),
-					lease_seconds = integer(300, 30, 86400),
-					prune_on_open = { type = "boolean", default = true },
-				},
-			},
-			coverage_workbench = {
-				type = "table",
-				fields = {
-					max_report_bytes = integer(50 * MEBIBYTE, KIBIBYTE, 256 * MEBIBYTE),
-					max_source_bytes = integer(16 * MEBIBYTE, 1, 16 * MEBIBYTE),
-					max_model_bytes = integer(64 * MEBIBYTE, 1, 64 * MEBIBYTE),
-					signs = { type = "enum", values = { "all", "covered", "missing", "none" }, default = "all" },
-					stale = { type = "enum", values = { "hide", "show" }, default = "hide" },
-				},
-			},
-			just_workbench = {
-				type = "table",
-				fields = {
-					binary = nonempty_string("just"),
-					root_mode = { type = "enum", values = { "repo", "nearest" }, default = "repo" },
-					justfile_names = {
-						type = "list",
-						default = { "justfile", "Justfile", ".justfile" },
-						item = nonempty_string(nil),
-						min_items = 1,
-					},
-					conflict = {
-						type = "enum",
-						values = { "prompt", "focus", "replace", "cancel" },
-						default = "prompt",
-					},
-				},
-			},
 			clangd_compile_db = {
 				type = "table",
 				fields = {
@@ -460,21 +422,19 @@ local SCHEMA = {
 					},
 				},
 			},
-			theme_router = {
-				type = "table",
-				fields = {
-					background = { type = "enum", values = { "auto", "light", "dark" }, default = "auto" },
-					transparent = { type = "boolean", default = false },
-					italic_comments = { type = "boolean", default = true },
-					reload_on_focus = { type = "boolean", default = true },
-				},
-			},
 		},
 	},
-	dap = {
+
+	telemetry = {
+		type = "table",
+		fields = { enabled = { type = "boolean", default = true } },
+	},
+	theme = {
 		type = "table",
 		fields = {
-			ui = { type = "enum", values = { "dap-ui", "dap-view" }, default = "dap-ui" },
+			background = { type = "enum", values = { "auto", "light", "dark" }, default = "auto" },
+			transparent = { type = "boolean", default = false },
+			italic_comments = { type = "boolean", default = true },
 		},
 	},
 	ui = {
@@ -1097,7 +1057,6 @@ return {
       buffer_mappings = { close = "q", open_location = "gf" }, -- either may be false
     },
     project_python = {
-      test_runner = "pytest", -- pytest | unittest
       repl = { readiness_timeout_ms = 5000, poll_interval_ms = 50 },
     },
     action_palette = { target_default = "exact", unavailable = "hide", recent_limit = 5 }, -- 0..20, session-only
@@ -1115,20 +1074,6 @@ return {
       max_matches = 20000, -- host-only match index bound
       scan_lines_per_tick = 1000, -- host-only match scan cost
     },
-    repo_scratch = { retention_days = 30, lease_seconds = 300, prune_on_open = true },
-    coverage_workbench = {
-      max_report_bytes = 50 * 1024 * 1024,
-      max_source_bytes = 16 * 1024 * 1024, -- hard per-source ceiling
-      max_model_bytes = 64 * 1024 * 1024, -- hard aggregate-source and normalized-model ceiling
-      signs = "all", -- all | covered | missing | none
-      stale = "hide", -- hide | show
-    },
-    just_workbench = {
-      binary = "just",
-      root_mode = "repo", -- repo | nearest
-      justfile_names = { "justfile", "Justfile", ".justfile" },
-      conflict = "prompt", -- prompt | focus | replace | cancel
-    },
     clangd_compile_db = {
       path = "clangd",
       profile = "full", -- full | light
@@ -1141,16 +1086,10 @@ return {
       reevaluate_debounce_ms = 50,
       languages = {}, -- e.g. markdown = { max_bytes = 400 * 1024, indent = false }
     },
-    theme_router = {
-      background = "auto", -- auto | light | dark
-      transparent = false,
-      italic_comments = true,
-      reload_on_focus = true,
-    },
   },
 
-  -- Debug UI selected at startup. $NVIM_DAP_UI overrides this value.
-  dap = { ui = "dap-ui" }, -- dap-ui | dap-view
+  telemetry = { enabled = true }, -- local mapping/palette counts; restart after changing
+  theme = { background = "auto", transparent = false, italic_comments = true },
 
   -- Full/low-bandwidth stays explicit. The unset cost controls use quieter
   -- defaults over SSH without changing the selected profile.

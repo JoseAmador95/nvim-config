@@ -40,8 +40,11 @@ jobs:
 
       - name: Prepare isolated paths
         run: |
-          printf 'NVIM_CONFIG_XDG_ROOT=%s/nvim-config-xdg\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          printf 'NVIM_CONFIG_TOOLS_BIN=%s/nvim-config-tools/bin\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          {
+            printf 'NVIM_CONFIG_XDG_ROOT=%s/nvim-config-xdg\n' "$RUNNER_TEMP"
+            printf 'NVIM_CONFIG_TOOLS_BIN=%s/nvim-config-tools/bin\n' "$RUNNER_TEMP"
+            printf 'NVIM_CONFIG_TEST_DEPS=%s/nvim-config-test-deps\n' "$RUNNER_TEMP"
+          } >> "$GITHUB_ENV"
 
       - name: Restore plugin and parser cache
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -49,6 +52,7 @@ jobs:
           path: |
             ${{ env.NVIM_CONFIG_XDG_ROOT }}/data
             ${{ runner.temp }}/nvim-config-tools
+            ${{ env.NVIM_CONFIG_TEST_DEPS }}
             ~/.local/share/mise
           key: nvim-${{ runner.os }}-${{ runner.arch }}-0.12.4-${{ hashFiles('lazy-lock.json', 'lua/plugins/treesitter.lua', 'lua/config/toolchain.lua', 'mise.toml', 'mise.lock', '.mise/locks/**') }}
 

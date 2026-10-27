@@ -1,6 +1,7 @@
 # ADR 0003: Separate diff presentation from source relations
 
-- Status: Accepted; GumTree-specific decisions superseded by [ADR 0005](0005-mise-tooling.md)
+- Status: Accepted; GumTree-specific decisions superseded by [ADR 0005](0005-mise-tooling.md);
+  Patience retired on 2026-10-20
 - Date: 2026-10-01
 
 ## Context
@@ -22,36 +23,31 @@ exact frozen Git sources regardless of the selected display.
 ## Decision
 
 Prepared engines declare native/projected presentation separately from
-structural-only semantics and source-coordinate relations. Main stays default.
-Patience owns a textual projection. Difftastic keeps its structural projection.
-GumTree uses native textual presentation with validated move/identifier-update
-relations. Selection is workspace-local and temporary; only comment provenance
-is persisted. Existing origins and the store schema do not change.
+structural-only semantics and source-coordinate relations.
+Main stays default.
+Main uses native textual presentation; Difftastic uses its structural projection.
+These are the two selectable engines after retiring Patience and GumTree.
+Selection is workspace-local and temporary; only comment provenance is persisted.
+Historical Patience and GumTree origins remain inert and readable.
+The store schema does not change.
 
-GumTree receives complete installed Neovim Tree-sitter trees from frozen strings,
-including anonymous tokens and comments. The plugin owns XML export and JSON
-validation; a host adapter owns verified execution, limits and cancellation.
-Its fixed Maven artifacts and private Java runtime form one attested package,
-installed only through an explicit managed-tool command.
+The original GumTree design used native textual presentation with validated
+move/identifier-update relations, complete installed Neovim Tree-sitter trees
+from frozen strings, and a managed private Java runtime.
+That implementation was removed by ADR 0005.
 
 ## Consequences and limitations
 
-All four engines share layout, context and comment workflows without changing
-canonical entries or global diff options. Exact text moves are conservative and
-omit ambiguous repeats. GumTree relations can describe moved-and-edited nodes,
-but are syntactic and file-local. Its initial four languages require installed
-parsers; unsupported or over-budget files visibly use Main. Execution errors
-retain the prior view.
-
-The private JRE increases download/storage cost and the pinned artifact closure
-requires coordinated updates. Platform libraries remain host facilities; the
-package does not attest the operating system. Bounds deliberately exclude large
-or deeply nested files from structural analysis.
+Both engines share layout, context and comment workflows without changing
+canonical entries or global diff options.
+Main's exact text moves are conservative and omit ambiguous repeats.
+Difftastic's supported text fallbacks visibly use Main.
+Execution errors retain the prior view.
 
 ## Workflow and user decisions
 
-The user chose Patience plus exact moved blocks plus GumTree, asked GumTree to
-retain the textual diff, and selected managed private Java. `ReviewEngine` and
-its registry-derived completion expose the engines; `NvimConfigToolsInstall
-gumtree` is the explicit install/repair path. No startup install or parser
-installation is added.
+The original selection was Patience plus exact moved blocks plus GumTree.
+The user later retired GumTree and Patience while keeping Main and Difftastic.
+`ReviewEngine` and its registry-derived completion expose the remaining engines.
+Exact moved-block annotations remain part of Main; the reviewer keeps its
+existing layout and comment workflow.

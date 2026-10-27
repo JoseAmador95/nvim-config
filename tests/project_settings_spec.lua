@@ -8,24 +8,10 @@ require("config.local_plugins").setup()
 
 local project_settings = require("config.project_settings")
 local lsp_neoconf = require("config.lsp_neoconf")
-local failures = {}
-local count = 0
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local function temp_dir()
 	local path = vim.fn.tempname()
@@ -104,7 +90,7 @@ local function harness(root, globals)
 	}
 end
 
-test("approval gates JSONC and any lexical change revokes current use", function()
+T["approval gates JSONC and any lexical change revokes current use"] = function()
 	local root = temp_dir()
 	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
 	write(
@@ -160,9 +146,9 @@ test("approval gates JSONC and any lexical change revokes current use", function
 	assert(state.approvals[root] == first_fingerprint, "adapter rewrote approval automatically")
 
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("batch lookup reads each file once and returns isolated values", function()
+T["batch lookup reads each file once and returns isolated values"] = function()
 	local root = temp_dir()
 	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
 	local neoconf_path = vim.fs.joinpath(root, ".neoconf.json")
@@ -217,9 +203,9 @@ test("batch lookup reads each file once and returns isolated values", function()
 	)
 
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("single lookup preserves an explicit nil default", function()
+T["single lookup preserves an explicit nil default"] = function()
 	local root = temp_dir()
 	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
 	write(vim.fs.joinpath(root, ".vscode/settings.json"), '{ "ty.disableLanguageServices": false }')
@@ -229,9 +215,9 @@ test("single lookup preserves an explicit nil default", function()
 	assert(err == nil, err)
 	equal(false, value.ty.disableLanguageServices, "nil default discarded the approved single setting")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("approved Neoconf settings preserve dotted-key expansion", function()
+T["approved Neoconf settings preserve dotted-key expansion"] = function()
 	local root = temp_dir()
 	write(
 		vim.fs.joinpath(root, ".neoconf.json"),
@@ -251,9 +237,9 @@ test("approved Neoconf settings preserve dotted-key expansion", function()
 	local ruff = assert(project_settings.get("lspconfig.ruff", {}, root))
 	equal(true, ruff.settings.lint.preview, "top-level Neoconf dotted key did not expand")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("global Neoconf lspconfig settings preserve dotted-key expansion", function()
+T["global Neoconf lspconfig settings preserve dotted-key expansion"] = function()
 	local root = temp_dir()
 	harness(root, {
 		["lspconfig.ty"] = {
@@ -265,9 +251,9 @@ test("global Neoconf lspconfig settings preserve dotted-key expansion", function
 	equal("warn", ty.ty.configuration.rules["unresolved-reference"], "global server dotted key did not expand")
 	equal(false, ty.ty.disableLanguageServices, "global server false value was lost")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("combined fingerprint covers appearance and disappearance of either file", function()
+T["combined fingerprint covers appearance and disappearance of either file"] = function()
 	local root = temp_dir()
 	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
 	write(vim.fs.joinpath(root, ".vscode/settings.json"), '{ "editor.formatOnSave": true }')
@@ -284,9 +270,9 @@ test("combined fingerprint covers appearance and disappearance of either file", 
 	assert(not absent.present and not absent.approved)
 	assert(project_settings.approve(root) == nil, "absence was approvable")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("a file change between approval lookup and consumption fails closed", function()
+T["a file change between approval lookup and consumption fails closed"] = function()
 	local root = temp_dir()
 	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
 	local path = vim.fs.joinpath(root, ".vscode/settings.json")
@@ -308,9 +294,9 @@ test("a file change between approval lookup and consumption fails closed", funct
 	assert(err == "project settings changed during fingerprint validation")
 	assert(not project_settings.snapshot(root).approved, "changed candidate remained approved")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("a same-size ctime change fails metadata-only revalidation", function()
+T["a same-size ctime change fails metadata-only revalidation"] = function()
 	local root = temp_dir()
 	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
 	local path = vim.fs.joinpath(root, ".vscode/settings.json")
@@ -361,9 +347,9 @@ test("a same-size ctime change fails metadata-only revalidation", function()
 	equal("project settings changed during fingerprint validation", err, "ctime mutation did not fail closed")
 
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("durable approval is reread after metadata validation", function()
+T["durable approval is reread after metadata validation"] = function()
 	local parent = temp_dir()
 	local root = vim.fs.joinpath(parent, "project")
 	local state_root = vim.fs.joinpath(parent, "trust-state")
@@ -415,9 +401,9 @@ test("durable approval is reread after metadata validation", function()
 	equal("{", table.concat(vim.fn.readfile(state_path), "\n"), "approval observation repaired corrupt state")
 
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("invalid oversized and hostile files fail closed without consuming approval", function()
+T["invalid oversized and hostile files fail closed without consuming approval"] = function()
 	local root = temp_dir()
 	local vscode_dir = vim.fs.joinpath(root, ".vscode")
 	assert(vim.fn.mkdir(vscode_dir, "p", tonumber("700", 8)) == 1)
@@ -464,9 +450,9 @@ test("invalid oversized and hostile files fail closed without consuming approval
 
 	vim.fn.delete(vim.fs.dirname(outside), "rf")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("repository root replacement during a read is rejected", function()
+T["repository root replacement during a read is rejected"] = function()
 	local root = temp_dir()
 	local moved = root .. ".moved"
 	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
@@ -493,9 +479,9 @@ test("repository root replacement during a read is rejected", function()
 	assert(err:find("identity changed", 1, true) or err:find("changed or escaped", 1, true))
 	vim.fn.delete(root, "rf")
 	vim.fn.delete(moved, "rf")
-end)
+end
 
-test("outside Git uses only immutable global values", function()
+T["outside Git uses only immutable global values"] = function()
 	local root = temp_dir()
 	harness(root, { vscode = { global = { enabled = true } } })
 	local value, err = project_settings.get("vscode", {}, "outside")
@@ -504,9 +490,9 @@ test("outside Git uses only immutable global values", function()
 	value.global.enabled = false
 	equal(true, project_settings.get("vscode", {}, "outside").global.enabled, "global return was mutable")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("read warnings deduplicate while every successful command approval notifies", function()
+T["read warnings deduplicate while every successful command approval notifies"] = function()
 	local root = temp_dir()
 	assert(vim.fn.mkdir(vim.fs.joinpath(root, ".vscode"), "p", tonumber("700", 8)) == 1)
 	local path = vim.fs.joinpath(root, ".vscode/settings.json")
@@ -524,9 +510,9 @@ test("read warnings deduplicate while every successful command approval notifies
 	assert(state.notifications[2] == state.notifications[3], "success notification text drifted between approvals")
 	vim.api.nvim_del_user_command("NvimConfigTrustProjectSettings")
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("LSP settings merge requests one batch for VSCode and server values", function()
+T["LSP settings merge requests one batch for VSCode and server values"] = function()
 	local original_get_many = project_settings.get_many
 	local calls = 0
 	local requested
@@ -560,11 +546,6 @@ test("LSP settings merge requests one batch for VSCode and server values", funct
 	end, debug.traceback)
 	project_settings.get_many = original_get_many
 	assert(ok, err)
-end)
-
-if #failures > 0 then
-	error(table.concat(failures, "\n\n"))
 end
 
-print(("project_settings_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+return T

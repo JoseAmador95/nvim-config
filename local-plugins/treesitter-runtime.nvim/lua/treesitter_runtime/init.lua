@@ -1,3 +1,4 @@
+local contracts = require("local_plugins.contracts")
 local M = {}
 
 local DEFAULT_MAX_BYTES = 200 * 1024
@@ -35,17 +36,7 @@ local function copy(value)
 	return vim.deepcopy(value)
 end
 
-local function exact_options(value, allowed, label)
-	if type(value) ~= "table" then
-		return nil, label .. " must be a table"
-	end
-	for key in pairs(value) do
-		if type(key) ~= "string" or not allowed[key] then
-			return nil, label .. " contains an unknown option: " .. tostring(key)
-		end
-	end
-	return true
-end
+local exact_options = contracts.exact_options
 
 local function non_negative_integer(value, label)
 	if type(value) ~= "number" or value < 0 or value % 1 ~= 0 then

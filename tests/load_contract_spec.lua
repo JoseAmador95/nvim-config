@@ -1,14 +1,10 @@
+local T = MiniTest.new_set()
 -- Loaded before init.lua. Assert the full-editor load boundary after all
 -- startup events have settled without activating any deferred product.
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
-local function fail(message)
-	vim.api.nvim_err_writeln("load_contract_spec: " .. message)
-	vim.cmd("cquit")
-end
-
-local completed = false
+local result
 local late_very_lazy_callback_ran = false
 
 local function is_module_or_child(name, prefix)
@@ -21,7 +17,6 @@ vim.api.nvim_create_autocmd("User", {
 	callback = function()
 		vim.schedule(function()
 			vim.defer_fn(function()
-				completed = true
 				local ok, err = xpcall(function()
 					assert(vim.g.did_very_lazy == true, "load boundary ran before User VeryLazy settled")
 					assert(late_very_lazy_callback_ran, "load boundary skipped a scheduled VeryLazy callback")
@@ -33,7 +28,6 @@ vim.api.nvim_create_autocmd("User", {
 						"trusted_workspace",
 						"tab_first",
 						"treesitter_runtime",
-						"theme_router",
 					}) do
 						assert(package.loaded[name] ~= nil, name .. " was not loaded at its required early boundary")
 					end
@@ -50,9 +44,6 @@ vim.api.nvim_create_autocmd("User", {
 						"action_palette",
 						"diagram_view",
 						"log_workbench",
-						"repo_scratch",
-						"coverage_workbench",
-						"just_workbench",
 						"clangd_compile_db",
 						"native_review",
 						"nvim-jqx",
@@ -96,12 +87,6 @@ vim.api.nvim_create_autocmd("User", {
 						"LogWatchCurrentFile",
 						"JqxList",
 						"JqxQuery",
-						"Scratch",
-						"CoverageLoad",
-						"CoverageSummary",
-						"CoverageClear",
-						"JustRun",
-						"JustImportLast",
 						"ClangdSetCompileCommands",
 						"NvimConfigToolsInstall",
 						"ReviewOpen",
@@ -136,24 +121,9 @@ vim.api.nvim_create_autocmd("User", {
 						)
 					end
 				end, debug.traceback)
-				if not ok then
-					fail(err)
-					return
-				end
-				io.stdout:write("load_contract_spec: early and first-use boundaries are isolated\n")
-				io.stdout:flush()
-				vim.cmd("quitall!")
+				result = { ok = ok, err = err }
 			end, 0)
 		end)
-	end,
-})
-
-vim.api.nvim_create_autocmd("VimLeavePre", {
-	once = true,
-	callback = function()
-		if not completed then
-			fail("Neovim exited before the deferred load boundary was verified")
-		end
 	end,
 })
 
@@ -178,11 +148,16 @@ vim.api.nvim_create_autocmd("VimEnter", {
 			if vim.g.did_very_lazy ~= true then
 				vim.api.nvim_exec_autocmds("UIEnter", { modeline = false })
 			end
-			vim.defer_fn(function()
-				if not completed then
-					fail("User VeryLazy did not fire during startup")
-				end
-			end, 1000)
 		end)
 	end,
 })
+T["early and first-use boundaries"] = function()
+	assert(
+		vim.wait(1000, function()
+			return result ~= nil
+		end, 10),
+		"User VeryLazy did not fire during startup"
+	)
+	assert(result.ok, result.err)
+end
+return T

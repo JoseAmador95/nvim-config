@@ -6,24 +6,7 @@ local uv = vim.uv
 local toolchain = require("config.toolchain")
 local tool_paths = require("config.tool_paths")
 
-local LOCAL_PRODUCTS = {
-	{ name = "native-review.nvim", module = "native_review" },
-	{ name = "exact-editor.nvim", module = "exact_editor" },
-	{ name = "devcontainer-editor.nvim", module = "devcontainer_editor" },
-	{ name = "tab-first.nvim", module = "tab_first" },
-	{ name = "terminal-lifecycle.nvim", module = "terminal_lifecycle" },
-	{ name = "project-python.nvim", module = "project_python" },
-	{ name = "action-palette.nvim", module = "action_palette" },
-	{ name = "diagram-view.nvim", module = "diagram_view" },
-	{ name = "log-workbench.nvim", module = "log_workbench" },
-	{ name = "repo-scratch.nvim", module = "repo_scratch" },
-	{ name = "coverage-workbench.nvim", module = "coverage_workbench" },
-	{ name = "just-workbench.nvim", module = "just_workbench" },
-	{ name = "clangd-compile-db.nvim", module = "clangd_compile_db" },
-	{ name = "trusted-workspace.nvim", module = "trusted_workspace" },
-	{ name = "treesitter-runtime.nvim", module = "treesitter_runtime" },
-	{ name = "theme-router.nvim", module = "theme_router" },
-}
+local local_plugins = require("config.local_plugins")
 
 local function version_string()
 	local version = vim.version()
@@ -204,7 +187,7 @@ end
 
 local function local_product_status()
 	local rows = {}
-	for _, product in ipairs(LOCAL_PRODUCTS) do
+	for _, product in ipairs(local_plugins.products()) do
 		local plugin = package.loaded[product.module]
 		local row = { name = product.name, module = product.module, loaded = type(plugin) == "table" }
 		if plugin == nil or plugin == false then

@@ -1,5 +1,5 @@
 -- Register repository-local product boundaries without involving Lazy or its
--- lockfile. The order is the extraction plan's canonical product order.
+-- lockfile. This registry also supplies the observational health inventory.
 local M = {}
 
 local NAMES = {
@@ -11,14 +11,11 @@ local NAMES = {
 	"project-python.nvim",
 	"action-palette.nvim",
 	"diagram-view.nvim",
+	"markdown-view.nvim",
 	"log-workbench.nvim",
-	"repo-scratch.nvim",
-	"coverage-workbench.nvim",
-	"just-workbench.nvim",
 	"clangd-compile-db.nvim",
 	"trusted-workspace.nvim",
 	"treesitter-runtime.nvim",
-	"theme-router.nvim",
 }
 
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve local plugin harness")
@@ -39,6 +36,13 @@ end
 ---@return string[]
 function M.names()
 	return vim.deepcopy(NAMES)
+end
+
+---Return runtime names and their public modules without loading products.
+function M.products()
+	return vim.tbl_map(function(name)
+		return { name = name, module = name:gsub("%.nvim$", ""):gsub("-", "_") }
+	end, NAMES)
 end
 
 ---Return the canonical absolute runtime paths as a caller-owned copy.

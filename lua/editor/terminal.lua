@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("editor.terminal")
 local function toggle_log_highlight()
 	local bufnr = vim.api.nvim_get_current_buf()
 	local ft = vim.bo[bufnr].filetype
@@ -31,13 +32,13 @@ end, {
 	desc = "Toggle line wrap",
 })
 
-vim.keymap.set("i", "jj", "<Esc>", {
+usage_map("i", "jj", "<Esc>", {
 	noremap = true,
 	silent = true,
 	desc = "Exit insert mode",
 })
 
-vim.keymap.set("t", "jj", "<C-\\><C-n>", {
+usage_map("t", "jj", "<C-\\><C-n>", {
 	noremap = true,
 	silent = true,
 	desc = "Exit terminal mode",
@@ -47,49 +48,46 @@ local pager = require("config.pager")
 
 -- Saving and tab ownership make no sense over a read-only pager buffer.
 if not pager.active then
-	vim.keymap.set("n", "<leader>w", "<cmd>write<CR>", {
+	usage_map("n", "<leader>w", "<cmd>write<CR>", {
 		noremap = true,
 		silent = true,
 		desc = "Save",
 	})
 	require("config.tabs").setup()
 	require("config.menu").setup()
-	require("config.just").setup()
-	require("config.scratch").setup()
-	require("config.coverage").setup()
 else
-	vim.keymap.set("n", "<leader>q", ":q<CR>", {
+	usage_map("n", "<leader>q", ":q<CR>", {
 		noremap = true,
 		silent = true,
 		desc = "Quit",
 	})
 end
 
-vim.keymap.set("n", "<leader>Q", "<cmd>CloseAll<cr>", {
+usage_map("n", "<leader>Q", "<cmd>CloseAll<cr>", {
 	noremap = true,
 	silent = true,
 	desc = "Close all (confirm)",
 })
 
-vim.keymap.set("n", "<leader>lh", "<cmd>ToggleLogHighlight<cr>", {
+usage_map("n", "<leader>lh", "<cmd>ToggleLogHighlight<cr>", {
 	noremap = true,
 	silent = true,
 	desc = "Toggle log highlight",
 })
 
-vim.keymap.set("n", "<leader>lw", "<cmd>ToggleWrap<cr>", {
+usage_map("n", "<leader>lw", "<cmd>ToggleWrap<cr>", {
 	noremap = true,
 	silent = true,
 	desc = "Toggle line wrap",
 })
 
-vim.keymap.set("n", "<leader>j", "<Cmd>tabprevious<CR>", {
+usage_map("n", "<leader>j", "<Cmd>tabprevious<CR>", {
 	noremap = true,
 	silent = true,
 	desc = "Previous tab",
 })
 
-vim.keymap.set("n", "<leader>k", "<Cmd>tabnext<CR>", {
+usage_map("n", "<leader>k", "<Cmd>tabnext<CR>", {
 	noremap = true,
 	silent = true,
 	desc = "Next tab",

@@ -6,17 +6,8 @@ vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local fixture = vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p", tonumber("700", 8)) == 1)
@@ -39,15 +30,15 @@ local function report()
 	return vim.json.decode(assert(require("config.fs").read_binary(report_path)))
 end
 
-test("contract version and canonical JSON are stable", function()
+T["contract version and canonical JSON are stable"] = function()
 	assert(provision.contract_version == 2)
 	assert(provision._json_encode({ z = 1, a = { true, "x" } }) == '{"a":[true,"x"],"z":1}')
 	local result = vim.system({ repo .. "/scripts/provision-runtime", "--contract-version" }, { text = true })
 		:wait(5000)
 	assert(result.code == 0 and result.stdout == "2\n" and (result.stderr or "") == "")
-end)
+end
 
-test("CLI rejects incomplete duplicate unknown and relative arguments", function()
+T["CLI rejects incomplete duplicate unknown and relative arguments"] = function()
 	for _, arguments in ipairs({
 		{},
 		{ "--non-interactive" },
@@ -64,9 +55,9 @@ test("CLI rejects incomplete duplicate unknown and relative arguments", function
 		local result = vim.system(command, { text = true, env = { HOME = fixture } }):wait(5000)
 		assert(result.code == 2, "invalid CLI did not exit 2: " .. vim.inspect(arguments))
 	end
-end)
+end
 
-test("CLI rejects outside-HOME paths before creating them", function()
+T["CLI rejects outside-HOME paths before creating them"] = function()
 	local outside_xdg = fixture .. "-outside-xdg"
 	local outside_report = fixture .. "-outside-report/report.json"
 	vim.fn.delete(outside_xdg, "rf")
@@ -97,18 +88,9 @@ test("CLI rejects outside-HOME paths before creating them", function()
 	}, { text = true, env = { HOME = fixture } }):wait(5000)
 	assert(report_result.code == 2)
 	assert(vim.uv.fs_lstat(vim.fs.dirname(outside_report)) == nil, "rejected report parent was created")
-end)
+end
 
-test("CLI is offline by default and propagates explicit authorization", function()
-	local source = table.concat(vim.fn.readfile(repo .. "/scripts/provision-runtime"), "\n")
-	assert(source:find("allow_network=0", 1, true))
-	assert(source:find("NVIM_CONFIG_ALLOW_NETWORK=$allow_network", 1, true))
-	assert(source:find("export NVIM_CONFIG_OFFLINE=1", 1, true))
-	assert(source:find("export NVIM_CONFIG_OFFLINE=0", 1, true))
-	assert(select(2, source:gsub('NVIM_CONFIG_ALLOW_NETWORK == "1"', "")) >= 3)
-	assert(source:find("/localdata", 1, true))
-	assert(source:find('chmod 700 "$root_physical"', 1, true))
-
+T["CLI is offline by default and propagates explicit authorization"] = function()
 	local fake_nvim = fixture .. "/fake-nvim"
 	local probe = fixture .. "/network-probe"
 	assert(vim.fn.writefile({
@@ -142,9 +124,9 @@ test("CLI is offline by default and propagates explicit authorization", function
 			assert(stat.mode % 512 == tonumber("700", 8), root .. " was not secured")
 		end
 	end
-end)
+end
 
-test("initial report is deterministic complete and mode 0600", function()
+T["initial report is deterministic complete and mode 0600"] = function()
 	assert(report_store.initialize())
 	local first = assert(require("config.fs").read_binary(report_path))
 	assert(report_store.initialize())
@@ -159,9 +141,9 @@ test("initial report is deterministic complete and mode 0600", function()
 	assert(value.tools.mmdflux and value.tools.plantuml)
 	assert(value.tools["markdown-preview"], "managed manifest entry was omitted")
 	assert(vim.uv.fs_lstat(report_path).mode % 512 == tonumber("600", 8))
-end)
+end
 
-test("failure report uses bounded sorted codes", function()
+T["failure report uses bounded sorted codes"] = function()
 	assert(report_store.initialize())
 	assert(report_store.fail("tools") == false)
 	assert(report_store.fail("lock-changed") == false)
@@ -169,9 +151,9 @@ test("failure report uses bounded sorted codes", function()
 	assert(vim.deep_equal(report().error_codes, { "lock-changed", "tools" }))
 	local ok = pcall(report_store.fail, "arbitrary-detail")
 	assert(not ok, "unbounded error detail entered the report")
-end)
+end
 
-test("report rejects paths outside HOME and hostile targets", function()
+T["report rejects paths outside HOME and hostile targets"] = function()
 	local original = vim.env.NVIM_CONFIG_PROVISION_REPORT
 	vim.env.NVIM_CONFIG_PROVISION_REPORT = "/tmp/nvim-provision-report.json"
 	assert(not pcall(report_store.initialize), "report escaped HOME")
@@ -180,9 +162,9 @@ test("report rejects paths outside HOME and hostile targets", function()
 	assert(not pcall(report_store.initialize), "report followed a symlink target")
 	assert(vim.uv.fs_unlink(vim.env.NVIM_CONFIG_PROVISION_REPORT))
 	vim.env.NVIM_CONFIG_PROVISION_REPORT = original
-end)
+end
 
-test("plugin checkout permits only generated help tags", function()
+T["plugin checkout permits only generated help tags"] = function()
 	local checkout_root = fixture .. "/checkout"
 	assert(vim.fn.mkdir(checkout_root, "p") == 1)
 	local environment = {
@@ -210,18 +192,13 @@ test("plugin checkout permits only generated help tags", function()
 	assert(vim.fn.writefile({ "unexpected" }, checkout_root .. "/unexpected.lua") == 0)
 	local dirty = provision._checkout("fixture", checkout_root, head)
 	assert(dirty.exact == false and dirty.problem == "dirty")
-end)
-
-vim.env.HOME = old_home
-vim.env.NVIM_CONFIG_ROOT = old_root
-vim.env.NVIM_CONFIG_PROVISION_REPORT = old_report
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("provision_runtime_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+hooks.post_once = function()
+	vim.env.HOME = old_home
+	vim.env.NVIM_CONFIG_ROOT = old_root
+	vim.env.NVIM_CONFIG_PROVISION_REPORT = old_report
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

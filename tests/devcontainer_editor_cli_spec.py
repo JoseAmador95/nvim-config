@@ -8099,6 +8099,441 @@ class DevContainerEditorCliTest(unittest.TestCase):
         )
         self.assertFalse(snapshot_path.exists())
 
+    @contextlib.contextmanager
+    def editor_bridge(
+        self, *, timeout_ms: int = 5000, batch_size: int = 32
+    ) -> Iterator[tuple[object, list[dict[str, object]]]]:
+        """Run the real editor owner against this test's private spool."""
+        environment = {
+            "NVIM_DEVCONTAINER": "1",
+            "NVIM_DEVCONTAINER_CONTAINER_ROOT": str(self.repo),
+            "NVIM_DEVCONTAINER_SPOOL_ROOT": str(self.spool.root),
+        }
+        output: list[dict[str, object]] = []
+        with (
+            mock.patch.dict(os.environ, environment),
+            contextlib.ExitStack() as resources,
+        ):
+            yield (
+                MODULE.EditorBridge(resources, output.append, timeout_ms, batch_size),
+                output,
+            )
+
+    def inbox_request(self, **overrides: object) -> dict[str, object]:
+        """Publish one real signed location request for bridge behavior tests."""
+        request = {
+            "version": MODULE.MESSAGE_VERSION,
+            "request_id": str(uuid.uuid4()),
+            "action": "open_location",
+            "path": "file.txt",
+            "line": 1,
+            "column": 2,
+            "created_at": MODULE.utc_now(),
+            **overrides,
+        }
+        request = MODULE.signed_message(self.token, "open_location", request)
+        MODULE.atomic_create_json_at(
+            self.spool.inbox_fd, f"{request['request_id']}.json", request
+        )
+        return request
+
+    def bridge_process(self, timeout_ms: int = 5000) -> subprocess.Popen[bytes]:
+        """Start an isolated bridge whose stdin is the test's lifetime leash."""
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                str(REPO / "scripts/devcontainer-editor"),
+                "bridge",
+                "--ack-timeout-ms",
+                str(timeout_ms),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=self.repo,
+            env={
+                **os.environ,
+                "NVIM_DEVCONTAINER": "1",
+                "NVIM_DEVCONTAINER_CONTAINER_ROOT": str(self.repo),
+                "NVIM_DEVCONTAINER_SPOOL_ROOT": str(self.spool.root),
+            },
+        )
+
+    def bridge_exchange(
+        self,
+        process: subprocess.Popen[bytes],
+        correlation: int,
+        method: str,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        """Exchange one bounded RPC frame with a real subprocess."""
+        assert process.stdin is not None
+        process.stdin.write(
+            json.dumps({"id": correlation, "method": method, "params": params}).encode()
+            + b"\n"
+        )
+        process.stdin.flush()
+        return json.loads(self.read_process_line(process))
+
+    def test_bridge_inbox_requires_editor_confirmation_before_positive_ack(
+        self,
+    ) -> None:
+        """A validated location is retired once and remains unacknowledged until opened."""
+        self.record()
+        request = self.inbox_request()
+        name = f"{request['request_id']}.json"
+        with self.editor_bridge() as (bridge, _):
+            batch = bridge.poll()
+            self.assertEqual(batch["records"][0]["path"], str(self.file))
+            self.assertFalse(MODULE.entry_exists_at(self.spool.inbox_fd, name))
+            self.assertFalse(MODULE.entry_exists_at(self.spool.acks_fd, name))
+            self.assertTrue(
+                bridge.complete_open(
+                    {"request_id": request["request_id"], "ok": True, "error": None}
+                )
+            )
+            ack = MODULE.read_private_json_at(self.spool.acks_fd, name, "ack")
+            MODULE.validate_ack(ack, self.token, request)
+            with self.assertRaisesRegex(MODULE.EditorError, "unknown or expired"):
+                bridge.complete_open(
+                    {"request_id": request["request_id"], "ok": True, "error": None}
+                )
+
+    def test_bridge_inbox_rejects_invalid_auth_schema_and_traversal(self) -> None:
+        """Invalid inputs never become editor actions; authenticated route errors get negative ACKs."""
+        self.record()
+        requests = [
+            self.inbox_request(extra=True),
+            self.inbox_request(line=True),
+            self.inbox_request(path="../outside"),
+        ]
+        invalid = self.inbox_request()
+        invalid["auth"] = "0" * 64
+        MODULE.atomic_replace_json_at(
+            self.spool.inbox_fd, f"{invalid['request_id']}.json", invalid
+        )
+        with self.editor_bridge(batch_size=2) as (bridge, _):
+            first = bridge.poll()
+            self.assertEqual(len(first["records"]), 2)
+            self.assertEqual(first["remaining"], 2)
+            records = first["records"] + bridge.poll()["records"]
+            self.assertTrue(all("error" in record for record in records))
+            self.assertFalse(bridge.opens)
+            for request in requests[:2] + [invalid]:
+                self.assertFalse(
+                    MODULE.entry_exists_at(
+                        self.spool.acks_fd, f"{request['request_id']}.json"
+                    )
+                )
+            ack = MODULE.read_private_json_at(
+                self.spool.acks_fd, f"{requests[2]['request_id']}.json", "ack"
+            )
+            self.assertFalse(ack["ok"])
+
+    def test_bridge_pins_spool_and_releases_owned_descriptors(self) -> None:
+        """Replacing a spool path cannot redirect operations and every descriptor closes."""
+        self.record()
+        with self.editor_bridge() as (bridge, _):
+            self.assertEqual(bridge.poll()["records"], [])
+            descriptor = bridge.spool.inbox_fd
+            displaced = self.spool.root / "inbox-old"
+            (self.spool.root / "inbox").rename(displaced)
+            hostile = self.root / "hostile"
+            hostile.mkdir()
+            (self.spool.root / "inbox").symlink_to(hostile, target_is_directory=True)
+            request = self.inbox_request()
+            batch = bridge.poll()
+            self.assertEqual(batch["records"][0]["request_id"], request["request_id"])
+            self.assertEqual(list(hostile.iterdir()), [])
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
+
+    def test_bridge_rejects_unsafe_records_and_logs_without_repairs(self) -> None:
+        """The bridge preserves record versions and never chmods an unsafe log hierarchy."""
+        record = self.record()
+        log = MODULE.log_path(self.paths, self.repo)
+        MODULE.atomic_bytes(log, b"lifecycle log\n")
+        with self.editor_bridge() as (bridge, _):
+            for version in range(2, 7):
+                with self.subTest(version=version):
+                    value = {
+                        key: value
+                        for key, value in record.items()
+                        if key in MODULE.record_keys(version)
+                    }
+                    value["version"] = version
+                    MODULE.atomic_json(MODULE.record_path(self.paths, self.repo), value)
+                    self.assertEqual(
+                        bridge.workspace(str(self.repo))["version"], version
+                    )
+                    self.assertEqual(bridge.log(str(self.repo)), str(log))
+            log.chmod(0o644)
+            with self.assertRaises(MODULE.EditorError):
+                bridge.log(str(self.repo))
+            self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o644)
+            log.chmod(0o600)
+            log.unlink()
+            log.symlink_to(self.file)
+            with self.assertRaises(MODULE.EditorError):
+                bridge.log(str(self.repo))
+            self.assertEqual(self.file.read_text(), "hello\n")
+
+    def test_bridge_host_ack_is_validated_retired_and_redacted(self) -> None:
+        """The Python owner waits for an authenticated ACK and never returns its auth."""
+        self.record()
+        with self.editor_bridge() as (bridge, output):
+            request_id = bridge.request_host(
+                1, {"action": "editor_ready", "timeout_ms": 5000, "request_id": None}
+            )
+            request = MODULE.read_private_json_at(
+                self.spool.outbox_fd, request_id + ".json", "request"
+            )
+            MODULE.validate_host_request(request, self.token, request_id + ".json")
+            bridge.tick()
+            self.assertEqual(output, [])
+            MODULE.write_ack(self.spool, self.token, request, True, None)
+            bridge.tick()
+            self.assertTrue(output[0]["result"]["ok"])
+            self.assertNotIn("auth", output[0]["result"])
+            self.assertFalse(
+                MODULE.entry_exists_at(self.spool.acks_fd, request_id + ".json")
+            )
+
+    def test_bridge_fragmentation_allowlist_eof_and_no_lifecycle_cleanup(self) -> None:
+        """A real helper frames split requests and EOF never retires coordinator state."""
+        self.record()
+        state = MODULE.record_path(self.paths, self.repo).read_bytes()
+        process = self.bridge_process()
+        assert process.stdin is not None
+        try:
+            process.stdin.write(b'{"id":1,"method":"new_claim_id",')
+            process.stdin.flush()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                self.assertEqual(selector.select(0.03), [])
+            process.stdin.write(b'"params":{"request_id":null}}\n')
+            process.stdin.flush()
+            result = json.loads(self.read_process_line(process))
+            self.assertEqual(result["id"], 1)
+            MODULE.canonical_uuid4(result["result"], "claim")
+            rejected = self.bridge_exchange(process, 2, "exec", {"argv": ["false"]})
+            self.assertIn("not allowed", rejected["error"])
+            self.bridge_exchange(
+                process,
+                3,
+                "request_host",
+                {"action": "lazygit", "timeout_ms": 5000, "request_id": None},
+            )
+        finally:
+            code, _, stderr = self.finish_process(process)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(MODULE.record_path(self.paths, self.repo).read_bytes(), state)
+        self.assertTrue((self.spool.root / "auth.json").is_file())
+        self.assertEqual(len(list((self.spool.root / "outbox").glob("*.json"))), 1)
+
+    def test_bridge_rejects_incomplete_oversized_and_replayed_frames(self) -> None:
+        """The framing boundary is bounded and never repeats a correlation."""
+        frames = [
+            b'{"id":',
+            b"x" * MODULE.MAX_JSON_BYTES,
+            b'{"id":1,"method":"new_claim_id","params":{"request_id":null}}\n' * 2,
+        ]
+        for frame in frames:
+            with self.subTest(size=len(frame)):
+                process = self.bridge_process()
+                stdout, stderr = process.communicate(frame, timeout=5)
+                self.assertEqual(process.returncode, 2, (stdout, stderr))
+                self.assertIn(b"editor bridge", stderr)
+
+    def test_bridge_open_timeout_is_negative_and_late_confirmation_cannot_replay(
+        self,
+    ) -> None:
+        """A stalled editor produces a negative ACK and cannot later claim success."""
+        self.record()
+        request = self.inbox_request()
+        with self.editor_bridge(timeout_ms=10) as (bridge, _):
+            bridge.poll()
+            with mock.patch.object(
+                MODULE.time, "monotonic", return_value=time.monotonic() + 10
+            ):
+                bridge.tick()
+            ack = MODULE.read_private_json_at(
+                self.spool.acks_fd, f"{request['request_id']}.json", "ack"
+            )
+            self.assertFalse(ack["ok"])
+            self.assertIn("timed out", ack["error"])
+            with self.assertRaisesRegex(MODULE.EditorError, "unknown or expired"):
+                bridge.complete_open(
+                    {"request_id": request["request_id"], "ok": True, "error": None}
+                )
+
+    def test_bridge_real_host_timeout_is_correlated(self) -> None:
+        """A real helper can expire host requests while waiting on editor input."""
+        self.record()
+        process = self.bridge_process()
+        try:
+            response = self.bridge_exchange(
+                process,
+                9,
+                "request_host",
+                {"action": "editor_ready", "timeout_ms": 150, "request_id": None},
+            )
+            self.assertEqual(response["id"], 9)
+            event = json.loads(self.read_process_line(process))
+            self.assertEqual((event["id"], event["event"]), (9, "host_result"))
+            self.assertIn("timed out", event["error"])
+        finally:
+            self.finish_process(process)
+
+    def test_bridge_real_neovim_confirms_open_before_positive_ack(self) -> None:
+        """An actual Neovim action succeeds; a callback that does nothing is rejected."""
+        self.record()
+        for opens in (True, False):
+            with self.subTest(opens=opens):
+                request = self.inbox_request()
+                ack = self.spool.root / "acks" / f"{request['request_id']}.json"
+                script = self.root / "editor.lua"
+                script.write_text(
+                    "vim.o.shadafile = 'NONE'\n"
+                    f"vim.opt.runtimepath:prepend({json.dumps(str(REPO / 'local-plugins/devcontainer-editor.nvim'))})\n"
+                    f"package.path = {json.dumps(str(REPO / 'local-plugins/_shared/lua/?.lua') + ';')} .. package.path\n"
+                    "local core = require('devcontainer_editor')\n"
+                    f"core.setup({{launcher={json.dumps(str(REPO / 'scripts/devcontainer-editor'))},watch=false,open=function(path, position)\n"
+                    f"assert(vim.uv.fs_stat({json.dumps(str(ack))}) == nil, 'premature ACK')\n"
+                    + (
+                        "vim.api.nvim_cmd({cmd='edit',args={path}},{}); vim.api.nvim_win_set_cursor(0,{position.lnum,position.col-1})\n"
+                        if opens
+                        else "return true\n"
+                    )
+                    + "end})\n"
+                    + "local count, err = core.consume_spool_once()\n"
+                    + (
+                        "assert(count == 1, err)\n"
+                        if opens
+                        else "assert(count == nil and err:find('did not confirm',1,true))\n"
+                    )
+                    + "core.teardown()\n",
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    [
+                        "nvim",
+                        "--headless",
+                        "-u",
+                        "NONE",
+                        "-i",
+                        "NONE",
+                        "-l",
+                        str(script),
+                    ],
+                    cwd=self.repo,
+                    env={
+                        **os.environ,
+                        "NVIM_DEVCONTAINER": "1",
+                        "NVIM_DEVCONTAINER_CONTAINER_ROOT": str(self.repo),
+                        "NVIM_DEVCONTAINER_SPOOL_ROOT": str(self.spool.root),
+                    },
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                value = MODULE.read_private_json(ack, "ack")
+                self.assertEqual(value["ok"], opens)
+                self.assertTrue(MODULE.valid_message_auth(self.token, "ack", value))
+
+    def test_remote_snapshot_probe_requires_python_before_pane_switch(self) -> None:
+        """All container transports require a working stdlib-only Python bridge."""
+        snapshot = mock.Mock(spec=MODULE.ConfigSnapshot)
+        snapshot.name = "config-current"
+        snapshot.marker = "exact-marker"
+        with mock.patch.object(
+            MODULE,
+            "run",
+            return_value=subprocess.CompletedProcess([], 126, b"", b"missing python"),
+        ) as run:
+            with self.assertRaisesRegex(MODULE.EditorError, "requires Python 3"):
+                MODULE.verify_remote_config_snapshot(
+                    str(self.cli),
+                    str(self.docker),
+                    self.repo,
+                    self.config,
+                    str(self.spool.root),
+                    snapshot,
+                )
+        self.assertIn("python3 -I -S", run.call_args.args[0][-5])
+
+    def test_bridge_hostile_hierarchy_and_records_never_signal_absence(self) -> None:
+        """Dangling links and extant hostile leaves cannot enable host fallback."""
+        self.record()
+        for broken in ("root", "workspaces"):
+            with self.subTest(broken=broken):
+                root = self.root / f"unsafe-{broken}"
+                if broken == "root":
+                    root.symlink_to(self.root / "missing")
+                else:
+                    root.mkdir(mode=0o700)
+                    (root / "workspaces").symlink_to(self.root / "missing")
+                with mock.patch.dict(
+                    os.environ, {"NVIM_DEVCONTAINER_STATE_HOME": str(root)}
+                ):
+                    with self.editor_bridge() as (bridge, _):
+                        with self.assertRaises(MODULE.EditorError) as caught:
+                            bridge.workspace(str(self.repo))
+                        self.assertNotIsInstance(
+                            caught.exception, MODULE.NoActiveEditor
+                        )
+        record_path = MODULE.record_path(self.paths, self.repo)
+        for kind in ("symlink", "fifo"):
+            with self.subTest(kind=kind):
+                record_path.unlink()
+                if kind == "symlink":
+                    record_path.symlink_to(self.root / "missing")
+                else:
+                    os.mkfifo(record_path, 0o600)
+                with self.editor_bridge() as (bridge, _):
+                    with self.assertRaises(MODULE.EditorError) as caught:
+                        bridge.workspace(str(self.repo))
+                    self.assertNotIsInstance(caught.exception, MODULE.NoActiveEditor)
+                record_path.unlink()
+                self.record()
+
+    def test_bridge_long_unicode_batches_respect_frames_without_losing_requests(
+        self,
+    ) -> None:
+        """Frame admission leaves valid excess locations queued for the next poll."""
+        self.record()
+        component = "é" * 95
+        target = self.repo / component / component / component / component
+        target.parent.mkdir(parents=True)
+        target.write_text("hello\n", encoding="utf-8")
+        requests = [
+            self.inbox_request(path=target.relative_to(self.repo).as_posix())
+            for _ in range(32)
+        ]
+        delivered = set()
+        with self.editor_bridge(timeout_ms=600001, batch_size=1000000) as (bridge, _):
+            first = bridge.poll()
+            self.assertGreater(first["remaining"], 0)
+            batch = first
+            while batch["records"]:
+                self.assertLessEqual(
+                    len(MODULE.bridge_json({"id": 1, "result": batch})) + 1,
+                    MODULE.MAX_JSON_BYTES,
+                )
+                for record in batch["records"]:
+                    self.assertNotIn(record["request_id"], delivered)
+                    delivered.add(record["request_id"])
+                    bridge.complete_open(
+                        {"request_id": record["request_id"], "ok": True, "error": None}
+                    )
+                queued = list((self.spool.root / "inbox").glob("*.json"))
+                self.assertEqual(len(queued), 32 - len(delivered))
+                batch = bridge.poll()
+        self.assertEqual(delivered, {request["request_id"] for request in requests})
+
     def test_module_imports_are_at_module_scope_and_cli_help_is_offline(self) -> None:
         """The Python entrypoint imports cleanly and help starts no lifecycle."""
         result = subprocess.run(

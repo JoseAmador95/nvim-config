@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("plugins.vscode")
 return {
 	{
 		"vscode-neovim/vscode-multi-cursor.nvim",
@@ -9,7 +10,7 @@ return {
 			-- Bindings -------------------------------------------------------------------
 			local cursors = require("vscode-multi-cursor")
 
-			local k = vim.keymap.set
+			local k = usage_map
 			k({ "n", "x" }, "mc", cursors.create_cursor, { expr = true, desc = "Create cursor" })
 			k({ "n" }, "mcc", cursors.cancel, { desc = "Cancel/Clear all cursors" })
 			k({ "n", "x" }, "mi", cursors.start_left, { desc = "Start cursors on the left" })

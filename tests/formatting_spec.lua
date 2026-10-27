@@ -6,8 +6,6 @@ vim.opt.runtimepath:prepend(repo)
 vim.opt.runtimepath:append(vim.fs.joinpath(vim.fn.stdpath("data"), "lazy", "conform.nvim"))
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
 local notifications = {}
 local resolve_calls = {}
 local tool_calls = {}
@@ -81,21 +79,10 @@ local discovery_loaded_tool_bootstrap = package.loaded["config.tool_bootstrap"] 
 local discovery_loaded_verified_tools = package.loaded.verified_tools ~= nil
 package.loaded["config.tool_bootstrap"] = tool_bootstrap
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function reset_observed(next_mode)
 	mode = next_mode or "allow"
@@ -126,13 +113,13 @@ vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "local x=1", "return x" })
 vim.bo[buffer].filetype = "lua"
 vim.api.nvim_set_current_buf(buffer)
 
-test("native spec discovery leaves verified tool resolution deferred", function()
+T["native spec discovery leaves verified tool resolution deferred"] = function()
 	assert(not discovery_loaded_tool_bootstrap, "formatting spec discovery loaded config.tool_bootstrap")
 	assert(not discovery_loaded_verified_tools, "formatting spec discovery loaded verified_tools")
 	equal({}, tool_calls, "formatting spec discovery resolved a tool")
-end)
+end
 
-test("central wrapper is idempotent, caller-owned, callback-once, and LSP-never", function()
+T["central wrapper is idempotent, caller-owned, callback-once, and LSP-never"] = function()
 	local raw_calls = {}
 	local fake = {
 		list_formatters_for_buffer = function()
@@ -163,9 +150,9 @@ test("central wrapper is idempotent, caller-owned, callback-once, and LSP-never"
 	equal("never", raw_calls[1].lsp_format, "central API permits LSP formatting")
 	equal(false, raw_calls[1].lsp_fallback, "legacy lsp_fallback bypassed the central policy")
 	equal(1, callbacks, "central wrapper invoked the callback more than once")
-end)
+end
 
-test("every configured formatter maps to its exact manifest command", function()
+T["every configured formatter maps to its exact manifest command"] = function()
 	reset_observed()
 	local expected = {
 		["clang-format"] = { tool = "clang-format", command = "clang-format" },
@@ -185,9 +172,9 @@ test("every configured formatter maps to its exact manifest command", function()
 		ordered[#ordered + 1] = expected[name]
 	end
 	equal(ordered, tool_calls, "formatter-to-manifest command mapping drifted")
-end)
+end
 
-test("plugin setup is lazy, caller-owned, and configures only verified formatters", function()
+T["plugin setup is lazy, caller-owned, and configures only verified formatters"] = function()
 	reset_observed()
 	local caller_opts = vim.deepcopy(formatting_spec.opts)
 	local before = vim.deepcopy(caller_opts)
@@ -213,9 +200,9 @@ test("plugin setup is lazy, caller-owned, and configures only verified formatter
 	for _, name in ipairs({ "stylua", "clang-format", "ruff_format", "shfmt", "tombi", "prettierd" }) do
 		assert(type(formatting_spec.opts.formatters[name].command) == "function", name .. " lacks a verified command")
 	end
-end)
+end
 
-test("direct Conform API resolves twice and spawns the final exact argv", function()
+T["direct Conform API resolves twice and spawns the final exact argv"] = function()
 	reset_observed()
 	local opts = {
 		bufnr = buffer,
@@ -245,9 +232,9 @@ test("direct Conform API resolves twice and spawns the final exact argv", functi
 		"-",
 	}, spawns[1].argv, "Conform did not spawn the final verified path with exact arguments")
 	equal(1, callbacks, "successful direct formatting invoked its callback more than once")
-end)
+end
 
-test("deny, revoke, resolver drift, and non-exact paths never reach spawn", function()
+T["deny, revoke, resolver drift, and non-exact paths never reach spawn"] = function()
 	for _, denied_mode in ipairs({ "deny", "throw", "revoke", "revoke-runner", "drift", "drift-runner", "relative" }) do
 		reset_observed(denied_mode)
 		local callbacks = 0
@@ -277,9 +264,9 @@ test("deny, revoke, resolver drift, and non-exact paths never reach spawn", func
 	equal({}, resolve_calls, "unmanaged formatter reached authority resolution")
 	equal({}, spawns, "unmanaged formatter reached spawn")
 	equal(1, #notifications, "unmanaged formatter did not notify exactly once")
-end)
+end
 
-test("save, FormatFile mapping target, and formatexpr share the central gate", function()
+T["save, FormatFile mapping target, and formatexpr share the central gate"] = function()
 	reset_observed()
 	vim.g.conform_format_on_save = true
 	vim.api.nvim_exec_autocmds("BufWritePre", { buffer = buffer, group = "Conform", modeline = false })
@@ -297,26 +284,20 @@ test("save, FormatFile mapping target, and formatexpr share the central gate", f
 	equal(3, #spawns, "formatexpr did not use the central gate")
 	equal(6, #resolve_calls, "one of the three entry points skipped runner-boundary revalidation")
 	vim.g.conform_format_on_save = false
-end)
-
-pcall(vim.api.nvim_del_user_command, "FormatFile")
-pcall(vim.api.nvim_del_user_command, "FormatToggle")
-pcall(vim.api.nvim_del_augroup_by_name, "Conform")
-if vim.api.nvim_buf_is_valid(buffer) then
-	vim.api.nvim_buf_delete(buffer, { force = true })
 end
-vim.fn.executable = original_executable
-vim.system = original_system
-vim.notify = original_notify
-package.loaded["config.execution"] = original_execution
-package.loaded["config.tool_bootstrap"] = original_tool_bootstrap
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	pcall(vim.api.nvim_del_user_command, "FormatFile")
+	pcall(vim.api.nvim_del_user_command, "FormatToggle")
+	pcall(vim.api.nvim_del_augroup_by_name, "Conform")
+	if vim.api.nvim_buf_is_valid(buffer) then
+		vim.api.nvim_buf_delete(buffer, { force = true })
 	end
-	vim.cmd("cquit")
+	vim.fn.executable = original_executable
+	vim.system = original_system
+	vim.notify = original_notify
+	package.loaded["config.execution"] = original_execution
+	package.loaded["config.tool_bootstrap"] = original_tool_bootstrap
 end
 
-print(("formatting_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+return T

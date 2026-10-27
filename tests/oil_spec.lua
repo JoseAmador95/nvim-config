@@ -9,24 +9,9 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local entry
 local current_dir = "/tmp/oil-fixture/"
@@ -71,16 +56,16 @@ local function reset()
 	opened = {}
 end
 
-test("setup injects the host selection callback without mutating caller opts", function()
+T["setup injects the host selection callback without mutating caller opts"] = function()
 	local original = { keymaps = { q = "actions.close" } }
 	equal("configured", adapter.setup(original), "adapter did not return oil.setup result")
 	equal(nil, original.keymaps["<CR>"], "adapter mutated caller options")
 	equal("actions.close", setup_options.keymaps.q, "existing Oil keymap was lost")
 	assert(type(setup_options.keymaps["<CR>"].callback) == "function", "host callback was not installed")
 	equal(adapter.open_selection, setup_options.keymaps["<CR>"].callback, "Oil callback identity changed")
-end)
+end
 
-test("directory and symlink-directory entries use Oil native navigation", function()
+T["directory and symlink-directory entries use Oil native navigation"] = function()
 	reset()
 	directory = true
 	entry = { name = "directory", parsed_name = "renamed-directory", type = "directory" }
@@ -94,18 +79,18 @@ test("directory and symlink-directory entries use Oil native navigation", functi
 	assert(adapter.open_selection(), "symlink-directory selection was rejected")
 	equal({ false }, select_calls, "symlink-directory did not use Oil's resolved directory check")
 	equal({}, opened, "symlink-directory was routed through the file opener")
-end)
+end
 
-test("remote Oil buffers retain native selection semantics", function()
+T["remote Oil buffers retain native selection semantics"] = function()
 	reset()
 	current_dir = nil
 	entry = { name = "remote.txt", parsed_name = "remote-renamed.txt", type = "file" }
 	assert(adapter.open_selection(), "remote selection was rejected")
 	equal({ false }, select_calls, "remote selection did not delegate to Oil")
 	equal({}, opened, "remote selection was routed through a local path")
-end)
+end
 
-test("local files route Oil's resolved buffer path through tab-first", function()
+T["local files route Oil's resolved buffer path through tab-first"] = function()
 	reset()
 	entry = { name = "old-name.lua", parsed_name = "new-name.lua", type = "file" }
 	assert(adapter.open_selection(), "local file selection was rejected")
@@ -124,22 +109,14 @@ test("local files route Oil's resolved buffer path through tab-first", function(
 	options.handle_buffer_callback(bufnr)
 	equal({ resolved }, opened, "adapter ignored Oil's resolved post-rename buffer path")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("missing entries are a no-op", function()
+T["missing entries are a no-op"] = function()
 	reset()
 	entry = nil
 	assert(not adapter.open_selection(), "missing entry reported success")
 	equal({}, select_calls, "missing entry called Oil")
 	equal({}, opened, "missing entry opened a file")
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("oil_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

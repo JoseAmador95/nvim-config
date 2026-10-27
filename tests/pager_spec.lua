@@ -7,18 +7,8 @@ package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", p
 vim.env.NVIM_APPNAME = "nvimpager"
 
 local pager = require("config.pager")
-local failures = {}
-local count = 0
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local function buffer(lines)
 	local buf = vim.api.nvim_create_buf(false, false)
@@ -26,7 +16,7 @@ local function buffer(lines)
 	return buf
 end
 
-test("bounded streaming strips CSI OSC and DCS while preserving buffer state", function()
+T["bounded streaming strips CSI OSC and DCS while preserving buffer state"] = function()
 	local buf = buffer({
 		"plain \27[31mred\27[0m",
 		"OSC \27]8;;https://example.test\7link\27]8;;\27\\ end",
@@ -42,9 +32,9 @@ test("bounded streaming strips CSI OSC and DCS while preserving buffer state", f
 	}))
 	assert(vim.bo[buf].modifiable == false and vim.bo[buf].modified == true)
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("64 MiB boundary is accepted and oversize aborts before materialization", function()
+T["64 MiB boundary is accepted and oversize aborts before materialization"] = function()
 	local buf = buffer({ "plain" })
 	local original_offset = vim.api.nvim_buf_get_offset
 	local original_get_text = vim.api.nvim_buf_get_text
@@ -84,9 +74,9 @@ test("64 MiB boundary is accepted and oversize aborts before materialization", f
 	assert(result == nil and err:find("exceed", 1, true))
 	assert(not text_called, "oversize buffer was read before rejection")
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("set_lines failure restores modifiable and modified exactly", function()
+T["set_lines failure restores modifiable and modified exactly"] = function()
 	local buf = buffer({ "\27[31mred\27[0m" })
 	vim.bo[buf].modified = false
 	vim.bo[buf].modifiable = false
@@ -102,9 +92,9 @@ test("set_lines failure restores modifiable and modified exactly", function()
 	assert(ok and result == nil and err:find("injected set_lines failure", 1, true))
 	assert(vim.bo[buf].modifiable == false and vim.bo[buf].modified == false)
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("pager and viewer filetype callers abort when stripping fails", function()
+T["pager and viewer filetype callers abort when stripping fails"] = function()
 	local buf = buffer({ "raw" })
 	local win = vim.api.nvim_get_current_win()
 	vim.api.nvim_win_set_buf(win, buf)
@@ -126,9 +116,9 @@ test("pager and viewer filetype callers abort when stripping fails", function()
 	pager.strip_ansi = original_strip
 	vim.notify = original_notify
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("successful pager SetFileType fires FileType once without an LSP probe", function()
+T["successful pager SetFileType fires FileType once without an LSP probe"] = function()
 	local buf = buffer({ "print('pager')" })
 	vim.api.nvim_win_set_buf(0, buf)
 	local original_strip = pager.strip_ansi
@@ -161,9 +151,9 @@ test("successful pager SetFileType fires FileType once without an LSP probe", fu
 	pager.strip_ansi = original_strip
 	vim.defer_fn = original_defer_fn
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("pager SetFileType can replace an already detected Markdown filetype", function()
+T["pager SetFileType can replace an already detected Markdown filetype"] = function()
 	local buf = buffer({ "# Pager source" })
 	vim.api.nvim_win_set_buf(0, buf)
 	vim.bo[buf].filetype = "markdown"
@@ -195,9 +185,6 @@ test("pager SetFileType can replace an already detected Markdown filetype", func
 	pager.strip_ansi = original_strip
 	vim.notify = original_notify
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
-
-if #failures > 0 then
-	error(table.concat(failures, "\n\n"))
 end
-print(("pager_spec: %d tests passed"):format(count))
+
+return T

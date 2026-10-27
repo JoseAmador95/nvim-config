@@ -30,17 +30,9 @@ assert(vim.fn.setfperm(fake, "rwx------") == 1)
 local bootstrap = require("config.tool_bootstrap")
 local manifest = require("config.toolchain")
 local structural_diff = require("config.review_structural_diff")
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 local function trace()
 	local f = assert(io.open(home .. "/trace", "rb"))
 	local value = f:read("*a")
@@ -48,15 +40,15 @@ local function trace()
 	return vim.split(value, "\0", { plain = true, trimempty = true })
 end
 
-test("resolving an absent tool prepares only a launcher inside ~/.local", function()
+T["resolving an absent tool prepares only a launcher inside ~/.local"] = function()
 	local path = assert(bootstrap.resolve("jq", "jq"))
 	assert(path == home .. "/.local/share/mise/nvim-bin/jq")
 	assert(not uv.fs_stat(home .. "/trace"), "resolution executed Mise")
 	assert(not bootstrap.resolve("gumtree", "gumtree"))
 	assert(not bootstrap.resolve("jq", "bash"))
-end)
+end
 
-test("launcher preserves cwd, argv and protocol streams and isolates tool selection", function()
+T["launcher preserves cwd, argv and protocol streams and isolates tool selection"] = function()
 	local path = assert(bootstrap.resolve("jq", "jq"))
 	local result = vim.system(
 		{ path, "one two", "$(literal)", "a'b" },
@@ -71,18 +63,18 @@ test("launcher preserves cwd, argv and protocol streams and isolates tool select
 	assert(values[4] == home .. "/.local/state/mise")
 	assert(values[5] == "unset")
 	assert(vim.deep_equal(vim.list_slice(values, 6), { "exec", "jq", "--", "jq", "one two", "$(literal)", "a'b" }))
-end)
+end
 
-test("offline absence fails before exec and cannot fall back to a host command", function()
+T["offline absence fails before exec and cannot fall back to a host command"] = function()
 	local result = vim.system(
 		{ assert(bootstrap.resolve("jq", "jq")), "--version" },
 		{ text = true, env = { NVIM_CONFIG_OFFLINE = "1" } }
 	):wait(5000)
 	assert(result.code ~= 0)
 	assert(trace()[6] == "where")
-end)
+end
 
-test("structural review can launch Mise in its filtered environment and preserves offline mode", function()
+T["structural review can launch Mise in its filtered environment and preserves offline mode"] = function()
 	local function execute(operation)
 		local result
 		local cancel = structural_diff[operation]({
@@ -112,9 +104,9 @@ test("structural review can launch Mise in its filtered environment and preserve
 	vim.env.NVIM_CONFIG_OFFLINE = nil
 	assert(result.output == nil and result.err:find("exit 1", 1, true))
 	assert(trace()[6] == "where", "offline review bypassed the missing-tool check")
-end)
+end
 
-test("named npm and Python launches include their pinned install dependencies", function()
+T["named npm and Python launches include their pinned install dependencies"] = function()
 	for _, item in ipairs({
 		{ "devcontainers-cli", "devcontainer", { "node", "devcontainers-cli" } },
 		{ "debugpy", "debugpy-adapter", { "python", "uv", "debugpy" } },
@@ -127,55 +119,62 @@ test("named npm and Python launches include their pinned install dependencies", 
 		vim.list_extend(expected, { "--", item[2], "--version" })
 		assert(vim.deep_equal(vim.list_slice(trace(), 6), expected))
 	end
-end)
+end
 
-test("missing Mise is reported without installing it", function()
+T["missing Mise is reported without installing it"] = function()
 	vim.env.PATH = "/usr/bin:/bin"
 	local path, err = bootstrap.resolve("jq", "jq")
 	assert(path == nil and err:find(":NvimConfigMiseInstall", 1, true))
 	vim.env.PATH = home .. "/.local/bin:/usr/bin:/bin"
-end)
+end
 
 local installed = false
 local calls = {}
-bootstrap._system = function(argv)
-	calls[#calls + 1] = argv
-	local data
-	if argv[2] == "version" then
-		data = { version = "2026.10.4 macos-arm64" }
-	elseif argv[2] == "ls" then
-		data = { unrelated = { { version = "1.0.0", installed = true } } }
-		for _, name in ipairs(manifest.tool_order) do
-			data[name] = {
-				{
-					version = manifest.tools[name].version,
-					installed = installed,
-					active = installed,
-					install_path = home .. "/.local/share/mise/installs/" .. name .. "/version",
-				},
-			}
-		end
-	else
-		assert(argv[2] == "install" and argv[3] == "--locked")
-		installed = true
-	end
-	return {
-		wait = function()
-			return { code = 0, stdout = data and vim.json.encode(data) or "", stderr = "" }
+local configured = MiniTest.new_set({
+	hooks = {
+		pre_once = function()
+			bootstrap._system = function(argv)
+				calls[#calls + 1] = argv
+				local data
+				if argv[2] == "version" then
+					data = { version = "2026.10.4 macos-arm64" }
+				elseif argv[2] == "ls" then
+					data = { unrelated = { { version = "1.0.0", installed = true } } }
+					for _, name in ipairs(manifest.tool_order) do
+						data[name] = {
+							{
+								version = manifest.tools[name].version,
+								installed = installed,
+								active = installed,
+								install_path = home .. "/.local/share/mise/installs/" .. name .. "/version",
+							},
+						}
+					end
+				else
+					assert(argv[2] == "install" and argv[3] == "--locked")
+					installed = true
+				end
+				return {
+					wait = function()
+						return { code = 0, stdout = data and vim.json.encode(data) or "", stderr = "" }
+					end,
+				}
+			end
 		end,
-	}
-end
+	},
+})
+T["provisioning"] = configured
 
-test("offline provisioning inventories missing tools without consuming an install", function()
+configured["offline provisioning inventories missing tools without consuming an install"] = function()
 	local ok, inventory, changed = bootstrap.provision_exact({ allow_network = false })
 	assert(not ok and not changed and inventory.tools.jq.status == "missing")
 	assert(vim.deep_equal(inventory.extras, { "unrelated@1.0.0" }))
 	for _, argv in ipairs(calls) do
 		assert(argv[2] ~= "install")
 	end
-end)
+end
 
-test("online provisioning installs fixed versions and is idempotent", function()
+configured["online provisioning installs fixed versions and is idempotent"] = function()
 	local ok, inventory, changed = bootstrap.provision_exact({ allow_network = true })
 	assert(ok and changed and inventory.tools.jq.status == "ready")
 	local second, _, again = bootstrap.provision_exact({ allow_network = false })
@@ -190,19 +189,15 @@ test("online provisioning installs fixed versions and is idempotent", function()
 	for _, command in ipairs({ "node", "npm", "python", "python3", "uv" }) do
 		assert(not uv.fs_lstat(home .. "/.local/share/mise/nvim-bin/" .. command), "tool runtime masked the host")
 	end
-end)
+end
 
-for key, value in pairs(old) do
-	vim.env[key] = value
+hooks.post_once = function()
+	for key, value in pairs(old) do
+		vim.env[key] = value
+	end
+	vim.env.NVIM_CONFIG_OFFLINE = old.NVIM_CONFIG_OFFLINE
+	vim.env.MISE_NODE_VERSION = old.MISE_NODE_VERSION
+	vim.fn.delete(home, "rf")
 end
-vim.env.NVIM_CONFIG_OFFLINE = old.NVIM_CONFIG_OFFLINE
-vim.env.MISE_NODE_VERSION = old.MISE_NODE_VERSION
-vim.fn.delete(home, "rf")
-for _, err in ipairs(failures) do
-	vim.api.nvim_err_writeln(err)
-end
-if #failures > 0 then
-	vim.cmd("cquit")
-end
-print(("tool_bootstrap_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+return T

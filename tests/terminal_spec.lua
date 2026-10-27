@@ -17,17 +17,8 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local original_snacks = package.loaded.snacks
 local original_editor = package.loaded["config.editor"]
@@ -121,7 +112,7 @@ end
 vim.api.nvim_chan_send = function(job, payload)
 	sent[#sent + 1] = { job = job, payload = payload }
 end
-vim.schedule = function(callback)
+local function fake_schedule(callback)
 	if defer_scheduled then
 		scheduled[#scheduled + 1] = callback
 	else
@@ -152,7 +143,7 @@ local function spec(id, overrides)
 	}, overrides or {})
 end
 
-test("a first-use lifecycle load failure is returned and remains retryable", function()
+T["a first-use lifecycle load failure is returned and remains retryable"] = function()
 	local original_preload = package.preload.terminal_lifecycle
 	package.preload.terminal_lifecycle = function()
 		error("injected terminal lifecycle load failure")
@@ -181,54 +172,43 @@ test("a first-use lifecycle load failure is returned and remains retryable", fun
 	)
 	local status, retry_err = terminal.status()
 	assert(type(status) == "table", "retry did not load the lifecycle: " .. tostring(retry_err))
-end)
+end
 
-test("specs require arrays, absolute directories, and explicit string env", function()
-	for _, case in ipairs({
-		{ launch = { argv = "printf hello" } },
-		{ launch = { argv = {} } },
-		{ launch = { argv = { "", "value" } } },
-		{ launch = { argv = { "printf", "bad\0value" } } },
-		{ launch = { cwd = "relative" } },
-		{ launch = { cwd = "/definitely/missing" } },
-		{ launch = { env = false } },
-		{ launch = { env = { BAD = 1 } } },
-		{ view = { layout = "popup" } },
-	}) do
-		local _, err = terminal._normalize(vim.tbl_deep_extend("force", spec("invalid"), case))
-		assert(type(err) == "string" and err ~= "")
+T["invalid host layouts leave the running terminal untouched"] = function()
+	local value = spec("invalid-layout")
+	local record = assert(terminal.open(value))
+	local before = terminal.status(value)
+	for _, operation in ipairs({ "open", "toggle", "focus", "restart" }) do
+		local changed = vim.deepcopy(value)
+		changed.view.layout = "popup"
+		local result, err = terminal[operation](changed)
+		assert(not result and err:find("view.layout", 1, true), "invalid host layout was accepted")
+		assert(vim.deep_equal(terminal.status(value), before), "invalid layout changed terminal state")
+		assert(#opened == 1 and record.handle.visible, "invalid layout changed the backend")
 	end
-end)
+	terminal._reset()
+	opened = {}
+end
 
-test("terminal adapter preserves empty arguments after a non-empty executable", function()
+T["terminal adapter preserves empty arguments after a non-empty executable"] = function()
 	local value = spec("empty-argument", { launch = { argv = { "printf", "%s", "" } } })
-	local normalized = assert(terminal._normalize(value))
-	assert(vim.deep_equal(normalized.launch.argv, value.launch.argv), "normalization changed exact argv")
 	assert(terminal.open(value))
 	assert(#opened == 1 and vim.deep_equal(opened[1].argv, value.launch.argv), "backend did not receive exact argv")
 	terminal._reset()
 	opened = {}
-end)
+end
 
-test("an empty environment map opens the default shell", function()
+T["an empty environment map opens the default shell"] = function()
 	local shell = terminal.shell_spec(repo)
-	local normalized = assert(terminal._normalize(shell))
-	assert(
-		next(normalized.launch.env) == nil and not vim.islist(normalized.launch.env),
-		"empty env did not remain a map"
-	)
-	assert(
-		vim.deep_equal(normalized.view.passthrough, { "<Tab>", "<S-Tab>" }),
-		"shell completion keys are not passed through"
-	)
+	assert(vim.deep_equal(shell.view.passthrough, { "<Tab>", "<S-Tab>" }), "shell completion keys are missing")
 	local record = assert(terminal.open(shell))
 	assert(record and #opened == 1, "default shell did not open")
 	assert(next(opened[1].opts.env) == nil and not vim.islist(opened[1].opts.env), "Snacks received an empty list")
 	terminal._reset()
 	opened = {}
-end)
+end
 
-test("embedded LazyGit keeps its edit preset and adds process-local blocking GH_EDITOR", function()
+T["embedded LazyGit keeps its edit preset and adds process-local blocking GH_EDITOR"] = function()
 	local old_devcontainer = package.loaded["config.devcontainer"]
 	local old_repo = package.loaded["config.repo"]
 	local old_terminal = package.loaded["config.terminal"]
@@ -289,9 +269,9 @@ test("embedded LazyGit keeps its edit preset and adds process-local blocking GH_
 	vim.fn.executable = old_executable
 	vim.fn.systemlist = old_systemlist
 	vim.fn.filereadable = old_filereadable
-end)
+end
 
-test("Dev Container opens Bash with the explicit interactive completion rc", function()
+T["Dev Container opens Bash with the explicit interactive completion rc"] = function()
 	local previous = vim.env.NVIM_DEVCONTAINER
 	vim.env.NVIM_DEVCONTAINER = "1"
 	local bash = vim.fn.exepath("bash")
@@ -304,9 +284,9 @@ test("Dev Container opens Bash with the explicit interactive completion rc", fun
 	)
 	local bashrc = vim.uv.fs_stat(terminal._devcontainer_bashrc)
 	assert(bashrc and bashrc.type == "file", "Dev Container Bash rc is missing")
-end)
+end
 
-test("toggle creates visibly, then hides and restores one process", function()
+T["toggle creates visibly, then hides and restores one process"] = function()
 	local value = spec("shell")
 	local record = assert(terminal.toggle(value))
 	assert(#opened == 1 and opened[1].win.visible, "first toggle hid the newly-created terminal")
@@ -319,9 +299,9 @@ test("toggle creates visibly, then hides and restores one process", function()
 	assert(record.handle.visible and #opened == 1, "show created a duplicate terminal")
 	assert(terminal.send(value, "print(1)"))
 	assert(sent[#sent].payload == "print(1)\n")
-end)
+end
 
-test("Snacks output reads are bounded before crossing the plugin boundary", function()
+T["Snacks output reads are bounded before crossing the plugin boundary"] = function()
 	local value = spec("bounded-output")
 	local record = assert(terminal.open(value))
 	local lines = {}
@@ -334,9 +314,9 @@ test("Snacks output reads are bounded before crossing the plugin boundary", func
 	assert(output[1] == "3" and output[#output] == "10002", "terminal output did not retain the newest lines")
 	local config = assert(terminal.effective_config())
 	assert(config.max_output_lines == 10000, "terminal host did not configure the safe output limit")
-end)
+end
 
-test("focus accepts a stable key and reuses the existing process", function()
+T["focus accepts a stable key and reuses the existing process"] = function()
 	local value = spec("focus-key")
 	local opened_before = #opened
 	local record = assert(terminal.open(value))
@@ -344,18 +324,18 @@ test("focus accepts a stable key and reuses the existing process", function()
 	assert(terminal.focus(value.key) == record, "focus did not resolve the existing record by key")
 	assert(#opened == opened_before + 1, "focus by key created a second process")
 	assert(record.handle.focus_count == focused_before + 1, "focus by key did not focus the existing view")
-end)
+end
 
-test("identity includes runtime, canonical root, and id", function()
+T["identity includes runtime, canonical root, and id"] = function()
 	local opened_before = #opened
 	assert(terminal.open(spec("one")))
 	assert(terminal.open(spec("two")))
 	assert(#opened == opened_before + 2, "different ids did not create distinct processes")
 	assert(terminal.open(spec("one")))
 	assert(#opened == opened_before + 2, "same identity created a duplicate process")
-end)
+end
 
-test("changed launch queues explicit restart until the old process exits", function()
+T["changed launch queues explicit restart until the old process exits"] = function()
 	local value = spec("restart")
 	local first = assert(terminal.open(value))
 	local changed = spec("restart", { launch = { argv = { "printf", "changed" } } })
@@ -378,17 +358,17 @@ test("changed launch queues explicit restart until the old process exits", funct
 	assert(status.exists and not status.running and status.state == "exited-retained" and status.exit_code == 7)
 	assert(#notices > 0 and notices[#notices].message:find("retained", 1, true))
 	assert(type(terminal.lines(changed)) == "table", "failed output buffer was discarded")
-end)
+end
 
-test("successful short-lived terminals are reaped", function()
+T["successful short-lived terminals are reaped"] = function()
 	local value = spec("success")
 	local record = assert(terminal.open(value))
 	record.handle.events.TermClose(record.handle, { status = 0 })
 	local status = terminal.status(value)
 	assert(not status.exists and status.state == "disposed", "successful terminal remained registered")
-end)
+end
 
-test("stop retains output after the actual exit until explicit dispose", function()
+T["stop retains output after the actual exit until explicit dispose"] = function()
 	local value = spec("stopped")
 	local record = assert(terminal.open(value))
 	assert(terminal.stop(value) == record, "stop failed")
@@ -400,9 +380,9 @@ test("stop retains output after the actual exit until explicit dispose", functio
 	assert(status.exists and not status.running and status.state == "exited-retained")
 	assert(type(terminal.lines(value)) == "table", "stop discarded output")
 	assert(terminal.dispose(value) == record and terminal.status(value).state == "disposed")
-end)
+end
 
-test("an already-exited job settles synchronously without calling jobstop", function()
+T["an already-exited job settles synchronously without calling jobstop"] = function()
 	local value = spec("already-exited")
 	local record = assert(terminal.open(value))
 	local stopped_before = #stopped
@@ -412,9 +392,9 @@ test("an already-exited job settles synchronously without calling jobstop", func
 	local status = terminal.status(value)
 	assert(status.state == "exited-retained" and not status.stop_pending)
 	assert(#stopped == stopped_before, "jobstop was called for a confirmed exited job")
-end)
+end
 
-test("wiping a live terminal requests stop and tracks it until exit", function()
+T["wiping a live terminal requests stop and tracks it until exit"] = function()
 	local value = spec("wiped-live")
 	local record = assert(terminal.open(value))
 	local stopped_before = #stopped
@@ -426,9 +406,9 @@ test("wiping a live terminal requests stop and tracks it until exit", function()
 	assert(#stopped == stopped_before + 1, "BufWipeout orphaned the live terminal job")
 	record.handle.events.TermClose(record.handle, { status = 0 })
 	assert(terminal.status(value).state == "disposed", "wiped terminal remained registered after exit")
-end)
+end
 
-test("TermClose before BufWipeout disposes without a false failure notice", function()
+T["TermClose before BufWipeout disposes without a false failure notice"] = function()
 	local value = spec("termclose-before-wipeout")
 	local record = assert(terminal.open(value))
 	local notices_before = #notices
@@ -441,9 +421,9 @@ test("TermClose before BufWipeout disposes without a false failure notice", func
 	assert(#stopped == stopped_before, "an already-observed terminal exit requested jobstop")
 	drain_scheduled()
 	assert(#notices == notices_before, "buffer wipe reported a false retained-process failure")
-end)
+end
 
-test("gf opens a contained location through the shared tab primitive", function()
+T["gf opens a contained location through the shared tab primitive"] = function()
 	local opened_location
 	package.loaded["config.editor"] = {
 		open_file_in_tab = function(path, position)
@@ -464,26 +444,26 @@ test("gf opens a contained location through the shared tab primitive", function(
 	gf()
 	assert(
 		opened_location and opened_location.path == repo .. "/lua/config/terminal.lua",
-		"unexpected opened location: " .. vim.inspect(opened_location)
+		"unexpected opened location: " .. vim.inspect(opened_location) .. " notices: " .. vim.inspect(notices)
 	)
 	assert(opened_location.position.lnum == 10 and opened_location.position.col == 2)
-end)
-
-package.loaded.snacks = original_snacks
-package.loaded["config.editor"] = original_editor
-package.loaded["config.local_config"] = original_local_config
-vim.fn.jobwait = original_jobwait
-vim.fn.jobstop = original_jobstop
-vim.api.nvim_chan_send = original_chan_send
-vim.schedule = original_schedule
-vim.notify = original_notify
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("terminal_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.pre_case = function()
+	vim.schedule = fake_schedule
+end
+hooks.post_case = function()
+	vim.schedule = original_schedule
+end
+hooks.post_once = function()
+	package.loaded.snacks = original_snacks
+	package.loaded["config.editor"] = original_editor
+	package.loaded["config.local_config"] = original_local_config
+	vim.fn.jobwait = original_jobwait
+	vim.fn.jobstop = original_jobstop
+	vim.api.nvim_chan_send = original_chan_send
+	vim.schedule = original_schedule
+	vim.notify = original_notify
+end
+
+return T

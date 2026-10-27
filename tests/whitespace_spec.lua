@@ -5,25 +5,12 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
 local whitespace = require("config.whitespace")
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. tostring(err)
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function buffer(lines, filetype)
 	local buf = vim.api.nvim_create_buf(false, true)
@@ -33,7 +20,7 @@ local function buffer(lines, filetype)
 	return buf
 end
 
-test("cleanup removes only trailing ASCII spaces and tabs", function()
+T["cleanup removes only trailing ASCII spaces and tabs"] = function()
 	whitespace.setup()
 	local buf = buffer({ "space   ", "tab\t ", "kept\194\160" })
 	local outcome = whitespace.trim(buf)
@@ -46,9 +33,9 @@ test("cleanup removes only trailing ASCII spaces and tabs", function()
 	local unchanged = whitespace.trim(buf)
 	assert(not unchanged.changed and not unchanged.skipped, "unchanged buffer was reported as skipped or changed")
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("semantic, binary, hex, and opted-out buffers are skipped", function()
+T["semantic, binary, hex, and opted-out buffers are skipped"] = function()
 	whitespace.setup()
 	local cases = {
 		{ filetype = "markdown", reason = "semantic-whitespace" },
@@ -69,9 +56,9 @@ test("semantic, binary, hex, and opted-out buffers are skipped", function()
 		equal({ "value   " }, vim.api.nvim_buf_get_lines(buf, 0, -1, false), "skipped buffer was modified")
 		vim.api.nvim_buf_delete(buf, { force = true })
 	end
-end)
+end
 
-test("byte and line budgets reject work before mutation", function()
+T["byte and line budgets reject work before mutation"] = function()
 	whitespace.setup({ max_bytes = 5, max_lines = 2 })
 	local bytes = buffer({ "abcdef   " })
 	local byte_outcome = whitespace.trim(bytes)
@@ -83,9 +70,9 @@ test("byte and line budgets reject work before mutation", function()
 	equal({ "a ", "b ", "c " }, vim.api.nvim_buf_get_lines(lines, 0, -1, false), "line-limited buffer changed")
 	vim.api.nvim_buf_delete(bytes, { force = true })
 	vim.api.nvim_buf_delete(lines, { force = true })
-end)
+end
 
-test("cleanup restores every visible view even when substitution fails", function()
+T["cleanup restores every visible view even when substitution fails"] = function()
 	whitespace.setup()
 	local buf = buffer({ "one   ", "two", "three" })
 	vim.api.nvim_set_current_buf(buf)
@@ -101,9 +88,9 @@ test("cleanup restores every visible view even when substitution fails", functio
 	assert(outcome.error and outcome.reason == "cleanup-error", "cleanup error was not returned")
 	equal(before, vim.fn.winsaveview(), "cleanup error changed the window view")
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("setup rejects unknown and out-of-range policy", function()
+T["setup rejects unknown and out-of-range policy"] = function()
 	for _, options in ipairs({
 		{ unknown = true },
 		{ max_bytes = 0 },
@@ -116,15 +103,10 @@ test("setup rejects unknown and out-of-range policy", function()
 	end
 	whitespace.setup({ max_bytes = 1, max_lines = 1 })
 	equal({ max_bytes = 1, max_lines = 1 }, whitespace.status(), "inclusive lower bounds were rejected")
-end)
-
-pcall(vim.api.nvim_del_augroup_by_name, "trim_whitespace")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(("whitespace_spec: %d tests passed"):format(count))
+hooks.post_once = function()
+	pcall(vim.api.nvim_del_augroup_by_name, "trim_whitespace")
+end
+
+return T

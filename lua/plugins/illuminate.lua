@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("plugins.illuminate")
 -- Resalta todas las apariciones de la palabra/símbolo bajo el cursor (estilo
 -- VSCode) y añade lo que VSCode no tiene: text objects sobre la referencia y
 -- "freeze" del resaltado. Providers en cascada LSP -> treesitter -> regex, así
@@ -42,24 +43,19 @@ return {
 
 		-- Salto SEMÁNTICO entre referencias (con LSP, solo referencias reales) en
 		-- Option/Alt + */#. Los */# nativos (textual + cgn/n/N) quedan intactos.
-		vim.keymap.set("n", "<A-*>", function()
+		usage_map("n", "<A-*>", function()
 			illuminate.goto_next_reference(true)
 		end, { desc = "Siguiente referencia semántica (illuminate)" })
-		vim.keymap.set("n", "<A-#>", function()
+		usage_map("n", "<A-#>", function()
 			illuminate.goto_prev_reference(true)
 		end, { desc = "Referencia semántica anterior (illuminate)" })
 
 		-- Text objects: operar sobre la referencia bajo el cursor
 		-- (cir cambia, dir borra, yir copia, vir selecciona; combina con . y con */#).
-		vim.keymap.set({ "o", "x" }, "ir", illuminate.textobj_select, { desc = "Referencia (illuminate)" })
-		vim.keymap.set({ "o", "x" }, "ar", illuminate.textobj_select, { desc = "Referencia (illuminate)" })
+		usage_map({ "o", "x" }, "ir", illuminate.textobj_select, { desc = "Referencia (illuminate)" })
+		usage_map({ "o", "x" }, "ar", illuminate.textobj_select, { desc = "Referencia (illuminate)" })
 
 		-- Freeze: mantener resaltado el símbolo actual aunque muevas el cursor.
-		vim.keymap.set(
-			"n",
-			"<leader>li",
-			illuminate.toggle_freeze_buf,
-			{ desc = "Fijar/soltar resaltado (illuminate)" }
-		)
+		usage_map("n", "<leader>li", illuminate.toggle_freeze_buf, { desc = "Fijar/soltar resaltado (illuminate)" })
 	end,
 }

@@ -2,10 +2,9 @@
 -- adapter returns values only: native-review owns buffers and coordinates.
 local M = { version = "visual-v3 / md-render 3.10.3" }
 
-local deferred = require("config.deferred")
 local markdown_view = require("config.markdown_view")
-local markdown_layout = require("config.markdown_layout")
-local markdown_codeblocks = require("config.markdown_codeblocks")
+local markdown_layout = require("markdown_view.layout")
+local markdown_codeblocks = require("markdown_view.decorations")
 local image_link = require("diagram_view.image_link")
 
 local function source_lines(text)
@@ -185,101 +184,6 @@ local function display_parts(value, width)
 	end
 	parts[#parts + 1] = { text = part, first = first, last = offset }
 	return parts
-end
-
--- Map pre-wrap bytes through the exact wrap offsets used by this pinned
--- builder. This also handles CJK and words split across several display rows.
-local function prose_spans(text, method, args, first, wrap)
-	local indent = args[1] or ""
-	if method == "add_simple_markdown" then
-		return { { line = first, col = #indent, first = 0, last = #text } }
-	end
-	local quote, marker = args[3] or "", args[4] or ""
-	local offset = #quote + #marker
-	local width = math.max(1, args[2] - vim.api.nvim_strwidth(quote) - vim.api.nvim_strwidth(marker))
-	local wrapped, starts = wrap.wrap_words(text:sub(offset + 1), width)
-	local spans = {}
-	if offset > 0 then
-		spans[#spans + 1] = { line = first, col = #indent, first = 0, last = offset }
-	end
-	for index, line in ipairs(wrapped) do
-		local prefix = index == 1 and #marker or vim.api.nvim_strwidth(marker)
-		spans[#spans + 1] = {
-			line = first + (index - 1) * (1 + (args[5] or 0)),
-			col = #indent + #quote + prefix,
-			first = offset + starts[index],
-			last = offset + starts[index] + #line,
-		}
-	end
-	return spans
-end
-
-local function capture_build(lines, opts)
-	local ok_builder, module = deferred.try("md-render.content_builder")
-	local ok_wrap, wrap = deferred.try("md-render.wrap")
-	local ok_render, render = deferred.try("md-render")
-	if not ok_builder or not ok_wrap or not ok_render then
-		return nil, "md-render snapshot builder is unavailable"
-	end
-	local builder = module.ContentBuilder
-	local captured, originals, current_table = {}, {}, nil
-	opts.nvim_config_table_layout = function(stacked)
-		if current_table then
-			current_table.stacked = stacked
-		end
-	end
-	for _, method in ipairs({ "add_simple_markdown", "add_wrapped_markdown" }) do
-		local original = builder[method]
-		originals[method] = original
-		builder[method] = function(self, text, highlights, links, ...)
-			local args = { ... }
-			local first = #self.lines + 1
-			local value = original(self, text, highlights, links, ...)
-			captured[#captured + 1] = {
-				first = first,
-				last = #self.lines,
-				text = text,
-				collapse_whitespace = method == "add_wrapped_markdown",
-				styles = style_values(highlights),
-				spans = prose_spans(text, method, args, first, wrap),
-			}
-			return value
-		end
-	end
-	local original_table = builder.add_table
-	originals.add_table = original_table
-	builder.add_table = function(self, table_lines, ...)
-		local first = #self.lines + 1
-		local source = self._current_source_line
-		local parsed = render.MarkdownTable.parse(table_lines)
-		local frame, previous = { first = first, source = source }, current_table
-		current_table = frame
-		local value = original_table(self, table_lines, ...)
-		current_table = previous
-		if parsed then
-			local cells = {}
-			for row, values in ipairs(vim.list_extend({ parsed.headers }, parsed.rows)) do
-				for column, cell in ipairs(values) do
-					cells[#cells + 1] = {
-						text = cell.text,
-						styles = style_values(cell.highlights),
-						row = row,
-						column = column,
-						spans = {},
-					}
-				end
-			end
-			frame.last, frame.cells = #self.lines, cells
-			frame.structure = { "table", #parsed.headers, #parsed.rows, parsed.alignments }
-			captured[#captured + 1] = frame
-		end
-		return value
-	end
-	local ok, content, err = pcall(markdown_view.build_snapshot, lines, opts)
-	for method, original in pairs(originals) do
-		builder[method] = original
-	end
-	return ok and content or nil, ok and err or tostring(content), captured, render
 end
 
 -- Upstream appends footnotes after the body without resetting its source
@@ -480,7 +384,7 @@ local function code_highlights(content, fences, render)
 			end
 		end
 		text = table.concat(text, "\n")
-		local lang = render.display_utils._resolve_lang(code.language)
+		local lang = render.resolve_language(code.language)
 		local ok_parser, parser = pcall(vim.treesitter.get_string_parser, text, lang, { error = false })
 		local ok_query, query = pcall(vim.treesitter.query.get, lang, "highlights")
 		if ok_parser and parser and ok_query and query then
@@ -1007,7 +911,7 @@ function M.build_snapshot(request)
 	if not references then
 		return nil, media_err
 	end
-	local content, build_err, captures, render = capture_build(lines, {
+	local content, build_err, captures, render = markdown_view.build_snapshot(lines, {
 		buf_dir = "",
 		max_width = math.max(1, request.width - 2),
 		nvim_config_page_width = request.width,

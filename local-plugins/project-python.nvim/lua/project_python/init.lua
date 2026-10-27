@@ -21,7 +21,6 @@ local SETUP_KEYS = {
 	repl = true,
 	root_markers = true,
 	terminal = true,
-	test_runner = true,
 }
 
 local TERMINAL_KEYS = {
@@ -47,7 +46,6 @@ local function public_defaults()
 	return {
 		repl = vim.deepcopy(DEFAULT_REPL),
 		root_markers = vim.deepcopy(DEFAULT_MARKERS),
-		test_runner = "pytest",
 	}
 end
 
@@ -300,13 +298,6 @@ function M.setup(opts)
 			error(("project_python.setup root_markers[%d] is invalid"):format(index))
 		end
 	end
-	local runner = opts.test_runner
-	if runner == nil then
-		runner = "pytest"
-	end
-	if runner ~= "pytest" and runner ~= "unittest" then
-		error("project_python.setup test_runner must be pytest or unittest")
-	end
 	local repl = opts.repl
 	if repl == nil then
 		repl = {}
@@ -363,7 +354,6 @@ function M.setup(opts)
 		},
 		root_markers = copy(markers),
 		terminal = opts.terminal and copy(opts.terminal) or nil,
-		test_runner = runner,
 	}
 	selected = {}
 	snapshots = {}
@@ -380,7 +370,6 @@ function M.effective_config()
 	return copy({
 		repl = configured.repl,
 		root_markers = configured.root_markers,
-		test_runner = configured.test_runner,
 	})
 end
 
@@ -520,15 +509,6 @@ function M.refresh(root)
 	end
 	emit("changed", { root = root, status = result })
 	return result
-end
-
-function M.neotest_python(root)
-	local snapshot = M.snapshot(root)
-	return snapshot.validity == "valid" and { snapshot.value.interpreter } or nil
-end
-
-function M.neotest_runner()
-	return configured.test_runner or "pytest"
 end
 
 local function diagnostic_candidate(result, source, path)

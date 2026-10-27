@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.viewer_commands")
 local pager = require("config.pager")
 local deferred = require("config.deferred")
 local jqx_commands = require("config.jqx_commands")
@@ -130,7 +131,7 @@ if not pager.active then
 		menu.open_palette()
 	end, { desc = "Open action palette" })
 
-	vim.keymap.set({ "n", "x" }, "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open action palette" })
+	usage_map({ "n", "x" }, "<leader><leader>", "<cmd>MenuOpen<cr>", { desc = "Open action palette" })
 end
 
 vim.api.nvim_create_user_command("LogHlAdd", function(opts)

@@ -1,9 +1,10 @@
 # devcontainer-editor.nvim
 
-`devcontainer-editor.nvim` is the provider-neutral lifecycle and transport core
-for an exact Neovim editor inside a Dev Container. It models workspace identity,
-validates host/container path mappings, consumes authenticated spool requests,
-and exposes lifecycle/status helpers without registering commands or mappings.
+`devcontainer-editor.nvim` is the Neovim adapter for an exact editor inside a
+Dev Container. Python in the injected launcher owns state, filesystem validation,
+path routing, authentication, spool publication, and acknowledgements. Lua owns
+editor callbacks, lifecycle argv, notifications, and cached health/configuration.
+The plugin registers no commands or mappings.
 
 The host injects the lifecycle launcher, a certified `@devcontainers/cli`
 resolver, Docker-compatible engine policy, root/repository identity, editor
@@ -11,6 +12,28 @@ callbacks, notifications, and process primitives through `setup(opts)`.
 Network authorization is carried into the container as
 `NVIM_CONFIG_OFFLINE`; denied authorization therefore makes
 `verified-tools.nvim` report `blocked/offline` without claiming an attempt.
+
+The host and every container require Python 3 with its standard library. The
+coordinator probes `python3 -I -S <snapshot>/scripts/devcontainer-editor bridge
+--probe` before replacing the pane. There is no package installation. One
+auxiliary process serves each editor after Dev Container use, or while the
+container editor watches its inbox. Ordinary startup, `effective_config()` and
+`status()` do not start that process.
+
+The private stdin/stdout bridge uses closed JSON-line requests with increasing
+correlation ids and an operation allowlist. Lines are limited to 64 KiB, queued
+output to 1 MiB, and outstanding actions to 128. Diagnostics use stderr. Python
+pins and shares resources until EOF or helper exit; Lua fails pending callbacks
+on pipe failure, death, malformed responses, or timeout. Uncertain actions are
+never replayed, and bridge shutdown never removes coordinator records. Fresh explicit commands reconnect a failed helper through `reconnect()`; the
+inbox watcher does not restart it or replay pending actions.
+
+For an incoming location, Python authenticates and retires the exact request
+before handing it to Lua. Lua confirms that the callback opened the requested
+buffer and cursor location before Python publishes a positive durable ACK. Callback failure,
+no-effect callbacks, and opening-confirmation timeout produce a negative ACK.
+The optional `uuid` setup provider remains supported; Python validates its
+canonical UUIDv4 result before publication.
 
 State directories are owner-only (`0700`) and records, requests,
 acknowledgments, authentication, and lock files are owner-only (`0600`). The
@@ -23,7 +46,7 @@ non-regular files, oversized payloads, unknown schema fields, mismatched
 authentication, and path traversal. Snapshots returned by the public API are
 deep copies.
 Once a request or acknowledgement is published it remains a committed success;
-a subsequent directory-fsync failure is surfaced separately through the host's
+a subsequent directory-fsync failure is surfaced separately on stderr and through the host's
 notification callback as a bounded warning and does not skip ACK validation.
 The editor-side transport pins the spool root plus `inbox`, `outbox`, and
 `acks` directory descriptors. Enumeration, reads, no-clobber publications, and
@@ -65,7 +88,7 @@ aggregate with `configured`, transport, and watcher state, while
 
 ## API
 
-- `setup(opts)` / `effective_config()` / `teardown()` / `stop()`
+- `setup(opts)` / `effective_config()` / `teardown()` / `stop()` / `reconnect()`
 - `in_workspace()` / `network_authorized()`
 - `workspace_key(value)` / `route(path, from_root, to_root, kind)`
 - `status(host_root)` / `log_path(host_root)`
@@ -83,8 +106,8 @@ policy, installs the Dev Containers CLI, or downloads tools. Host adapters own
 `:DevContainer*`, menus, statusline, session refresh, and presentation. Python
 owns the detached coordinator, the advisory lock retained for its whole
 lifetime, checked tmux replacement/monitoring, and explicit record retirement.
-The plugin owns lifecycle argv validation and the editor-side authenticated
-transport contract. `lifecycle_argv("up", spec)` therefore requires an explicit
+The plugin owns lifecycle argv and the editor callback; the Python bridge owns
+the authenticated transport contract on both sides. `lifecycle_argv("up", spec)` therefore requires an explicit
 `spec.tmux_pane` and canonical `spec.claim_id`; the host waits for that exact
 claim before reporting detached startup success.
 The internal `editor_ready` host request is a no-op acknowledgement consumed

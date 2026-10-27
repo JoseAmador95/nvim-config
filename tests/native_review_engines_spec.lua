@@ -20,21 +20,14 @@ assert(vim.fn.mkdir(fixture, "p", 448) == 1)
 local state_home = vim.fn.tempname()
 assert(vim.fn.mkdir(state_home, "p", 448) == 1)
 local source = fixture .. "/sample.lua"
-local failures, count = {}, 0
+
 local notifications = {}
 local original_notify = vim.notify
 vim.notify = function(message)
 	notifications[#notifications + 1] = tostring(message)
 end
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. tostring(err)
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 local function git(args)
 	local cmd = { "git", "-C", fixture }
 	vim.list_extend(cmd, args)
@@ -120,7 +113,7 @@ local function output()
 end
 local workspace
 host.setup()
-test("Main is default and engine command/mapping are registered", function()
+T["Main is default and engine command/mapping are registered"] = function()
 	assert(vim.fn.exists(":ReviewEngine") == 2)
 	assert(
 		vim.fn.maparg(" rD", "n") == "<Cmd>ReviewEngine<CR>"
@@ -131,8 +124,8 @@ test("Main is default and engine command/mapping are registered", function()
 	assert(controller.status().engine == "main")
 	assert(workspace.mode_state.presentation.origin_engine.id == "main")
 	assert(workspace.mode_state.presentation.origin_engine.version:find("builtin-v2", 1, true))
-end)
-test("default Main and switching back to Main retain exact move decorations", function()
+end
+T["default Main and switching back to Main retain exact move decorations"] = function()
 	local initial = workspace.entry_identity
 	local moved
 	for _, item in ipairs(workspace.model.entries) do
@@ -160,13 +153,15 @@ test("default Main and switching back to Main retain exact move decorations", fu
 	end
 	assert(controller.present(moved))
 	check_main()
-	assert(controller.engine("patience"))
+	assert(controller.engine("difftastic"))
+	pending[#pending].callback(vim.json.encode({ language = "Lua", path = "zz-moved.lua", status = "unchanged" }))
+	assert(workspace.engine == "difftastic")
 	assert(controller.engine("main"))
 	check_main()
 	assert(controller.present(initial))
-end)
+end
 
-test("Picker reuses native review style and unavailable engines retain the view", function()
+T["Picker reuses native review style and unavailable engines retain the view"] = function()
 	local before = workspace.mode_state.presentation
 	vim.ui.select = function(items, opts, callback)
 		assert(opts.kind == "native_review" and opts.prompt == "Review diff engine")
@@ -178,8 +173,11 @@ test("Picker reuses native review style and unavailable engines retain the view"
 	pending[#pending].callback(nil, "Difftastic unavailable")
 	assert(controller.status().engine == "main" and workspace.mode_state.presentation == before)
 	assert(notifications[#notifications]:find("unavailable", 1, true))
-end)
-test("Difftastic receives materialized exact snapshots and replaces inline detail", function()
+	assert(not controller.engine("patience"))
+	assert(controller.status().engine == "main" and workspace.mode_state.presentation == before)
+	assert(notifications[#notifications]:find("Unknown review engine: patience", 1, true))
+end
+T["Difftastic receives materialized exact snapshots and replaces inline detail"] = function()
 	assert(controller.engine("difftastic"))
 	local operation = pending[#pending]
 	assert(getmetatable(operation.request.entry) == nil)
@@ -191,8 +189,8 @@ test("Difftastic receives materialized exact snapshots and replaces inline detai
 	assert(shown.intraline.old[1].start_col == 10 and shown.intraline.old[1].end_col == 12)
 	assert(shown.projection.by_source.old[2] and shown.projection.by_source.new[3])
 	assert(workspace.model.entries[1].old_text == old_text)
-end)
-test("Split maps frozen sources and unanchorable filler rows without native diff", function()
+end
+T["Split maps frozen sources and unanchorable filler rows without native diff"] = function()
 	assert(controller.layout("split"))
 	local shown = workspace.mode_state.presentation
 	assert(not vim.wo[shown.left.win].diff and not vim.wo[shown.right.win].diff)
@@ -235,8 +233,8 @@ test("Split maps frozen sources and unanchorable filler rows without native diff
 		vim.cmd("redraw!")
 		assert(vim.fn.screenpos(shown.left.win, 3, 1).row == vim.fn.screenpos(shown.right.win, 3, 1).row)
 	end
-end)
-test("Comments and replies capture effective origin; composer blocks switches", function()
+end
+T["Comments and replies capture effective origin; composer blocks switches"] = function()
 	local active = true
 	review.editor.has_active = function()
 		return active
@@ -262,8 +260,8 @@ test("Comments and replies capture effective origin; composer blocks switches", 
 	assert(snapshot.items[1].origin_engine.id == "difftastic")
 	local exported = assert(review.export.render(workspace.session))
 	assert(exported:find("Origin engine: `difftastic`", 1, true) and exported:find("Origin engine: `main`", 1, true))
-end)
-test("Text fallback remains selected per file and captures Main provenance", function()
+end
+T["Text fallback remains selected per file and captures Main provenance"] = function()
 	assert(controller.engine("difftastic"))
 	pending[#pending].callback(
 		vim.json.encode({ language = "Text (exceeded DFT_BYTE_LIMIT)", path = "sample.lua", status = "changed" })
@@ -280,8 +278,8 @@ test("Text fallback remains selected per file and captures Main provenance", fun
 	)
 	controller.general_comment()
 	assert(workspace.session.items[#workspace.session.items].origin_engine.id == "main")
-end)
-test("Malformed results and superseded completion never replace a live view", function()
+end
+T["Malformed results and superseded completion never replace a live view"] = function()
 	assert(controller.engine("main"))
 	local before = workspace.mode_state.presentation
 	assert(controller.engine("difftastic"))
@@ -301,8 +299,8 @@ test("Malformed results and superseded completion never replace a live view", fu
 	assert(stale.cancelled and cancelled > 0)
 	stale.callback(output())
 	assert(workspace.mode_state.presentation == before and workspace.engine == "main")
-end)
-test("AST-equivalent formatting keeps commentable full source with no byte detail", function()
+end
+T["AST-equivalent formatting keeps commentable full source with no byte detail"] = function()
 	assert(controller.engine("difftastic"))
 	pending[#pending].callback(vim.json.encode({ language = "Lua", path = "sample.lua", status = "unchanged" }))
 	assert(controller.layout("inline") and controller.context("full"))
@@ -310,8 +308,8 @@ test("AST-equivalent formatting keeps commentable full source with no byte detai
 	assert(#shown.intraline.old == 0 and #shown.intraline.new == 0 and #shown.projection.hunks == 0)
 	assert(shown.projection.by_source.old[1] and shown.projection.by_source.new[1])
 	assert(vim.wo[shown.inline.win].winbar:find("No structural changes", 1, true))
-end)
-test("Split comments keep canonical coordinates and reveal hidden rows in both panes", function()
+end
+T["Split comments keep canonical coordinates and reveal hidden rows in both panes"] = function()
 	assert(controller.engine("difftastic"))
 	pending[#pending].callback(output())
 	assert(controller.layout("split") and controller.context("full"))
@@ -355,13 +353,13 @@ test("Split comments keep canonical coordinates and reveal hidden rows in both p
 	assert(location.side == "new" and location.line == 11)
 	assert(controller.engine("main"))
 	assert(lhs.origin_engine.id == "difftastic" and rhs.origin_engine.id == "difftastic")
-end)
-test("three engines retain layout, context, comments and refresh behavior", function()
+end
+T["both engines retain layout, context, comments and refresh behavior"] = function()
 	adapter.analyze = function(_, callback)
 		callback(output())
 		return function() end
 	end
-	local expected = { "main", "difftastic", "patience" }
+	local expected = { "main", "difftastic" }
 	assert(vim.deep_equal(vim.fn.getcompletion("ReviewEngine ", "cmdline"), expected))
 	local preserved = workspace.session.items[1].origin_engine.id
 	for _, id in ipairs(expected) do
@@ -372,7 +370,7 @@ test("three engines retain layout, context, comments and refresh behavior", func
 				assert(controller.layout(layout) and controller.context(context))
 				local shown = workspace.mode_state.presentation
 				assert(shown.layout == layout and shown.context == context and shown.origin_engine.id == id)
-				assert((shown.projected ~= nil) == (id == "patience" or id == "difftastic"))
+				assert((shown.projected ~= nil) == (id == "difftastic"))
 				assert(shown.entry.old_text == old_text and shown.entry.new_text == new_text)
 			end
 		end
@@ -380,7 +378,7 @@ test("three engines retain layout, context, comments and refresh behavior", func
 		review.editor.has_active = function()
 			return true
 		end
-		assert(not controller.engine(id == "main" and "patience" or "main"))
+		assert(not controller.engine(id == "main" and "difftastic" or "main"))
 		assert(before == workspace.mode_state.presentation)
 		review.editor.has_active = function()
 			return false
@@ -403,28 +401,24 @@ test("three engines retain layout, context, comments and refresh behavior", func
 	for _, id in ipairs(expected) do
 		assert(markdown:find("Origin engine: `" .. id .. "`", 1, true))
 	end
-end)
+end
 
-controller.teardown()
-for name, value in pairs(originals) do
-	if name == "analyze" then
-		adapter.analyze = value
-	elseif name == "compose" or name == "has_active" then
-		review.editor[name] = value
-	elseif name == "select" then
-		vim.ui.select = value
-	else
-		store[name] = value
+hooks.post_once = function()
+	controller.teardown()
+	for name, value in pairs(originals) do
+		if name == "analyze" then
+			adapter.analyze = value
+		elseif name == "compose" or name == "has_active" then
+			review.editor[name] = value
+		elseif name == "select" then
+			vim.ui.select = value
+		else
+			store[name] = value
+		end
 	end
+	vim.notify = original_notify
+	vim.fn.delete(fixture, "rf")
+	vim.fn.delete(state_home, "rf")
 end
-vim.notify = original_notify
-vim.fn.delete(fixture, "rf")
-vim.fn.delete(state_home, "rf")
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
-end
-print(("native_review_engines_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+return T

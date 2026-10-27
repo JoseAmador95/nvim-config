@@ -1319,8 +1319,7 @@ local function migrate_legacy_session(root, scope_id, deps, store_version)
 			if backup_created == nil then
 				return nil, backup_err
 			end
-			local wrote, write_err = deps.fs.write_binary_atomic(target_path, encoded)
-			if not wrote then
+			local function rollback(failure, rollback_failure)
 				local rollback_ok, rollback_err = remove_created_file(target_path, deps)
 				if backup_created then
 					local backup_ok, backup_remove_err = remove_created_file(backup_path, deps)
@@ -1330,39 +1329,27 @@ local function migrate_legacy_session(root, scope_id, deps, store_version)
 					rollback_ok = rollback_ok and backup_ok
 				end
 				if not rollback_ok then
-					return nil, "cannot write or roll back migrated v3 review session: " .. tostring(rollback_err)
+					return nil, rollback_failure .. ": " .. tostring(rollback_err)
 				end
-				return nil, "cannot write migrated v3 review session: " .. tostring(write_err)
+				return nil, failure
+			end
+			local wrote, write_err = deps.fs.write_binary_atomic(target_path, encoded)
+			if not wrote then
+				return rollback(
+					"cannot write migrated v3 review session: " .. tostring(write_err),
+					"cannot write or roll back migrated v3 review session"
+				)
 			end
 			local secured, secure_err = secure_file(target_path, deps)
 			if not secured then
-				local rollback_ok, rollback_err = remove_created_file(target_path, deps)
-				if backup_created then
-					local backup_ok, backup_remove_err = remove_created_file(backup_path, deps)
-					if not backup_ok and not rollback_err then
-						rollback_err = backup_remove_err
-					end
-					rollback_ok = rollback_ok and backup_ok
-				end
-				if not rollback_ok then
-					return nil, "cannot secure or roll back migrated v3 review session: " .. tostring(rollback_err)
-				end
-				return nil, secure_err
+				return rollback(secure_err, "cannot secure or roll back migrated v3 review session")
 			end
 			local reloaded, reload_err = read_session(root, scope_id, deps)
 			if not reloaded or not vim.deep_equal(reloaded, migrated) then
-				local rollback_ok, rollback_err = remove_created_file(target_path, deps)
-				if backup_created then
-					local backup_ok, backup_remove_err = remove_created_file(backup_path, deps)
-					if not backup_ok and not rollback_err then
-						rollback_err = backup_remove_err
-					end
-					rollback_ok = rollback_ok and backup_ok
-				end
-				if not rollback_ok then
-					return nil, "migrated review failed reload validation and rollback: " .. tostring(rollback_err)
-				end
-				return nil, "migrated review failed reload validation: " .. tostring(reload_err or "mismatch")
+				return rollback(
+					"migrated review failed reload validation: " .. tostring(reload_err or "mismatch"),
+					"migrated review failed reload validation and rollback"
+				)
 			end
 			return reloaded, target_path
 		end)

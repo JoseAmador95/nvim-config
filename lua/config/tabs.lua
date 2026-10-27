@@ -1,7 +1,9 @@
+local usage_map = require("config.usage").mapper("config.tabs")
 local M = {}
 local runtime = require("tab_first")
 local local_config = require("config.local_config")
 local code_review = require("config.code_review")
+local pager = require("config.pager")
 
 local SPECIAL_FILETYPES = {
 	oil = true,
@@ -34,8 +36,7 @@ local NEW_FILE_WINDOW_OPTIONS = {
 }
 
 local function enabled()
-	local ok, pager = pcall(require, "config.pager")
-	return not vim.g.vscode and not (ok and pager.active)
+	return not vim.g.vscode and not pager.active
 end
 
 local function present_home(context)
@@ -157,7 +158,7 @@ function M.setup()
 		M.request_close(vim.api.nvim_get_current_tabpage())
 	end, { force = true, desc = "Close tab and return home when it is the last work tab" })
 
-	vim.keymap.set("n", "<leader>q", "<cmd>CloseTab<cr>", {
+	usage_map("n", "<leader>q", "<cmd>CloseTab<cr>", {
 		noremap = true,
 		silent = true,
 		desc = "Close tab",

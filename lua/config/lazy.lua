@@ -1,6 +1,7 @@
 -- lua/config/lazy.lua
 -- Bootstrap lazy.nvim and load plugin specs from lua/plugins/
 
+local usage = require("config.usage")
 local fn = vim.fn
 local uv = vim.uv
 local lazypath = fn.stdpath("data") .. "/lazy/lazy.nvim"
@@ -347,7 +348,7 @@ local function native_editor_specs()
 		if not ok or type(value) ~= "table" then
 			error(("Invalid native plugin spec %s: %s"):format(path, tostring(value)))
 		end
-		result[#result + 1] = pin_spec(value)
+		result[#result + 1] = pin_spec(usage.spec(value, "plugins." .. name:sub(1, -5)))
 	end
 	return result
 end
@@ -356,7 +357,7 @@ end
 -- `{ import = "plugins" }` set and any external ~/.nvim-local.lua plugin dirs.
 local specs
 if pager.active then
-	specs = pin_spec(pager.specs())
+	specs = pin_spec(usage.spec(pager.specs(), "pager"))
 else
 	-- Native specs from lua/plugins, plus any external dirs from ~/.nvim-local.lua.
 	specs = {

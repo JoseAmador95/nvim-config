@@ -13,22 +13,9 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		table.insert(failures, name .. "\n" .. err)
-	end
-end
+local T = MiniTest.new_set()
 
 local function make_file(lines)
 	local path = vim.fn.tempname()
@@ -84,8 +71,17 @@ vim.uv.new_fs_poll = function()
 end
 
 local log_watch = require("config.log_watch")
+local log_tests = MiniTest.new_set({
+	hooks = {
+		post_once = function()
+			vim.uv.new_fs_poll = original_new_fs_poll
+			vim.notify = original_notify
+		end,
+	},
+})
+T["LogWatch"] = log_tests
 
-test("LogWatch refuses modified buffers without mutation", function()
+log_tests["refuses modified buffers without mutation"] = function()
 	local path = make_file({ "disk" })
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
 	local buf = vim.api.nvim_get_current_buf()
@@ -104,9 +100,9 @@ test("LogWatch refuses modified buffers without mutation", function()
 	assert(notifications[#notifications].message:find("unsaved changes", 1, true), "missing refusal notification")
 
 	delete_file_buffer(path)
-end)
+end
 
-test("LogWatch restores exact state and ignores a late callback", function()
+log_tests["restores exact state and ignores a late callback"] = function()
 	local path = make_file({ "first", "second" })
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
 	local buf = vim.api.nvim_get_current_buf()
@@ -149,9 +145,9 @@ test("LogWatch restores exact state and ignores a late callback", function()
 	equal(true, vim.bo[buf].readonly, "late callback changed readonly")
 
 	delete_file_buffer(path)
-end)
+end
 
-test("LogWatch startup failure preserves buffer state", function()
+log_tests["startup failure preserves buffer state"] = function()
 	local path = make_file({ "disk" })
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
 	local buf = vim.api.nvim_get_current_buf()
@@ -167,12 +163,9 @@ test("LogWatch startup failure preserves buffer state", function()
 	assert(notifications[#notifications].message:find("simulated start failure", 1, true), "missing failure detail")
 
 	delete_file_buffer(path)
-end)
+end
 
-vim.uv.new_fs_poll = original_new_fs_poll
-vim.notify = original_notify
-
-test("editor reuses a file in a non-current split", function()
+T["editor reuses a file in a non-current split"] = function()
 	local target = make_file({ "first", "second", "third" })
 	local other = make_file({ "other" })
 	vim.cmd("edit! " .. vim.fn.fnameescape(target))
@@ -190,9 +183,9 @@ test("editor reuses a file in a non-current split", function()
 	vim.cmd("silent! only!")
 	delete_file_buffer(other)
 	delete_file_buffer(target)
-end)
+end
 
-test("trailing whitespace cleanup preserves complete per-window views", function()
+T["trailing whitespace cleanup preserves complete per-window views"] = function()
 	local lines = {}
 	for index = 1, 80 do
 		lines[index] = string.format("line-%03d", index)
@@ -233,14 +226,6 @@ test("trailing whitespace cleanup preserves complete per-window views", function
 
 	vim.cmd("silent! only!")
 	delete_file_buffer(path)
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("core_spec: %d tests passed", 5))
-vim.cmd("quitall!")
+return T

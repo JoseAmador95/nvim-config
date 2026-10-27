@@ -1,3 +1,4 @@
+local T = MiniTest.new_set()
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
@@ -5,28 +6,23 @@ local background = assert(vim.env.NVIM_CONFIG_THEME_BACKGROUND, "theme backgroun
 assert(background == "light" or background == "dark", "invalid theme background fixture")
 vim.o.background = background
 
-local active_state = vim.fs.normalize(vim.fn.stdpath("state"))
-local state_path = vim.fs.joinpath(vim.fs.dirname(active_state), "nvim", "theme.yaml")
-assert(vim.fn.mkdir(vim.fs.dirname(state_path), "p", 448) == 1)
-assert(vim.fn.writefile({ "# profile fixture", "version: 1", 'colorscheme: "catppuccin"' }, state_path) == 0)
-assert(vim.uv.fs_chmod(state_path, 384))
-
-local function fail(message)
-	vim.api.nvim_err_writeln("theme_profile_spec: " .. message)
-	vim.cmd("cquit")
-end
-
-local function expected(flavour_background)
-	return "catppuccin-" .. (flavour_background == "light" and "latte" or "mocha")
-end
-
-local function has_plugin(name)
-	for _, path in ipairs(vim.api.nvim_list_runtime_paths()) do
-		if vim.fn.fnamemodify(path, ":t") == name then
-			return true
-		end
+local function assert_appearance(expected)
+	assert(vim.g.colors_name == "vscode", "active colorscheme changed")
+	assert(vim.o.background == expected, "theme uses the wrong background")
+	local normal = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
+	local popup = vim.api.nvim_get_hl(0, { name = "NormalFloat", link = false })
+	local comment = vim.api.nvim_get_hl(0, { name = "Comment", link = false })
+	assert(comment.italic == true, "italic comment preference was lost")
+	if expected == "light" then
+		assert(normal.bg == nil and popup.bg == nil, "light theme did not inherit the terminal background")
+	else
+		assert(normal.bg ~= nil and popup.bg ~= nil, "opaque dark theme lost its backgrounds")
 	end
-	return false
+	local palette = require("config.palette").current()
+	local indent = vim.api.nvim_get_hl(0, { name = "IblIndent", link = false })
+	assert(indent.fg == palette.indent, "shared palette was not repainted")
+	local code = vim.api.nvim_get_hl(0, { name = "MdRenderInlineCode", link = false })
+	assert(code.fg ~= nil and code.bg ~= palette.background, "Markdown code lost its contrast")
 end
 
 local function assert_review_band_visible()
@@ -47,80 +43,32 @@ local function activate_review()
 	assert(package.loaded.native_review ~= nil, "Review action did not activate native-review")
 end
 
-vim.api.nvim_create_autocmd("VimEnter", {
-	once = true,
-	callback = function()
-		vim.schedule(function()
-			local ok, err = xpcall(function()
-				local pager = require("config.pager")
-				local theme = require("config.theme")
-				local lazy_plugin = nil
-				for _, plugin in pairs(require("lazy").plugins()) do
-					if plugin.name == "catppuccin" then
-						lazy_plugin = plugin
-						break
-					end
-				end
+T["fixed theme follows background changes in editor and pager"] = function()
+	local pager = require("config.pager")
+	assert(pager.active == (vim.env.NVIM_APPNAME == "nvimpager"), "wrong profile reached the fixture")
+	assert_appearance(background)
+	assert(vim.fn.exists(":Theme") == 0 and vim.fn.exists(":ThemeReset") == 0)
+	if not pager.active then
+		assert(package.loaded["config.native_review"] == nil, "theme activated review at startup")
+		activate_review()
+		assert_review_band_visible()
+	end
 
-				assert(theme.selection().colorscheme == "catppuccin", "Catppuccin selection was not loaded")
-				assert(theme.state_path() == state_path, "profile did not use the canonical shared theme path")
-				assert(vim.g.colors_name == expected(background), "wrong Catppuccin startup flavour")
-				assert(has_plugin("catppuccin"), "Catppuccin is absent from the active profile")
-				assert(has_plugin("vscode.nvim"), "VSCode fallback is absent from the active profile")
-				assert(lazy_plugin and package.loaded.catppuccin, "Catppuccin was not loaded eagerly")
-				assert(lazy_plugin.commit == "605b4603797de970e9f3a4238c199c850da03186", "Catppuccin commit drifted")
-				assert(pager.active == (vim.env.NVIM_APPNAME == "nvimpager"), "wrong profile reached the fixture")
+	local other = background == "light" and "dark" or "light"
+	vim.o.background = other
+	assert_appearance(other)
+	if not pager.active then
+		assert_review_band_visible()
+	end
 
-				local other = background == "light" and "dark" or "light"
-				vim.o.background = other
-				assert(
-					vim.wait(1000, function()
-						return vim.g.colors_name == expected(other)
-					end, 10),
-					"background change did not switch Catppuccin flavour"
-				)
-
-				vim.cmd("Theme vscode")
-				assert(theme.selection().colorscheme == "vscode", ":Theme vscode did not update selection")
-				assert(vim.g.colors_name == "vscode", ":Theme vscode did not repaint")
-				if not pager.active then
-					assert(package.loaded["config.native_review"] == nil, "theme routing activated review at startup")
-					activate_review()
-					assert_review_band_visible()
-				end
-
-				vim.cmd("Theme catppuccin")
-				assert(theme.selection().colorscheme == "catppuccin", ":Theme catppuccin did not persist selection")
-				assert(vim.g.colors_name == expected(other), ":Theme catppuccin did not repaint")
-				local persisted = table.concat(vim.fn.readfile(state_path), "\n")
-				assert(persisted:find("version: 1", 1, true), "shared state version was not written")
-				assert(
-					persisted:find('colorscheme: "catppuccin"', 1, true),
-					"machine-local Catppuccin choice was not written"
-				)
-				assert(vim.fn.getfperm(vim.fs.dirname(state_path)) == "rwx------", "theme state directory is not 0700")
-				assert(vim.fn.getfperm(state_path) == "rw-------", "theme state file is not 0600")
-
-				vim.cmd("ThemeReset")
-				assert(theme.selection().colorscheme == "vscode", ":ThemeReset did not restore the versioned default")
-				assert(vim.g.colors_name == "vscode", ":ThemeReset did not repaint VSCode")
-				assert(vim.fn.filereadable(state_path) == 0, ":ThemeReset persisted the versioned default")
-				local marker = vim.fs.joinpath(vim.fs.dirname(state_path), ".legacy-migrated")
-				assert(vim.fn.readfile(marker)[1] == "version: 1", ":ThemeReset did not create its migration marker")
-				assert(vim.fn.getfperm(marker) == "rw-------", "theme migration marker is not 0600")
-			end, debug.traceback)
-
-			if not ok then
-				fail(err)
-				return
-			end
-			print(
-				("theme_profile_spec: %s/%s selection and persistence passed"):format(
-					vim.env.NVIM_APPNAME == "nvimpager" and "pager" or "editor",
-					background
-				)
-			)
-			vim.cmd("quitall!")
-		end)
-	end,
-})
+	vim.o.background = background
+	assert_appearance(background)
+	vim.api.nvim_exec_autocmds("TermResponse", {
+		data = { sequence = other == "light" and "\27]11;rgb:ffff/ffff/ffff" or "\27]11;rgb:00/00/00" },
+	})
+	assert_appearance(other)
+	if not pager.active then
+		assert_review_band_visible()
+	end
+end
+return T

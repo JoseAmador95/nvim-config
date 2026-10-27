@@ -14,31 +14,12 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
 local temporary = {}
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(
-			(message or "values differ")
-				.. "\nexpected: "
-				.. vim.inspect(expected)
-				.. "\nactual: "
-				.. vim.inspect(actual)
-		)
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function temporary_file(lines)
 	local path = vim.fn.tempname() .. ".log"
@@ -105,7 +86,7 @@ assert(log_watch.setup({
 }))
 equal(1024, require("log_workbench.follow").effective_config().continuity_bytes)
 
-test("host command opens a distinct tail buffer and restores the untouched source", function()
+T["host command opens a distinct tail buffer and restores the untouched source"] = function()
 	local path = temporary_file({ "one", "two" })
 	vim.cmd.edit(vim.fn.fnameescape(path))
 	local source = vim.api.nvim_get_current_buf()
@@ -129,9 +110,9 @@ test("host command opens a distinct tail buffer and restores the untouched sourc
 	equal(source, vim.api.nvim_get_current_buf(), "stopping did not return to the source")
 	equal(false, vim.api.nvim_buf_is_valid(tail), "tail buffer survived stop")
 	equal({}, log_watch.status())
-end)
+end
 
-test("auto-session suspends tails before serialization and restores them afterward", function()
+T["auto-session suspends tails before serialization and restores them afterward"] = function()
 	local path = temporary_file({ "session", "tail" })
 	vim.cmd.edit(vim.fn.fnameescape(path))
 	local source = vim.api.nvim_get_current_buf()
@@ -175,34 +156,35 @@ test("auto-session suspends tails before serialization and restores them afterwa
 	package.loaded["config.code_review"] = original_code_review
 	package.preload["config.code_review"] = original_preload
 	vim.schedule = original_schedule
-end)
+end
 
-test("host color UI drives plugin extmarks while log-highlight remains external", function()
+T["host color UI drives plugin extmarks while log-highlight remains external"] = function()
 	local buf = vim.api.nvim_create_buf(true, false)
 	vim.api.nvim_set_current_buf(buf)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "INFO", "ERROR marker", "ERROR second" })
 	local patterns = require("config.log_patterns")
 	assert(package.loaded["log_workbench.matches"] == nil, "loading the host log adapter initialized log matches")
 	assert(patterns.add("exact", { args = "red ERROR" }))
-	local state = vim.b[buf].log_pattern_state
-	equal(1, #state.patterns)
-	equal("red", state.patterns[1].color_key)
 	local match_core = require("log_workbench.matches")
 	equal({ max_matches = 7, scan_lines_per_tick = 2 }, match_core.effective_config())
 	wait_for(function()
 		return #match_core.locations(buf) == 2
 	end, "host-configured match scan did not complete")
 	equal(2, #match_core.locations(buf))
-	equal(2, #vim.api.nvim_buf_get_extmarks(buf, match_core.namespace(), 0, -1, {}))
+	local marks = vim.api.nvim_buf_get_extmarks(buf, match_core.namespace(), 0, -1, { details = true })
+	equal(2, #marks)
+	for _, mark in ipairs(marks) do
+		equal("LogHl1", mark[4].hl_group, "the requested red highlight was not rendered")
+	end
 	patterns.clear({ args = "red" })
 	equal({}, match_core.locations(buf))
 
 	local syntax_spec = require("plugins.log-highlight")
 	equal("fei6409/log-highlight.nvim", syntax_spec[1], "external syntax backend changed")
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("host commands distinguish explicit patterns from visual ranges", function()
+T["host commands distinguish explicit patterns from visual ranges"] = function()
 	local buf = vim.api.nvim_create_buf(true, false)
 	vim.api.nvim_set_current_buf(buf)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
@@ -253,9 +235,9 @@ test("host commands distinguish explicit patterns from visual ranges", function(
 	assert(notifications[#notifications].message:find("patterns must be single-line", 1, true))
 
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("local plugin has no host imports, commands, mappings, or syntax dependency", function()
+T["local plugin has no host imports, commands, mappings, or syntax dependency"] = function()
 	for _, path in ipairs(vim.fn.glob(plugin .. "/lua/**/*.lua", false, true)) do
 		local contents = table.concat(vim.fn.readfile(path), "\n")
 		assert(not contents:match([[require%s*%(%s*["']config%.]]), path .. " imports config.*")
@@ -263,20 +245,14 @@ test("local plugin has no host imports, commands, mappings, or syntax dependency
 		assert(not contents:find("vim.keymap.set", 1, true), path .. " creates a mapping")
 		assert(not contents:find("log%-highlight", 1), path .. " loads the syntax backend")
 	end
-end)
-
-log_watch.teardown()
-vim.notify = original_notify
-for _, path in ipairs(temporary) do
-	vim.fn.delete(path, "rf")
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	log_watch.teardown()
+	vim.notify = original_notify
+	for _, path in ipairs(temporary) do
+		vim.fn.delete(path, "rf")
 	end
-	vim.cmd("cquit")
 end
 
-print(("log_workbench_spec: %d host contract tests passed"):format(count))
-vim.cmd("quitall!")
+return T

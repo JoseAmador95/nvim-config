@@ -6,8 +6,6 @@ vim.opt.runtimepath:prepend(repo)
 vim.opt.runtimepath:append(vim.fs.joinpath(vim.fn.stdpath("data"), "lazy", "nvim-lint"))
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
 local buffers = {}
 local fixture_paths = {}
 local notifications = {}
@@ -89,21 +87,10 @@ local discovery_loaded_tool_bootstrap = package.loaded["config.tool_bootstrap"] 
 local discovery_loaded_verified_tools = package.loaded.verified_tools ~= nil
 package.loaded["config.tool_bootstrap"] = tool_bootstrap
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function reset_observed(next_mode)
 	mode = next_mode or "allow"
@@ -130,13 +117,13 @@ local function named_buffer(suffix, ft, buftype, on_disk)
 	return buf, path
 end
 
-test("native spec discovery leaves verified tool resolution deferred", function()
+T["native spec discovery leaves verified tool resolution deferred"] = function()
 	assert(not discovery_loaded_tool_bootstrap, "lint spec discovery loaded config.tool_bootstrap")
 	assert(not discovery_loaded_verified_tools, "lint spec discovery loaded verified_tools")
 	equal({}, tool_calls, "lint spec discovery resolved a tool")
-end)
+end
 
-test("profiles and setup remain lazy and idempotent", function()
+T["profiles and setup remain lazy and idempotent"] = function()
 	local previous_vscode = vim.g.vscode
 	local previous_pager = pager.active
 	vim.g.vscode = nil
@@ -162,9 +149,9 @@ test("profiles and setup remain lazy and idempotent", function()
 
 	vim.g.vscode = previous_vscode
 	pager.active = previous_pager
-end)
+end
 
-test("saved-file routes preserve exact argv with verified command paths", function()
+T["saved-file routes preserve exact argv with verified command paths"] = function()
 	reset_observed()
 	local markdown = named_buffer(".md", "markdown.mdx")
 	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = markdown, group = "NvimLint", modeline = false })
@@ -188,9 +175,9 @@ test("saved-file routes preserve exact argv with verified command paths", functi
 		equal("lint-format", call.capability, "linter used the wrong execution capability")
 		equal(raw_calls[index].buf, call.opts.buf, "linter authorized a different buffer from the spawn buffer")
 	end
-end)
+end
 
-test("direct lint API cannot bypass exact resolution or mutate its caller", function()
+T["direct lint API cannot bypass exact resolution or mutate its caller"] = function()
 	reset_observed()
 	local buf = named_buffer(".sh", "sh")
 	vim.api.nvim_set_current_buf(buf)
@@ -216,9 +203,9 @@ test("direct lint API cannot bypass exact resolution or mutate its caller", func
 	equal("/verified/shellcheck/1", raw_calls[1].command, "direct lint retained an unverified command")
 	equal({ "/verified/shellcheck/1", "--format", "json1", "-" }, raw_calls[1].argv, "direct lint argv drifted")
 	equal(1, #resolve_calls, "idempotent setup wrapped lint.lint more than once")
-end)
+end
 
-test("deny, revoke, resolver drift, and non-exact paths never reach lint", function()
+T["deny, revoke, resolver drift, and non-exact paths never reach lint"] = function()
 	local buf = named_buffer(".md", "markdown")
 	vim.api.nvim_set_current_buf(buf)
 	for _, denied_mode in ipairs({ "deny", "throw", "revoke", "drift", "relative" }) do
@@ -229,9 +216,9 @@ test("deny, revoke, resolver drift, and non-exact paths never reach lint", funct
 		equal(1, #notifications, denied_mode .. " lint did not notify exactly once")
 		assert(#notifications[1].message <= 240, denied_mode .. " lint notification was not bounded")
 	end
-end)
+end
 
-test("unmanaged direct linters fail closed before authority resolution", function()
+T["unmanaged direct linters fail closed before authority resolution"] = function()
 	reset_observed()
 	local process, err = lint.lint({ name = "custom", cmd = "/tmp/custom" })
 	assert(not process and tostring(err):find("not manifest%-backed"), "unmanaged direct linter was accepted")
@@ -239,9 +226,9 @@ test("unmanaged direct linters fail closed before authority resolution", functio
 	equal({}, tool_calls, "unmanaged linter reached tool resolution")
 	equal({}, raw_calls, "unmanaged linter reached the upstream spawn seam")
 	equal(1, #notifications, "unmanaged direct linter did not notify exactly once")
-end)
+end
 
-test("only eligible written file buffers reach the central lint API", function()
+T["only eligible written file buffers reach the central lint API"] = function()
 	reset_observed()
 	local nofile = named_buffer("lint://preview", "markdown", "nofile")
 	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = nofile, group = "NvimLint", modeline = false })
@@ -253,28 +240,22 @@ test("only eligible written file buffers reach the central lint API", function()
 	vim.api.nvim_exec_autocmds("BufWritePost", { buffer = unnamed, group = "NvimLint", modeline = false })
 	equal({}, resolve_calls, "ineligible buffer reached authority resolution")
 	equal({}, raw_calls, "ineligible buffer reached the upstream spawn seam")
-end)
+end
 
-pcall(vim.api.nvim_del_augroup_by_name, "NvimLint")
-for _, buf in ipairs(buffers) do
-	if vim.api.nvim_buf_is_valid(buf) then
-		pcall(vim.api.nvim_buf_delete, buf, { force = true })
+hooks.post_once = function()
+	pcall(vim.api.nvim_del_augroup_by_name, "NvimLint")
+	for _, buf in ipairs(buffers) do
+		if vim.api.nvim_buf_is_valid(buf) then
+			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+		end
 	end
-end
-for _, path in ipairs(fixture_paths) do
-	vim.fn.delete(path)
-end
-vim.fn.executable = original_executable
-vim.notify = original_notify
-package.loaded["config.execution"] = original_execution
-package.loaded["config.tool_bootstrap"] = original_tool_bootstrap
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+	for _, path in ipairs(fixture_paths) do
+		vim.fn.delete(path)
 	end
-	vim.cmd("cquit")
+	vim.fn.executable = original_executable
+	vim.notify = original_notify
+	package.loaded["config.execution"] = original_execution
+	package.loaded["config.tool_bootstrap"] = original_tool_bootstrap
 end
 
-print(("lint_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+return T

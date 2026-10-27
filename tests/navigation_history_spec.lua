@@ -21,24 +21,10 @@ package.loaded["config.local_config"] = {
 	end,
 }
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local history = require("config.navigation_history")
 local editor = require("config.editor")
@@ -69,7 +55,7 @@ local function reset_editor()
 	history.reset()
 end
 
-test("semantic history restores exact locations across existing tabs", function()
+T["semantic history restores exact locations across existing tabs"] = function()
 	reset_editor()
 	local first = make_file("first")
 	local second = make_file("second")
@@ -96,9 +82,9 @@ test("semantic history restores exact locations across existing tabs", function(
 	assert(history.forward({ fallback = false }), "could not navigate forward")
 	equal(vim.uv.fs_realpath(second), current_path(), "forward did not restore the second file")
 	equal({ 3, 2 }, vim.api.nvim_win_get_cursor(0), "forward lost the exact second-file cursor")
-end)
+end
 
-test("same-file semantic jumps retain both cursor positions", function()
+T["same-file semantic jumps retain both cursor positions"] = function()
 	reset_editor()
 	local path = make_file("same-file")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
@@ -110,9 +96,9 @@ test("same-file semantic jumps retain both cursor positions", function()
 	equal({ 1, 2 }, vim.api.nvim_win_get_cursor(0), "same-file back lost its origin")
 	assert(history.forward({ fallback = false }), "could not go forward within one file")
 	equal({ 3, 3 }, vim.api.nvim_win_get_cursor(0), "same-file forward lost its destination")
-end)
+end
 
-test("new semantic navigation truncates forward history", function()
+T["new semantic navigation truncates forward history"] = function()
 	reset_editor()
 	local first = make_file("branch-first")
 	local second = make_file("branch-second")
@@ -133,9 +119,9 @@ test("new semantic navigation truncates forward history", function()
 	assert(history.back({ fallback = false }), "could not return from the new branch")
 	equal(vim.uv.fs_realpath(second), current_path(), "branch back did not restore its origin")
 	equal({ 1, 4 }, vim.api.nvim_win_get_cursor(0), "branch origin cursor was not refreshed")
-end)
+end
 
-test("history restores the exact split when a file has multiple windows", function()
+T["history restores the exact split when a file has multiple windows"] = function()
 	reset_editor()
 	local first = make_file("split-first")
 	local second = make_file("split-second")
@@ -151,9 +137,9 @@ test("history restores the exact split when a file has multiple windows", functi
 	assert(history.back({ fallback = false }), "could not restore the split fixture")
 	equal(preferred_win, vim.api.nvim_get_current_win(), "history restored a different window showing the same file")
 	equal({ 3, 4 }, vim.api.nvim_win_get_cursor(0), "history lost the preferred split cursor")
-end)
+end
 
-test("closed tabs are reopened without recording a recursive transition", function()
+T["closed tabs are reopened without recording a recursive transition"] = function()
 	reset_editor()
 	local first = make_file("reopen-first")
 	local second = make_file("reopen-second")
@@ -172,9 +158,9 @@ test("closed tabs are reopened without recording a recursive transition", functi
 	equal(vim.uv.fs_realpath(second), current_path(), "reopened history landed on the wrong file")
 	equal({ 3, 1 }, vim.api.nvim_win_get_cursor(0), "reopened history lost its cursor")
 	equal(3, #history.snapshot().entries, "history restoration recorded itself")
-end)
+end
 
-test("transient tabs are neither captured nor reused by history restoration", function()
+T["transient tabs are neither captured nor reused by history restoration"] = function()
 	reset_editor()
 	local first = make_file("transient-first")
 	local second = make_file("transient-second")
@@ -190,9 +176,9 @@ test("transient tabs are neither captured nor reused by history restoration", fu
 	assert(vim.api.nvim_get_current_tabpage() ~= transient, "history restoration reused the transient window")
 	assert(not tabs.is_transient(vim.api.nvim_get_current_tabpage()), "history restored into another transient tab")
 	equal(vim.uv.fs_realpath(second), current_path(), "history restored the wrong destination")
-end)
+end
 
-test("empty semantic history uses real counted Ctrl-O and Ctrl-I fallback", function()
+T["empty semantic history uses real counted Ctrl-O and Ctrl-I fallback"] = function()
 	reset_editor()
 	local path = make_file("native-fallback")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
@@ -205,9 +191,9 @@ test("empty semantic history uses real counted Ctrl-O and Ctrl-I fallback", func
 	equal({ 1, 0 }, vim.api.nvim_win_get_cursor(0), "empty-history Ctrl-O fallback did not execute")
 	assert(not history.forward(), "native Ctrl-I reported a semantic traversal")
 	equal({ 3, 0 }, vim.api.nvim_win_get_cursor(0), "empty-history Ctrl-I fallback did not execute")
-end)
+end
 
-test("semantic boundaries never escape into the native jumplist", function()
+T["semantic boundaries never escape into the native jumplist"] = function()
 	reset_editor()
 	local first = make_file("fallback-first")
 	local second = make_file("fallback-second")
@@ -231,9 +217,9 @@ test("semantic boundaries never escape into the native jumplist", function()
 	equal({}, fallbacks, "native forward ran before semantic history was exhausted")
 	assert(not history.forward(), "exhausted semantic forward reported a semantic traversal")
 	equal({}, fallbacks, "exhausted forward escaped into native history")
-end)
+end
 
-test("history picker renders provider labels without filesystem fields", function()
+T["history picker renders provider labels without filesystem fields"] = function()
 	reset_editor()
 	local runtime = require("tab_first")
 	local current = {
@@ -267,9 +253,9 @@ test("history picker renders provider labels without filesystem fields", functio
 	equal("● Review file.lua:2:1", choices[1].label, "current provider label changed")
 	equal("  Review file.lua:1:1", choices[2].label, "provider origin label changed")
 	runtime.setup({ history = {} })
-end)
+end
 
-test("setup exposes commands and back-forward mappings", function()
+T["setup exposes commands and back-forward mappings"] = function()
 	history.reset()
 	assert(not history.back({ fallback = false }), "empty semantic history unexpectedly navigated")
 	equal(0, #history.snapshot().entries, "an empty traversal seeded semantic history")
@@ -301,23 +287,17 @@ test("setup exposes commands and back-forward mappings", function()
 	equal(2, back_count, "<C-o> discarded its mapping count")
 	history.back = original_back
 	history.forward = original_forward
-end)
+end
 
-for _, path in ipairs(paths) do
-	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then
-			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+hooks.post_once = function()
+	for _, path in ipairs(paths) do
+		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then
+				pcall(vim.api.nvim_buf_delete, buf, { force = true })
+			end
 		end
+		vim.fn.delete(path)
 	end
-	vim.fn.delete(path)
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
-end
-
-print(string.format("navigation_history_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

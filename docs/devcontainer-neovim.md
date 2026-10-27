@@ -10,6 +10,12 @@ El repositorio conserva como source of truth su propio
 `.devcontainer.json`; una ruta explícita inválida falla sin elegir otra
 configuración.
 
+El host y todos los containers necesitan Python 3 con su biblioteca estándar.
+Antes de sustituir el pane se ejecuta una sonda `python3 -I -S` del launcher
+incluido en el snapshot. No se instala Python ni ningún paquete automáticamente.
+Al usar Dev Container, cada editor mantiene un único proceso auxiliar del mismo
+launcher; el arranque normal y la consulta de health/configuración no lo lanzan.
+
 ## Uso
 
 Desde el editor terminal completo:
@@ -152,6 +158,22 @@ se traducen sólo por el mapping exacto `{host_root, container_root}` y se
 revalidan contra el filesystem host antes de escribir una petición.
 
 ## Transporte y estado
+
+Python es el único propietario de la validación de estado, rutas y ficheros,
+HMAC, spool y ACK. Lua conserva los callbacks de navegación y la presentación.
+Ambos se comunican por stdin/stdout con JSON por líneas, operaciones permitidas
+y correlaciones crecientes. Cada línea tiene un máximo de 64 KiB; la cola de
+salida, 1 MiB, y las acciones pendientes, 128. Los diagnósticos van por stderr.
+EOF o la muerte del helper liberan sus descriptores y fallan las llamadas
+pendientes; no se repiten acciones inciertas ni se retiran records del
+coordinador. El siguiente comando explícito puede iniciar un helper nuevo con llamadas
+nuevas; el polling no lo reinicia ni vuelve a enviar acciones anteriores.
+
+Una apertura recibida se autentica y retira antes de llamar al editor. Python
+sólo escribe el ACK positivo tras la confirmación de Lua de que el callback ha
+abierto el buffer solicitado y colocado su cursor. Una excepción, un callback sin efecto o un timeout
+de confirmación produce un ACK negativo. La ausencia de un record sigue siendo
+la única condición que permite fallback al host.
 
 Cada repo usa directorios privados `0700` y registros, locks, peticiones y ACKs
 `0600` bajo `NVIM_DEVCONTAINER_STATE_HOME` o

@@ -5,18 +5,8 @@ vim.opt.runtimepath:prepend(vim.fn.getcwd() .. "/local-plugins/native-review.nvi
 
 local difftastic = require("native_review.difftastic")
 local projection = require("native_review.projection")
-local failures = {}
-local count = 0
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local function entry(old, new, options)
 	return vim.tbl_extend("force", {
@@ -75,7 +65,7 @@ local function rows(value)
 	return result
 end
 
-test("real pinned JSON maps zero-based tokens to original CRLF byte columns", function()
+T["real pinned JSON maps zero-based tokens to original CRLF byte columns"] = function()
 	local old = 'local élève = "uno"\r\nreturn élève\r\n'
 	local new = 'local élève = "dos"\r\nreturn élève\r\n'
 	local decoded = vim.json.decode(
@@ -97,9 +87,9 @@ test("real pinned JSON maps zero-based tokens to original CRLF byte columns", fu
 	assert(value.projection.rows[1].terminator == "\r\n" and value.projection.sources.old.raw == old)
 	assert(value.projection.hunks[1].first == 1 and value.projection.hunks[1].last == 2)
 	assert(vim.deep_equal(model, original), "normalization changed the frozen entry")
-end)
+end
 
-test("formatting differences remain separate unhighlighted source rows", function()
+T["formatting differences remain separate unhighlighted source rows"] = function()
 	local model = entry("local a=1\nreturn 1\n", "local a = 1\nreturn 2\n")
 	local value = normalize(
 		model,
@@ -119,9 +109,9 @@ test("formatting differences remain separate unhighlighted source rows", functio
 	assert(value.projection.hunks[1].old_start == 2 and value.projection.hunks[1].new_start == 2)
 	assert(assert(projection.source_at(value.projection, 1)).side == "old")
 	assert(assert(projection.resolve_range(value.projection, 1, 1)).start_line == 1)
-end)
+end
 
-test("exact context requires matching terminators as well as matching visible bytes", function()
+T["exact context requires matching terminators as well as matching visible bytes"] = function()
 	local model = entry("keep\r\nold\n", "keep\nnew\n")
 	local value = normalize(
 		model,
@@ -133,9 +123,9 @@ test("exact context requires matching terminators as well as matching visible by
 	assert(value.projection.rows[1].kind == "context" and value.projection.rows[1].new_line == nil)
 	assert(value.projection.rows[2].kind == "context" and value.projection.rows[2].old_line == nil)
 	assert(value.projection.rows[1].terminator == "\r\n" and value.projection.rows[2].terminator == "\n")
-end)
+end
 
-test("unsorted chunks and ranges produce ordered structural hunks independent of byte hunks", function()
+T["unsorted chunks and ranges produce ordered structural hunks independent of byte hunks"] = function()
 	local model = entry("format=1\nkeep\na1b2\nkeep\nold\n", "format = 1\nkeep\na3b4\nkeep\nnew\n")
 	local value = normalize(
 		model,
@@ -165,9 +155,9 @@ test("unsorted chunks and ranges produce ordered structural hunks independent of
 	assert(value.projection.hunks[1].first == 4 and value.projection.hunks[1].last == 5)
 	assert(value.projection.hunks[2].first == 7 and value.projection.hunks[2].last == 8)
 	assert(value.projection.rows[1].hunk_index == nil)
-end)
+end
 
-test("overlapping chunks reuse identical source records without duplicating ranges or anchors", function()
+T["overlapping chunks reuse identical source records without duplicating ranges or anchors"] = function()
 	local model = entry("keep\na1b2\nold\n", "keep\na3b4\nnew\n")
 	local decoded = json("changed", { { 0, 0 }, { 1, 1 }, { 2, 2 }, { 3, 3 } }, {
 		{
@@ -188,9 +178,9 @@ test("overlapping chunks reuse identical source records without duplicating rang
 	local value = normalize(model, decoded)
 	assert(vim.deep_equal(value, expected), "overlapping chunks changed the normalized presentation")
 	assert(vim.deep_equal(model, original), "overlapping chunks changed the frozen sources")
-end)
+end
 
-test("repeated chunk records still validate contents and their opposite alignment", function()
+T["repeated chunk records still validate contents and their opposite alignment"] = function()
 	local model = entry("keep\nold\n", "keep\nnew\n")
 	local decoded = json("changed", { { 0, 0 }, { 1, 1 }, { 2, 2 } }, {
 		{ { lhs = side(1, { change(0, 3, "old") }), rhs = side(1, { change(0, 3, "new") }) } },
@@ -206,9 +196,9 @@ test("repeated chunk records still validate contents and their opposite alignmen
 	local invalid = vim.deepcopy(decoded)
 	invalid.chunks[2] = { { lhs = vim.deepcopy(decoded.chunks[1][1].lhs), rhs = side(0) } }
 	rejects(model, invalid, "disagree with aligned_lines")
-end)
+end
 
-test("nullable one-sided alignment covers originals and omits virtual EOF", function()
+T["nullable one-sided alignment covers originals and omits virtual EOF"] = function()
 	local model = entry("keep\nold", "keep\nextra\nnew\n")
 	local decoded = vim.json.decode(
 		'{"language":"Lua","path":"file.lua","status":"changed","aligned_lines":[[0,0],[null,1],[1,2],[2,3]],"chunks":[[{"rhs":{"line_number":1,"changes":[{"start":0,"end":5,"content":"extra","highlight":"normal"}]}},{"lhs":{"line_number":1,"changes":[{"start":0,"end":3,"content":"old","highlight":"normal"}]},"rhs":{"line_number":2,"changes":[{"start":0,"end":3,"content":"new","highlight":"normal"}]}}]]}'
@@ -222,9 +212,9 @@ test("nullable one-sided alignment covers originals and omits virtual EOF", func
 	assert(value.projection.sources.old.line_count == 2 and value.projection.sources.new.line_count == 3)
 	assert(value.projection.rows[3].terminator == "", "original missing final newline was rewritten")
 	assert(#value.projection.rows == 4)
-end)
+end
 
-test("actual blank trailing lines survive omission of only the synthetic EOF line", function()
+T["actual blank trailing lines survive omission of only the synthetic EOF line"] = function()
 	local value = normalize(
 		entry("old\n\n", "new\n\n"),
 		json("changed", { { 0, 0 }, { 1, 1 }, { 2, 2 } }, {
@@ -234,9 +224,9 @@ test("actual blank trailing lines survive omission of only the synthetic EOF lin
 	assert(#value.aligned_lines == 2 and #value.projection.rows == 3)
 	assert(value.projection.rows[3].text == "" and value.projection.rows[3].old_line == 2)
 	assert(value.projection.rows[3].new_line == 2 and value.projection.rows[3].terminator == "\n")
-end)
+end
 
-test("Unicode ranges are exclusive byte columns including combining marks and astral scalars", function()
+T["Unicode ranges are exclusive byte columns including combining marks and astral scalars"] = function()
 	local prefix = "é𝌆="
 	local old, new = prefix .. "é", prefix .. "á"
 	local decoded = json("changed", { { 0, 0 }, { 1, 1 } }, {
@@ -250,18 +240,18 @@ test("Unicode ranges are exclusive byte columns including combining marks and as
 	rejects(model, malformed, "UTF-8")
 	malformed.chunks[1][1].lhs.changes[1] = change(2, 3, old:sub(3, 3))
 	rejects(model, malformed, "UTF-8")
-end)
+end
 
-test("CRLF ranges validate retained CR bytes and clamp only the visible end column", function()
+T["CRLF ranges validate retained CR bytes and clamp only the visible end column"] = function()
 	local value = normalize(entry("old\r\n", "new\r\n"), replaced("old\r", "new\r"))
 	assert(value.intraline.old[1].end_col == 3 and value.intraline.new[1].end_col == 3)
 	assert(value.projection.sources.old.raw == "old\r\n")
 	local invalid = replaced("old\r", "new\r")
 	invalid.chunks[1][1].lhs.changes[1] = change(0, 5, "old\r\n")
 	rejects(entry("old\r\n", "new\r\n"), invalid, "byte bounds")
-end)
+end
 
-test("unchanged syntactic output uses local geometry without any structural highlights", function()
+T["unchanged syntactic output uses local geometry without any structural highlights"] = function()
 	local model = entry("local a=1\nreturn a", "local a = 1\nreturn a\n")
 	local original = vim.deepcopy(model)
 	local value = normalize(model, json("unchanged"))
@@ -274,9 +264,9 @@ test("unchanged syntactic output uses local geometry without any structural high
 	end
 	assert(#value.projection.rows == 4, "unequal text or terminators were merged")
 	assert(vim.deep_equal(model, original))
-end)
+end
 
-test("identical and empty unchanged files retain canonical source anchors", function()
+T["identical and empty unchanged files retain canonical source anchors"] = function()
 	local value = normalize(entry("same\n", "same\n"), json("unchanged"))
 	assert(
 		#value.projection.rows == 1
@@ -287,9 +277,9 @@ test("identical and empty unchanged files retain canonical source anchors", func
 	assert(#value.aligned_lines == 0 and #value.projection.rows == 1)
 	assert(value.projection.rows[1].kind == "empty" and not value.projection.rows[1].anchorable)
 	assert(#value.projection.hunks == 0)
-end)
+end
 
-test("created and deleted files highlight all actual visible bytes and retain blank line anchors", function()
+T["created and deleted files highlight all actual visible bytes and retain blank line anchors"] = function()
 	for _, status in ipairs({ "created", "deleted" }) do
 		local selected = status == "created" and "new" or "old"
 		local model = selected == "new" and entry("", "é\r\n\r\ntail", { old_path = false })
@@ -305,9 +295,9 @@ test("created and deleted files highlight all actual visible bytes and retain bl
 		assert(value.projection.rows[2].kind == selected and value.projection.rows[2].source_line == 2)
 		assert(value.projection.rows[3].terminator == "")
 	end
-end)
+end
 
-test("Text and internal Text fallbacks publish no structural result", function()
+T["Text and internal Text fallbacks publish no structural result"] = function()
 	for _, language in ipairs({ "Text", "Text (exceeded DFT_GRAPH_LIMIT)", "Text (exceeded DFT_BYTE_LIMIT)" }) do
 		local decoded = replaced("old", "new")
 		decoded.language = language
@@ -316,9 +306,9 @@ test("Text and internal Text fallbacks publish no structural result", function()
 		assert(value.fallback_reason:find(language, 1, true))
 		assert(value.projection == nil and value.intraline == nil and value.aligned_lines == nil)
 	end
-end)
+end
 
-test("single-file metadata and canonical geometry are validated before analysis", function()
+T["single-file metadata and canonical geometry are validated before analysis"] = function()
 	local model = entry("old\n", "new\n")
 	for _, invalid in ipairs({ {}, { json("unchanged") }, "string", json("unexpected") }) do
 		rejects(model, invalid, "single-file object")
@@ -329,9 +319,9 @@ test("single-file metadata and canonical geometry are validated before analysis"
 	invalid.path, invalid.language = "file.lua", ""
 	rejects(model, invalid, "single-file object")
 	rejects(entry("old\n", "new\n", { hunks = { { 5, 1, 5, 1 } } }), replaced("old", "new"))
-end)
+end
 
-test("alignment rejects missing repeated reversed virtual out-of-range and noninteger maps", function()
+T["alignment rejects missing repeated reversed virtual out-of-range and noninteger maps"] = function()
 	local model = entry("keep\nold\n", "keep\nnew\n")
 	local invalid_alignments = {
 		{},
@@ -355,9 +345,9 @@ test("alignment rejects missing repeated reversed virtual out-of-range and nonin
 			})
 		)
 	end
-end)
+end
 
-test("chunks reject inconsistent alignment conflicting repeats virtual EOF and malformed side maps", function()
+T["chunks reject inconsistent alignment conflicting repeats virtual EOF and malformed side maps"] = function()
 	local model = entry("keep\nold\n", "keep\nnew\n")
 	local alignment = { { 0, 0 }, { 1, 1 }, { 2, 2 } }
 	for _, chunks in ipairs({
@@ -373,9 +363,9 @@ test("chunks reject inconsistent alignment conflicting repeats virtual EOF and m
 	}) do
 		rejects(model, json("changed", alignment, chunks))
 	end
-end)
+end
 
-test("change ranges reject forged bytes invalid bounds highlights and overlapping spans", function()
+T["change ranges reject forged bytes invalid bounds highlights and overlapping spans"] = function()
 	local model = entry("old\n", "new\n")
 	for _, invalid_change in ipairs({
 		change(-1, 2, "ol"),
@@ -397,35 +387,27 @@ test("change ranges reject forged bytes invalid bounds highlights and overlappin
 	empty.chunks[1][1].lhs.changes = {}
 	empty.chunks[1][1].rhs.changes = {}
 	rejects(model, empty, "no structural ranges")
-end)
+end
 
-test("adjacent novel spans merge without broadening over unchanged bytes", function()
+T["adjacent novel spans merge without broadening over unchanged bytes"] = function()
 	local decoded = replaced("old", "new")
 	decoded.chunks[1][1].lhs.changes = { change(1, 3, "ld"), change(0, 1, "o") }
 	local value = normalize(entry("old\n", "new\n"), decoded)
 	assert(vim.deep_equal(value.intraline.old, { { line = 1, start_col = 0, end_col = 3 } }))
-end)
+end
 
-test("local statuses reject contradictory bytes and unexpected analysis maps", function()
+T["local statuses reject contradictory bytes and unexpected analysis maps"] = function()
 	rejects(entry("old\n", "new\n"), json("created"), "contradicts")
 	rejects(entry("", ""), json("deleted"), "contradicts")
 	rejects(entry("old\n", "new\n"), json("unchanged", { { 0, 0 } }), "must omit")
 	rejects(entry("old\n", "new\n"), json("unchanged", nil, false), "must omit")
 	assert(normalize(entry("old\n", "new\n"), json("unchanged", {}, {})).projection)
-end)
+end
 
-test("lossy UTF-8 conversion cannot drift source coordinates", function()
+T["lossy UTF-8 conversion cannot drift source coordinates"] = function()
 	rejects(entry("\255\n", "new\n"), json("unchanged"), "not valid UTF-8")
 	rejects(entry("\237\160\128\n", "new\n"), json("unchanged"), "not valid UTF-8")
 	rejects(entry("\244\144\128\128\n", "new\n"), json("unchanged"), "not valid UTF-8")
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(("native_review_difftastic_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+return T

@@ -1,5 +1,5 @@
 -- Host policy adapter for devcontainer-editor.nvim. Lifecycle and transport
--- validation live in the local plugin; commands, tmux, and UI stay here.
+-- validation live in Python; commands, tmux, and UI stay here.
 local source = assert(debug.getinfo(1, "S").source:match("^@(.+)$"), "Could not resolve config.devcontainer source")
 local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
 
@@ -75,30 +75,6 @@ local default_dependencies = {
 }
 local dependencies = vim.tbl_extend("force", {}, default_dependencies)
 
-local function within(parent, path)
-	return path == parent or path:sub(1, #parent + 1) == parent .. "/"
-end
-
-local function state_root()
-	local configured = vim.env.NVIM_DEVCONTAINER_STATE_HOME
-	if configured and configured ~= "" then
-		configured = vim.fs.normalize(vim.fn.fnamemodify(configured, ":p"))
-	else
-		local state = vim.env.XDG_STATE_HOME or (vim.env.HOME and vim.fs.joinpath(vim.env.HOME, ".local", "state"))
-		configured = state and vim.fs.joinpath(state, "nvim-devcontainer") or nil
-		configured = configured and vim.fs.normalize(vim.fn.fnamemodify(configured, ":p")) or nil
-	end
-	if not configured then
-		return nil
-	end
-	local home = vim.env.HOME and vim.fs.normalize(vim.fn.fnamemodify(vim.env.HOME, ":p")) or nil
-	local temporary = uv.os_tmpdir and vim.fs.normalize(uv.os_tmpdir()) or nil
-	if (home and within(home, configured)) or (temporary and within(temporary, configured)) then
-		return configured
-	end
-	return nil
-end
-
 local function notify(message, level, options)
 	vim.notify(
 		message,
@@ -121,7 +97,6 @@ end
 
 local function options()
 	return {
-		state_root = state_root,
 		launcher = launcher,
 		docker_path = policy.docker_path,
 		resolve_cli = resolve_cli,
@@ -135,8 +110,11 @@ local function options()
 	}
 end
 
-local function ensure_core()
+local function ensure_core(retry)
 	if core_configured and core then
+		if retry then
+			core.reconnect()
+		end
 		return core
 	end
 	local candidate = core
@@ -166,8 +144,11 @@ function M.network_authorized()
 end
 
 function M.request_host(action, dependencies, on_success)
-	local instance, err = ensure_core()
-	return instance and instance.request_host(action, dependencies, on_success) or nil, err
+	local instance, err = ensure_core(true)
+	if not instance then
+		return nil, err
+	end
+	return instance.request_host(action, dependencies, on_success)
 end
 
 local function exact_pane()
@@ -287,7 +268,7 @@ function M.prepare_up(project_root)
 	if M.in_workspace() then
 		return nil, "cannot prepare a host Dev Container lifecycle from inside a container editor"
 	end
-	local instance, load_err = ensure_core()
+	local instance, load_err = ensure_core(true)
 	if not instance then
 		return nil, load_err
 	end
@@ -310,7 +291,7 @@ function M.preflight_record(project_root)
 	if M.in_workspace() then
 		return nil, "cannot prepare a host Dev Container restart from inside a container editor"
 	end
-	local instance, load_err = ensure_core()
+	local instance, load_err = ensure_core(true)
 	if not instance then
 		return nil, load_err
 	end
@@ -347,7 +328,7 @@ local function replace_editor(recreate, allow_network, requested_root)
 		return nil, pane_err
 	end
 	local project_root = requested_root or root()
-	local instance, load_err = ensure_core()
+	local instance, load_err = ensure_core(true)
 	if not instance then
 		return nil, load_err
 	end
@@ -778,7 +759,7 @@ local function execute_replace(recreate, allow_network)
 end
 
 local function run_lifecycle(action, specification, callback)
-	local instance, load_err = ensure_core()
+	local instance, load_err = ensure_core(true)
 	if not instance then
 		return nil, load_err
 	end
@@ -814,7 +795,7 @@ local function show_status()
 end
 
 open_lifecycle_log = function(project_root, quiet)
-	local instance, load_err = ensure_core()
+	local instance, load_err = ensure_core(not quiet)
 	if not instance then
 		if not quiet then
 			notify(load_err, vim.log.levels.ERROR)
@@ -876,7 +857,7 @@ local function return_to_host()
 		return M.request_host("host_editor")
 	end
 	local project_root = root()
-	local instance, load_err = ensure_core()
+	local instance, load_err = ensure_core(true)
 	if not instance then
 		return nil, load_err
 	end
@@ -971,6 +952,9 @@ end
 
 function M.teardown()
 	cancel_progress(true)
+	if core_configured and core then
+		core.stop()
+	end
 	return true
 end
 

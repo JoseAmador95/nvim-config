@@ -1,18 +1,21 @@
 # project-python.nvim
 
 Boundary: project Python roots, interpreter resolution, immutable snapshots,
-precedence, provider-neutral synchronization, Neotest, DAP, venv selection,
-and REPLs. LSP-provider settings, host commands, and UI stay outside.
+precedence, provider-neutral synchronization, DAP, venv selection,
+and REPLs.
+LSP-provider settings, host commands, and UI stay outside.
 
 `setup(opts)` rejects unknown top-level, REPL, and terminal keys before changing
-state. `effective_config()` is available before setup, returns caller-owned
-defaults, and projects only `test_runner`, `repl`, and `root_markers`; setup
-events carry that same callback-free projection. `status()` returns a copied
+state.
+`effective_config()` is available before setup, returns caller-owned
+defaults, and projects only `repl` and `root_markers`; setup
+events carry that same callback-free projection.
+`status()` returns a copied
 aggregate with `configured` and all process-local selections, snapshots, and
-generations, while `status(root)` keeps the contextual view. `teardown()` clears
-that operational state. The runner is restricted to `pytest` or `unittest` and
-defaults to `pytest`; REPL readiness defaults to a 5000 ms timeout polled every
-50 ms.
+generations, while `status(root)` keeps the contextual view.
+`teardown()` clears that operational state.
+REPL readiness defaults to a 5000 ms timeout polled
+every 50 ms.
 
 The first default `snapshot(root)` publishes a process-local snapshot; later
 default reads return that copied snapshot without canonicalizing the root or
@@ -27,7 +30,8 @@ Discovery only inspects paths and executable bits; it never starts Python.
 Explicit interpreter paths, environment directories,
 `python.defaultInterpreterPath`, `pythonPath`, `venvPath`, and `venv` inputs are
 authoritative. `diagnostics(root)` returns every inspected candidate and
-validity without changing the selected snapshot. DAP, Neotest, and REPL helpers
+validity without changing the selected snapshot.
+DAP and REPL helpers
 all consume the same root-bound snapshot.
 
 The injected terminal bridge receives the canonical project root as the third

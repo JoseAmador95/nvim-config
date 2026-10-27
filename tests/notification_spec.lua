@@ -1,26 +1,38 @@
-vim.o.shadafile = "NONE"
-vim.o.swapfile = false
+local T = MiniTest.new_set()
+T["notification"] = function()
+	vim.o.shadafile = "NONE"
+	vim.o.swapfile = false
 
-local repo = vim.fn.getcwd()
-vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+	local repo = vim.fn.getcwd()
+	vim.opt.runtimepath:prepend(repo)
+	package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local original_broker = package.loaded["config.notify_broker"]
-local original_noice = package.loaded.noice
-local original_snacks = package.loaded.snacks
-local original_snacks_spec = package.loaded["plugins.snacks"]
-local original_notify = vim.notify
-local original_echo = vim.api.nvim_echo
-local original_fast_event = vim.in_fast_event
-local original_schedule = vim.schedule
+	local original_broker = package.loaded["config.notify_broker"]
+	local original_noice = package.loaded.noice
+	local original_snacks = package.loaded.snacks
+	local original_snacks_spec = package.loaded["plugins.snacks"]
+	local original_notify = vim.notify
+	local original_echo = vim.api.nvim_echo
+	local original_fast_event = vim.in_fast_event
+	local original_schedule = vim.schedule
 
-local fallback_calls = {}
-local function fallback(message, level, options)
-	fallback_calls[#fallback_calls + 1] = { message = message, level = level, options = options }
-	return { fallback = #fallback_calls }
-end
+	local fallback_calls = {}
+	local function fallback(message, level, options)
+		fallback_calls[#fallback_calls + 1] = { message = message, level = level, options = options }
+		return { fallback = #fallback_calls }
+	end
 
-local ok, err = xpcall(function()
+	MiniTest.finally(function()
+		package.loaded["plugins.noice"] = nil
+		package.loaded["plugins.snacks"] = original_snacks_spec
+		package.loaded["config.notify_broker"] = original_broker
+		package.loaded.noice = original_noice
+		package.loaded.snacks = original_snacks
+		vim.notify = original_notify
+		vim.api.nvim_echo = original_echo
+		vim.in_fast_event = original_fast_event
+		vim.schedule = original_schedule
+	end)
 	package.loaded["plugins.snacks"] = nil
 	assert(require("plugins.snacks").opts.notifier.enabled == false, "Snacks still replaces broker-owned vim.notify")
 
@@ -179,18 +191,5 @@ local ok, err = xpcall(function()
 	assert(vim.deep_equal({ fallback = 8 }, vim.notify("native again")), "Noice deactivate lost native fallback")
 	assert(not broker.release({ id = -1 }), "unknown provider token was released")
 	broker.teardown()
-end, debug.traceback)
-
-package.loaded["plugins.noice"] = nil
-package.loaded["plugins.snacks"] = original_snacks_spec
-package.loaded["config.notify_broker"] = original_broker
-package.loaded.noice = original_noice
-package.loaded.snacks = original_snacks
-vim.notify = original_notify
-vim.api.nvim_echo = original_echo
-vim.in_fast_event = original_fast_event
-vim.schedule = original_schedule
-
-assert(ok, err)
-print("notification_spec: broker leases, fallback, generations, and Noice lifecycle passed")
-vim.cmd("quitall!")
+end
+return T

@@ -7,24 +7,10 @@ package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", p
 
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function temp_dir()
 	local path = vim.fn.tempname()
@@ -45,7 +31,7 @@ vim.notify = function(message)
 	notifications[#notifications + 1] = tostring(message)
 end
 
-test("local_config delegates merge and snapshots while preserving host APIs", function()
+T["local_config delegates merge and snapshots while preserving host APIs"] = function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
@@ -54,12 +40,11 @@ test("local_config delegates merge and snapshots while preserving host APIs", fu
 	assert(vim.fn.writefile({
 		"return {",
 		"  plugins = {",
-		"    theme_router = { background = 'dark', transparent = true },",
 		"    clangd_compile_db = { path = 'host-clangd', profile = 'full' },",
 		"    log_workbench = { max_lines = 1000, max_bytes = 4096, continuity_bytes = 32768, max_matches = 5000, scan_lines_per_tick = 250 },",
 		"    diagram_view = { cache = { max_bytes = 2 * 1024 * 1024 } },",
 		"  },",
-		"  dap = { ui = 'dap-view' },",
+		"  theme = { background = 'dark', transparent = true },",
 		"  path = { '/host/bin' },",
 		"  env = { HOST_ONLY = 'yes' },",
 		"  plugins_dir = { '/host/plugins' },",
@@ -98,8 +83,7 @@ test("local_config delegates merge and snapshots while preserving host APIs", fu
 	equal(32768, effective.plugins.log_workbench.continuity_bytes, "project replaced host continuity cost")
 	equal(5000, effective.plugins.log_workbench.max_matches, "project replaced host match cap")
 	equal(250, effective.plugins.log_workbench.scan_lines_per_tick, "project replaced host scan cost")
-	equal("dark", effective.plugins.theme_router.background, "project theme escaped its boundary")
-	equal("dap-view", effective.dap.ui, "project DAP setting escaped its boundary")
+	equal("dark", effective.theme.background, "project theme escaped its boundary")
 	equal(2 * 1024 * 1024, effective.plugins.diagram_view.cache.max_bytes, "project diagram cache escaped its boundary")
 	equal({ "/host/bin" }, effective.path, "project PATH escaped its boundary")
 	equal({ HOST_ONLY = "yes" }, effective.env, "project environment escaped its boundary")
@@ -170,9 +154,9 @@ test("local_config delegates merge and snapshots while preserving host APIs", fu
 	)
 
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("project local config rejects host-only log indexing controls", function()
+T["project local config rejects host-only log indexing controls"] = function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
@@ -207,9 +191,9 @@ test("project local config rejects host-only log indexing controls", function()
 	equal(0, #require("trusted_workspace").status().pending, "rejected log controls remained pending")
 
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("project local config permits review context only and rejects host-only review controls", function()
+T["project local config permits review context only and rejects host-only review controls"] = function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
@@ -247,9 +231,9 @@ test("project local config permits review context only and rejects host-only rev
 	equal(0, #require("trusted_workspace").status().pending, "rejected composer remained pending")
 
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("pager mode does not read or execute project Lua", function()
+T["pager mode does not read or execute project Lua"] = function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
@@ -278,9 +262,9 @@ test("pager mode does not read or execute project Lua", function()
 	equal(0, #status.pending, "pager exposed a project approval")
 
 	vim.fn.delete(root, "rf")
-end)
+end
 
-test("project redraw settings reject the complete source without approval", function()
+T["project redraw settings reject the complete source without approval"] = function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
@@ -318,18 +302,16 @@ test("project redraw settings reject the complete source without approval", func
 	equal(0, #require("trusted_workspace").status().pending, "rejected project source left a pending approval")
 
 	vim.fn.delete(root, "rf")
-end)
-
-vim.cmd.cd(vim.fn.fnameescape(original_cwd))
-vim.env.NVIM_CONFIG_FILE = original_config_file
-vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = original_state_root
-vim.env.NVIM_APPNAME = original_appname
-vim.secure.read = original_secure_read
-vim.notify = original_notify
-package.loaded["config.local_config"] = original_local_config
-
-if #failures > 0 then
-	error(table.concat(failures, "\n\n"))
 end
 
-print(("trusted_workspace host spec: %d tests passed"):format(count))
+hooks.post_once = function()
+	vim.cmd.cd(vim.fn.fnameescape(original_cwd))
+	vim.env.NVIM_CONFIG_FILE = original_config_file
+	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = original_state_root
+	vim.env.NVIM_APPNAME = original_appname
+	vim.secure.read = original_secure_read
+	vim.notify = original_notify
+	package.loaded["config.local_config"] = original_local_config
+end
+
+return T

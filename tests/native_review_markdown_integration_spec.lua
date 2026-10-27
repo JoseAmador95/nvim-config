@@ -1,3 +1,4 @@
+local MiniTest = require("mini.test")
 -- Frozen Git sources, commands, canonical comments and store integration.
 -- Allocate the screen first: -c 'lua dofile(...)'.
 vim.o.shadafile = "NONE"
@@ -23,7 +24,8 @@ local controller, presenter, store = review.controller, review.presenter, review
 local fixture, state_home = vim.fn.tempname(), vim.fn.tempname()
 assert(vim.fn.mkdir(fixture, "p", 448) == 1)
 assert(vim.fn.mkdir(state_home, "p", 448) == 1)
-local failures, count, notifications = {}, 0, {}
+
+local notifications = {}
 local originals = {
 	notify = vim.notify,
 	compose = review.editor.compose,
@@ -36,6 +38,40 @@ local originals = {
 	snacks = _G.Snacks,
 	image_load = diagram_image.load,
 }
+local function analyze(request, callback)
+	local entry = request.entry
+	local canonical = assert(review.projection.build(entry))
+	local alignment, chunks = {}, {}
+	for _, pair in ipairs(review.projection.alignment(canonical)) do
+		alignment[#alignment + 1] = {
+			pair.old_line and pair.old_line - 1 or vim.NIL,
+			pair.new_line and pair.new_line - 1 or vim.NIL,
+		}
+		local lhs = pair.old_line and canonical.sources.old.lines[pair.old_line].text
+		local rhs = pair.new_line and canonical.sources.new.lines[pair.new_line].text
+		if lhs ~= rhs then
+			local chunk = {}
+			for _, side in ipairs({ { "lhs", pair.old_line, lhs }, { "rhs", pair.new_line, rhs } }) do
+				if side[2] then
+					chunk[side[1]] = {
+						line_number = side[2] - 1,
+						changes = { { start = 0, ["end"] = #side[3], content = side[3], highlight = "normal" } },
+					}
+				end
+			end
+			chunks[#chunks + 1] = chunk
+		end
+	end
+	callback(vim.json.encode({
+		language = "Markdown",
+		path = entry.path,
+		status = "changed",
+		aligned_lines = alignment,
+		chunks = { chunks },
+	}))
+	return function() end
+end
+structural.analyze = analyze
 vim.notify = function(message)
 	notifications[#notifications + 1] = tostring(message)
 end
@@ -47,15 +83,8 @@ for _, name in ipairs({ "load", "save", "list" }) do
 		return originals[name](repo_root, value, vim.tbl_extend("force", options or {}, { state_home = state_home }))
 	end
 end
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. tostring(err)
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 local function write(path, text)
 	local file = assert(io.open(fixture .. "/" .. path, "wb"))
 	file:write(text)
@@ -139,20 +168,20 @@ local function focus(side, source_line)
 	vim.api.nvim_win_set_cursor(target.win, { row, 0 })
 	return row
 end
-test("ReviewMarkdown registers its command, completion and mapping with source as default", function()
+T["ReviewMarkdown registers its command, completion and mapping with source as default"] = function()
 	assert(vim.fn.exists(":ReviewMarkdown") == 2)
 	assert(vim.deep_equal(vim.fn.getcompletion("ReviewMarkdown ", "cmdline"), { "source", "render", "toggle" }))
 	assert(vim.fn.maparg(" rM", "n"):lower() == "<cmd>reviewmarkdown<cr>")
 	workspace = assert(controller.open({ kind = "working" }, fixture))
 	select("sample.md")
 	assert(controller.status().markdown_view == "source" and workspace.engine == "main")
-	assert(controller.engine("patience"))
+	assert(controller.engine("difftastic"))
 	assert(controller.layout("inline") and controller.context("full"))
 	vim.cmd("ReviewMarkdown render")
-	assert(controller.status().markdown_view == "render" and workspace.engine == "patience")
+	assert(controller.status().markdown_view == "render" and workspace.engine == "difftastic")
 	assert(workspace.mode_state.presentation.origin_engine.id == "markdown-visual")
-end)
-test("rendering uses frozen Git text even when the live file changes", function()
+end
+T["rendering uses frozen Git text even when the live file changes"] = function()
 	write("sample.md", new:gsub("60", "999"))
 	select("sample.md")
 	local p = workspace.mode_state.presentation
@@ -160,8 +189,8 @@ test("rendering uses frozen Git text even when the live file changes", function(
 	assert(text:find("60 seconds", 1, true) and not text:find("999", 1, true))
 	assert(p.entry.old_text == old and p.entry.new_text == new)
 	write("sample.md", new)
-end)
-test("rendered comments store whole original blocks and visual provenance on both sides", function()
+end
+T["rendered comments store whole original blocks and visual provenance on both sides"] = function()
 	for _, side in ipairs({ "old", "new" }) do
 		local row = focus(side, 4)
 		controller.comment(row, row)
@@ -184,14 +213,14 @@ test("rendered comments store whole original blocks and visual provenance on bot
 	local loaded = assert(originals.load(fixture, workspace.session.scope.id, { state_home = state_home }))
 	assert(loaded.items[1].origin_engine.id == "markdown-visual" and loaded.items[1].anchor.end_line == 4)
 	assert(review.export.render(loaded):find("Origin engine: `markdown-visual`", 1, true))
-end)
-test("source engine and block location survive source/render and layout changes", function()
+end
+T["source engine and block location survive source/render and layout changes"] = function()
 	focus("old", 3)
 	vim.api.nvim_win_set_cursor(pane("old").win, { vim.api.nvim_win_get_cursor(pane("old").win)[1], 5 })
 	assert(controller.markdown("source"))
 	local location = assert(presenter.capture_location(workspace.mode_state))
 	assert(location.side == "old" and location.line == 3 and location.col == 1)
-	assert(workspace.engine == "patience" and workspace.mode_state.presentation.origin_engine.id == "patience")
+	assert(workspace.engine == "difftastic" and workspace.mode_state.presentation.origin_engine.id == "difftastic")
 	assert(controller.markdown("render") and controller.layout("split"))
 	location = assert(presenter.capture_location(workspace.mode_state))
 	assert(location.side == "old" and location.line == 3)
@@ -200,8 +229,8 @@ test("source engine and block location survive source/render and layout changes"
 	location = assert(presenter.capture_location(workspace.mode_state))
 	assert(location.side == "new" and location.line == 3)
 	assert(left_comment.origin_engine.id == "markdown-visual")
-end)
-test("renderer, parser and source-engine failures retain the rendered presentation", function()
+end
+T["renderer, parser and source-engine failures retain the rendered presentation"] = function()
 	local previous = workspace.mode_state.presentation
 	renderer.build_snapshot = function()
 		return nil, "deliberate renderer failure"
@@ -230,13 +259,14 @@ test("renderer, parser and source-engine failures retain the rendered presentati
 	assert(
 		workspace.mode_state.presentation == previous
 			and workspace.markdown_view == "render"
-			and workspace.engine == "patience"
+			and workspace.engine == "difftastic"
 	)
+	structural.analyze = analyze
 	assert(controller.engine("main"))
 	assert(workspace.markdown_view == "source" and workspace.mode_state.presentation.origin_engine.id == "main")
 	assert(controller.markdown("render"))
-end)
-test("render preference travels across Markdown entries and leaves source available elsewhere", function()
+end
+T["render preference travels across Markdown entries and leaves source available elsewhere"] = function()
 	select("sample.lua")
 	assert(workspace.markdown_view == "render" and not workspace.mode_state.presentation.engine_result.markdown)
 	local previous = workspace.mode_state.presentation
@@ -257,14 +287,14 @@ test("render preference travels across Markdown entries and leaves source availa
 		assert(composed == before, "filler row acquired an anchor")
 	end
 	select("sample.md")
-end)
-test("jumping to a hidden source comment reveals the source in either source layout", function()
+end
+T["jumping to a hidden source comment reveals the source in either source layout"] = function()
 	assert(controller.markdown("source") and controller.layout("inline"))
 	local row = focus("new", 8)
 	controller.comment(row, row)
 	hidden_comment = workspace.session.items[#workspace.session.items]
 	assert(hidden_comment.anchor.start_line == 8 and hidden_comment.origin_engine.id == "main")
-	for _, engine in ipairs({ "main", "patience" }) do
+	for _, engine in ipairs({ "main", "difftastic" }) do
 		assert(controller.engine(engine))
 		for _, layout in ipairs({ "inline", "split" }) do
 			assert(controller.layout(layout) and controller.markdown("render"))
@@ -275,8 +305,8 @@ test("jumping to a hidden source comment reveals the source in either source lay
 			assert(location.side == "new" and location.line == 8)
 		end
 	end
-end)
-test("composer blocks view switches and render survives refresh, mode and session suspension", function()
+end
+T["composer blocks view switches and render survives refresh, mode and session suspension"] = function()
 	assert(controller.markdown("render"))
 	local previous = workspace.mode_state.presentation
 	review.editor.has_active = function()
@@ -287,15 +317,15 @@ test("composer blocks view switches and render survives refresh, mode and sessio
 	assert(workspace.mode_state.presentation == previous and workspace.markdown_view == "render")
 	review.editor.has_active = originals.has_active
 	assert(controller.refresh(), vim.inspect(notifications))
-	assert(workspace.mode_state.presentation.engine_result.markdown and workspace.engine == "patience")
+	assert(workspace.mode_state.presentation.engine_result.markdown and workspace.engine == "difftastic")
 	assert(controller.mode("off") and controller.mode("on"))
 	assert(workspace.mode_state.presentation.engine_result.markdown)
 	assert(controller.suspend_for_session() and controller.restore_after_session())
 	assert(workspace.mode_state.presentation.engine_result.markdown)
 	local loaded = assert(originals.load(fixture, workspace.session.scope.id, { state_home = state_home }))
 	assert(loaded.version == 3 and loaded.items[1].origin_engine.id == "markdown-visual")
-end)
-test("table row comments preserve exact source anchors in both rendered layouts", function()
+end
+T["table row comments preserve exact source anchors in both rendered layouts"] = function()
 	select("table.md")
 	assert(controller.markdown("render") and controller.context("full"))
 	for _, layout in ipairs({ "inline", "split" }) do
@@ -321,8 +351,8 @@ test("table row comments preserve exact source anchors in both rendered layouts"
 	assert(item.anchor.start_line == 4 and item.anchor.end_line == 4)
 	assert(item.anchor.context:find("| delay |", 1, true))
 	assert(review.export.render(loaded):find("table.md:4 [NEW]", 1, true))
-end)
-test("code line comments and navigation retain frozen row anchors and provenance", function()
+end
+T["code line comments and navigation retain frozen row anchors and provenance"] = function()
 	select("code.md")
 	assert(controller.markdown("render") and controller.context("full"))
 	for _, layout in ipairs({ "inline", "split" }) do
@@ -355,8 +385,8 @@ test("code line comments and navigation retain frozen row anchors and provenance
 	assert(item.anchor.start_line == 3 and item.anchor.end_line == 3 and item.origin_engine.version == renderer.version)
 	assert(review.export.render(loaded):find("code.md:3 [NEW]", 1, true))
 	write("code.md", code_new)
-end)
-test("diagram keymaps preview the frozen OLD/NEW fence in both source and rendered layouts", function()
+end
+T["diagram keymaps preview the frozen OLD/NEW fence in both source and rendered layouts"] = function()
 	local jobs = {}
 	_G.Snacks = { image = {
 		supports_terminal = function()
@@ -420,8 +450,8 @@ test("diagram keymaps preview the frozen OLD/NEW fence in both source and render
 	assert(vim.deep_equal(jobs[2].argv, { "/verified/plantuml", "-ttxt", "-pipe" }))
 	write("diagram.md", diagram_new)
 	_G.Snacks = originals.snacks
-end)
-test("diagram selections resolve the selected side and complete rendered fences", function()
+end
+T["diagram selections resolve the selected side and complete rendered fences"] = function()
 	select("diagram.md")
 	assert(controller.layout("inline") and controller.context("full"))
 	for _, view in ipairs({ "source", "render" }) do
@@ -452,8 +482,8 @@ test("diagram selections resolve the selected side and complete rendered fences"
 		not diagram.show("ascii", { start_row = first, end_row = last }),
 		"multiple diagram blocks were rendered as one"
 	)
-end)
-test("review diagram previews reject live images and unanchorable rows", function()
+end
+T["review diagram previews reject live images and unanchorable rows"] = function()
 	diagram_image.load = function()
 		error("review preview read a live image")
 	end
@@ -472,8 +502,8 @@ test("review diagram previews reject live images and unanchorable rows", functio
 	assert(not target and err, "filler row acquired a diagram source")
 	assert(not diagram.show("ascii"))
 	select("sample.md")
-end)
-test("queued resize cannot recreate a presentation after Review closes", function()
+end
+T["queued resize cannot recreate a presentation after Review closes"] = function()
 	local state = workspace.mode_state
 	vim.api.nvim_exec_autocmds("VimResized", {})
 	assert(controller.close())
@@ -481,23 +511,19 @@ test("queued resize cannot recreate a presentation after Review closes", functio
 		return false
 	end, 5)
 	assert(not state.presentation and not controller.status().active)
-end)
-controller.teardown()
-_G.Snacks = originals.snacks
-diagram_image.load = originals.image_load
-vim.notify = originals.notify
-review.editor.compose, review.editor.has_active = originals.compose, originals.has_active
-renderer.build_snapshot, structural.analyze = originals.build_snapshot, originals.analyze
-for _, name in ipairs({ "load", "save", "list" }) do
-	store[name] = originals[name]
 end
-vim.fn.delete(fixture, "rf")
-vim.fn.delete(state_home, "rf")
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	controller.teardown()
+	_G.Snacks = originals.snacks
+	diagram_image.load = originals.image_load
+	vim.notify = originals.notify
+	review.editor.compose, review.editor.has_active = originals.compose, originals.has_active
+	renderer.build_snapshot, structural.analyze = originals.build_snapshot, originals.analyze
+	for _, name in ipairs({ "load", "save", "list" }) do
+		store[name] = originals[name]
 	end
-	vim.cmd("cquit")
+	vim.fn.delete(fixture, "rf")
+	vim.fn.delete(state_home, "rf")
 end
-print(("native_review_markdown_integration_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+return T

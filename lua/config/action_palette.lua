@@ -4,6 +4,7 @@ local local_config = require("config.local_config")
 local deferred = require("config.deferred")
 local menu_context = require("config.menu.context")
 local recent = require("config.menu.recent")
+local usage = require("config.usage")
 
 local M = {}
 
@@ -57,7 +58,10 @@ local function ensure_configured()
 			refresh_context = function(context, target)
 				return menu_context.refresh(context, target)
 			end,
-			event = recent.observe,
+			event = function(event)
+				recent.observe(event)
+				usage.observe(event)
+			end,
 		})
 		palette.register_catalog(catalog.definitions(), {
 			supports = actions.supports,
@@ -78,6 +82,7 @@ local function ensure_configured()
 		return nil, setup_err
 	end
 	configured = true
+	usage.palette_catalog(catalog.definitions())
 	return palette
 end
 

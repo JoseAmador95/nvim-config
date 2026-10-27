@@ -117,19 +117,10 @@ local function configure(event)
 	router.register_provider("meson", { priority = 20 })
 end
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
-test("pre-setup public defaults and aggregate status are copied", function()
+T["pre-setup public defaults and aggregate status are copied"] = function()
 	local first = router.effective_config()
 	assert(first.max_validation_bytes == 256 * 1024 * 1024)
 	assert(first.restart_delay_ms == 100 and first.restart_timeout_ms == 5000)
@@ -141,9 +132,9 @@ test("pre-setup public defaults and aggregate status are copied", function()
 	assert(status.configured == false and vim.tbl_isempty(status.roots))
 	status.configured = true
 	assert(router.status().configured == false)
-end)
+end
 
-test("validation accepts only a structural JSON array", function()
+T["validation accepts only a structural JSON array"] = function()
 	configure()
 	local valid = database("valid", "[]")
 	assert(router.validate(valid).validity == "structural")
@@ -151,9 +142,9 @@ test("validation accepts only a structural JSON array", function()
 		local result, err = router.validate(database(name, data))
 		assert(result == nil and err:find("expected a JSON array", 1, true))
 	end
-end)
+end
 
-test("hostile compile database entries are rejected exactly", function()
+T["hostile compile database entries are rejected exactly"] = function()
 	configure()
 	for name, entry in pairs({
 		missing_directory = { file = "a.c", command = "cc a.c" },
@@ -186,9 +177,9 @@ test("hostile compile database entries are rejected exactly", function()
 	local status = router.status(root)
 	assert(status.active.fingerprint == active.fingerprint, "hostile candidate replaced the prior active database")
 	assert(status.candidates.cmake == nil, "hostile candidate remained eligible")
-end)
+end
 
-test("files over 256 MiB require explicit unchecked candidate and apply", function()
+T["files over 256 MiB require explicit unchecked candidate and apply"] = function()
 	configure()
 	local directory = database("huge", "[]")
 	local path = directory .. "/compile_commands.json"
@@ -216,9 +207,9 @@ test("files over 256 MiB require explicit unchecked candidate and apply", functi
 	assert(router.active(root).fingerprint == downgraded.active.fingerprint, "failed growth replaced active state")
 	local unchecked = assert(router.apply(root, { provider = "cmake", unchecked = true }))
 	assert(unchecked.active.validity == "unchecked" and unchecked.active.fingerprint ~= candidate.fingerprint)
-end)
+end
 
-test("apply refreshes a mutated candidate and preserves active on invalid revalidation", function()
+T["apply refreshes a mutated candidate and preserves active on invalid revalidation"] = function()
 	configure()
 	local stable = database("mutation-stable", "[]")
 	local changing = database("mutation-changing", "[]")
@@ -242,9 +233,9 @@ test("apply refreshes a mutated candidate and preserves active on invalid revali
 	assert(result == nil and err:find("expected a JSON array", 1, true))
 	assert(router.active(root).fingerprint == applied.active.fingerprint, "invalid revalidation replaced active state")
 	assert(router.active(root).fingerprint ~= previous.fingerprint)
-end)
+end
 
-test("candidate and apply are distinct with deterministic providers and RAM override", function()
+T["candidate and apply are distinct with deterministic providers and RAM override"] = function()
 	configure()
 	local cmake = database("cmake")
 	local meson = database("meson")
@@ -266,9 +257,9 @@ test("candidate and apply are distinct with deterministic providers and RAM over
 	router._reset_for_tests()
 	router.setup({})
 	assert(router.active(root) == nil, "manual override survived process-local reset")
-end)
+end
 
-test("changed or malformed active databases become stale without replacement", function()
+T["changed or malformed active databases become stale without replacement"] = function()
 	configure()
 	local directory = database("stale")
 	assert(router.set_provider(root, "cmake", directory))
@@ -280,9 +271,9 @@ test("changed or malformed active databases become stale without replacement", f
 	local generation = status.generation
 	assert(router.status(root).generation == generation, "stale status republished without a transition")
 	assert(router.command_directory(root) == directory)
-end)
+end
 
-test("restarts coalesce, build latest cmd first, and create one ordered client per root", function()
+T["restarts coalesce, build latest cmd first, and create one ordered client per root"] = function()
 	configure()
 	local first = database("first")
 	local second = database("second")
@@ -317,9 +308,9 @@ test("restarts coalesce, build latest cmd first, and create one ordered client p
 	assert(applied.active_revision == 2 and applied.applied_revision == 2 and not applied.restart_pending)
 	assert(router.set_provider(root, "cmake", second))
 	assert(#deferred == 1, "unchanged active database scheduled another restart")
-end)
+end
 
-test("initialization failure discards replacement and restores an initialized rollback", function()
+T["initialization failure discards replacement and restores an initialized rollback"] = function()
 	configure()
 	local first = database("initialize-rollback-first")
 	local second = database("initialize-rollback-second")
@@ -351,9 +342,9 @@ test("initialization failure discards replacement and restores an initialized ro
 	assert(status.active_revision == 2 and status.applied_revision == 1)
 	assert(status.active.directory == second and status.applied.directory == first)
 	assert(status.error:find("previous clangd configuration restored", 1, true))
-end)
+end
 
-test("failed rollback initialization clears applied state", function()
+T["failed rollback initialization clears applied state"] = function()
 	configure()
 	local first = database("initialize-failure-first")
 	local second = database("initialize-failure-second")
@@ -377,9 +368,9 @@ test("failed rollback initialization clears applied state", function()
 	assert(#discarded == 2 and discarded[1].client_id == 80 and discarded[2].client_id == 81)
 	assert(status.applied == nil and status.applied_revision == nil)
 	assert(status.error:find("previous clangd configuration could not be restored", 1, true))
-end)
+end
 
-test("initialization callback exceptions are contained before publication", function()
+T["initialization callback exceptions are contained before publication"] = function()
 	configure()
 	local first = database("initialize-exception-first")
 	local second = database("initialize-exception-second")
@@ -402,9 +393,9 @@ test("initialization callback exceptions are contained before publication", func
 	assert(#discarded == 1 and discarded[1].client_id == 77)
 	assert(status.applied_revision == 1 and status.active_revision == 2)
 	assert(status.error:find("could not confirm clangd initialization", 1, true))
-end)
+end
 
-test("reentrant updates schedule one exact follow-up transaction", function()
+T["reentrant updates schedule one exact follow-up transaction"] = function()
 	configure()
 	local first = database("reentrant-first")
 	local second = database("reentrant-second")
@@ -432,9 +423,9 @@ test("reentrant updates schedule one exact follow-up transaction", function()
 	assert(final.active_revision == 3 and final.applied_revision == 3 and not final.restart_pending)
 	assert(starts[#starts - 1].config.cmd[2] == "--compile-commands-dir=" .. second)
 	assert(starts[#starts].config.cmd[2] == "--compile-commands-dir=" .. third)
-end)
+end
 
-test("failed replacement restores only the last applied configuration", function()
+T["failed replacement restores only the last applied configuration"] = function()
 	configure()
 	local first = database("rollback-first")
 	local second = database("rollback-second")
@@ -461,9 +452,9 @@ test("failed replacement restores only the last applied configuration", function
 	assert(starts[#starts - 1].config.cmd[2] == "--compile-commands-dir=" .. second)
 	assert(starts[#starts].config.cmd[2] == "--compile-commands-dir=" .. first)
 	assert(not failed.restart_pending, "failed unchanged revision retried forever")
-end)
+end
 
-test("unconfirmed stop and failed rollback never claim an applied revision", function()
+T["unconfirmed stop and failed rollback never claim an applied revision"] = function()
 	configure()
 	local first = database("failure-first")
 	local second = database("failure-second")
@@ -492,9 +483,9 @@ test("unconfirmed stop and failed rollback never claim an applied revision", fun
 	local unrestored = router.status(root)
 	assert(unrestored.applied_revision == nil and unrestored.applied == nil)
 	assert(unrestored.error:find("could not be restored", 1, true))
-end)
+end
 
-test("reconciliation captures autoactivated buffers before one owned start", function()
+T["reconciliation captures autoactivated buffers before one owned start"] = function()
 	configure()
 	local directory = database("reconcile-autoactivation")
 	clients = { { id = 1, root = root, attached_buffers = { [4] = true } } }
@@ -514,9 +505,9 @@ test("reconciliation captures autoactivated buffers before one owned start", fun
 		"autoactivated buffers were not merged into the replacement"
 	)
 	assert(router.status(root).applied_revision == 1)
-end)
+end
 
-test("partial attachment discards the owned client before rollback", function()
+T["partial attachment discards the owned client before rollback"] = function()
 	configure()
 	local first = database("attach-first")
 	local second = database("attach-second")
@@ -537,9 +528,9 @@ test("partial attachment discards the owned client before rollback", function()
 	assert(#discarded == 1 and discarded[1].client_id == 77, "partial client was not explicitly discarded")
 	assert(state.applied_revision == 1 and state.applied.directory == first)
 	assert(state.error:find("previous clangd configuration restored", 1, true))
-end)
+end
 
-test("setup contracts reject unknown options without mutating active state", function()
+T["setup contracts reject unknown options without mutating active state"] = function()
 	local events = {}
 	configure(function(event)
 		events[#events + 1] = event
@@ -568,9 +559,9 @@ test("setup contracts reject unknown options without mutating active state", fun
 	assert(router.effective_config().restart_timeout_ms == 5000)
 	assert(router.status().configured == false)
 	assert(type(router.status(root)) == "table")
-end)
+end
 
-test("clear override coalesces fallback and skips unapplied round trips", function()
+T["clear override coalesces fallback and skips unapplied round trips"] = function()
 	configure()
 	clients = { { id = 1, root = root, attached_buffers = { [1] = true } } }
 	local fallback = database("clear-fallback")
@@ -606,16 +597,10 @@ test("clear override coalesces fallback and skips unapplied round trips", functi
 	assert(#deferred == 1, "no-database transitions did not coalesce to one restart")
 	deferred[1]()
 	assert(#starts == 0, "unapplied manual round trip restarted the unchanged base configuration")
-end)
-
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("clangd_compile_db_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

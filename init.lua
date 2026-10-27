@@ -55,6 +55,9 @@ vim.opt.undodir = undodir .. "//"
 -- before plugins and mason rely on them.
 local local_config = require("config.local_config")
 local_config.apply_env()
+local usage = require("config.usage")
+usage.setup(local_config.get("telemetry", {}))
+local usage_map = usage.mapper("init")
 local redraw_profile = require("config.redraw_profile")
 local low_bandwidth_redraw = redraw_profile.low_bandwidth()
 
@@ -134,28 +137,28 @@ require("config.whitespace").setup(local_config.get("whitespace", {}))
 -- Key Mappings -------------------------------------------------------------
 
 -- Toggle paste mode with <leader>pp
-vim.keymap.set("n", "<leader>pp", ":setlocal paste!<CR>", {
+usage_map("n", "<leader>pp", ":setlocal paste!<CR>", {
 	noremap = true,
 	silent = true,
 	desc = "Toggle paste mode",
 })
 
 -- Clear search highlight
-vim.keymap.set("n", "<leader><CR>", ":nohlsearch<CR>", {
+usage_map("n", "<leader><CR>", ":nohlsearch<CR>", {
 	noremap = true,
 	silent = true,
 	desc = "Clear search highlight",
 })
 
 -- Toggle spell checking
-vim.keymap.set("n", "<leader>ss", ":setlocal spell!<CR>", {
+usage_map("n", "<leader>ss", ":setlocal spell!<CR>", {
 	noremap = true,
 	silent = true,
 	desc = "Toggle spell checking",
 })
 
 -- Map 0 to go to the first non-blank character on the line
-vim.keymap.set("n", "H", "^", {
+usage_map("n", "H", "^", {
 	noremap = true,
 	silent = true,
 	desc = "Beginning of indentation",
@@ -188,7 +191,7 @@ local is_editor = not is_vscode and not pager.active
 -- native buffer-cycle maps in VSCode and nvimpager, where this tab workflow
 -- does not own navigation.
 if is_editor then
-	vim.keymap.set("n", "gf", require("config.editor_actions").open_file_under_cursor, {
+	usage_map("n", "gf", require("config.editor_actions").open_file_under_cursor, {
 		desc = "Open file under cursor in new tab",
 	})
 	for _, lhs in ipairs({ "[b", "]b" }) do
@@ -223,12 +226,11 @@ elseif pager.active then
 	require("config.diagram").setup()
 end
 
+require("config.lazy")
 if not is_vscode then
 	local theme = require("config.theme")
-	theme.setup()
 	redraw_profile.register_repaint("theme", theme.repaint)
 end
-require("config.lazy")
 
 -- `:syntax enable` also enables filetype detection and replays it for buffers
 -- that already exist. Lazy must register its documented event handlers first

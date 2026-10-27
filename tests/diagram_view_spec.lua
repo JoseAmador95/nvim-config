@@ -13,31 +13,12 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
 local temporary = {}
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(
-			(message or "values differ")
-				.. "\nexpected: "
-				.. vim.inspect(expected)
-				.. "\nactual: "
-				.. vim.inspect(actual)
-		)
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function cache_root()
 	local parent = vim.fn.tempname()
@@ -53,7 +34,7 @@ package.loaded["config.local_config"] = {
 }
 package.loaded["config.pager"] = { active = false }
 
-test("host owns commands, keymaps, renderer commands, and presenters", function()
+T["host owns commands, keymaps, renderer commands, and presenters"] = function()
 	local jobs_a = {}
 	local jobs_b = {}
 	local pending_killed = false
@@ -165,9 +146,9 @@ test("host owns commands, keymaps, renderer commands, and presenters", function(
 	equal("SANDBOX", jobs_b[#jobs_b].options.env.PLANTUML_SECURITY_PROFILE)
 	equal("ASCII", delivery.result)
 	equal("presented", session:status().state)
-end)
+end
 
-test("managed tool resolution stays deferred until an explicit render", function()
+T["managed tool resolution stays deferred until an explicit render"] = function()
 	local adapter = require("config.diagram")
 	local deferred = require("config.deferred")
 	local original_load = deferred.load
@@ -208,7 +189,7 @@ test("managed tool resolution stays deferred until an explicit render", function
 	end, debug.traceback)
 	deferred.load = original_load
 	assert(ok, err)
-end)
+end
 
 local function with_image_viewer(callback)
 	local original_snacks = _G.Snacks
@@ -313,7 +294,7 @@ local function argument(argv, name)
 	end
 end
 
-test("image zoom and pan crop the source, cancel obsolete frames, and keep the float", function()
+T["image zoom and pan crop the source, cancel obsolete frames, and keep the float"] = function()
 	with_image_viewer(function(context)
 		local presentation, jobs = context.presentation, context.jobs
 		context.press("+")
@@ -357,9 +338,9 @@ test("image zoom and pan crop the source, cancel obsolete frames, and keep the f
 		equal({ zoom = 1, x = 0.5, y = 0.5 }, presentation.viewport)
 		assert(vim.inspect(vim.api.nvim_win_get_config(win).footer):find("100%%"))
 	end)
-end)
+end
 
-test("cached zoom delivery is synchronous-safe and clipboard keeps the whole diagram", function()
+T["cached zoom delivery is synchronous-safe and clipboard keeps the whole diagram"] = function()
 	with_image_viewer(function(context)
 		context.finish()
 		local presentation = context.presentation
@@ -387,9 +368,9 @@ test("cached zoom delivery is synchronous-safe and clipboard keeps the whole dia
 			assert(vim.tbl_contains(clipboard_argv, original), "clipboard did not receive the original PNG")
 		end
 	end)
-end)
+end
 
-test("failed and late image frames preserve displayed content and close cancels work", function()
+T["failed and late image frames preserve displayed content and close cancels work"] = function()
 	with_image_viewer(function(context)
 		context.finish()
 		context.press("+")
@@ -415,9 +396,9 @@ test("failed and late image frames preserve displayed content and close cancels 
 		context.complete(late, "<svg/>")
 		equal(placement_count, #context.placements, "late render reopened a closed diagram")
 	end)
-end)
+end
 
-test("portrait geometry keeps its pixel aspect and zoom and pan stop at their bounds", function()
+T["portrait geometry keeps its pixel aspect and zoom and pan stop at their bounds"] = function()
 	with_image_viewer(function(context)
 		context.dimensions = { width = 600, height = 1800 }
 		context.finish()
@@ -449,9 +430,9 @@ test("portrait geometry keeps its pixel aspect and zoom and pan stop at their bo
 		context.press("l")
 		equal(count_before, #context.jobs, "fit image panned or zoomed below its bound")
 	end)
-end)
+end
 
-test("zoom uses the full float and centers axes that still fit", function()
+T["zoom uses the full float and centers axes that still fit"] = function()
 	for _, dimensions in ipairs({ { width = 600, height = 1800 }, { width = 3600, height = 300 } }) do
 		with_image_viewer(function(context)
 			context.dimensions = dimensions
@@ -495,9 +476,9 @@ test("zoom uses the full float and centers axes that still fit", function()
 			equal(fit, context.placements[#context.placements].options, "fit reset retained the full zoom canvas")
 		end)
 	end
-end)
+end
 
-test("failed cancellation retains the pending frame for a close retry", function()
+T["failed cancellation retains the pending frame for a close retry"] = function()
 	with_image_viewer(function(context)
 		context.finish()
 		context.press("+")
@@ -516,7 +497,7 @@ test("failed cancellation retains the pending frame for a close retry", function
 		assert(not vim.api.nvim_win_is_valid(context.presentation.win))
 		equal("cancelled", frame:status().state)
 	end)
-end)
+end
 
 local function write_file(path, data)
 	local fd = assert(vim.uv.fs_open(path, "w", 420))
@@ -538,7 +519,7 @@ local function png_bytes(width, height)
 		.. "payload"
 end
 
-test("image references resolve to local files and reject remote or unsupported media", function()
+T["image references resolve to local files and reject remote or unsupported media"] = function()
 	local image = require("config.diagram_image")
 	local root = vim.fn.tempname()
 	assert(vim.fn.mkdir(root, "p") == 1)
@@ -601,7 +582,7 @@ test("image references resolve to local files and reject remote or unsupported m
 	assert(unsupported == nil and unsupported_err:find("unsupported image format", 1, true), tostring(unsupported_err))
 	local oversized, oversized_err = image.load(shot, 8)
 	assert(oversized == nil and oversized_err:find("viewer limit", 1, true), tostring(oversized_err))
-end)
+end
 
 local function with_markdown_image(options, callback)
 	local original_snacks = _G.Snacks
@@ -685,7 +666,7 @@ local function with_markdown_image(options, callback)
 	assert(ok, err)
 end
 
-test("a Markdown image renders, zooms, and pans through the SVG pipeline", function()
+T["a Markdown image renders, zooms, and pans through the SVG pipeline"] = function()
 	with_markdown_image({}, function(context)
 		local session = assert(context.session, "the image did not open: " .. tostring(context.error))
 		equal(1, #context.jobs, "an image needs exactly one rasterizing stage")
@@ -719,9 +700,9 @@ test("a Markdown image renders, zooms, and pans through the SVG pipeline", funct
 		end)
 		equal(3, #context.jobs, "pan did not render a new frame")
 	end)
-end)
+end
 
-test("an image refuses to degrade to ASCII and reports a missing rasterizer", function()
+T["an image refuses to degrade to ASCII and reports a missing rasterizer"] = function()
 	with_markdown_image({ terminal = false }, function(context)
 		assert(context.session == nil, "an image must not open without inline image support")
 		assert(context.error:find("inline image support", 1, true), tostring(context.error))
@@ -744,9 +725,9 @@ test("an image refuses to degrade to ASCII and reports a missing rasterizer", fu
 		assert(context.error:find("rsvg%-convert"), tostring(context.error))
 		assert(context.error:find("shot.png", 1, true), "the failure must name the image")
 	end)
-end)
+end
 
-test("local plugin contains no host imports, global commands, or mappings", function()
+T["local plugin contains no host imports, global commands, or mappings"] = function()
 	local files = vim.fn.glob(plugin .. "/lua/**/*.lua", false, true)
 	assert(#files > 0)
 	for _, path in ipairs(files) do
@@ -755,22 +736,12 @@ test("local plugin contains no host imports, global commands, or mappings", func
 		assert(not contents:find("nvim_create_user_command", 1, true), path .. " creates a global command")
 		assert(not contents:find("vim.keymap.set", 1, true), path .. " creates a mapping")
 	end
-	local host = table.concat(vim.fn.readfile(repo .. "/lua/config/diagram.lua"), "\n")
-	assert(host:find("nvim_create_user_command", 1, true), "command did not remain in the host adapter")
-	assert(host:find("vim.keymap.set", 1, true), "mappings did not remain in the host adapter")
-	assert(host:find("Snacks.image.placement.new", 1, true), "Snacks presenter did not remain in the host adapter")
-end)
-
-for _, path in ipairs(temporary) do
-	vim.fn.delete(path, "rf")
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	for _, path in ipairs(temporary) do
+		vim.fn.delete(path, "rf")
 	end
-	vim.cmd("cquit")
 end
 
-print(("diagram_view_spec: %d host contract tests passed"):format(count))
-vim.cmd("quitall!")
+return T

@@ -6,24 +6,10 @@ vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local root = vim.fn.tempname()
 assert(vim.fn.mkdir(root, "p", 448) == 1)
@@ -52,16 +38,12 @@ local plugin_names = {
 	"action_palette",
 	"diagram_view",
 	"log_workbench",
-	"repo_scratch",
-	"coverage_workbench",
-	"just_workbench",
 	"clangd_compile_db",
 	"trusted_workspace",
 	"treesitter_runtime",
-	"theme_router",
 }
 
-test("canonical plugin schema exposes all products and host-only top-level values", function()
+T["canonical plugin schema exposes all products and host-only top-level values"] = function()
 	local config = local_config.read()
 	local actual = vim.tbl_keys(config.plugins)
 	table.sort(actual)
@@ -155,12 +137,8 @@ test("canonical plugin schema exposes all products and host-only top-level value
 	equal(64 * 1024, config.plugins.log_workbench.continuity_bytes, "log continuity default changed")
 	equal(20000, config.plugins.log_workbench.max_matches, "log match cap default changed")
 	equal(1000, config.plugins.log_workbench.scan_lines_per_tick, "log scan budget default changed")
-	equal(50 * 1024 * 1024, config.plugins.coverage_workbench.max_report_bytes, "coverage report cap changed")
-	equal(16 * 1024 * 1024, config.plugins.coverage_workbench.max_source_bytes, "coverage source cap changed")
-	equal(64 * 1024 * 1024, config.plugins.coverage_workbench.max_model_bytes, "coverage model cap changed")
 	equal(5, config.plugins.action_palette.recent_limit, "action palette recent limit default changed")
-	equal("auto", config.plugins.theme_router.background, "theme background default changed")
-	equal("dap-ui", config.dap.ui, "DAP host configuration moved under plugins")
+	equal("auto", config.theme.background, "theme background default changed")
 	equal("full", config.ui.redraw_profile, "redraw profile default changed")
 	equal(nil, config.ui.inline_diagnostics, "inline diagnostic policy gained a schema default")
 	equal(nil, config.ui.full_refresh_ms, "full refresh interval gained a schema default")
@@ -171,9 +149,9 @@ test("canonical plugin schema exposes all products and host-only top-level value
 	equal(4 * 1024 * 1024, config.whitespace.max_bytes, "whitespace byte default changed")
 	equal(100000, config.whitespace.max_lines, "whitespace line default changed")
 	equal({}, config.env, "env host configuration default changed")
-end)
+end
 
-test("Dev Container UI policy accepts only inclusive host bounds", function()
+T["Dev Container UI policy accepts only inclusive host bounds"] = function()
 	for _, values in ipairs({
 		{ progress_interval_ms = 200, log_width = 30 },
 		{ progress_interval_ms = 5000, log_width = 160 },
@@ -209,9 +187,9 @@ test("Dev Container UI policy accepts only inclusive host bounds", function()
 	}) do
 		assert(errors:find(path, 1, true), "missing Dev Container UI diagnostic for " .. path)
 	end
-end)
+end
 
-test("action palette recent limit accepts only its inclusive host bounds", function()
+T["action palette recent limit accepts only its inclusive host bounds"] = function()
 	for _, value in ipairs({ 0, 20 }) do
 		assert(vim.fn.writefile({
 			("return { plugins = { action_palette = { recent_limit = %d } } }"):format(value),
@@ -232,33 +210,9 @@ test("action palette recent limit accepts only its inclusive host bounds", funct
 			"invalid action palette recent limit omitted its diagnostic"
 		)
 	end
-end)
+end
 
-test("coverage host byte limits accept only their inclusive schema bounds", function()
-	for _, limits in ipairs({
-		{ max_report_bytes = 1024, max_source_bytes = 1, max_model_bytes = 1 },
-		{
-			max_report_bytes = 256 * 1024 * 1024,
-			max_source_bytes = 16 * 1024 * 1024,
-			max_model_bytes = 64 * 1024 * 1024,
-		},
-	}) do
-		assert(vim.fn.writefile({
-			("return { plugins = { coverage_workbench = { max_report_bytes = %d, max_source_bytes = %d, max_model_bytes = %d } } }"):format(
-				limits.max_report_bytes,
-				limits.max_source_bytes,
-				limits.max_model_bytes
-			),
-		}, config_path) == 0)
-		local actual = local_config.reload().plugins.coverage_workbench
-		equal(limits.max_report_bytes, actual.max_report_bytes, "coverage report boundary was rejected")
-		equal(limits.max_source_bytes, actual.max_source_bytes, "coverage source boundary was rejected")
-		equal(limits.max_model_bytes, actual.max_model_bytes, "coverage model boundary was rejected")
-		equal({}, local_config.errors(), "valid coverage boundaries produced a diagnostic")
-	end
-end)
-
-test("log workbench host cost controls accept their inclusive schema bounds", function()
+T["log workbench host cost controls accept their inclusive schema bounds"] = function()
 	for _, limits in ipairs({
 		{ continuity_bytes = 1024, max_matches = 1, scan_lines_per_tick = 1 },
 		{ continuity_bytes = 1024 * 1024, max_matches = 100000, scan_lines_per_tick = 10000 },
@@ -276,9 +230,9 @@ test("log workbench host cost controls accept their inclusive schema bounds", fu
 		equal(limits.scan_lines_per_tick, actual.scan_lines_per_tick, "scan boundary was rejected")
 		equal({}, local_config.errors(), "valid log boundaries produced a diagnostic")
 	end
-end)
+end
 
-test("native review composer style is host-configurable and schema-validated", function()
+T["native review composer style is host-configurable and schema-validated"] = function()
 	for _, style in ipairs({ "card", "minimal" }) do
 		assert(vim.fn.writefile({
 			("return { plugins = { native_review = { composer = { style = %q } } } }"):format(style),
@@ -299,7 +253,7 @@ test("native review composer style is host-configurable and schema-validated", f
 		table.concat(local_config.errors(), "\n"):find("plugins.native_review.composer.style", 1, true),
 		"invalid composer style omitted its schema warning"
 	)
-end)
+end
 
 local function configured_review_types(definitions)
 	assert(vim.fn.writefile({
@@ -308,7 +262,7 @@ local function configured_review_types(definitions)
 	return local_config.reload().plugins.native_review.comment_types, local_config.errors()
 end
 
-test("additional native review comment types keep order and default INFO severity", function()
+T["additional native review comment types keep order and default INFO severity"] = function()
 	local definitions = "{{ id = 'objection!', icon = '!', description = 'Challenge to a decision.', highlight = 'NvimReviewCommentObjection', default_link = 'Special', rail_rank = 4 }, "
 		.. "{ id = 'insight', icon = '◆', highlight = 'NvimReviewCommentInsight', default_link = 'DiagnosticSignInfo', rail_rank = 2, severity = 4 }}"
 	local types, errors = configured_review_types(definitions)
@@ -320,9 +274,9 @@ test("additional native review comment types keep order and default INFO severit
 	equal(vim.diagnostic.severity.HINT, types[2].severity, "review type severity was ignored")
 	types[1].id = "mutated"
 	equal("objection!", local_config.plugin("native_review").comment_types[1].id, "review types leaked mutable state")
-end)
+end
 
-test("host type list can select issue-only and rejects invalid replacements atomically", function()
+T["host type list can select issue-only and rejects invalid replacements atomically"] = function()
 	local issue_only, issue_only_errors = configured_review_types("{}")
 	equal({}, issue_only, "explicit empty type list did not select issue-only")
 	equal({}, issue_only_errors, "explicit empty type list produced a diagnostic")
@@ -407,9 +361,9 @@ test("host type list can select issue-only and rejects invalid replacements atom
 	local types, errors = configured_review_types("{" .. table.concat(many, ",") .. "}")
 	equal(review_type_defaults, types, "oversized review type list escaped validation")
 	assert(table.concat(errors, "\n"):find("at most 32", 1, true), "oversized list omitted its diagnostic")
-end)
+end
 
-test("native review construction limits are positive host settings", function()
+T["native review construction limits are positive host settings"] = function()
 	assert(vim.fn.writefile({
 		"return { plugins = { native_review = { max_files = 7, max_file_bytes = 11, max_model_bytes = 13 } } }",
 	}, config_path) == 0)
@@ -426,9 +380,9 @@ test("native review construction limits are positive host settings", function()
 	equal(2000, review.max_files, "zero native review file limit escaped validation")
 	equal(4 * 1024 * 1024, review.max_file_bytes, "negative native review byte limit escaped validation")
 	equal(64 * 1024 * 1024, review.max_model_bytes, "fractional native review model limit escaped validation")
-end)
+end
 
-test("Tree-sitter language options remain partial for global inheritance", function()
+T["Tree-sitter language options remain partial for global inheritance"] = function()
 	assert(vim.fn.writefile({
 		"return { plugins = { treesitter_runtime = {",
 		"  max_bytes = 32768,",
@@ -440,9 +394,9 @@ test("Tree-sitter language options remain partial for global inheritance", funct
 	equal({ max_bytes = 65536 }, policy.languages.lua, "absent language indentation gained a default")
 	equal({ indent = false }, policy.languages.markdown, "absent language maximum gained a default")
 	equal({}, local_config.errors(), "valid partial language policies produced a diagnostic")
-end)
+end
 
-test("redraw profile accepts only the documented host values", function()
+T["redraw profile accepts only the documented host values"] = function()
 	assert(vim.fn.writefile({ "return { ui = { redraw_profile = 'low-bandwidth' } }" }, config_path) == 0)
 	local config = local_config.reload()
 	equal("low-bandwidth", config.ui.redraw_profile, "low-bandwidth redraw profile was rejected")
@@ -454,9 +408,9 @@ test("redraw profile accepts only the documented host values", function()
 		table.concat(local_config.errors(), "\n"):find("ui.redraw_profile", 1, true),
 		"invalid redraw profile did not report its schema path"
 	)
-end)
+end
 
-test("inline diagnostics accepts only explicit host presenter values", function()
+T["inline diagnostics accepts only explicit host presenter values"] = function()
 	for _, mode in ipairs({ "current-line", "settled-line", "off" }) do
 		assert(vim.fn.writefile({ ("return { ui = { inline_diagnostics = %q } }"):format(mode) }, config_path) == 0)
 		local config = local_config.reload()
@@ -471,9 +425,9 @@ test("inline diagnostics accepts only explicit host presenter values", function(
 		table.concat(local_config.errors(), "\n"):find("ui.inline_diagnostics", 1, true),
 		"invalid inline diagnostic presenter did not report its schema path"
 	)
-end)
+end
 
-test("redraw cost controls are optional host-only overrides", function()
+T["redraw cost controls are optional host-only overrides"] = function()
 	assert(vim.fn.writefile({
 		"return { ui = {",
 		"  full_refresh_ms = 8,",
@@ -511,9 +465,9 @@ test("redraw cost controls are optional host-only overrides", function()
 	}) do
 		assert(errors:find(path, 1, true), "missing redraw cost diagnostic for " .. path)
 	end
-end)
+end
 
-test("clipboard and whitespace host bounds are schema validated", function()
+T["clipboard and whitespace host bounds are schema validated"] = function()
 	assert(vim.fn.writefile({
 		"return {",
 		"  clipboard = { osc52_max_bytes = 16777216 },",
@@ -540,9 +494,9 @@ test("clipboard and whitespace host bounds are schema validated", function()
 	for _, path in ipairs({ "clipboard.osc52_max_bytes", "whitespace.max_bytes", "whitespace.max_lines" }) do
 		assert(errors:find(path, 1, true), "missing host-bound diagnostic for " .. path)
 	end
-end)
+end
 
-test("exact editor heartbeat accepts both inclusive policy bounds", function()
+T["exact editor heartbeat accepts both inclusive policy bounds"] = function()
 	for _, value in ipairs({ 60, 604800 }) do
 		assert(vim.fn.writefile({
 			("return { plugins = { exact_editor = { registry_heartbeat_seconds = %d } } }"):format(value),
@@ -550,9 +504,9 @@ test("exact editor heartbeat accepts both inclusive policy bounds", function()
 		local config = local_config.reload()
 		equal(value, config.plugins.exact_editor.registry_heartbeat_seconds, "heartbeat boundary was rejected")
 	end
-end)
+end
 
-test("exact editor activation delay accepts both inclusive policy bounds", function()
+T["exact editor activation delay accepts both inclusive policy bounds"] = function()
 	for _, value in ipairs({ 0, 5000 }) do
 		assert(vim.fn.writefile({
 			("return { plugins = { exact_editor = { activation_delay_ms = %d } } }"):format(value),
@@ -560,18 +514,18 @@ test("exact editor activation delay accepts both inclusive policy bounds", funct
 		local config = local_config.reload()
 		equal(value, config.plugins.exact_editor.activation_delay_ms, "activation delay boundary was rejected")
 	end
-end)
+end
 
-test("plugin accessor returns isolated values and does not expose unrelated host data", function()
+T["plugin accessor returns isolated values and does not expose unrelated host data"] = function()
 	local review = local_config.plugin("native_review")
 	review.panel.max_width = 1
 	equal(200, local_config.plugin("native_review").panel.max_width, "plugin config shares mutable state")
 	equal({ sentinel = true }, local_config.plugin("not_registered", { sentinel = true }), "fallback changed")
 	local ok = pcall(local_config.plugin, "")
 	assert(not ok, "empty plugin name was accepted")
-end)
+end
 
-test("host plugin accessor never reads the project-local file", function()
+T["host plugin accessor never reads the project-local file"] = function()
 	assert(vim.fn.writefile({
 		"return { plugins = { devcontainer_editor = { docker_path = '/host/podman' } } }",
 	}, config_path) == 0)
@@ -600,12 +554,12 @@ test("host plugin accessor never reads the project-local file", function()
 		local_config.host_plugin("devcontainer_editor", { docker_path = "docker" }).docker_path,
 		"host plugin accessor leaked mutable cache state"
 	)
-end)
+end
 
-test("retired root namespaces are rejected without compatibility aliases", function()
+T["retired root namespaces are rejected without compatibility aliases"] = function()
 	assert(vim.fn.writefile({
 		"return {",
-		"  theme = { background = 'dark' },",
+		"  dap = { ui = 'dap-view' },",
 		"  clangd = { path = 'legacy-clangd' },",
 		"  review = { hunk_context = 99 },",
 		"  log_watch = { max_lines = 5 },",
@@ -614,16 +568,16 @@ test("retired root namespaces are rejected without compatibility aliases", funct
 		"}",
 	}, config_path) == 0)
 	local config = local_config.reload()
-	assert(config.theme == nil and config.clangd == nil and config.review == nil, "legacy namespace escaped validation")
+	assert(config.dap == nil and config.clangd == nil and config.review == nil, "legacy namespace escaped validation")
 	equal(3, config.plugins.native_review.hunk_context, "legacy review value became an alias")
 	equal("clangd", config.plugins.clangd_compile_db.path, "legacy clangd value became an alias")
 	local errors = table.concat(local_config.errors(), "\n")
-	for _, name in ipairs({ "theme", "clangd", "review", "log_watch", "diagram_cache", "mason" }) do
+	for _, name in ipairs({ "dap", "clangd", "review", "log_watch", "diagram_cache", "mason" }) do
 		assert(errors:find(name .. ": unknown field", 1, true), "missing retirement diagnostic for " .. name)
 	end
-end)
+end
 
-test("canonical values validate ranges and the generated file is owner-only", function()
+T["canonical values validate ranges and the generated file is owner-only"] = function()
 	assert(vim.fn.writefile({
 		"return { plugins = {",
 		"  native_review = { hunk_context = 7 },",
@@ -634,12 +588,9 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 		"  project_python = { repl = { readiness_timeout_ms = 100, poll_interval_ms = 5000 } },",
 		"  diagram_view = { cache = { max_age_seconds = 0 } },",
 		"  log_workbench = { max_lines = 100001, continuity_bytes = 1023, max_matches = 100001, scan_lines_per_tick = 10001 },",
-		"  coverage_workbench = { max_report_bytes = 268435457, max_source_bytes = 16777217, max_model_bytes = 67108865 },",
-		"  just_workbench = { binary = '', justfile_names = { '' } },",
 		"  clangd_compile_db = { path = '' },",
 		"  treesitter_runtime = { languages = { [''] = {}, ['bad\\0key'] = {} } },",
-		"  theme_router = { background = 'dark', transparent = true },",
-		"} }",
+		"}, theme = { background = 'dark', transparent = true } }",
 	}, config_path) == 0)
 	local config = local_config.reload()
 	equal(7, config.plugins.native_review.hunk_context, "canonical review value was ignored")
@@ -662,18 +613,10 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 	equal(64 * 1024, config.plugins.log_workbench.continuity_bytes, "unsafe continuity limit was accepted")
 	equal(20000, config.plugins.log_workbench.max_matches, "unsafe match limit was accepted")
 	equal(1000, config.plugins.log_workbench.scan_lines_per_tick, "unsafe scan budget was accepted")
-	equal(50 * 1024 * 1024, config.plugins.coverage_workbench.max_report_bytes, "unsafe report cap was accepted")
-	equal(16 * 1024 * 1024, config.plugins.coverage_workbench.max_source_bytes, "unsafe source cap was accepted")
-	equal(64 * 1024 * 1024, config.plugins.coverage_workbench.max_model_bytes, "unsafe model cap was accepted")
-	equal("just", config.plugins.just_workbench.binary, "empty Just binary escaped validation")
-	equal(
-		{ "justfile", "Justfile", ".justfile" },
-		config.plugins.just_workbench.justfile_names,
-		"empty Just names escaped validation"
-	)
+
 	equal("clangd", config.plugins.clangd_compile_db.path, "empty clangd path escaped validation")
 	equal({}, config.plugins.treesitter_runtime.languages, "invalid Tree-sitter language keys escaped validation")
-	equal("dark", config.plugins.theme_router.background, "canonical theme value was ignored")
+	equal("dark", config.theme.background, "canonical theme value was ignored")
 	local errors = table.concat(local_config.errors(), "\n")
 	for _, path in ipairs({
 		"plugins.exact_editor.activation_delay_ms",
@@ -692,11 +635,6 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 		"plugins.log_workbench.continuity_bytes",
 		"plugins.log_workbench.max_matches",
 		"plugins.log_workbench.scan_lines_per_tick",
-		"plugins.coverage_workbench.max_report_bytes",
-		"plugins.coverage_workbench.max_source_bytes",
-		"plugins.coverage_workbench.max_model_bytes",
-		"plugins.just_workbench.binary",
-		"plugins.just_workbench.justfile_names",
 		"plugins.clangd_compile_db.path",
 		"plugins.treesitter_runtime.languages",
 	}) do
@@ -706,7 +644,6 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 	assert(vim.fn.writefile({
 		"return { plugins = {",
 		"  terminal_lifecycle = { buffer_mappings = { close = false, open_location = false } },",
-		"  coverage_workbench = { signs = 'covered' },",
 		"} }",
 	}, config_path) == 0)
 	config = local_config.reload()
@@ -716,7 +653,6 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 		config.plugins.terminal_lifecycle.buffer_mappings.open_location,
 		"disabled location mapping was rejected"
 	)
-	equal("covered", config.plugins.coverage_workbench.signs, "covered-only signs were rejected")
 
 	local_config.setup()
 	vim.cmd("NvimConfigInit!")
@@ -765,24 +701,15 @@ test("canonical values validate ranges and the generated file is owner-only", fu
 	}) do
 		assert(generated:find(field, 1, true), "generated template omitted native review control: " .. field)
 	end
-	for _, field in ipairs({
-		"max_report_bytes = 50 * 1024 * 1024",
-		"max_source_bytes = 16 * 1024 * 1024",
-		"max_model_bytes = 64 * 1024 * 1024",
-	}) do
-		assert(generated:find(field, 1, true), "generated template omitted coverage limit: " .. field)
-	end
+
 	assert(not generated:find("mason =", 1, true), "generated template retained retired Mason automation")
-end)
-
-vim.notify = original_notify
-vim.env.NVIM_CONFIG_FILE = original_config
-vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = original_state
-vim.fn.delete(root, "rf")
-
-if #failures > 0 then
-	error(table.concat(failures, "\n\n"))
 end
 
-print(("local_config_plugins_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.notify = original_notify
+	vim.env.NVIM_CONFIG_FILE = original_config
+	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = original_state
+	vim.fn.delete(root, "rf")
+end
+
+return T

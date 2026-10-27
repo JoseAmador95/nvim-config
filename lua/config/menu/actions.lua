@@ -87,17 +87,6 @@ local flash_actions = {
 	treesitter = "treesitter",
 }
 
-local neotest_actions = {
-	debug_nearest = { "run.run", { strategy = "dap" } },
-	last = { "run.run_last" },
-	nearest = { "run.run" },
-	next_failed = { "jump.next", { status = "failed" } },
-	output_panel = { "output_panel.toggle" },
-	prev_failed = { "jump.prev", { status = "failed" } },
-	stop = { "run.stop" },
-	summary = { "summary.toggle" },
-}
-
 local dap_actions = {
 	clear_breakpoints = "clear_breakpoints",
 	continue = "continue",
@@ -122,9 +111,6 @@ local commands = {
 	cmake_run = { "CMakeRun" },
 	cmake_test = { "CMakeRunTest" },
 	conform_info = { "ConformInfo" },
-	coverage_clear = { "CoverageClear" },
-	coverage_load = { "CoverageLoad" },
-	coverage_summary = { "CoverageSummary" },
 	devcontainer_host = { "DevContainerHostEditor" },
 	devcontainer_log = { "DevContainerLog" },
 	devcontainer_recreate = { "DevContainerRecreate" },
@@ -144,8 +130,6 @@ local commands = {
 	hex_toggle = { "HexToggle" },
 	diagram_show = { "DiagramShow" },
 	json_tree = { "JsonTree" },
-	just_import_last = { "JustImportLast" },
-	just_run = { "JustRun" },
 	lazygit = { "LazyGit" },
 	log_watch = { "LogWatchCurrentFile" },
 	log_watch_disable = { name = "LogWatchCurrentFile", args = { "off" } },
@@ -193,9 +177,6 @@ local commands = {
 	review_scope_back = { "ReviewScopeBack" },
 	review_sessions = { "ReviewSessions" },
 	review_toggle_resolve = { "ReviewToggleResolve" },
-	scratch = { "Scratch" },
-	theme = { "Theme" },
-	theme_reset = { "ThemeReset" },
 	toggle_inlay_hints = { "ToggleInlayHints" },
 	toggle_inline_diagnostics = { "ToggleInlineDiagnostics" },
 	toggle_log_highlight = { "ToggleLogHighlight" },
@@ -297,26 +278,6 @@ local function nested_function(root, path)
 		end
 	end
 	return value
-end
-
-local function run_neotest(name)
-	local neotest = require_or_notify("neotest", "Neotest")
-	if not neotest then
-		return
-	end
-
-	if name == "file" then
-		neotest.run.run(vim.fn.expand("%"))
-		return
-	end
-
-	local action = neotest_actions[name]
-	local fn = action and nested_function(neotest, action[1])
-	if type(fn) ~= "function" then
-		notify("Neotest action not available: " .. name, vim.log.levels.WARN)
-		return
-	end
-	fn(unpack(action, 2))
 end
 
 local function run_dap(name)
@@ -843,13 +804,7 @@ local handlers = {
 			refresh.refresh()
 		end
 	end,
-	["coverage.load_report"] = function(target)
-		vim.ui.input({ prompt = "Coverage report: ", completion = "file" }, function(path)
-			if path and path ~= "" then
-				target_command(target, "CoverageLoad", { path })
-			end
-		end)
-	end,
+
 	["dap.conditional_breakpoint"] = function(target)
 		vim.ui.input({ prompt = "Condition: " }, function(condition)
 			if not condition then
@@ -1044,7 +999,6 @@ function M.supports(id)
 		or (namespace == "picker" and picker_sources[name] ~= nil)
 		or (namespace == "python" and python_actions[name] ~= nil)
 		or (namespace == "tab" and tab_commands[name] ~= nil)
-		or (namespace == "test" and (name == "file" or neotest_actions[name] ~= nil))
 		or (namespace == "transform" and transform_parts(name) ~= nil)
 		or (
 			namespace == "window"
@@ -1102,10 +1056,6 @@ local function execute(id, target)
 	elseif namespace == "tab" and tab_commands[name] then
 		local definition = tab_commands[name]
 		return target_command(target, definition[1], definition[2])
-	elseif namespace == "test" and (name == "file" or neotest_actions[name]) then
-		return on_target(target, { window = true }, function()
-			run_neotest(name)
-		end)
 	elseif namespace == "transform" and transform_parts(name) then
 		return run_transform(name, target)
 	elseif namespace == "window" and (window_commands[name] or name == "equalize" or smart_split_actions[name]) then

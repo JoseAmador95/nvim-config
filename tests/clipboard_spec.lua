@@ -5,24 +5,10 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. tostring(err)
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local original_ssh_tty = vim.env.SSH_TTY
 local original_ssh_connection = vim.env.SSH_CONNECTION
@@ -68,14 +54,14 @@ local function native_clipboard()
 	return calls
 end
 
-test("copy refuses use before setup", function()
+T["copy refuses use before setup"] = function()
 	local_session()
 	local ok, err = clipboard.copy_text("value")
 	assert(not ok and err:find("not configured", 1, true), "unconfigured copy was accepted")
 	assert(not clipboard.available(), "unconfigured adapter reported availability")
-end)
+end
 
-test("empty SSH variables keep the native provider and exact native payload", function()
+T["empty SSH variables keep the native provider and exact native payload"] = function()
 	local_session()
 	vim.env.SSH_TTY = ""
 	vim.env.SSH_CONNECTION = ""
@@ -95,9 +81,9 @@ test("empty SSH variables keep the native provider and exact native payload", fu
 	assert(clipboard.copy_text("one\ntwo\n", "*"))
 	equal({ { "*", "one\ntwo\n" } }, calls, "native clipboard payload changed")
 	equal(sentinel, vim.g.clipboard, "empty SSH marker installed the OSC 52 provider")
-end)
+end
 
-test("remote raw byte bound includes inter-line separators without truncation", function()
+T["remote raw byte bound includes inter-line separators without truncation"] = function()
 	local_session()
 	vim.env.SSH_CONNECTION = "client 1 2 3"
 	local sent = {}
@@ -125,9 +111,9 @@ test("remote raw byte bound includes inter-line separators without truncation", 
 	equal(1, #sent, "oversized payload was partially sent")
 	ok, err = clipboard.copy_lines("+", { "ok", 3 })
 	assert(not ok and err:find("only strings", 1, true), "mixed payload types were accepted")
-end)
+end
 
-test("remote provider requires a UI and reports rejected provider copies", function()
+T["remote provider requires a UI and reports rejected provider copies"] = function()
 	local_session()
 	vim.env.SSH_TTY = "pts/1"
 	local notifications = {}
@@ -157,9 +143,9 @@ test("remote provider requires a UI and reports rejected provider copies", funct
 	vim.g.clipboard.copy["+"]({ "toolong" })
 	equal(0, sends, "rejected provider copy reached the sender")
 	assert(notifications[#notifications]:find("3%-byte raw limit"), "provider rejection was silent")
-end)
+end
 
-test("setup validates its public policy and dependencies", function()
+T["setup validates its public policy and dependencies"] = function()
 	local_session()
 	for _, options in ipairs({
 		{ unknown = true },
@@ -171,9 +157,9 @@ test("setup validates its public policy and dependencies", function()
 	end
 	assert(not pcall(clipboard.setup, {}, { has_ui = true }), "non-callable dependency was accepted")
 	assert(not pcall(clipboard.setup, {}, { senders = { ["+"] = function() end } }), "partial senders were accepted")
-end)
+end
 
-test("teardown restores the prior provider", function()
+T["teardown restores the prior provider"] = function()
 	local_session()
 	vim.env.SSH_TTY = "pts/1"
 	local sentinel = { name = "prior-provider" }
@@ -191,9 +177,9 @@ test("teardown restores the prior provider", function()
 	assert(vim.g.clipboard.name == "OSC52 (bounded)", "remote provider was not installed")
 	clipboard.teardown()
 	equal(sentinel, vim.g.clipboard, "teardown did not restore the previous provider")
-end)
+end
 
-test("edits preserve the clipboard while native registers and puts still work", function()
+T["edits preserve the clipboard while native registers and puts still work"] = function()
 	local calls = native_clipboard()
 	edit_lines({ "copied word", "stay", "tail" })
 	normal("yiw")
@@ -212,9 +198,9 @@ test("edits preserve the clipboard while native registers and puts still work", 
 	normal("ddP")
 	equal({ "one", "two" }, vim.api.nvim_buf_get_lines(0, 0, -1, false), "native P changed")
 	equal(1, #calls, "editing or putting exported text to the clipboard")
-end)
+end
 
-test("normal and visual yanks preserve exact contents and register types", function()
+T["normal and visual yanks preserve exact contents and register types"] = function()
 	local cases = {
 		{ keys = "yiw", lines = { "abc" }, kind = "v" },
 		{ keys = "yy", lines = { "abc", "" }, kind = "V" },
@@ -234,9 +220,9 @@ test("normal and visual yanks preserve exact contents and register types", funct
 		equal(vim.fn.getreg("0"), vim.fn.getreg('"'), "clipboard mirroring replaced the unnamed register")
 		equal(case.kind, vim.fn.getregtype("0"), "clipboard mirroring changed the last yank type")
 	end
-end)
+end
 
-test("explicit registers keep their destination without duplicate clipboard writes", function()
+T["explicit registers keep their destination without duplicate clipboard writes"] = function()
 	local calls = native_clipboard()
 	edit_lines({ "copy me" })
 	for _, register in ipairs({ "a", "A", "_" }) do
@@ -250,9 +236,9 @@ test("explicit registers keep their destination without duplicate clipboard writ
 	end
 	normal('""yiw')
 	equal(3, #calls, "explicit unnamed yank did not mirror to the clipboard")
-end)
+end
 
-test("remote yanks use the bounded provider including the linewise newline", function()
+T["remote yanks use the bounded provider including the linewise newline"] = function()
 	local_session()
 	vim.env.SSH_TTY = "pts/1"
 	local sent = {}
@@ -283,9 +269,9 @@ test("remote yanks use the bounded provider including the linewise newline", fun
 	normal("dd")
 	equal(2, #sent, "edit or oversized yank reached the terminal")
 	assert(notifications[#notifications]:find("5%-byte raw limit"), "oversized yank was silently rejected")
-end)
+end
 
-test("repeated setup and teardown leave exactly one active yank observer", function()
+T["repeated setup and teardown leave exactly one active yank observer"] = function()
 	local_session()
 	local copies = 0
 	local deps = {
@@ -302,9 +288,9 @@ test("repeated setup and teardown leave exactly one active yank observer", funct
 	clipboard.teardown()
 	normal("yy")
 	equal(1, copies, "teardown left an active yank observer")
-end)
+end
 
-test("failed clipboard copies notify without losing the native yank", function()
+T["failed clipboard copies notify without losing the native yank"] = function()
 	local_session()
 	local notifications = {}
 	clipboard.setup({}, {
@@ -319,19 +305,14 @@ test("failed clipboard copies notify without losing the native yank", function()
 	normal("yiw")
 	equal("copy", vim.fn.getreg("0"), "clipboard failure lost the yank")
 	assert(notifications[1]:find("copy unavailable", 1, true), "clipboard failure was silent")
-end)
-
-clipboard.teardown()
-vim.g.clipboard = original_provider
-vim.o.clipboard = original_clipboard_option
-vim.env.SSH_TTY = original_ssh_tty
-vim.env.SSH_CONNECTION = original_ssh_connection
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(("clipboard_spec: %d tests passed"):format(count))
+hooks.post_once = function()
+	clipboard.teardown()
+	vim.g.clipboard = original_provider
+	vim.o.clipboard = original_clipboard_option
+	vim.env.SSH_TTY = original_ssh_tty
+	vim.env.SSH_CONNECTION = original_ssh_connection
+end
+
+return T

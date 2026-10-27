@@ -64,14 +64,7 @@ if vim.env.TRUSTED_WORKSPACE_LOCK_CHILD == "1" then
 	return
 end
 
-local failures = {}
-local count = 0
-
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
 local function with_uv_override(name, replacement, callback)
 	local original = assert(vim.uv[name], "missing uv function " .. name)
@@ -105,15 +98,7 @@ local function with_observational_filesystem(callback)
 	return first, second, third
 end
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local function temp_dir()
 	local path = vim.fn.tempname()
@@ -154,7 +139,7 @@ local function lock_claim(root, kind, pid, token, number)
 	return path
 end
 
-test("sources are deterministic, restricted, provenance-aware, and copy-safe", function()
+T["sources are deterministic, restricted, provenance-aware, and copy-safe"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -236,9 +221,9 @@ test("sources are deterministic, restricted, provenance-aware, and copy-safe", f
 	equal("rwx------", vim.fn.getfperm(root), "state root is not owner-only")
 	equal("rw-------", vim.fn.getfperm(vim.fs.joinpath(root, "trusted-workspace.json")), "state file is not owner-only")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("changed fingerprints retain the last-known-good snapshot until approval", function()
+T["changed fingerprints retain the last-known-good snapshot until approval"] = function()
 	local parent = temp_dir()
 	setup(state_root(parent))
 	assert(trusted_workspace.register_source({
@@ -291,9 +276,9 @@ test("changed fingerprints retain the last-known-good snapshot until approval", 
 		"changed fingerprint approval did not apply"
 	)
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("appliers receive effective validity while pending data stays candidate-only", function()
+T["appliers receive effective validity while pending data stays candidate-only"] = function()
 	local parent = temp_dir()
 	setup(state_root(parent))
 	local applied
@@ -351,9 +336,9 @@ test("appliers receive effective validity while pending data stays candidate-onl
 	local snapshot = trusted_workspace.snapshot()
 	assert(snapshot.validity.valid and #snapshot.validity.errors == 0 and #snapshot.validity.pending == 0)
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("approval is limited to the exact currently registered project candidate", function()
+T["approval is limited to the exact currently registered project candidate"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -390,9 +375,9 @@ test("approval is limited to the exact currently registered project candidate", 
 	assert(approved == nil and tostring(approval_err):find("corrupt", 1, true), tostring(approval_err))
 	equal("{", vim.fn.readfile(path)[1], "approval observation replaced corrupt state")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("capability grants are exact, persistent, copied, and revocable", function()
+T["capability grants are exact, persistent, copied, and revocable"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -418,9 +403,9 @@ test("capability grants are exact, persistent, copied, and revocable", function(
 	setup(root)
 	assert(trusted_workspace.status("/repo").repo_grants.build == nil, "revocation did not survive reload")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("has_grant rereads durable state without updating cached status", function()
+T["has_grant rereads durable state without updating cached status"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -438,9 +423,9 @@ test("has_grant rereads durable state without updating cached status", function(
 	assert(trusted_workspace.has_grant({ repo = "/repo", capability = "test" }) == false)
 	equal(true, trusted_workspace.status("/repo").repo_grants.test, "durable read rewrote cached grants")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("has_grant keeps absent durable state observational", function()
+T["has_grant keeps absent durable state observational"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	local events = 0
@@ -458,9 +443,9 @@ test("has_grant keeps absent durable state observational", function()
 	assert(vim.uv.fs_lstat(root) == nil, "grant observation created the state root")
 	equal(0, events, "grant observation emitted an event")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("has_grant rejects unsafe durable state without repairing it", function()
+T["has_grant rejects unsafe durable state without repairing it"] = function()
 	local function granted_fixture()
 		local parent = temp_dir()
 		local root = state_root(parent)
@@ -519,9 +504,9 @@ test("has_grant rejects unsafe durable state without repairing it", function()
 		assert(vim.uv.fs_lstat(path).nlink == 2, "grant observation replaced hard-linked state")
 		vim.fn.delete(parent, "rf")
 	end
-end)
+end
 
-test("pre-commit file fsync and close failures do not create grants", function()
+T["pre-commit file fsync and close failures do not create grants"] = function()
 	for _, fixture in ipairs({
 		{ name = "fsync", api = "fs_fsync" },
 		{ name = "close", api = "fs_close" },
@@ -558,9 +543,9 @@ test("pre-commit file fsync and close failures do not create grants", function()
 		)
 		vim.fn.delete(parent, "rf")
 	end
-end)
+end
 
-test("persistent lock and state mutations cross directory fsync barriers", function()
+T["persistent lock and state mutations cross directory fsync barriers"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -589,9 +574,9 @@ test("persistent lock and state mutations cross directory fsync barriers", funct
 	assert(saw("unlink record.quarantine."), "lock claim unlink omitted its directory fsync")
 	assert(saw("remove directory"), "quarantine removal omitted its directory fsync")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("persistent mutations reread under lock and preserve unrelated writers", function()
+T["persistent mutations reread under lock and preserve unrelated writers"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	local module_path = plugin_root .. "/lua/trusted_workspace/init.lua"
@@ -613,9 +598,9 @@ test("persistent mutations reread under lock and preserve unrelated writers", fu
 	assert(grants.debug == nil, "stale writer resurrected a revoked grant")
 	equal(true, grants.test, "stale writer discarded an unrelated grant")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("persistent CAS preserves an external writer at the publication boundary", function()
+T["persistent CAS preserves an external writer at the publication boundary"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -648,9 +633,9 @@ test("persistent CAS preserves an external writer at the publication boundary", 
 		assert(not name:find("trusted%-workspace%.json%.cas%."), "CAS quarantine leaked after recovery")
 	end
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("persistent CAS restores a symlink introduced at the exchange boundary", function()
+T["persistent CAS restores a symlink introduced at the exchange boundary"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -680,9 +665,9 @@ test("persistent CAS restores a symlink introduced at the exchange boundary", fu
 	assert(trusted_workspace.status("/repo").repo_grants.test == nil, "failed CAS advanced in-memory grants")
 	assert(vim.fn.filereadable(displaced) == 1, "race fixture lost the displaced prior state")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("successful state exchange publishes the exact staging snapshot and cleans the incumbent", function()
+T["successful state exchange publishes the exact staging snapshot and cleans the incumbent"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -734,9 +719,9 @@ test("successful state exchange publishes the exact staging snapshot and cleans 
 		assert(not name:find("trusted%-workspace%.json%.tmp%."), "successful exchange leaked state staging")
 	end
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("state exchange fsync failure keeps committed success, warning, and recovery", function()
+T["state exchange fsync failure keeps committed success, warning, and recovery"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -778,9 +763,9 @@ test("state exchange fsync failure keeps committed success, warning, and recover
 		vim.json.decode(table.concat(vim.fn.readfile(vim.fs.joinpath(root, "trusted-workspace.json"), "b"), "\n"))
 	assert(persisted.grants["/committed-fsync"].test, "committed state bytes were not visible")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("state CAS rejects changed staging bytes and restores the exact incumbent", function()
+T["state CAS rejects changed staging bytes and restores the exact incumbent"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -825,9 +810,9 @@ test("state CAS rejects changed staging bytes and restores the exact incumbent",
 	equal(injected_bytes, table.concat(vim.fn.readfile(staging_path, "b"), "\n"), "changed staging was clobbered")
 	assert(trusted_workspace.status("/repo").repo_grants.test == nil, "rejected staging advanced memory")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("lock claim publication rejects changed staging content without deleting it", function()
+T["lock claim publication rejects changed staging content without deleting it"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -865,9 +850,9 @@ test("lock claim publication rejects changed staging content without deleting it
 	)
 	equal(changed_bytes, table.concat(vim.fn.readfile(staging_path, "b"), "\n"), "changed claim staging was deleted")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("lock release preserves a replacement instead of adopting its inode", function()
+T["lock release preserves a replacement instead of adopting its inode"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -931,9 +916,9 @@ test("lock release preserves a replacement instead of adopting its inode", funct
 	assert(reader.setup({ state_root = root, reset = true }))
 	equal(true, reader.status("/repo").repo_grants.test, "committed state was lost after release conflict")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("lock quarantine cleanup preserves unknown entries and reports the retained directory", function()
+T["lock quarantine cleanup preserves unknown entries and reports the retained directory"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -968,9 +953,9 @@ test("lock quarantine cleanup preserves unknown entries and reports the retained
 	assert(reader.setup({ state_root = root, reset = true }))
 	equal(true, reader.status("/repo").repo_grants.test, "cleanup failure lost the durable state mutation")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("state cleanup preserves a replacement introduced after final validation", function()
+T["state cleanup preserves a replacement introduced after final validation"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1016,9 +1001,9 @@ test("state cleanup preserves a replacement introduced after final validation", 
 		"post-validation cleanup conflict was not exposed"
 	)
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("directory cleanup preserves an empty replacement introduced after final validation", function()
+T["directory cleanup preserves an empty replacement introduced after final validation"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1052,9 +1037,9 @@ test("directory cleanup preserves an empty replacement introduced after final va
 		"directory cleanup conflict was not exposed"
 	)
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("initial state no-replace publication preserves a boundary rival", function()
+T["initial state no-replace publication preserves a boundary rival"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1083,9 +1068,9 @@ test("initial state no-replace publication preserves a boundary rival", function
 	assert(current.dev == rival_identity.dev and current.ino == rival_identity.ino, "initial rival inode was replaced")
 	equal(rival_bytes, table.concat(vim.fn.readfile(path, "b"), "\n"), "initial rival bytes were clobbered")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("a crash after state exchange never exposes missing durable state", function()
+T["a crash after state exchange never exposes missing durable state"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1132,9 +1117,9 @@ test("a crash after state exchange never exposes missing durable state", functio
 		"valid NEW state did not reload after crash"
 	)
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("state locks reject live owners and reclaim only confirmed-dead owners", function()
+T["state locks reject live owners and reclaim only confirmed-dead owners"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1162,9 +1147,9 @@ test("state locks reject live owners and reclaim only confirmed-dead owners", fu
 	assert(reclaimed, "dead owner lock was not reclaimed: " .. tostring(dead_err))
 	assert(vim.uv.fs_lstat(lock) == nil, "reclaimed lock was not released")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("lock enumeration remains bound to the pinned root across an ABA swap", function()
+T["lock enumeration remains bound to the pinned root across an ABA swap"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1197,9 +1182,9 @@ test("lock enumeration remains bound to the pinned root across an ABA swap", fun
 	assert(vim.uv.fs_lstat(live_claim), "live claim was removed after descriptor enumeration")
 	assert(#vim.fn.readdir(outside) == 0, "ABA listing wrote through the transient pathname")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("dead-claim reclamation preserves a live replacement before conditional removal", function()
+T["dead-claim reclamation preserves a live replacement before conditional removal"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1257,9 +1242,9 @@ test("dead-claim reclamation preserves a live replacement before conditional rem
 		assert(not name:find("%.remove%."), "conditional removal leaked a quarantine after restoration")
 	end
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("a committed state update remains successful when lock release fails", function()
+T["a committed state update remains successful when lock release fails"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1284,9 +1269,9 @@ test("a committed state update remains successful when lock release fails", func
 		vim.json.decode(table.concat(vim.fn.readfile(vim.fs.joinpath(root, "trusted-workspace.json"), "b"), "\n"))
 	assert(persisted.grants["/committed"].test == true, "committed grant was not durable")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("lock release fsync warnings survive later successful cleanup and mutations", function()
+T["lock release fsync warnings survive later successful cleanup and mutations"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1326,9 +1311,9 @@ test("lock release fsync warnings survive later successful cleanup and mutations
 	)
 	assert(trusted_workspace.status("/later-success").repo_grants.build, "later successful mutation was not applied")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("post-commit quarantine close failures remain successful state warnings", function()
+T["post-commit quarantine close failures remain successful state warnings"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1359,9 +1344,9 @@ test("post-commit quarantine close failures remain successful state warnings", f
 		"post-commit close warning was not exposed"
 	)
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("hard-linked state and lock claims fail closed", function()
+T["hard-linked state and lock claims fail closed"] = function()
 	local state_parent = temp_dir()
 	local root = state_root(state_parent)
 	assert(vim.fn.mkdir(root, "p", 448) == 1)
@@ -1386,9 +1371,9 @@ test("hard-linked state and lock claims fail closed", function()
 	assert(vim.uv.fs_lstat(claim), "unsafe lock claim was removed")
 	vim.fn.delete(state_parent, "rf")
 	vim.fn.delete(lock_parent, "rf")
-end)
+end
 
-test("state root substitution is rejected after setup", function()
+T["state root substitution is rejected after setup"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1402,9 +1387,9 @@ test("state root substitution is rejected after setup", function()
 	assert(not authorized and tostring(err):find("state root", 1, true), "substituted state root was accepted")
 	assert(#vim.fn.readdir(outside) == 0, "substituted state root was modified")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("state publication stays pinned when a validated ancestor is swapped", function()
+T["state publication stays pinned when a validated ancestor is swapped"] = function()
 	local container = temp_dir()
 	local parent = vim.fs.joinpath(container, "trusted-parent")
 	assert(vim.fn.mkdir(parent, "p", 448) == 1)
@@ -1448,9 +1433,9 @@ test("state publication stays pinned when a validated ancestor is swapped", func
 	)
 	assert(trusted_workspace.status("/repo").repo_grants.test == nil, "failed ancestor-swap CAS advanced memory")
 	vim.fn.delete(container, "rf")
-end)
+end
 
-test("a process crash before claim publication leaves no blocking claim", function()
+T["a process crash before claim publication leaves no blocking claim"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1493,9 +1478,9 @@ test("a process crash before claim publication leaves no blocking claim", functi
 	assert(vim.uv.fs_lstat(staged[1]), "unrecognized staging orphan was treated as a claim")
 	assert(vim.uv.fs_unlink(staged[1]))
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("two processes serialize simultaneous stale-claim reclamation", function()
+T["two processes serialize simultaneous stale-claim reclamation"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1538,9 +1523,9 @@ test("two processes serialize simultaneous stale-claim reclamation", function()
 	local grants = trusted_workspace.status("/race").repo_grants
 	assert(grants.test and grants.debug, "serialized writers lost a persistent mutation")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("appliers prepare first and roll back in reverse without advancing LKG", function()
+T["appliers prepare first and roll back in reverse without advancing LKG"] = function()
 	local parent = temp_dir()
 	setup(state_root(parent))
 	local events = {}
@@ -1587,9 +1572,9 @@ test("appliers prepare first and roll back in reverse without advancing LKG", fu
 	assert(status.apply_error:find("simulated failure", 1, true), "status omitted apply failure")
 	fail_second = false
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("corrupt and symlink state fail closed without overwriting targets", function()
+T["corrupt and symlink state fail closed without overwriting targets"] = function()
 	local prior_config = trusted_workspace.effective_config()
 	local corrupt_parent = temp_dir()
 	local corrupt_root = state_root(corrupt_parent)
@@ -1623,9 +1608,9 @@ test("corrupt and symlink state fail closed without overwriting targets", functi
 	vim.fn.delete(corrupt_parent, "rf")
 	vim.fn.delete(symlink_parent, "rf")
 	vim.fn.delete(root_link_parent, "rf")
-end)
+end
 
-test("host-only mode never enables or waits for project sources", function()
+T["host-only mode never enables or waits for project sources"] = function()
 	local parent = temp_dir()
 	setup(state_root(parent), "host-only")
 	assert(trusted_workspace.register_source({ id = "host", layer = "host", value = { value = "host" } }))
@@ -1644,9 +1629,9 @@ test("host-only mode never enables or waits for project sources", function()
 	local value = trusted_workspace.snapshot().value
 	assert(not value.plugins or value.plugins.native_review == nil, "host-only mode applied a project field")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("WorkspaceKey scopes isolate sources and project host values into every scope", function()
+T["WorkspaceKey scopes isolate sources and project host values into every scope"] = function()
 	local parent = temp_dir()
 	setup(state_root(parent))
 	local host_workspace = { runtime = "host", root = "/repo", repo_identity = "logical-repo" }
@@ -1738,9 +1723,9 @@ test("WorkspaceKey scopes isolate sources and project host values into every sco
 	equal("pending", trusted_workspace.status(host_workspace).mode, "revoked host approval stayed active")
 	equal("pending", trusted_workspace.status(container_workspace).mode, "shared logical approval stayed active")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("multi-scope setup rolls back external effects before restoring prior state", function()
+T["multi-scope setup rolls back external effects before restoring prior state"] = function()
 	local parent = temp_dir()
 	local root = state_root(parent)
 	setup(root)
@@ -1798,9 +1783,9 @@ test("multi-scope setup rolls back external effects before restoring prior state
 	equal(before_a, trusted_workspace.snapshot(workspace_a), "failed setup changed scope A")
 	equal(before_b, trusted_workspace.snapshot(workspace_b), "failed setup changed scope B")
 	vim.fn.delete(parent, "rf")
-end)
+end
 
-test("setup contracts are transactional, copied, repeatable, and callback-isolated", function()
+T["setup contracts are transactional, copied, repeatable, and callback-isolated"] = function()
 	trusted_workspace.teardown()
 	equal(false, trusted_workspace.status().configured, "pre-setup status was unavailable")
 	equal({ mode = "full" }, trusted_workspace.effective_config(), "pre-setup config defaults are unavailable")
@@ -1840,10 +1825,6 @@ test("setup contracts are transactional, copied, repeatable, and callback-isolat
 	equal(false, trusted_workspace.status().configured, "teardown did not reset status")
 	vim.fn.delete(corrupt_parent, "rf")
 	vim.fn.delete(parent, "rf")
-end)
-
-if #failures > 0 then
-	error(table.concat(failures, "\n\n"))
 end
 
-print(("trusted_workspace plugin spec: %d tests passed"):format(count))
+return T

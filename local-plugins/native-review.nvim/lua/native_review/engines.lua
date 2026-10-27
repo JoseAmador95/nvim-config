@@ -1,11 +1,25 @@
 -- Engines interpret frozen sources; they never own Git identities or anchors.
 local dependencies = require("native_review.dependencies")
 local difftastic = require("native_review.difftastic")
-local textual = require("native_review.textual")
+local projection = require("native_review.projection")
+local moves = require("native_review.moves")
 local structural = dependencies.get("structural_diff")
 
 local M = {}
 local registry = {}
+
+local function main(entry)
+	local result = { presentation = "native", structural_only = false, relations = {} }
+	if entry.metadata_only or entry.binary then
+		return result
+	end
+	local value, err = projection.build(entry)
+	if not value then
+		return nil, err
+	end
+	result.relations, result.relations_limited = moves.detect(value)
+	return result
+end
 
 function M.register(id, engine)
 	assert(type(id) == "string" and id:match("^[a-z][a-z0-9_-]*$") and #id <= 64, "invalid engine id")
@@ -47,7 +61,7 @@ function M.prepare(id, entry, callback)
 	return engine.prepare(entry, function(result, err)
 		if result and result.fallback_reason then
 			local reason = result.fallback_reason
-			result, err = textual.main(entry)
+			result, err = main(entry)
 			if result then
 				result.fallback_reason = reason
 			end
@@ -66,16 +80,7 @@ M.register("main", {
 	version = ("builtin-v2 / Neovim %d.%d.%d"):format(runtime.major, runtime.minor, runtime.patch),
 	prepare = function(entry, callback)
 		-- The presenter owns Main's selected-entry refinement cache.
-		callback(textual.main(entry))
-		return function() end
-	end,
-})
-
-M.register("patience", {
-	label = "Patience",
-	version = ("builtin-v1 / Neovim %d.%d.%d"):format(runtime.major, runtime.minor, runtime.patch),
-	prepare = function(entry, callback)
-		callback(textual.patience(entry))
+		callback(main(entry))
 		return function() end
 	end,
 })

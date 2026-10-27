@@ -18,6 +18,18 @@ local function exact_keys(value, allowed, label)
 	return true
 end
 
+function M.exact_options(value, allowed, label)
+	if type(value) ~= "table" then
+		return nil, label .. " must be a table"
+	end
+	for key in pairs(value) do
+		if type(key) ~= "string" or not allowed[key] then
+			return nil, label .. " contains an unknown option: " .. tostring(key)
+		end
+	end
+	return true
+end
+
 local function string_field(value, label, absolute)
 	if type(value) ~= "string" or value == "" or value:find("\0", 1, true) then
 		return nil, label .. " must be a non-empty string without NUL bytes"
@@ -265,27 +277,6 @@ function M.normalize_terminal_spec(value)
 		view = view,
 		metadata = metadata,
 	}
-end
-
-function M.normalize_tool_identity(value)
-	local fields = { "backend", "name", "version", "target", "digest", "install_root" }
-	local allowed = {}
-	for _, field in ipairs(fields) do
-		allowed[field] = true
-	end
-	local ok, err = exact_keys(value, allowed, "ToolIdentity")
-	if not ok then
-		return nil, err
-	end
-	local result = {}
-	for _, field in ipairs(fields) do
-		local normalized, field_err = string_field(value[field], "ToolIdentity." .. field, field == "install_root")
-		if not normalized then
-			return nil, field_err
-		end
-		result[field] = normalized
-	end
-	return result
 end
 
 return M

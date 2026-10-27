@@ -1,7 +1,9 @@
+local usage_map = require("config.usage").mapper("config.menu")
 local backend = require("config.menu.backend").default()
 local context = require("config.menu.context")
 local deferred = require("config.deferred")
 local recent = require("config.menu.recent")
+local pager = require("config.pager")
 
 local M = {}
 
@@ -44,8 +46,7 @@ end
 ---The menu belongs only to full terminal Neovim, never VS Code or nvimpager.
 ---@return boolean
 function M.enabled()
-	local ok, pager = pcall(require, "config.pager")
-	return not vim.g.vscode and not (ok and pager.active)
+	return not vim.g.vscode and not pager.active
 end
 
 function M.open()
@@ -149,7 +150,7 @@ function M.setup()
 		return
 	end
 
-	vim.keymap.set({ "n", "v" }, "<RightMouse>", M.open_context, { desc = "Open menu" })
+	usage_map({ "n", "v" }, "<RightMouse>", M.open_context, { desc = "Open menu" })
 
 	local group = vim.api.nvim_create_augroup("NvimConfigMenu", { clear = true })
 	vim.api.nvim_create_autocmd("TabClosed", {

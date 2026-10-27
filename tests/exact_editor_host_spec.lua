@@ -6,18 +6,8 @@ vim.opt.runtimepath:prepend(config_repo)
 package.path = table.concat({ config_repo .. "/lua/?.lua", config_repo .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function git(arguments)
 	local command = { "git" }
@@ -59,7 +49,7 @@ end
 local rpc = require("config.exact_editor")
 assert(package.loaded.exact_editor == nil, "host adapter imported exact-editor at module load")
 
-test("host adapter coalesces one delayed activation without importing the core", function()
+T["host adapter coalesces one delayed activation without importing the core"] = function()
 	local callbacks = {}
 	local delays = {}
 	local entered = false
@@ -95,9 +85,9 @@ test("host adapter coalesces one delayed activation without importing the core",
 	assert(setups == 1, "delayed activation did not run exactly once")
 	assert(package.loaded.exact_editor == nil, "injected activation unexpectedly imported the core")
 	assert(rpc.teardown(), "adapter teardown failed after injected activation")
-end)
+end
 
-test("a detached UI at the deadline keeps activation dormant and retryable", function()
+T["a detached UI at the deadline keeps activation dormant and retryable"] = function()
 	local callbacks = {}
 	local setups = 0
 	local uis = 1
@@ -128,9 +118,9 @@ test("a detached UI at the deadline keeps activation dormant and retryable", fun
 	assert(setups == 1, "retried activation did not run exactly once")
 	assert(package.loaded.exact_editor == nil, "UI retry imported the core before explicit setup")
 	assert(rpc.teardown(), "adapter teardown failed after UI retry")
-end)
+end
 
-test("teardown cancels and invalidates a pending activation without importing the core", function()
+T["teardown cancels and invalidates a pending activation without importing the core"] = function()
 	local callback
 	local setups = 0
 	local timer = { closed = false, stopped = false }
@@ -166,9 +156,9 @@ test("teardown cancels and invalidates a pending activation without importing th
 	callback()
 	assert(setups == 0, "generation-invalidated activation still ran")
 	assert(package.loaded.exact_editor == nil, "teardown imported exact-editor")
-end)
+end
 
-test("VimLeavePre cancels pending activation and blocks startup replay", function()
+T["VimLeavePre cancels pending activation and blocks startup replay"] = function()
 	local callback
 	local setups = 0
 	rpc.setup_deferred({
@@ -198,9 +188,15 @@ test("VimLeavePre cancels pending activation and blocks startup replay", functio
 	assert(setups == 0, "activation was re-armed after VimLeavePre")
 	assert(package.loaded.exact_editor == nil, "exit cancellation imported exact-editor")
 	assert(rpc.teardown(), "adapter teardown did not reset exit state")
-end)
+end
 
-assert(rpc._prepare_state(state))
+local configured = MiniTest.new_set({ hooks = {
+	pre_once = function()
+		assert(rpc._prepare_state(state))
+	end,
+} })
+T["RPC requests"] = configured
+
 local instance = {
 	root = state,
 	instance_id = "12345678-1234-4234-8234-123456789abc",
@@ -262,14 +258,14 @@ local function drain()
 	end, 10)
 end
 
-test("host setup options do not leak request-only dependencies", function()
+configured["host setup options do not leak request-only dependencies"] = function()
 	local setup = rpc._options()
 	assert(type(setup.open) == "function", "setup open callback is missing")
 	assert(setup.open_file == nil, "request-only open_file leaked into strict setup options")
 	assert(setup.activation_delay_ms == nil, "host activation policy leaked into strict setup options")
-end)
+end
 
-test("state root follows override, XDG, then home modes", function()
+configured["state root follows override, XDG, then home modes"] = function()
 	local old_override = vim.env.NVIM_EXACT_EDITOR_STATE_HOME
 	local old_xdg = vim.env.XDG_STATE_HOME
 	local old_home = vim.env.HOME
@@ -284,9 +280,9 @@ test("state root follows override, XDG, then home modes", function()
 	vim.env.NVIM_EXACT_EDITOR_STATE_HOME = old_override
 	vim.env.XDG_STATE_HOME = old_xdg
 	vim.env.HOME = old_home
-end)
+end
 
-test("state directories and atomic registry are owner-only", function()
+configured["state directories and atomic registry are owner-only"] = function()
 	local record = assert(rpc.write_registry(instance))
 	assert(record.version == 2 and record.instance_id == instance.instance_id)
 	assert(vim.deep_equal(record.workspaces, { { runtime = "host", root = root, repo_identity = root } }))
@@ -305,9 +301,9 @@ test("state directories and atomic registry are owner-only", function()
 	for key in pairs(rpc._record_keys) do
 		assert(decoded[key] ~= nil or key == "TMUX_PANE", "registry omitted " .. key)
 	end
-end)
+end
 
-test("container registration requires and preserves the exact environment triplet", function()
+configured["container registration requires and preserves the exact environment triplet"] = function()
 	vim.env.NVIM_DEVCONTAINER = "1"
 	vim.env.NVIM_EXACT_EDITOR_RUNTIME = "container"
 	vim.env.NVIM_EXACT_EDITOR_WORKSPACE_ROOT = root
@@ -357,9 +353,9 @@ test("container registration requires and preserves the exact environment triple
 	vim.env.NVIM_EXACT_EDITOR_RUNTIME = nil
 	vim.env.NVIM_EXACT_EDITOR_WORKSPACE_ROOT = nil
 	vim.env.NVIM_EXACT_EDITOR_REPO_IDENTITY = nil
-end)
+end
 
-test("version-2 editor request arms durable state before acknowledging and finishes only after close", function()
+configured["version-2 editor request arms durable state before acknowledging and finishes only after close"] = function()
 	local request_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	local value = wait_request(request_id, external)
 	write_request(value)
@@ -388,9 +384,9 @@ test("version-2 editor request arms durable state before acknowledging and finis
 	drain()
 	assert(wait_state(request_id).status == "completed")
 	assert(table.concat(vim.fn.readfile(external), "\n") == "saved editor text")
-end)
+end
 
-test("closing a modified editor window aborts and preserves the exact buffer", function()
+configured["closing a modified editor window aborts and preserves the exact buffer"] = function()
 	local request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 	local target = temporary_text()
 	local value = wait_request(request_id, target)
@@ -405,9 +401,9 @@ test("closing a modified editor window aborts and preserves the exact buffer", f
 	assert(wait_state(request_id).status == "aborted")
 	assert(vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified, "modified buffer was discarded")
 	assert(vim.api.nvim_buf_get_lines(buf, 0, -1, false)[1] == "unsaved window text")
-end)
+end
 
-test("deleting a modified editor buffer aborts and preserves a recovery buffer", function()
+configured["deleting a modified editor buffer aborts and preserves a recovery buffer"] = function()
 	local request_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 	local target = temporary_text()
 	local value = wait_request(request_id, target)
@@ -428,9 +424,9 @@ test("deleting a modified editor buffer aborts and preserves a recovery buffer",
 	assert(recovery and vim.api.nvim_buf_is_valid(recovery), "modified text was not recovered")
 	assert(vim.bo[recovery].modified, "recovery buffer is not modified")
 	assert(vim.api.nvim_buf_get_lines(recovery, 0, -1, false)[1] == "unsaved deleted text")
-end)
+end
 
-test("version-2 requests reject schema injection, symlinks, binary files, and a different opened target", function()
+configured["version-2 requests reject schema injection, symlinks, binary files, and a different opened target"] = function()
 	local symlink = fixture .. "/external-link"
 	assert(vim.uv.fs_symlink(external, symlink))
 	local binary = vim.fn.tempname()
@@ -457,9 +453,9 @@ test("version-2 requests reject schema injection, symlinks, binary files, and a 
 	})
 	assert(not handled and err:find("different target", 1, true))
 	assert(vim.uv.fs_lstat(state .. "/waits/" .. request_id .. ".json") == nil)
-end)
+end
 
-test("VimLeavePre completes saved work and aborts modified work", function()
+configured["VimLeavePre completes saved work and aborts modified work"] = function()
 	local saved_id = "34343434-5656-4789-8aaa-343434343434"
 	local saved_path = temporary_text()
 	write_request(wait_request(saved_id, saved_path))
@@ -476,9 +472,9 @@ test("VimLeavePre completes saved work and aborts modified work", function()
 	vim.api.nvim_exec_autocmds("VimLeavePre", {})
 	assert(wait_state(saved_id).status == "completed")
 	assert(wait_state(modified_id).status == "aborted")
-end)
+end
 
-test("opaque UUID request is consumed once and delegates exact tab position", function()
+configured["opaque UUID request is consumed once and delegates exact tab position"] = function()
 	local value = request()
 	local path = write_request(value)
 	local opened
@@ -492,9 +488,9 @@ test("opaque UUID request is consumed once and delegates exact tab position", fu
 	assert(opened[2].lnum == 7 and opened[2].col == 9)
 	assert(vim.uv.fs_lstat(path) == nil, "request was not unlinked after consumption")
 	assert(rpc.consume_request(value.request_id, instance, { open_file = function() end }) == nil)
-end)
+end
 
-test("request schema, identity, and opaque id reject injected fields", function()
+configured["request schema, identity, and opaque id reject injected fields"] = function()
 	assert(rpc.consume_request('../target")', instance, { open_file = function() end }) == nil)
 	local value = request({ action = "execute" })
 	local path = write_request(value)
@@ -505,18 +501,18 @@ test("request schema, identity, and opaque id reject injected fields", function(
 	write_request(value)
 	handled, err = rpc.consume_request(value.request_id, instance, { open_file = function() end })
 	assert(not handled and err:find("identity", 1, true))
-end)
+end
 
-test("request containment rejects traversal and symlink escape", function()
+configured["request containment rejects traversal and symlink escape"] = function()
 	for _, unsafe in ipairs({ "../outside.lua", "/etc/passwd", "escape.lua", "missing.lua" }) do
 		local value = request({ path = unsafe })
 		write_request(value)
 		local handled = rpc.consume_request(value.request_id, instance, { open_file = function() end })
 		assert(not handled, "unsafe request path was accepted: " .. unsafe)
 	end
-end)
+end
 
-test("symlinked state directories are rejected before chmod", function()
+configured["symlinked state directories are rejected before chmod"] = function()
 	local symlink_root = vim.fn.tempname()
 	local target = vim.fn.tempname()
 	assert(vim.fn.mkdir(target, "p") == 1)
@@ -525,27 +521,21 @@ test("symlinked state directories are rejected before chmod", function()
 	assert(not ok and err:find("not a real directory", 1, true))
 	vim.fn.delete(symlink_root)
 	vim.fn.delete(target, "rf")
-end)
+end
 
-test("host applies the bounded default registry heartbeat", function()
+configured["host applies the bounded default registry heartbeat"] = function()
 	assert(rpc._options().registry_heartbeat_seconds == 21600, "host heartbeat policy default changed")
-end)
-
-vim.fn.delete(fixture, "rf")
-vim.fn.delete(state, "rf")
-for _, path in ipairs(external_files) do
-	vim.fn.delete(path)
-end
-for name, value in pairs(original_environment) do
-	vim.env[name] = value
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+	vim.fn.delete(state, "rf")
+	for _, path in ipairs(external_files) do
+		vim.fn.delete(path)
 	end
-	vim.cmd("cquit")
+	for name, value in pairs(original_environment) do
+		vim.env[name] = value
+	end
 end
 
-print(string.format("exact_editor_host_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

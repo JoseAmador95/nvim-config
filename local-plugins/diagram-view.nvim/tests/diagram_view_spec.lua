@@ -7,31 +7,13 @@ package.path = table.concat({ plugin .. "/lua/?.lua", plugin .. "/lua/?/init.lua
 
 local diagram = require("diagram_view")
 local cache = require("diagram_view.cache")
-local failures = {}
-local count = 0
+
 local temporary = {}
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(
-			(message or "values differ")
-				.. "\nexpected: "
-				.. vim.inspect(expected)
-				.. "\nactual: "
-				.. vim.inspect(actual)
-		)
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function cache_root()
 	local parent = vim.fn.tempname()
@@ -61,7 +43,7 @@ local function setup(opts)
 	assert(ok, err)
 end
 
-test("lifecycle defaults are copied and rejected setup is non-mutating", function()
+T["lifecycle defaults are copied and rejected setup is non-mutating"] = function()
 	local defaults = diagram.effective_config()
 	equal({
 		default_mode = "svg",
@@ -76,7 +58,7 @@ test("lifecycle defaults are copied and rejected setup is non-mutating", functio
 	local ok, err = diagram.setup({ unknown = true })
 	assert(not ok and err:find("unknown option", 1, true), err)
 	equal(before, diagram.status(), "rejected setup mutated state")
-end)
+end
 
 local function renderer(plantuml)
 	assert(diagram.register_renderer("test", {
@@ -109,7 +91,7 @@ local function presenter(log, name)
 	}))
 end
 
-test("extracts homogeneous fences, explicit selections, and whole buffers", function()
+T["extracts homogeneous fences, explicit selections, and whole buffers"] = function()
 	local fences = assert(diagram.find_fences({
 		"````Mermaid title",
 		"flowchart LR",
@@ -146,9 +128,9 @@ test("extracts homogeneous fences, explicit selections, and whole buffers", func
 	local whole = assert(diagram.extract({ lines = { "graph TD", "A --> B" }, filetype = "mermaid" }))
 	equal("buffer", whole.origin.type)
 	equal("graph TD\nA --> B", whole.source)
-end)
+end
 
-test("malformed and unsupported outer fences do not expose nested diagrams", function()
+T["malformed and unsupported outer fences do not expose nested diagrams"] = function()
 	local found = assert(diagram.find_fences({
 		"~~~text",
 		"```mermaid",
@@ -162,9 +144,9 @@ test("malformed and unsupported outer fences do not expose nested diagrams", fun
 	}, { mermaid = true }))
 	equal(1, #found)
 	equal("visible", found[1].source)
-end)
+end
 
-test("PlantUML is sandboxed unless local trust explicitly permits a profile", function()
+T["PlantUML is sandboxed unless local trust explicitly permits a profile"] = function()
 	local environments = {}
 	local function spawn(_, options, callback)
 		environments[#environments + 1] = vim.deepcopy(options.env)
@@ -200,9 +182,9 @@ test("PlantUML is sandboxed unless local trust explicitly permits a profile", fu
 	presenter({})
 	assert(diagram.open({ renderer = "test", presenter = "test", kind = "plantuml", source = "C -> D" }))
 	equal("SANDBOX", environments[3].PLANTUML_SECURITY_PROFILE)
-end)
+end
 
-test("cancellation kills active work and ignores a late callback", function()
+T["cancellation kills active work and ignores a late callback"] = function()
 	local callback
 	local killed = {}
 	local log = {}
@@ -237,9 +219,9 @@ test("cancellation kills active work and ignores a late callback", function()
 	assert(log.delivered == nil, "late renderer output reached the presenter")
 	equal(1, #completions, "late renderer output completed a cancelled request again")
 	equal({}, diagram.status().sessions)
-end)
+end
 
-test("stage timeout kills work and late completion cannot cache or present", function()
+T["stage timeout kills work and late completion cannot cache or present"] = function()
 	local callback
 	local timeout
 	local killed = 0
@@ -279,9 +261,9 @@ test("stage timeout kills work and late completion cannot cache or present", fun
 	callback({ code = 0, stdout = "late output", stderr = "" })
 	assert(log.delivered == nil, "late output reached the presenter")
 	equal({}, vim.fn.glob(root .. "/*", false, true), "late output entered the cache")
-end)
+end
 
-test("combined stdout and stderr obey the per-stage output ceiling", function()
+T["combined stdout and stderr obey the per-stage output ceiling"] = function()
 	local log = {}
 	setup({
 		max_stage_output_bytes = 5,
@@ -296,9 +278,9 @@ test("combined stdout and stderr obey the per-stage output ceiling", function()
 	equal("error", session:status().state)
 	assert(log.error:find("exceeds 5 bytes", 1, true), log.error)
 	assert(log.delivered == nil)
-end)
+end
 
-test("default process capture stops at the output ceiling", function()
+T["default process capture stops at the output ceiling"] = function()
 	local killed = 0
 	local observed
 	local log = {}
@@ -324,9 +306,9 @@ test("default process capture stops at the output ceiling", function()
 	equal(1, killed, "bounded process capture did not terminate the renderer")
 	assert(type(observed.stdout) == "function" and type(observed.stderr) == "function")
 	assert(observed.timeout == nil, "vim.system retained a second competing timeout")
-end)
+end
 
-test("default process capture rejects stream read failures", function()
+T["default process capture rejects stream read failures"] = function()
 	local log = {}
 	setup({
 		system = function(_, options, callback)
@@ -341,9 +323,9 @@ test("default process capture rejects stream read failures", function()
 	equal("error", session:status().state)
 	assert(log.error:find("stdout read failed", 1, true), log.error)
 	assert(log.delivered == nil, "a partial stream was presented after a read failure")
-end)
+end
 
-test("presenter-driven buffer teardown cannot reenter cancellation", function()
+T["presenter-driven buffer teardown cannot reenter cancellation"] = function()
 	local session
 	local closes = 0
 	local cancelled = 0
@@ -373,9 +355,9 @@ test("presenter-driven buffer teardown cannot reenter cancellation", function()
 	assert(session:cancel("closed"))
 	equal(1, closes, "presenter close reentered itself")
 	equal(1, cancelled, "reentrant close emitted duplicate lifecycle events")
-end)
+end
 
-test("a duplicated runner callback completes a session exactly once", function()
+T["a duplicated runner callback completes a session exactly once"] = function()
 	local deliveries = 0
 	local completions = 0
 	setup({
@@ -408,9 +390,9 @@ test("a duplicated runner callback completes a session exactly once", function()
 	equal("presented", session:status().state)
 	equal(1, deliveries, "duplicate runner completion reached the presenter")
 	equal(1, completions, "duplicate runner completion reached on_done")
-end)
+end
 
-test("runner and completion exceptions still conclude exactly once", function()
+T["runner and completion exceptions still conclude exactly once"] = function()
 	local completions = {}
 	setup({
 		spawn = function()
@@ -434,9 +416,9 @@ test("runner and completion exceptions still conclude exactly once", function()
 	assert(completions[1].result == nil and completions[1].err:find("runner exploded", 1, true))
 	assert(session:cancel("closed after error"))
 	equal(1, #completions, "cancelling an errored session completed on_done again")
-end)
+end
 
-test("cache is private, reused, and rejects a symlink root", function()
+T["cache is private, reused, and rejects a symlink root"] = function()
 	local root = cache_root()
 	local runs = 0
 	local log = {}
@@ -494,9 +476,9 @@ test("cache is private, reused, and rejects a symlink root", function()
 		assert(diagram.open({ renderer = "test", presenter = "test", kind = "mermaid", source = "unsafe" }))
 	equal("error", rejected:status().state)
 	assert(symlink_log.error:find("real directory", 1, true), symlink_log.error)
-end)
+end
 
-test("conditional cache cleanup never removes a same-key fresh publication", function()
+T["conditional cache cleanup never removes a same-key fresh publication"] = function()
 	local root = cache_root()
 	assert(cache.setup({ root = root, max_age_seconds = 1, max_bytes = 1024 }))
 	local path = assert(cache.write("same-key", "txt", "stale"))
@@ -527,9 +509,9 @@ test("conditional cache cleanup never removes a same-key fresh publication", fun
 	assert(cache.prune())
 	cache._set_test_hook(nil)
 	equal("new", assert(cache.read("prune-key", "txt")), "prune removed the fresh same-key publication")
-end)
+end
 
-test("failed process or presenter shutdown preserves session authority and rejects reconfiguration", function()
+T["failed process or presenter shutdown preserves session authority and rejects reconfiguration"] = function()
 	local kill_fails = true
 	local close_fails = true
 	local root = cache_root()
@@ -575,9 +557,9 @@ test("failed process or presenter shutdown preserves session authority and rejec
 	close_fails = false
 	assert(diagram.cancel(session, "retry"))
 	equal(0, #diagram.status().sessions, "successful retry retained cancelled session")
-end)
+end
 
-test("presenters are selected by name and renderer errors stay session-local", function()
+T["presenters are selected by name and renderer errors stay session-local"] = function()
 	local logs = { first = {}, second = {} }
 	setup({
 		spawn = function(_, _, callback)
@@ -594,9 +576,9 @@ test("presenters are selected by name and renderer errors stay session-local", f
 	equal("bad source", logs.second.error)
 	equal("error", session:status().state)
 	equal({ "first", "second" }, diagram.status().presenters)
-end)
+end
 
-test("repeated setup and teardown reset registries deterministically", function()
+T["repeated setup and teardown reset registries deterministically"] = function()
 	setup({ default_mode = "ascii" })
 	renderer(false)
 	presenter({})
@@ -610,9 +592,9 @@ test("repeated setup and teardown reset registries deterministically", function(
 	assert(diagram.teardown())
 	assert(not diagram.status().configured)
 	equal("svg", diagram.effective_config().default_mode)
-end)
+end
 
-test("markdown image references are extracted by column, reference, and HTML tag", function()
+T["markdown image references are extracted by column, reference, and HTML tag"] = function()
 	local image_link = require("diagram_view.image_link")
 
 	local parsed = assert(image_link.parse_line('text ![one](a.png) and ![two](<b c.png> "title")'))
@@ -671,18 +653,12 @@ test("markdown image references are extracted by column, reference, and HTML tag
 	})
 	assert(reported == nil)
 	assert(reported_err:find("image", 1, true), "the miss must mention images: " .. tostring(reported_err))
-end)
-
-for _, path in ipairs(temporary) do
-	vim.fn.delete(path, "rf")
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	for _, path in ipairs(temporary) do
+		vim.fn.delete(path, "rf")
 	end
-	vim.cmd("cquit")
 end
 
-print(("diagram_view_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+return T

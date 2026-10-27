@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.log_watch")
 -- Host adapter for log-workbench.nvim. Commands, local configuration,
 -- notifications, and window placement remain configuration concerns.
 local follow = require("log_workbench.follow")
@@ -173,7 +174,7 @@ local function configure_presentation(session, win, opts)
 	end
 	pcall(vim.api.nvim_win_set_width, win, effective_width(opts.width))
 	vim.b[buf].log_watch_presenter = opts.presenter or "devcontainer-log"
-	vim.keymap.set("n", "q", function()
+	usage_map("n", "q", function()
 		local session_now = follow.session(buf)
 		local current = vim.api.nvim_get_current_win()
 		local target = valid_window_for_buffer(current, buf) and current or presentation_window(session_now)

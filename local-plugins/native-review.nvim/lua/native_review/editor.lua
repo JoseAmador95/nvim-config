@@ -3,6 +3,7 @@ local M = {}
 
 local config = require("native_review.dependencies").get("config")
 local comment_types = require("native_review.comment_types")
+local buffers = require("native_review.buffers")
 
 local NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_editor")
 local FOOTER_NAMESPACE = vim.api.nvim_create_namespace("nvim_config_review_editor_footer")
@@ -64,26 +65,6 @@ local function close_timer(timer)
 	end
 	if not closing then
 		pcall(timer.close, timer)
-	end
-end
-
-local function scope_namespace(win, namespace)
-	if type(vim.api.nvim_win_add_ns) == "function" and type(vim.api.nvim_win_remove_ns) == "function" then
-		return pcall(vim.api.nvim_win_add_ns, win, namespace)
-	end
-	if type(vim.api.nvim__ns_set) == "function" then
-		return pcall(vim.api.nvim__ns_set, namespace, { wins = { win } })
-	end
-	return false, "window-scoped namespaces are unavailable"
-end
-
-local function unscope_namespace(win, namespace)
-	if type(vim.api.nvim_win_add_ns) == "function" and type(vim.api.nvim_win_remove_ns) == "function" then
-		if valid_win(win) then
-			pcall(vim.api.nvim_win_remove_ns, win, namespace)
-		end
-	elseif type(vim.api.nvim__ns_set) == "function" then
-		pcall(vim.api.nvim__ns_set, namespace, { wins = {} })
 	end
 end
 
@@ -422,9 +403,9 @@ function M.compose(options, callback)
 			return false
 		end
 		source_row = source_line - 1
-		local scoped, scope_err = scope_namespace(source_win, NAMESPACE)
+		local scoped, scope_err = buffers.scope_namespace(source_win, NAMESPACE)
 		if not scoped then
-			unscope_namespace(source_win, NAMESPACE)
+			buffers.unscope_namespace(source_win, NAMESPACE)
 			vim.notify(
 				"Could not isolate review editor reservation: " .. tostring(scope_err),
 				vim.log.levels.ERROR,
@@ -471,7 +452,7 @@ function M.compose(options, callback)
 		end
 		reservation = nil
 		if namespace_scoped then
-			unscope_namespace(source_win, NAMESPACE)
+			buffers.unscope_namespace(source_win, NAMESPACE)
 			namespace_scoped = false
 		end
 	end

@@ -445,6 +445,15 @@ table.sort(M.tool_order)
 M.versions.tree_sitter = M.versions["tree-sitter-cli"]
 M.validation_order = { "stylua", "shellcheck", "actionlint", "tree-sitter-cli" }
 
+-- Test-only dependencies are installed explicitly, outside the editor runtime.
+M.test_dependencies = {
+	mini_test = {
+		url = "https://github.com/echasnovski/mini.test.git",
+		version = "0.18.0",
+		commit = "35c67cb7f2dc697ed0c7c06400fcf29a8a521d7d",
+	},
+}
+
 -- Mise requires configured install dependencies to be included in named requests.
 function M.request_tools(name)
 	local backend = assert(M.tools[name], "unknown tool: " .. name).backend

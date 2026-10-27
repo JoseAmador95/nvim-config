@@ -96,7 +96,6 @@ package.loaded["config.local_config"] = {
 			return vim.deepcopy(defaults)
 		end
 		assert(name == "project_python")
-		assert(defaults.test_runner == "pytest")
 		assert(defaults.repl.readiness_timeout_ms == 5000 and defaults.repl.poll_interval_ms == 50)
 		return vim.deepcopy(defaults)
 	end,
@@ -214,25 +213,18 @@ local buf_b = vim.fn.bufadd(fixture .. "/b/src/test_b.py")
 vim.fn.bufload(buf_a)
 vim.fn.bufload(buf_b)
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
+hooks.pre_case = function()
 	debug_authorized = true
 	revoke_during_resolve = false
 	before_execution_resolver = nil
 	execution_calls = {}
 	project_settings_batches = 0
 	project_settings_requests = {}
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
 end
 
-test("automatic environments follow deterministic filesystem-only priority", function()
+T["automatic environments follow deterministic filesystem-only priority"] = function()
 	local root = fixture .. "/priority"
 	local paths = {
 		uv = root .. "/.uv/bin/python",
@@ -272,9 +264,9 @@ test("automatic environments follow deterministic filesystem-only priority", fun
 			python.refresh(root)
 		end
 	end)
-end)
+end
 
-test("environment probes skip non-executable files and support all layouts", function()
+T["environment probes skip non-executable files and support all layouts"] = function()
 	local root = fixture .. "/layouts"
 	local unix_python = root .. "/.venv/bin/python"
 	local unix_python3 = root .. "/.venv/bin/python3"
@@ -292,9 +284,9 @@ test("environment probes skip non-executable files and support all layouts", fun
 	assert(vim.fn.delete(windows_scripts) == 0)
 	python.refresh(root)
 	assert(python.for_root(root) == windows_root)
-end)
+end
 
-test("process environments are considered only when rooted in the project", function()
+T["process environments are considered only when rooted in the project"] = function()
 	local root = fixture .. "/contained"
 	local local_python = root .. "/.venv/bin/python"
 	local outside = fixture .. "/outside"
@@ -307,9 +299,9 @@ test("process environments are considered only when rooted in the project", func
 	}, function()
 		assert(python.for_root(root) == local_python)
 	end)
-end)
+end
 
-test("canonical root keys preserve lexical symlinked venv interpreters", function()
+T["canonical root keys preserve lexical symlinked venv interpreters"] = function()
 	local root = fixture .. "/symlink-project"
 	local target = fixture .. "/symlink-target"
 	local alias = fixture .. "/symlink-project-alias"
@@ -318,9 +310,9 @@ test("canonical root keys preserve lexical symlinked venv interpreters", functio
 	assert(vim.uv.fs_symlink(target, root .. "/.venv", { dir = true }))
 	assert(vim.uv.fs_symlink(root, alias, { dir = true }))
 	assert(python.for_root(alias) == root .. "/.venv/bin/python")
-end)
+end
 
-test("selection is remembered independently per project without mutating vim.env", function()
+T["selection is remembered independently per project without mutating vim.env"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	active_python = python_a
 	python.refresh_current()
@@ -334,9 +326,9 @@ test("selection is remembered independently per project without mutating vim.env
 	assert(vim.env.UV_PROJECT_ENVIRONMENT == nil)
 	assert(vim.env.VIRTUAL_ENV == nil)
 	assert(vim.env.CONDA_PREFIX == nil)
-end)
+end
 
-test("manual selections are root-scoped and stale interpreters are discarded", function()
+T["manual selections are root-scoped and stale interpreters are discarded"] = function()
 	local root = fixture .. "/stale"
 	local manual = root .. "/.manual/bin/python"
 	local automatic = root .. "/.venv/bin/python"
@@ -355,18 +347,15 @@ test("manual selections are root-scoped and stale interpreters are discarded", f
 	python.refresh(root)
 	assert(python.for_root(root) == automatic)
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("ty, Neotest, and DAP consume the same root selection without interpreter probes", function()
+T["ty and DAP consume the same root selection without interpreter probes"] = function()
 	local settings = { ty = { configuration = { rules = { ["unresolved-reference"] = "warn" } } } }
 	local config = { root_dir = fixture .. "/a", settings = settings }
 	python.before_init({}, config)
 	assert(rawequal(config.settings, settings))
 	assert(config.settings.ty.configuration.environment.python == python_a)
 	assert(config.settings.ty.configuration.rules["unresolved-reference"] == "warn")
-	assert(vim.deep_equal(python.neotest_python(fixture .. "/a"), { python_a }))
-	assert(python.neotest_runner({ python_a }) == "pytest")
-	assert(python.neotest_runner({ python_b }) == "pytest")
 
 	vim.api.nvim_set_current_buf(buf_a)
 	local dap = { listeners = { on_config = {} } }
@@ -375,9 +364,9 @@ test("ty, Neotest, and DAP consume the same root selection without interpreter p
 	local resolved = dap.listeners.on_config.nvim_config_python(source)
 	assert(resolved ~= source and resolved.pythonPath == python_a)
 	assert(dap.listeners.on_config.nvim_config_python({ type = "cppdbg" }).type == "cppdbg")
-end)
+end
 
-test("DAP roots resolve cross-project config fields before the active buffer", function()
+T["DAP roots resolve cross-project config fields before the active buffer"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	local dap = { listeners = { on_config = {} } }
 	python.setup_dap(dap)
@@ -401,9 +390,9 @@ test("DAP roots resolve cross-project config fields before the active buffer", f
 	assert(from_workspace.pythonPath == python_b, "workspace did not resolve project B")
 	local placeholder = resolve({ type = "python", request = "launch", program = "${file}" })
 	assert(placeholder.pythonPath == python_a, "unresolved placeholder preempted the active buffer")
-end)
+end
 
-test("DAP aborts an invalid explicit interpreter without mutating its input", function()
+T["DAP aborts an invalid explicit interpreter without mutating its input"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	local dap = { ABORT = {}, listeners = { on_config = {} } }
 	python.setup_dap(dap)
@@ -432,9 +421,9 @@ test("DAP aborts an invalid explicit interpreter without mutating its input", fu
 			and notifications[1].message:find("explicit Python interpreter is invalid", 1, true),
 		"invalid explicit Python was not reported"
 	)
-end)
+end
 
-test("ty settings stay in place and trusted explicit precedence publishes one interpreter", function()
+T["ty settings stay in place and trusted explicit precedence publishes one interpreter"] = function()
 	local environment = fixture .. "/a/.other"
 	local settings = {
 		ty = {
@@ -494,9 +483,9 @@ test("ty settings stay in place and trusted explicit precedence publishes one in
 	local automatic = { root_dir = fixture .. "/a", settings = {} }
 	local automatic_snapshot = python.on_new_config(automatic, fixture .. "/a")
 	assert(automatic.settings.ty.configuration.environment.python == automatic_snapshot.value.interpreter)
-end)
+end
 
-test("host snapshots are copied and explicit project failures never fall back", function()
+T["host snapshots are copied and explicit project failures never fall back"] = function()
 	local root = fixture .. "/explicit-invalid"
 	local automatic = root .. "/.venv/bin/python"
 	interpreter(automatic, false)
@@ -507,22 +496,21 @@ test("host snapshots are copied and explicit project failures never fall back", 
 	snapshot.value.interpreter = "mutated"
 	assert(python.snapshot(root).value.interpreter == nil, "snapshot mutation leaked into plugin state")
 	explicit_project_values.vscode = nil
-end)
+end
 
-test("host discovery and Neotest runner never execute Python", function()
+T["host discovery never executes Python"] = function()
 	local original_system = vim.system
 	vim.system = function()
 		error("Python discovery executed a process")
 	end
 	local ok, err = xpcall(function()
 		assert(type(python.for_root(fixture .. "/a")) == "string")
-		assert(python.neotest_runner({ python_a }) == "pytest")
 	end, debug.traceback)
 	vim.system = original_system
 	assert(ok, err)
-end)
+end
 
-test("manual activation restarts only ty clients for the selected root", function()
+T["manual activation restarts only ty clients for the selected root"] = function()
 	local stopped = {}
 	local started = {}
 	local clients = {
@@ -574,9 +562,9 @@ test("manual activation restarts only ty clients for the selected root", functio
 	assert(not stopped.ruff)
 	assert(#started == 1 and started[1].options.bufnr == buf_a)
 	assert(started[1].config.root_dir == fixture .. "/a")
-end)
+end
 
-test("ty and legacy markers keep LSP and shared consumers on the same nested root", function()
+T["ty and legacy markers keep LSP and shared consumers on the same nested root"] = function()
 	local monorepo = fixture .. "/marker-monorepo"
 	local service = monorepo .. "/services/api"
 	local path = service .. "/src/main.py"
@@ -608,9 +596,9 @@ test("ty and legacy markers keep LSP and shared consumers on the same nested roo
 	vim.lsp.get_clients = previous_clients
 	vim.api.nvim_buf_delete(buf, { force = true })
 	assert(ok, err)
-end)
+end
 
-test("supplied repository roots avoid Git and preserve Python root precedence", function()
+T["supplied repository roots avoid Git and preserve Python root precedence"] = function()
 	local monorepo = fixture .. "/supplied-root-monorepo"
 	local service = monorepo .. "/services/api"
 	local attached = service .. "/src"
@@ -657,9 +645,9 @@ test("supplied repository roots avoid Git and preserve Python root precedence", 
 	vim.system = previous_system
 	vim.api.nvim_buf_delete(buf, { force = true })
 	assert(ok, err)
-end)
+end
 
-test("sending code opens and focuses the project REPL automatically", function()
+T["sending code opens and focuses the project REPL automatically"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "answer = 6 * 7" })
 	vim.api.nvim_win_set_cursor(0, { 1, 0 })
@@ -683,9 +671,9 @@ test("sending code opens and focuses the project REPL automatically", function()
 	assert(#sent == 1, "second code send bypassed the deferred FIFO")
 	drain_deferred()
 	assert(#sent == 2, "the second line was not sent to the live REPL")
-end)
+end
 
-test("sending code restarts a retained stopped REPL", function()
+T["sending code restarts a retained stopped REPL"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = true
 	terminal_running = false
@@ -700,9 +688,9 @@ test("sending code restarts a retained stopped REPL", function()
 	terminal_accepting_input = true
 	drain_deferred()
 	assert(#sent == 1, "code was not sent after restarting the REPL")
-end)
+end
 
-test("an exited REPL adopts the newly selected interpreter on explicit restart", function()
+T["an exited REPL adopts the newly selected interpreter on explicit restart"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = false
 	terminal_running = false
@@ -718,9 +706,9 @@ test("an exited REPL adopts the newly selected interpreter on explicit restart",
 	python.open_repl()
 	assert(#restarted_specs == 1)
 	assert(vim.deep_equal(restarted_specs[1].launch.argv, { python_a2, "-i" }))
-end)
+end
 
-test("opening an unchanged live REPL toggles it without restarting", function()
+T["opening an unchanged live REPL toggles it without restarting"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = false
 	terminal_running = false
@@ -733,9 +721,9 @@ test("opening an unchanged live REPL toggles it without restarting", function()
 	python.open_repl()
 	assert(#toggled_specs == 2, "second open did not toggle the live REPL")
 	assert(#restarted_specs == 0, "second open restarted an unchanged live REPL")
-end)
+end
 
-test("queued REPL sends preserve FIFO order while startup is pending", function()
+T["queued REPL sends preserve FIFO order while startup is pending"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = false
 	terminal_running = false
@@ -752,9 +740,9 @@ test("queued REPL sends preserve FIFO order while startup is pending", function(
 	drain_deferred()
 	assert(#sent == 2)
 	assert(sent[1].text == 'exec("first = 1")' and sent[2].text == 'exec("second = 2")')
-end)
+end
 
-test("sending during a pending restart waits without refocusing the old process", function()
+T["sending during a pending restart waits without refocusing the old process"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = true
 	terminal_running = true
@@ -769,9 +757,9 @@ test("sending during a pending restart waits without refocusing the old process"
 	terminal_accepting_input = true
 	drain_deferred()
 	assert(#sent == 1 and sent[1].text == 'exec("after_restart = true")')
-end)
+end
 
-test("queued REPL sends abort visibly when the process exits before input", function()
+T["queued REPL sends abort visibly when the process exits before input"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = false
 	terminal_running = false
@@ -788,9 +776,9 @@ test("queued REPL sends abort visibly when the process exits before input", func
 	vim.notify = previous_notify
 	assert(#sent == 0 and #notices == 1)
 	assert(notices[1].message:find("exited before it accepted input", 1, true))
-end)
+end
 
-test("queued REPL sends time out instead of retrying forever", function()
+T["queued REPL sends time out instead of retrying forever"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = false
 	terminal_running = false
@@ -806,9 +794,9 @@ test("queued REPL sends time out instead of retrying forever", function()
 	vim.notify = previous_notify
 	assert(#sent == 0 and #notices == 1)
 	assert(notices[1].message:find("Timed out waiting for Python REPL input", 1, true))
-end)
+end
 
-test("REPL open, restart, and send require a fresh durable debug grant", function()
+T["REPL open, restart, and send require a fresh durable debug grant"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "guarded = true" })
 	deferred_callbacks = {}
@@ -845,9 +833,9 @@ test("REPL open, restart, and send require a fresh durable debug grant", functio
 	end
 	assert(#notices == 3, "denied REPL operations were not reported exactly once")
 	assert(package.loaded.verified_tools == nil, "REPL authorization loaded verified-tools")
-end)
+end
 
-test("revocation during the final grant recheck cannot create a partial REPL", function()
+T["revocation during the final grant recheck cannot create a partial REPL"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "race = true" })
 	deferred_callbacks = {}
@@ -863,9 +851,9 @@ test("revocation during the final grant recheck cannot create a partial REPL", f
 	assert(#execution_calls == 1, "REPL open did not pass through the authority resolver")
 	assert(#opened_specs == 0 and not terminal_exists, "revocation raced into a partially opened terminal")
 	assert(#deferred_callbacks == 0, "denied REPL open queued input for a nonexistent terminal")
-end)
+end
 
-test("REPL launch revalidates the interpreter inside the authority seam", function()
+T["REPL launch revalidates the interpreter inside the authority seam"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { "race = 'interpreter'" })
 	terminal_exists = false
@@ -887,9 +875,9 @@ test("REPL launch revalidates the interpreter inside the authority seam", functi
 	assert(#opened_specs == 0 and not terminal_exists, "a vanished interpreter reached the terminal backend")
 	assert(#notices == 1 and notices[1].message:find("no longer executable", 1, true))
 	interpreter(python_a, true)
-end)
+end
 
-test("a live REPL asks before adopting a changed interpreter", function()
+T["a live REPL asks before adopting a changed interpreter"] = function()
 	vim.api.nvim_set_current_buf(buf_a)
 	terminal_exists = false
 	terminal_running = false
@@ -907,19 +895,19 @@ test("a live REPL asks before adopting a changed interpreter", function()
 	python.refresh_current()
 	assert(prompt and prompt.opts.prompt:find("environment changed", 1, true))
 	assert(#restarted_specs == 0, "REPL restarted without confirmation")
-end)
+end
 
 local venv_spec = require("plugins.python")
-test("venv-selector disables all implicit global activation paths", function()
+T["venv-selector disables all implicit global activation paths"] = function()
 	assert(venv_spec.commit == "cc4bb3975de8835291f9bb45889e96c6b2795fc4")
 	assert(venv_spec.opts.options.cached_venv_automatic_activation == false)
 	assert(venv_spec.opts.options.activate_venv_in_terminal == false)
 	assert(venv_spec.opts.options.set_environment_variables == false)
 	assert(#venv_spec.opts.hooks == 1 and type(venv_spec.opts.hooks[1]) == "function")
 	assert(venv_spec.opts.options.on_venv_activate_callback == nil)
-end)
+end
 
-test("venv-selector hook keeps the Python origin while its picker has focus", function()
+T["venv-selector hook keeps the Python origin while its picker has focus"] = function()
 	terminal_running = false
 	active_python = python_a
 	python.refresh_current(buf_a)
@@ -930,9 +918,9 @@ test("venv-selector hook keeps the Python origin while its picker has focus", fu
 	assert(python.for_root(fixture .. "/b") == python_b)
 	vim.api.nvim_set_current_buf(buf_b)
 	vim.api.nvim_buf_delete(picker_buf, { force = true })
-end)
+end
 
-test("attached ty root scopes manual selection and shared consumers", function()
+T["attached ty root scopes manual selection and shared consumers"] = function()
 	local monorepo = fixture .. "/lsp-monorepo"
 	local service = monorepo .. "/services/api"
 	local path = service .. "/src/main.py"
@@ -992,7 +980,6 @@ test("attached ty root scopes manual selection and shared consumers", function()
 		assert(rawequal(started[1].config.settings, started[1].client.settings))
 		assert(started[1].client.settings.ty.configuration.environment.python == manual)
 		assert(started[1].client.settings.ty.configuration.rules["unresolved-reference"] == "warn")
-		assert(vim.deep_equal(python.neotest_python(service), { manual }))
 		vim.api.nvim_set_current_buf(buf)
 		local original_cmake = package.loaded["config.cmake"]
 		local original_clangd = package.loaded["config.clangd"]
@@ -1026,9 +1013,9 @@ test("attached ty root scopes manual selection and shared consumers", function()
 	vim.api.nvim_buf_delete(picker_buf, { force = true })
 	vim.api.nvim_buf_delete(buf, { force = true })
 	assert(ok, err)
-end)
+end
 
-test("Python mappings stay outside the review namespace", function()
+T["Python mappings stay outside the review namespace"] = function()
 	python.setup()
 	for _, name in ipairs({ "PythonEnvironment", "PythonEnvironmentRefresh", "PythonEnvironmentClear" }) do
 		assert(vim.fn.exists(":" .. name) == 2, "missing command " .. name)
@@ -1041,28 +1028,22 @@ test("Python mappings stay outside the review namespace", function()
 	vim.keymap.del("n", "<leader>pr")
 	vim.keymap.del("n", "<leader>ps")
 	vim.keymap.del("x", "<leader>ps")
-end)
-
-package.loaded["venv-selector"] = original_selector
-package.loaded["config.terminal"] = original_terminal
-package.loaded["config.project_settings"] = original_project_settings
-package.loaded["config.local_config"] = original_local_config
-package.loaded["config.execution"] = original_execution
-package.loaded.verified_tools = original_verified_tools
-vim.lsp.get_clients = original_clients
-vim.ui.select = original_select
-vim.defer_fn = original_defer_fn
-vim.env.UV_PROJECT_ENVIRONMENT = original_uv_project_environment
-vim.env.VIRTUAL_ENV = original_virtual_env
-vim.env.CONDA_PREFIX = original_conda_prefix
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("python_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	package.loaded["venv-selector"] = original_selector
+	package.loaded["config.terminal"] = original_terminal
+	package.loaded["config.project_settings"] = original_project_settings
+	package.loaded["config.local_config"] = original_local_config
+	package.loaded["config.execution"] = original_execution
+	package.loaded.verified_tools = original_verified_tools
+	vim.lsp.get_clients = original_clients
+	vim.ui.select = original_select
+	vim.defer_fn = original_defer_fn
+	vim.env.UV_PROJECT_ENVIRONMENT = original_uv_project_environment
+	vim.env.VIRTUAL_ENV = original_virtual_env
+	vim.env.CONDA_PREFIX = original_conda_prefix
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

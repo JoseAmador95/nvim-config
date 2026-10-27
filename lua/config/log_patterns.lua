@@ -168,33 +168,6 @@ local function get_visual_selection(buf, opts)
 	return table.concat(lines, "\n")
 end
 
-local function legacy_pattern(entry)
-	local text = entry.text:gsub("\n", "\\n")
-	if entry.kind == "exact" then
-		text = "\\V" .. text:gsub("\\", "\\\\")
-	end
-	return text
-end
-
-local function sync_buffer_state(buf)
-	local core = assert(ensure_matches())
-	local patterns = {}
-	local next_id = 1
-	for _, entry in ipairs(core.list(buf)) do
-		patterns[#patterns + 1] = {
-			id = entry.id,
-			group = entry.hl_group,
-			color_key = entry.metadata.color_key,
-			pattern = legacy_pattern(entry),
-			kind = entry.kind,
-		}
-		if type(entry.id) == "number" then
-			next_id = math.max(next_id, entry.id + 1)
-		end
-	end
-	vim.b[buf].log_pattern_state = { patterns = patterns, window_matches = {}, next_id = next_id }
-end
-
 function M.complete_colors(arglead, cmdline)
 	return complete_color(arglead, cmdline)
 end
@@ -238,7 +211,6 @@ function M.add(kind, opts)
 		notify("Could not add log pattern: " .. tostring(err), vim.log.levels.ERROR)
 		return
 	end
-	sync_buffer_state(buf)
 	return entry
 end
 
@@ -252,7 +224,6 @@ function M.clear(opts)
 	local arg = vim.trim(opts.args or "")
 	if arg == "" then
 		core.clear(buf)
-		sync_buffer_state(buf)
 		return
 	end
 	local color_key, color_err = parse_color(arg)
@@ -267,7 +238,6 @@ function M.clear(opts)
 		end
 	end
 	core.clear(buf, ids)
-	sync_buffer_state(buf)
 end
 
 function M.next(buf, opts)

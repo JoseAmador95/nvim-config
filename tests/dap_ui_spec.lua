@@ -1,146 +1,17 @@
-vim.o.shadafile = "NONE"
-vim.o.swapfile = false
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
-local repo = vim.fn.getcwd()
-vim.opt.runtimepath:prepend(repo)
-package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
-
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
-
-local original_env = vim.env.NVIM_DAP_UI
-local original_notify = vim.notify
-local original_local_config = package.loaded["config.local_config"]
 local original_editor = package.loaded["config.editor"]
-local original_dapui = package.loaded.dapui
 local original_dap_view = package.loaded["dap-view"]
+local original_ui = package.loaded["config.dap_ui"]
+local calls, dap, ui
 
-local function fresh(selected, override)
-	package.loaded["config.dap_ui"] = nil
-	package.loaded["config.local_config"] = {
-		get = function(key)
-			assert(key == "dap")
-			return { ui = selected or "dap-ui" }
-		end,
-	}
-	vim.env.NVIM_DAP_UI = override
-	return require("config.dap_ui")
-end
-
-local function fake_dap()
-	local dap = {
-		defaults = { fallback = {} },
-		listeners = {
-			after = { event_initialized = {} },
-			on_session = {},
-		},
-	}
-	dap.session = function()
-		return dap.current_session
-	end
-	return dap
-end
-
-test("local config accepts the versioned DAP UI selection", function()
-	local root = vim.fn.tempname()
-	vim.fn.mkdir(root, "p")
-	local host = root .. "/host.lua"
-	vim.fn.writefile({ "return { dap = { ui = 'dap-view' } }" }, host)
-
-	local cwd = vim.fn.getcwd()
-	local config_file = vim.env.NVIM_CONFIG_FILE
-	vim.env.NVIM_CONFIG_FILE = host
-	vim.cmd.cd(root)
-	package.loaded["config.local_config"] = nil
-	local local_config = require("config.local_config")
-	assert(local_config.read().dap.ui == "dap-view")
-	assert(#local_config.errors() == 0)
-
-	vim.cmd.cd(cwd)
-	vim.env.NVIM_CONFIG_FILE = config_file
-	vim.fn.delete(root, "rf")
-end)
-
-test("selection defaults to dap-ui and a valid environment value wins", function()
-	assert(fresh("dap-ui", nil).selected() == "dap-ui")
-	assert(fresh("dap-ui", "dap-view").selected() == "dap-view")
-	assert(fresh("dap-view", "dap-ui").selected() == "dap-ui")
-end)
-
-test("invalid environment override fails safely to local config", function()
-	local notifications = {}
-	vim.notify = function(message)
-		notifications[#notifications + 1] = tostring(message)
-	end
-	local ui = fresh("dap-view", "unknown")
-	assert(ui.selected() == "dap-view")
-	assert(#notifications == 1 and notifications[1]:find("must be dap-ui or dap-view", 1, true))
-	vim.notify = original_notify
-end)
-
-test("dap-ui is the only implementation loaded and owns the shared lifecycle", function()
-	local calls = { open = 0, close = 0, toggle = 0, eval = 0, setup = 0 }
-	package.loaded.dapui = {
-		setup = function()
-			calls.setup = calls.setup + 1
-		end,
-		open = function()
-			calls.open = calls.open + 1
-		end,
-		close = function()
-			calls.close = calls.close + 1
-		end,
-		toggle = function()
-			calls.toggle = calls.toggle + 1
-		end,
-		eval = function()
-			calls.eval = calls.eval + 1
-		end,
-	}
-	package.loaded["dap-view"] = nil
-	local ui = fresh("dap-ui", nil)
-	local dap = fake_dap()
-	ui.setup(dap)
-	assert(calls.setup == 1)
-	assert(package.loaded["dap-view"] == nil, "dap-view loaded for dap-ui selection")
-	assert(dap.defaults.fallback.switchbuf == "usevisible,usetab,newtab")
-
-	dap.listeners.after.event_initialized.nvim_config_dap_ui()
-	local active_session = { id = 1 }
-	local replacement_session = { id = 2 }
-	dap.current_session = replacement_session
-	dap.listeners.on_session.nvim_config_dap_ui(active_session, replacement_session)
-	vim.wait(20)
-	assert(calls.close == 0, "UI closed while another debug session remained")
-	dap.current_session = nil
-	dap.listeners.on_session.nvim_config_dap_ui(replacement_session, nil)
-	assert(
-		vim.wait(1000, function()
-			return calls.close == 1
-		end),
-		"UI did not close after the final debug session"
-	)
-	ui.toggle()
-	ui.eval()
-	assert(vim.deep_equal(calls, { open = 1, close = 1, toggle = 1, eval = 1, setup = 1 }))
-end)
-
-test("dap-view is exclusive, closes its terminal and routes jumps through editor tabs", function()
-	local calls = { open = 0, close = {}, toggle = {}, hover = {}, setup = nil }
-	package.loaded.dapui = nil
+hooks.pre_case = function()
+	calls = { open = 0, close = {}, toggle = {}, hover = {}, setup = 0 }
 	package.loaded["dap-view"] = {
 		setup = function(options)
-			calls.setup = options
+			calls.setup = calls.setup + 1
+			calls.options = options
 		end,
 		open = function()
 			calls.open = calls.open + 1
@@ -155,71 +26,81 @@ test("dap-view is exclusive, closes its terminal and routes jumps through editor
 			calls.hover[#calls.hover + 1] = { expr = expr, enter = enter, options = options }
 		end,
 	}
-
-	local opened
 	package.loaded["config.editor"] = {
 		open_file_in_tab = function(path)
-			opened = path
+			calls.opened = path
 		end,
 	}
-	local ui = fresh("dap-view", nil)
-	local dap = fake_dap()
+	package.loaded["config.dap_ui"] = nil
+	ui = require("config.dap_ui")
+	dap = {
+		defaults = { fallback = {} },
+		listeners = { after = { event_initialized = {} }, on_session = {} },
+		session = function()
+			return dap.current_session
+		end,
+	}
 	ui.setup(dap)
-	assert(type(calls.setup) == "table" and calls.setup.auto_toggle == false and calls.setup.follow_tab == true)
-	assert(package.loaded.dapui == nil, "dap-ui loaded for dap-view selection")
+end
+
+hooks.post_once = function()
+	package.loaded["config.editor"] = original_editor
+	package.loaded["dap-view"] = original_dap_view
+	package.loaded["config.dap_ui"] = original_ui
+end
+
+T["DAP controls preserve terminal closure, evaluation and tab-first navigation"] = function()
+	ui.setup(dap)
+	assert(calls.setup == 1, "DAP setup was duplicated")
+	assert(calls.options.auto_toggle == false and calls.options.follow_tab == true)
+	assert(dap.defaults.fallback.switchbuf == "usevisible,usetab,newtab")
 
 	local buf = vim.api.nvim_create_buf(true, false)
-	local path = vim.fn.tempname() .. ".py"
-	vim.api.nvim_buf_set_name(buf, path)
-	local buffer_path = vim.api.nvim_buf_get_name(buf)
-	local win = calls.setup.switchbuf(buf)
-	assert(opened == buffer_path)
+	MiniTest.finally(function()
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end)
+	assert(calls.options.switchbuf(buf) == nil, "unnamed source opened a tab")
+	assert(calls.opened == nil)
+	vim.api.nvim_buf_set_name(buf, vim.fn.tempname() .. ".py")
+	local win = calls.options.switchbuf(buf)
+	assert(calls.opened == vim.api.nvim_buf_get_name(buf))
 	assert(win == vim.api.nvim_get_current_win())
 
 	dap.listeners.after.event_initialized.nvim_config_dap_ui()
-	dap.current_session = nil
-	dap.listeners.on_session.nvim_config_dap_ui({ id = 1 }, nil)
-	assert(
-		vim.wait(1000, function()
-			return #calls.close == 1
-		end),
-		"dap-view did not close after the final debug session"
-	)
+	ui.close()
 	ui.toggle()
 	ui.eval()
 	assert(calls.open == 1)
 	assert(vim.deep_equal(calls.close, { true }))
 	assert(vim.deep_equal(calls.toggle, { true }))
-	assert(calls.hover[1].enter == true and calls.hover[1].options.context == "repl")
-end)
-
-test("plugin spec pins dap-view 1.2.0 and makes both UIs conditional", function()
-	local specs = require("plugins.dap")
-	local plugins = {}
-	for _, spec in ipairs(specs) do
-		plugins[spec[1]] = spec
-	end
-	assert(type(plugins["rcarriga/nvim-dap-ui"].cond) == "function")
-	assert(plugins["rcarriga/nvim-dap-ui"].lazy == true)
-	assert(plugins["igorlfs/nvim-dap-view"].commit == "ba5c838e731003abefb8bc1c403c59aa5b3aa194")
-	assert(type(plugins["igorlfs/nvim-dap-view"].cond) == "function")
-	assert(plugins["igorlfs/nvim-dap-view"].lazy == true)
-end)
-
-vim.env.NVIM_DAP_UI = original_env
-vim.notify = original_notify
-package.loaded["config.local_config"] = original_local_config
-package.loaded["config.editor"] = original_editor
-package.loaded.dapui = original_dapui
-package.loaded["dap-view"] = original_dap_view
-package.loaded["config.dap_ui"] = nil
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
+	assert(vim.deep_equal(calls.hover, { { enter = true, options = { context = "repl" } } }))
 end
 
-print(string.format("dap_ui_spec: %d tests passed", count))
-vim.cmd("quitall!")
+T["DAP closes only after the final session and checks for a scheduled replacement"] = function()
+	local listener = dap.listeners.on_session.nvim_config_dap_ui
+	local active, replacement = { id = 1 }, { id = 2 }
+	dap.current_session = active
+	listener(nil, active)
+	dap.current_session = replacement
+	listener(active, replacement)
+	vim.wait(20)
+	assert(#calls.close == 0, "UI closed while a debug session remained")
+
+	dap.current_session = nil
+	listener(replacement, nil)
+	dap.current_session = active
+	vim.wait(20)
+	assert(#calls.close == 0, "scheduled close hid a newly started session")
+
+	dap.current_session = nil
+	listener(active, nil)
+	assert(
+		vim.wait(1000, function()
+			return #calls.close == 1
+		end),
+		"UI did not close after the final debug session"
+	)
+	assert(calls.close[1] == true, "session cleanup left the debug terminal visible")
+end
+
+return T

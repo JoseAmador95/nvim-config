@@ -1,0 +1,2 @@
+# mini.test screenshots preserve padded terminal cells.
+tests/screenshots/* whitespace=-blank-at-eol

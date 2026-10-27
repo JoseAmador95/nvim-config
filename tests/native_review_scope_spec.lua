@@ -8,17 +8,7 @@ vim.opt.runtimepath:prepend(repo .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local scope = require("config.native_review").scope
 local root = "/tmp/review-scope-repository"
@@ -116,7 +106,7 @@ local function assert_read_only_git(calls)
 	end
 end
 
-test("commit and range scopes freeze full OIDs and emit exact Diffview ranges", function()
+T["commit and range scopes freeze full OIDs and emit exact Diffview ranges"] = function()
 	local calls = {}
 	local outputs = {
 		[rev("feature")] = oid_a .. "\n",
@@ -137,9 +127,9 @@ test("commit and range scopes freeze full OIDs and emit exact Diffview ranges", 
 	assert(range.id ~= commit.id, "scope kind did not contribute to identity")
 	assert(vim.deep_equal(calls[1], { "rev-parse", "--verify", "--end-of-options", "feature^{commit}" }))
 	assert_read_only_git(calls)
-end)
+end
 
-test("branch scope tries upstream remote then origin and freezes merge-base through HEAD", function()
+T["branch scope tries upstream remote then origin and freezes merge-base through HEAD"] = function()
 	local calls = {}
 	local outputs = {
 		[key({ "remote" })] = "team\norigin\n",
@@ -164,9 +154,9 @@ test("branch scope tries upstream remote then origin and freezes merge-base thro
 	end
 	assert(vim.deep_equal(symbolic, { "refs/remotes/team/HEAD", "refs/remotes/origin/HEAD" }))
 	assert_read_only_git(calls)
-end)
+end
 
-test("sole remote is used locally and missing symbolic HEAD is a structured picker error", function()
+T["sole remote is used locally and missing symbolic HEAD is a structured picker error"] = function()
 	local calls = {}
 	local outputs = {
 		[key({ "remote" })] = "fork\n",
@@ -178,7 +168,7 @@ test("sole remote is used locally and missing symbolic HEAD is a structured pick
 	assert(vim.deep_equal(err.details.remotes, { "fork" }))
 	assert(vim.deep_equal(err.details.attempted, { "fork" }))
 	assert_read_only_git(calls)
-end)
+end
 
 local function working_outputs(options)
 	options = options or {}
@@ -208,7 +198,7 @@ local function working_outputs(options)
 	}
 end
 
-test("working fingerprint separates HEAD, staged, unstaged, and untracked content without Git writes", function()
+T["working fingerprint separates HEAD, staged, unstaged, and untracked content without Git writes"] = function()
 	local first_calls = {}
 	local first = assert(
 		scope.resolve(root, { kind = "working" }, dependencies(working_outputs({ staged = "staged one" }), first_calls))
@@ -227,9 +217,9 @@ test("working fingerprint separates HEAD, staged, unstaged, and untracked conten
 	assert(vim.deep_equal(first.diffview_args, {}) and first.file_history_range == nil)
 	assert_read_only_git(first_calls)
 	assert_read_only_git(second_calls)
-end)
+end
 
-test("working drift detects changes in HEAD and every content layer", function()
+T["working drift detects changes in HEAD and every content layer"] = function()
 	local baseline_calls = {}
 	local baseline = assert(scope.resolve(root, { kind = "working" }, dependencies(working_outputs(), baseline_calls)))
 	assert_read_only_git(baseline_calls)
@@ -258,9 +248,9 @@ test("working drift detects changes in HEAD and every content layer", function()
 	local historical_calls = {}
 	local historical = assert(scope.detect_drift({ kind = "commit" }, dependencies({}, historical_calls)))
 	assert(not historical.stale and #historical_calls == 0)
-end)
+end
 
-test("working fingerprint hashes symlink targets and rejects special untracked files", function()
+T["working fingerprint hashes symlink targets and rejects special untracked files"] = function()
 	local calls = {}
 	local linked = assert(
 		scope.resolve(
@@ -285,9 +275,9 @@ test("working fingerprint hashes symlink targets and rejects special untracked f
 	)
 	assert(not invalid and err.code == "working_tree_unavailable")
 	assert(err.message:find("unsupported untracked file type", 1, true))
-end)
+end
 
-test("untracked hashing is NUL-safe, ordered, and uses bounded multi-path batches", function()
+T["untracked hashing is NUL-safe, ordered, and uses bounded multi-path batches"] = function()
 	local paths = {}
 	for index = 1, 2000 do
 		paths[#paths + 1] = ("dir/%04d-%s.lua"):format(index, string.rep("x", 70))
@@ -354,9 +344,9 @@ test("untracked hashing is NUL-safe, ordered, and uses bounded multi-path batche
 	end, paths)
 	assert(vim.deep_equal(expected, hashed), "batched paths lost ordering or control bytes")
 	assert(vim.tbl_contains(checkpoints, "scope.untracked_hash_batch"), "hash batches exposed no checkpoint")
-end)
+end
 
-test("untracked limits fail before regular file hashing", function()
+T["untracked limits fail before regular file hashing"] = function()
 	local paths = { "one.lua", "two.lua" }
 	local function limited(overrides)
 		local hash_calls = 0
@@ -395,20 +385,12 @@ test("untracked limits fail before regular file hashing", function()
 	value, err, hash_calls = limited({ max_files = 2, max_file_bytes = 5, max_model_bytes = 8 })
 	assert(not value and err.details.limit == "max_model_bytes" and err.details.path == "two.lua")
 	assert(err.details.actual == 9 and hash_calls == 0, "aggregate rejection ran hash-object")
-end)
+end
 
-test("invalid requests fail before Git execution", function()
+T["invalid requests fail before Git execution"] = function()
 	local calls = {}
 	local value, err = scope.resolve(root, { kind = "commit", rev = "HEAD", extra = true }, dependencies({}, calls))
 	assert(not value and err.code == "invalid_scope" and #calls == 0)
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("review_scope_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

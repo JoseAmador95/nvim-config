@@ -11,8 +11,6 @@ package.path = table.concat({
 }, ";")
 
 local exact = require("exact_editor")
-local failures = {}
-local count = 0
 
 local function fake_timer_factory(observed)
 	return function()
@@ -45,15 +43,8 @@ local function fake_timer_factory(observed)
 	end
 end
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local fixture = vim.fn.tempname()
 local state = fixture .. "/state"
@@ -109,7 +100,7 @@ local function request_path(id)
 	return state .. "/requests/" .. id .. ".json"
 end
 
-test("status and setup rejection are safe before an instance exists", function()
+T["status and setup rejection are safe before an instance exists"] = function()
 	assert(vim.deep_equal(exact.effective_config(), {
 		workspace_retention = "visited",
 		registry_heartbeat_seconds = 21600,
@@ -123,9 +114,9 @@ test("status and setup rejection are safe before an instance exists", function()
 	local ok, err = pcall(exact.setup, { injected = true })
 	assert(not ok and tostring(err):find("unknown option: injected", 1, true))
 	assert(vim.deep_equal(status, exact.status()), "rejected setup mutated status")
-end)
+end
 
-test("heartbeat policy is strict before setup performs I/O", function()
+T["heartbeat policy is strict before setup performs I/O"] = function()
 	for _, value in ipairs({ 59, 604801, 60.5, "60" }) do
 		local server_called = false
 		local ok, err = pcall(exact.setup, {
@@ -142,9 +133,9 @@ test("heartbeat policy is strict before setup performs I/O", function()
 		assert(not ok and tostring(err):find("integer between 60 and 604800", 1, true))
 		assert(not server_called and not exact.status().configured, "invalid heartbeat policy caused setup I/O")
 	end
-end)
+end
 
-test("failed setup restores the prior configuration", function()
+T["failed setup restores the prior configuration"] = function()
 	local prior_root = exact.state_root()
 	local failed_state = ("/tmp/nvim-eef-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
 	local configured_instance = exact.setup({
@@ -162,9 +153,9 @@ test("failed setup restores the prior configuration", function()
 	assert(not exact.status().configured, "failed setup left an active instance")
 	assert(exact.state_root() == prior_root, "failed setup retained candidate callbacks")
 	vim.fn.delete(failed_state, "rf")
-end)
+end
 
-test("registry persists an exact WorkspaceKey and returns detached values", function()
+T["registry persists an exact WorkspaceKey and returns detached values"] = function()
 	local record = assert(exact.write_registry(instance))
 	assert(record.version == 2)
 	assert(vim.deep_equal(record.workspaces, { workspace }))
@@ -172,9 +163,9 @@ test("registry persists an exact WorkspaceKey and returns detached values", func
 	assert(instance.workspaces[exact._workspace_identity(workspace)].runtime == "host")
 	local path = state .. "/editors/" .. instance.instance_id .. ".json"
 	assert(assert(vim.uv.fs_lstat(path)).mode % 512 == tonumber("600", 8))
-end)
+end
 
-test("normal RPC opens one contained file and consumes the private request", function()
+T["normal RPC opens one contained file and consumes the private request"] = function()
 	local id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	private_json(request_path(id), normal_request(id))
 	local opened
@@ -187,9 +178,9 @@ test("normal RPC opens one contained file and consumes the private request", fun
 	assert(opened.path == root .. "/target.lua")
 	assert(opened.position.lnum == 4 and opened.position.col == 2)
 	assert(vim.uv.fs_lstat(request_path(id)) == nil)
-end)
+end
 
-test("normal RPC rejects traversal and a blocking schema before opening", function()
+T["normal RPC rejects traversal and a blocking schema before opening"] = function()
 	local traversal = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	private_json(request_path(traversal), normal_request(traversal, { path = "../target.lua" }))
 	assert(exact.consume_normal(traversal, instance, {
@@ -213,9 +204,9 @@ test("normal RPC rejects traversal and a blocking schema before opening", functi
 		end,
 	})
 	assert(not handled and err:find("not normal", 1, true))
-end)
+end
 
-test("concurrent waits share one finish action and fan out deterministically", function()
+T["concurrent waits share one finish action and fan out deterministically"] = function()
 	local ids = {
 		"dddddddd-dddd-4ddd-8ddd-dddddddddddd",
 		"ffffffff-ffff-4fff-8fff-ffffffffffff",
@@ -267,9 +258,9 @@ test("concurrent waits share one finish action and fan out deterministically", f
 		local wait = state .. "/waits/" .. id .. ".json"
 		assert(vim.json.decode(table.concat(vim.fn.readfile(wait), "\n")).status == "completed")
 	end
-end)
+end
 
-test("descriptor-relative cleanup preserves record replacements at both validation boundaries", function()
+T["descriptor-relative cleanup preserves record replacements at both validation boundaries"] = function()
 	local record = state .. "/editors/" .. instance.instance_id .. ".json"
 	assert(exact.write_registry(instance))
 	local owned_before_reserve = record .. ".owned-before-reserve"
@@ -304,9 +295,9 @@ test("descriptor-relative cleanup preserves record replacements at both validati
 		vim.json.decode(table.concat(vim.fn.readfile(record), "\n")).replacement == "before-unlink",
 		"replacement created before unlink was removed"
 	)
-end)
+end
 
-test("cleanup without an owned registry identity fails closed", function()
+T["cleanup without an owned registry identity fails closed"] = function()
 	local record = state .. "/editors/" .. instance.instance_id .. ".json"
 	private_json(record, { replacement = "missing-identity" })
 	local unowned = vim.deepcopy(instance)
@@ -322,9 +313,9 @@ test("cleanup without an owned registry identity fails closed", function()
 		vim.json.decode(table.concat(vim.fn.readfile(record), "\n")).replacement == "missing-identity",
 		"record without an owned identity was removed"
 	)
-end)
+end
 
-test("post-reserve failure restores the same record before returning", function()
+T["post-reserve failure restores the same record before returning"] = function()
 	local record = state .. "/editors/" .. instance.instance_id .. ".json"
 	assert(exact.write_registry(instance))
 	local before = assert(vim.uv.fs_lstat(record))
@@ -344,9 +335,9 @@ test("post-reserve failure restores the same record before returning", function(
 	local restored = assert(vim.uv.fs_lstat(record))
 	assert(restored.ino == before.ino and restored.dev == before.dev, "reserved record was not restored in place")
 	assert(not reached_unlink, "cleanup continued to unlink after the post-reserve failure")
-end)
+end
 
-test("socket pathname is vacant during stop and a late replacement is restored", function()
+T["socket pathname is vacant during stop and a late replacement is restored"] = function()
 	local socket_dir = ("/tmp/nvim-eec-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
 	assert(vim.fn.mkdir(socket_dir, "p", tonumber("700", 8)) == 1)
 	assert(vim.uv.fs_chmod(socket_dir, tonumber("700", 8)))
@@ -384,9 +375,9 @@ test("socket pathname is vacant during stop and a late replacement is restored",
 		return rival:is_closing()
 	end)
 	vim.fn.delete(socket_dir, "rf")
-end)
+end
 
-test("symlink request and record paths are rejected without unlinking their targets", function()
+T["symlink request and record paths are rejected without unlinking their targets"] = function()
 	local id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 	local target = fixture .. "/hostile.json"
 	private_json(target, normal_request(id))
@@ -404,9 +395,9 @@ test("symlink request and record paths are rejected without unlinking their targ
 	assert(vim.uv.fs_symlink(target, record))
 	exact._cleanup(instance)
 	assert(vim.uv.fs_lstat(record).type == "link")
-end)
+end
 
-test("discovery publishes only new workspaces and heartbeat is quick-exit safe", function()
+T["discovery publishes only new workspaces and heartbeat is quick-exit safe"] = function()
 	local lifecycle_state = ("/tmp/nvim-eeh-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
 	local second_root = fixture .. "/repo-second"
 	assert(vim.fn.mkdir(second_root, "p") == 1)
@@ -510,9 +501,9 @@ test("discovery publishes only new workspaces and heartbeat is quick-exit safe",
 	exact._set_timer_factory_for_tests(nil)
 	assert(not exact.status().configured)
 	vim.fn.delete(lifecycle_state, "rf")
-end)
+end
 
-test("failed server stop preserves the live instance and teardown can retry", function()
+T["failed server stop preserves the live instance and teardown can retry"] = function()
 	local retry_state = ("/tmp/nvim-eet-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
 	local allow_stop = false
 	local events = {}
@@ -574,9 +565,9 @@ test("failed server stop preserves the live instance and teardown can retry", fu
 	end, events)
 	assert(#stopped == 1 and events[#events] == "instance-stopped")
 	vim.fn.delete(retry_state, "rf")
-end)
+end
 
-test("invalid clock snapshots fail before state or server publication", function()
+T["invalid clock snapshots fail before state or server publication"] = function()
 	for index, value in ipairs({ false, "not-a-timestamp", "2026-02-30T00:00:00Z" }) do
 		local failed_state = ("/tmp/nvim-eec-clock-%d-%d-%d"):format(
 			vim.uv.os_getpid(),
@@ -602,9 +593,9 @@ test("invalid clock snapshots fail before state or server publication", function
 		assert(not server_called and vim.uv.fs_lstat(failed_state) == nil, "invalid clock caused setup I/O")
 		assert(not exact.status().configured)
 	end
-end)
+end
 
-test("deferred setup callbacks are invalidated by teardown", function()
+T["deferred setup callbacks are invalidated by teardown"] = function()
 	local scheduled
 	local setup_calls = 0
 	exact.setup_deferred({
@@ -623,9 +614,9 @@ test("deferred setup callbacks are invalidated by teardown", function()
 	assert(exact.teardown())
 	scheduled()
 	assert(setup_calls == 0, "deferred setup survived teardown")
-end)
+end
 
-test("deferred setup retries after the UI detaches before its callback", function()
+T["deferred setup retries after the UI detaches before its callback"] = function()
 	assert(exact.teardown())
 	local callbacks = {}
 	local uis = 0
@@ -656,9 +647,9 @@ test("deferred setup retries after the UI detaches before its callback", functio
 	assert(setup_calls == 1, "retried setup did not run exactly once")
 	assert(vim.fn.exists("#exact_editor_rpc_deferred#UIEnter") == 0, "effective setup left a deferred watcher")
 	assert(exact.teardown())
-end)
+end
 
-test("deferred setup remains retryable until setup is effective", function()
+T["deferred setup remains retryable until setup is effective"] = function()
 	assert(exact.teardown())
 	local callbacks = {}
 	local uis = 1
@@ -688,16 +679,10 @@ test("deferred setup remains retryable until setup is effective", function()
 	assert(setup_calls == 2, "retry did not run exactly once")
 	assert(vim.fn.exists("#exact_editor_rpc_deferred#UIEnter") == 0, "successful retry left a watcher")
 	assert(exact.teardown())
-end)
-
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("exact_editor_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

@@ -13,24 +13,10 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function write_raw(path, data)
 	local fd, open_err = vim.uv.fs_open(path, "w", 384)
@@ -122,7 +108,7 @@ local function trigger(path, previous, current)
 	callback(nil, previous, current)
 end
 
-test("LogWatch tails incrementally, carries partial lines, and pins every tail window", function()
+T["LogWatch tails incrementally, carries partial lines, and pins every tail window"] = function()
 	local path = vim.fn.tempname()
 	write_raw(path, "one\ntwo\nthree\nfour\nfive")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
@@ -178,9 +164,9 @@ test("LogWatch tails incrementally, carries partial lines, and pins every tail w
 	vim.cmd("silent! only!")
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.fn.delete(path)
-end)
+end
 
-test("LogWatch reloads bounded content after rotation and delete/recreate", function()
+T["LogWatch reloads bounded content after rotation and delete/recreate"] = function()
 	local path = vim.fn.tempname()
 	local rotated = path .. ".old"
 	write_raw(path, "before-a\nbefore-b")
@@ -237,9 +223,9 @@ test("LogWatch reloads bounded content after rotation and delete/recreate", func
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.fn.delete(path)
 	vim.fn.delete(rotated)
-end)
+end
 
-test("follow_path opens one reusable right split with private viewer options and q teardown", function()
+T["follow_path opens one reusable right split with private viewer options and q teardown"] = function()
 	local path = vim.fn.tempname()
 	write_raw(path, "build starting\n")
 	vim.cmd("enew!")
@@ -308,18 +294,12 @@ test("follow_path opens one reusable right split with private viewer options and
 
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.fn.delete(path)
-end)
-
-vim.uv.fs_read = original_fs_read
-vim.uv.new_fs_poll = original_new_fs_poll
-vim.notify = original_notify
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("log_watch_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.uv.fs_read = original_fs_read
+	vim.uv.new_fs_poll = original_new_fs_poll
+	vim.notify = original_notify
+end
+
+return T

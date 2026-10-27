@@ -7,17 +7,8 @@ vim.opt.runtimepath:prepend(vim.fn.stdpath("data") .. "/lazy/nvim-dap")
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 local dap_utils = require("dap.utils")
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local originals = {}
 for _, name in ipairs({
@@ -28,12 +19,7 @@ for _, name in ipairs({
 	"config.python",
 	"dap",
 	"dap-python",
-	"neotest",
-	"neotest.config",
-	"neotest-python",
-	"neotest-gtest",
 	"plugins.dap",
-	"plugins.neotest",
 }) do
 	originals[name] = package.loaded[name]
 end
@@ -88,7 +74,7 @@ package.loaded["config.workflow_execution"] = nil
 
 local workflow = require("config.workflow_execution")
 
-test("workflow helper remains observational until an authorized resolver", function()
+T["workflow helper remains observational until an authorized resolver"] = function()
 	assert(package.loaded["config.tool_bootstrap"] == nil)
 	assert(package.loaded.verified_tools == nil)
 	authority_mode = "allow"
@@ -100,9 +86,9 @@ test("workflow helper remains observational until an authorized resolver", funct
 	local denied, err = workflow.tool("debug", "debugpy", "debugpy-adapter", { root = repo })
 	assert(denied == nil and err:find("grant denied", 1, true))
 	assert(bootstrap_calls == 0, "denied authority invoked tool bootstrap")
-end)
+end
 
-test("managed and host paths are exact and resolver failures stay closed", function()
+T["managed and host paths are exact and resolver failures stay closed"] = function()
 	authority_mode = "allow"
 	bootstrap_path = executable
 	assert(workflow.tool("debug", "debugpy", "debugpy-adapter", { root = repo }) == executable)
@@ -129,7 +115,7 @@ test("managed and host paths are exact and resolver failures stay closed", funct
 		return alias
 	end, fixture .. "/other", { root = repo }, "host tool")
 	assert(drifted == nil and drift_err:find("changed after discovery", 1, true))
-end)
+end
 
 local workflow_mode = "allow"
 local workflow_grants = {}
@@ -160,7 +146,7 @@ local fake_workflow = {
 	end,
 }
 
-test("DAP gates direct runs and resolves adapters only inside callbacks", function()
+T["DAP gates direct runs and resolves adapters only inside callbacks"] = function()
 	package.loaded["config.workflow_execution"] = fake_workflow
 	package.loaded["config.dap_ui"] = { setup = function() end }
 	package.loaded["config.python"] = {
@@ -293,9 +279,9 @@ test("DAP gates direct runs and resolves adapters only inside callbacks", functi
 	assert(vim.deep_equal(codelldb.executable.args, { "--port", "${port}" }))
 	assert(dap.adapters.lldb == dap.adapters.codelldb and dap.adapters.cppdbg == nil)
 	assert(package.loaded["config.tool_bootstrap"] == nil and package.loaded.verified_tools == nil)
-end)
+end
 
-test("DAP existing-session restart authorizes only the expanded workspace", function()
+T["DAP existing-session restart authorizes only the expanded workspace"] = function()
 	local gate_calls = {}
 	local gate_notifications = 0
 	local gate_mode = "deny"
@@ -374,105 +360,13 @@ test("DAP existing-session restart authorizes only the expanded workspace", func
 	assert(#gate_calls == 1 and gate_calls[1].opts.root == fixture, "restart did not authorize the expanded cwd")
 	dap.sessions()[session.id] = nil
 	dap.set_session(nil)
-end)
-
-test("Neotest chains one immutable pre-spawn gate for run and run_last", function()
-	package.loaded["config.workflow_execution"] = fake_workflow
-	package.loaded["config.python"] = { neotest_python = function() end, neotest_runner = function() end }
-	package.loaded["neotest-python"] = function()
-		return { name = "python" }
-	end
-	package.loaded["neotest-gtest"] = {
-		setup = function()
-			return { name = "gtest" }
-		end,
-	}
-	local previous_calls = 0
-	local neotest_config = {
-		default_strategy = "integrated",
-		projects = {},
-		run = {
-			augment = function(_, args)
-				previous_calls = previous_calls + 1
-				args.previous = true
-				return args
-			end,
-		},
-	}
-	local configured
-	package.loaded["neotest.config"] = neotest_config
-	package.loaded.neotest = {
-		setup = function(options)
-			configured = options
-			neotest_config.run = options.run
-		end,
-	}
-	package.loaded["plugins.neotest"] = nil
-	local configure = require("plugins.neotest").config
-	configure()
-	local first_augment = configured.run.augment
-	configure()
-	assert(configured.run.augment == first_augment, "repeated Neotest setup nested the execution gate")
-
-	local tree = {
-		data = function()
-			return { path = repo .. "/tests/workflow_execution_spec.lua" }
-		end,
-		root = function()
-			return {
-				data = function()
-					return { path = repo }
-				end,
-			}
-		end,
-	}
-	local source = { strategy = "integrated", nested = { value = 1 } }
-	workflow_mode = "allow"
-	workflow_grants = {}
-	local result = configured.run.augment(tree, source)
-	assert(
-		result ~= source
-			and result.previous
-			and vim.deep_equal(source, { strategy = "integrated", nested = { value = 1 } })
-	)
-	assert(#workflow_grants == 1 and workflow_grants[1].capability == "test")
-
-	local spawned = 0
-	local function common_run(args)
-		configured.run.augment(tree, args)
-		spawned = spawned + 1
-	end
-	workflow_mode = "deny"
-	assert(not pcall(common_run, {}))
-	assert(not pcall(common_run, { strategy = "dap" }))
-	assert(spawned == 0, "denied Neotest run reached the client spawn seam")
-
-	workflow_mode = "revoke-debug"
-	workflow_grants = {}
-	assert(not pcall(common_run, { strategy = "dap" }))
-	assert(spawned == 0)
-	assert(
-		#workflow_grants == 2 and workflow_grants[1].capability == "test" and workflow_grants[2].capability == "debug"
-	)
-	neotest_config.projects[repo] = { default_strategy = "dap" }
-	workflow_grants = {}
-	assert(not pcall(common_run, {}))
-	assert(#workflow_grants == 2 and workflow_grants[2].capability == "debug")
-	neotest_config.projects[repo] = nil
-	assert(package.loaded["config.tool_bootstrap"] == nil and package.loaded.verified_tools == nil)
-end)
-
-for name, value in pairs(originals) do
-	package.loaded[name] = value
-end
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("workflow_execution_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	for name, value in pairs(originals) do
+		package.loaded[name] = value
+	end
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

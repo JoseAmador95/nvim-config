@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.lsp_navigation")
 local M = {}
 
 local editor = require("config.editor")
@@ -595,8 +596,8 @@ local function set_owned_keymap(bufnr, modes, lhs, callback, options)
 		local owned = owned_callback(bufnr, mode, lhs)
 		if not mapping or (owned and mapping.callback == owned) then
 			local mapping_options = vim.tbl_extend("force", {}, options or {}, { buffer = bufnr })
-			vim.keymap.set(mode, lhs, callback, mapping_options)
-			remember_owned(bufnr, mode, lhs, callback)
+			local installed = usage_map(mode, lhs, callback, mapping_options)
+			remember_owned(bufnr, mode, lhs, installed)
 		elseif owned then
 			forget_owned(bufnr, mode, lhs)
 		end

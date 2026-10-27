@@ -30,7 +30,7 @@ import threading
 import time
 import urllib.parse
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, NamedTuple, NoReturn
 
 MESSAGE_VERSION = 2
@@ -197,7 +197,9 @@ SNAPSHOT_LEASE_KEYS = {
 }
 EXEC_CWD_TRAMPOLINE = 'target=$1; shift; cd "$target" || exit 125; exec "$@"'
 REMOTE_SNAPSHOT_PROBE = (
-    'test -r "$1" && test -f "$2" && actual=$(cat "$2") && test "$actual" = "$3"'
+    'test -r "$1" && test -f "$2" && actual=$(cat "$2") && test "$actual" = "$3" '
+    '|| exit 125; python3 -I -S "${1%/init.lua}/scripts/devcontainer-editor" '
+    "bridge --probe >/dev/null || exit 126"
 )
 DIRECT_AGENT_SOCKET = "/tmp/nvim-config-ssh-agent.sock"
 RELAY_AGENT_DIRECTORY_PREFIX = "/tmp/nvim-config-ssh-agent-proxy-"
@@ -3155,6 +3157,7 @@ def read_private_snapshot_at(
     directory_fd: int,
     name: str,
     label: str,
+    maximum: int = MAX_JSON_BYTES,
 ) -> tuple[bytes, FileIdentity]:
     """Read exact private bytes and return their descriptor-bound identity."""
     name = private_basename(name)
@@ -3167,9 +3170,9 @@ def read_private_snapshot_at(
         or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) != 0o600
         or before.st_nlink != 1
-        or before.st_size > MAX_JSON_BYTES
+        or before.st_size > maximum
     ):
-        fail(f"{label} is unsafe or exceeds 64 KiB")
+        fail(f"{label} is unsafe or exceeds {maximum} bytes")
     try:
         descriptor = os.open(
             name,
@@ -3192,7 +3195,7 @@ def read_private_snapshot_at(
                 )
             ):
                 fail(f"{label} changed while opening")
-            payload = stream.read(MAX_JSON_BYTES + 1)
+            payload = stream.read(maximum + 1)
             if len(payload) != opened.st_size:
                 fail(f"{label} changed while reading")
     except OSError as error:
@@ -7425,14 +7428,14 @@ def record_request_error(
 
 
 def retire_invalid_request(
-    spool: SpoolDirectories,
+    directory_fd: int,
     name: str,
     identity: FileIdentity,
     primary: EditorError,
 ) -> None:
     """Best-effort retire one invalid snapshot without masking validation."""
     try:
-        unlink_regular_at(spool.outbox_fd, name, durable=True, expected=identity)
+        unlink_regular_at(directory_fd, name, durable=True, expected=identity)
     except (EditorError, OSError) as cleanup_error:
         warn_nonfatal(
             f"warning: {primary}; invalid request retirement also failed: {cleanup_error}"
@@ -7470,7 +7473,9 @@ def consume_request(
                 name,
             )
         except EditorError as validation_error:
-            retire_invalid_request(spool, name, request_identity, validation_error)
+            retire_invalid_request(
+                spool.outbox_fd, name, request_identity, validation_error
+            )
             raise
         if not unlink_regular_at(
             spool.outbox_fd,
@@ -7661,6 +7666,10 @@ def verify_remote_config_snapshot(
         check=False,
         env=env,
     )
+    if result.returncode == 126:
+        fail(
+            "container requires Python 3 with its standard library for the editor bridge"
+        )
     if result.returncode != 0:
         fail("container cannot read the exact current Neovim config snapshot")
 
@@ -8402,7 +8411,7 @@ def wait_ack(
     token: str,
     request: Mapping[str, object],
     timeout: float,
-) -> None:
+) -> dict[str, Any]:
     """Wait for one exact authenticated spool acknowledgement."""
     name = f"{request['request_id']}.json"
     deadline = time.monotonic() + timeout
@@ -8422,6 +8431,7 @@ def wait_ack(
         retire_ack_snapshot(spool, name, identity, primary)
         raise
     retire_ack_snapshot(spool, name, identity)
+    return value
 
 
 def open_location(
@@ -8850,10 +8860,509 @@ def cmd_doctor(arguments: argparse.Namespace) -> None:
     )
 
 
+# The editor bridge uses the same private-file and message owners as the CLI.
+BRIDGE_PROTOCOL = 1
+MAX_BRIDGE_PENDING = 128
+MAX_BRIDGE_OUTPUT_BYTES = 1024 * 1024
+BRIDGE_ENVELOPE_BYTES = 128
+BRIDGE_ERROR_RECORD_BYTES = 8192
+BRIDGE_PARAMETERS = {
+    "status": {"root"},
+    "log_path": {"root"},
+    "route": {"path", "from_root", "to_root", "kind"},
+    "new_claim_id": {"request_id"},
+    "runtime": {"cli_path", "docker_path"},
+    "poll": set(),
+    "complete_open": {"request_id", "ok", "error"},
+    "request_host": {"action", "timeout_ms", "request_id"},
+}
+
+
+def bridge_text(value: object, label: str) -> str:
+    """Require one non-empty transport string without NUL bytes."""
+    if not isinstance(value, str) or not value or "\0" in value:
+        fail(f"{label} must be a non-empty string without NUL bytes")
+    return value
+
+
+def bridge_positive(value: object, label: str, maximum: int | None = None) -> int:
+    """Require a positive integer and any protocol-specific upper bound."""
+    if type(value) is float and value.is_integer():
+        value = int(value)
+    if type(value) is not int or value < 1 or (maximum is not None and value > maximum):
+        fail(f"{label} must be a positive integer within its protocol bounds")
+    return value
+
+
+def bridge_json(value: object) -> bytes:
+    """Encode frames and their admission budgets identically."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def route_editor_path(
+    path: object, from_root: object, to_root: object, kind: object
+) -> str:
+    """Translate only an existing contained path through an explicit mapping."""
+    root = canonical_root(bridge_text(from_root, "source root"))
+    destination = bridge_text(to_root, "destination root")
+    if not canonical_posix_absolute(destination):
+        fail("destination root must be canonical and absolute")
+    if kind is not None and (
+        not isinstance(kind, str) or kind not in {"file", "directory"}
+    ):
+        fail("path kind must be file or directory")
+    target = pathlib.Path(bridge_text(path, "path"))
+    target = (root / target).resolve(strict=True)
+    if not contained(root, target):
+        fail("path resolves outside the source root")
+    if (kind == "file" and not target.is_file()) or (
+        kind == "directory" and not target.is_dir()
+    ):
+        fail("path has the wrong type")
+    relative = target.relative_to(root).as_posix()
+    return destination if relative == "." else posixpath.join(destination, relative)
+
+
+def validate_open_request(
+    value: Mapping[str, object], token: str, name: str
+) -> dict[str, Any]:
+    """Authenticate a filename-bound location before any editor action."""
+    if set(value) != REQUEST_KEYS:
+        fail("spool request schema is invalid")
+    request_id = canonical_request_id(value.get("request_id"))
+    if (
+        value.get("version") != MESSAGE_VERSION
+        or name != f"{request_id}.json"
+        or value.get("action") != "open_location"
+        or not recent_timestamp(value.get("created_at"))
+        or not valid_message_auth(token, "open_location", value)
+    ):
+        fail("spool request authentication or schema is invalid")
+    bridge_text(value.get("path"), "location path")
+    bridge_positive(value.get("line"), "line")
+    bridge_positive(value.get("column"), "column")
+    return dict(value)
+
+
+def resolve_editor_executable(value: object, label: str) -> str:
+    """Resolve a host selection once before applying the exact runtime contract."""
+    selected = bridge_text(value, label)
+    if not selected.startswith("/"):
+        selected = shutil.which(selected)
+        if selected is None:
+            fail(f"{label} is unavailable")
+    return exact_executable_path(
+        str(pathlib.Path(selected).resolve(strict=True)), label
+    )
+
+
+class EditorBridge:
+    """Own one editor's pinned resources and outstanding authenticated actions.
+
+    :param resources: Lifetime shared by the bridge loop and its descriptors.
+    :param emit: Queue a bounded response on the editor's private pipe.
+    :param timeout_ms: Maximum time to await the editor's opening confirmation.
+    :param batch_size: Maximum inbox records returned by one poll.
+    """
+
+    def __init__(
+        self,
+        resources: contextlib.ExitStack,
+        emit: Callable[[dict[str, object]], None],
+        timeout_ms: int,
+        batch_size: int,
+    ) -> None:
+        self.resources = resources
+        self.emit = emit
+        self.timeout = timeout_ms / 1000
+        self.batch_size = batch_size
+        self.paths: StateDirectories | None = None
+        self.spool: SpoolDirectories | None = None
+        self.opens: dict[str, tuple[dict[str, Any], str, float]] = {}
+        self.host_requests: dict[int, tuple[dict[str, Any], str, float]] = {}
+        self.last_id = 0
+
+    def state(self) -> StateDirectories:
+        """Pin existing private state without creating or repairing it."""
+        if self.paths is not None:
+            return self.paths
+        root = state_root()
+        try:
+            root.lstat()
+        except FileNotFoundError as error:
+            raise NoActiveEditor(
+                "workspace record is missing or not a regular file"
+            ) from error
+        with contextlib.ExitStack() as acquired:
+            root_fd = open_existing_directory_path(root, "state root")
+            acquired.callback(os.close, root_fd)
+            workspaces = root / "workspaces"
+            try:
+                workspaces.lstat()
+            except FileNotFoundError as error:
+                raise NoActiveEditor(
+                    "workspace record is missing or not a regular file"
+                ) from error
+            descriptor = open_existing_directory_path(workspaces, "state workspaces")
+            acquired.callback(os.close, descriptor)
+            revalidate_directory_path(root, root_fd, "state root")
+            paths = {name: root / name for name in ("workspaces", "logs")}
+            paths["root"] = root
+            self.paths = StateDirectories(
+                paths, {"root": root_fd, "workspaces": descriptor}
+            )
+            acquired.pop_all()
+        self.resources.callback(self.paths.close)
+        return self.paths
+
+    def workspace(self, root: object) -> dict[str, Any]:
+        """Read the exact record, distinguishing absence from hostile state."""
+        host_root = canonical_root(bridge_text(root, "host root"))
+        paths = self.state()
+        if not entry_exists_at(paths.descriptor("workspaces"), record_name(host_root)):
+            raise NoActiveEditor("workspace record is missing or not a regular file")
+        return load_record(paths, host_root)
+
+    def log(self, root: object) -> str:
+        """Validate a record-bound log and its hierarchy without filesystem repair."""
+        record = self.workspace(root)
+        paths = self.state()
+        revalidate_directory_path(paths["root"], paths.descriptor("root"), "state root")
+        path = pathlib.Path(record["log_path"])
+        with contextlib.ExitStack() as acquired:
+            descriptor = open_existing_directory_path(paths["logs"], "logs directory")
+            acquired.callback(os.close, descriptor)
+            read_private_snapshot_at(
+                descriptor, path.name, "lifecycle log", MAX_LOG_BYTES
+            )
+            revalidate_directory_path(paths["logs"], descriptor, "logs directory")
+            revalidate_directory_path(
+                paths["root"], paths.descriptor("root"), "state root"
+            )
+        return str(path)
+
+    def editor_spool(self) -> SpoolDirectories:
+        """Pin the registered container spool once for the helper lifetime."""
+        if os.environ.get("NVIM_DEVCONTAINER") != "1":
+            fail("not running inside a Dev Container editor")
+        if self.spool is None:
+            value = bridge_text(
+                os.environ.get("NVIM_DEVCONTAINER_SPOOL_ROOT"), "spool root"
+            )
+            path = pathlib.Path(value)
+            if not canonical_posix_absolute(value) or path.resolve(strict=True) != path:
+                fail("spool root must be a canonical real directory")
+            self.spool = self.resources.enter_context(workspace_spool(path))
+        return self.spool
+
+    def receive_open(
+        self, name: str, token: str, budget: int
+    ) -> dict[str, object] | None:
+        """Retire one exact inbox snapshot before exposing its editor action."""
+        spool = self.editor_spool()
+        payload, identity = read_private_snapshot_at(
+            spool.inbox_fd, name, "spool request"
+        )
+        try:
+            request = validate_open_request(
+                decode_json_object(payload, "spool request"), token, name
+            )
+        except EditorError as primary:
+            retire_invalid_request(spool.inbox_fd, name, identity, primary)
+            raise
+        try:
+            target = route_editor_path(
+                request["path"],
+                os.environ.get("NVIM_DEVCONTAINER_CONTAINER_ROOT"),
+                os.environ.get("NVIM_DEVCONTAINER_CONTAINER_ROOT"),
+                "file",
+            )
+        except (EditorError, OSError) as error:
+            try:
+                if not unlink_regular_at(
+                    spool.inbox_fd, name, durable=True, expected=identity
+                ):
+                    fail("spool request disappeared before rejection")
+                write_ack(spool, token, request, False, str(error))
+            except (EditorError, OSError) as cleanup:
+                report_cleanup_failure(
+                    error, "negative acknowledgement failed", cleanup
+                )
+            raise
+        record = {
+            "name": name,
+            "request_id": request["request_id"],
+            "path": target,
+            "line": request["line"],
+            "column": request["column"],
+        }
+        if len(bridge_json(record)) + 1 > budget:
+            return None
+        if not unlink_regular_at(spool.inbox_fd, name, durable=True, expected=identity):
+            fail("spool request disappeared before execution")
+        self.opens[request["request_id"]] = (
+            request,
+            token,
+            time.monotonic() + self.timeout,
+        )
+        return record
+
+    def poll(self) -> dict[str, object]:
+        """Return a bounded inbox batch; opening remains unacknowledged."""
+        spool = self.editor_spool()
+        token = read_auth(spool)
+        available = MAX_BRIDGE_PENDING - len(self.opens) - len(self.host_requests)
+        records = []
+        budget = MAX_JSON_BYTES - BRIDGE_ENVELOPE_BYTES
+        with os.scandir(spool.inbox_fd) as entries:
+            names = sorted(
+                entry.name
+                for entry in entries
+                if entry.name.endswith(".json") and not entry.name.startswith(".")
+            )
+        for name in names[: min(self.batch_size, available)]:
+            if budget < BRIDGE_ERROR_RECORD_BYTES:
+                break
+            try:
+                record = self.receive_open(name, token, budget)
+            except (EditorError, OSError) as error:
+                record = {"name": name, "error": bounded_log_detail(str(error), 512)}
+            if record is None:
+                break
+            budget -= len(bridge_json(record)) + 1
+            records.append(record)
+        return {"records": records, "remaining": len(names) - len(records)}
+
+    def complete_open(self, params: Mapping[str, object]) -> bool:
+        """Publish success only after the editor explicitly confirms its action."""
+        request_id = canonical_request_id(params["request_id"])
+        ok, error = params["ok"], params["error"]
+        if type(ok) is not bool or (error is not None and not isinstance(error, str)):
+            fail("editor completion must contain a boolean result and optional error")
+        pending = self.opens.pop(request_id, None)
+        if pending is None:
+            fail(
+                "opening confirmation is unknown or expired; action will not be replayed"
+            )
+        request, token, deadline = pending
+        if time.monotonic() >= deadline:
+            ok, error = False, "editor opening confirmation timed out"
+        detail = (
+            None
+            if ok
+            else bounded_log_detail(error or "editor did not confirm opening", 512)
+        )
+        write_ack(self.editor_spool(), token, request, ok, detail)
+        if not ok:
+            fail(detail)
+        return True
+
+    def request_host(self, correlation: int, params: Mapping[str, object]) -> str:
+        """Publish an allowlisted request and retain its ACK deadline."""
+        action = bridge_text(params["action"], "host action")
+        if action not in HOST_ACTIONS:
+            fail("unsupported host action")
+        timeout = bridge_positive(params["timeout_ms"], "ACK timeout") / 1000
+        if len(self.host_requests) + len(self.opens) >= MAX_BRIDGE_PENDING:
+            fail("too many pending editor bridge requests")
+        spool = self.editor_spool()
+        token = read_auth(spool)
+        request = signed_message(
+            token,
+            "host_request",
+            {
+                "version": MESSAGE_VERSION,
+                "request_id": canonical_uuid4(params["request_id"], "host request id")
+                if params["request_id"] is not None
+                else str(uuid.uuid4()),
+                "action": action,
+                "created_at": utc_now(),
+            },
+        )
+        atomic_create_json_at(spool.outbox_fd, f"{request['request_id']}.json", request)
+        self.host_requests[correlation] = (request, token, time.monotonic() + timeout)
+        return str(request["request_id"])
+
+    def check_host_ack(
+        self, request: Mapping[str, object], token: str, deadline: float
+    ) -> dict[str, Any] | None:
+        """Validate and retire an available ACK using the CLI protocol owner."""
+        spool = self.editor_spool()
+        if entry_exists_at(spool.acks_fd, f"{request['request_id']}.json"):
+            return wait_ack(spool, token, request, 0)
+        if time.monotonic() >= deadline:
+            fail("host request timed out; action will not be replayed")
+        return None
+
+    def tick(self) -> None:
+        """Expire unconfirmed opens and deliver authenticated host outcomes."""
+        for request_id, (request, token, deadline) in list(self.opens.items()):
+            if time.monotonic() >= deadline:
+                del self.opens[request_id]
+                write_ack(
+                    self.editor_spool(),
+                    token,
+                    request,
+                    False,
+                    "editor opening confirmation timed out",
+                )
+        for correlation, (request, token, deadline) in list(self.host_requests.items()):
+            try:
+                acknowledgement = self.check_host_ack(request, token, deadline)
+                if acknowledgement is None:
+                    continue
+                response = {
+                    "id": correlation,
+                    "event": "host_result",
+                    "result": acknowledgement,
+                }
+            except (EditorError, OSError) as error:
+                response = {
+                    "id": correlation,
+                    "event": "host_result",
+                    "error": bounded_log_detail(str(error), 512),
+                }
+            del self.host_requests[correlation]
+            # Authentication remains wholly within the Python owner.
+            response.get("result", {}).pop("auth", None)
+            self.emit(response)
+
+    def dispatch(
+        self, correlation: int, method: str, params: Mapping[str, object]
+    ) -> object:
+        """Dispatch only the small editor-facing operation allowlist."""
+        operations = {
+            "status": lambda: self.workspace(params["root"]),
+            "log_path": lambda: self.log(params["root"]),
+            "route": lambda: route_editor_path(
+                params["path"], params["from_root"], params["to_root"], params["kind"]
+            ),
+            "new_claim_id": lambda: (
+                canonical_uuid4(params["request_id"], "claim id")
+                if params["request_id"] is not None
+                else str(uuid.uuid4())
+            ),
+            "runtime": lambda: {
+                "cli_path": resolve_editor_executable(
+                    params["cli_path"], "certified Dev Containers CLI"
+                ),
+                "docker_path": resolve_editor_executable(
+                    params["docker_path"], "Docker-compatible engine"
+                ),
+            },
+            "poll": self.poll,
+            "complete_open": lambda: self.complete_open(params),
+            "request_host": lambda: self.request_host(correlation, params),
+        }
+        return operations[method]()
+
+    def receive(self, payload: bytes) -> None:
+        """Validate a closed RPC envelope and return one correlated result."""
+        message = decode_json_object(payload, "editor bridge request")
+        if set(message) != {"id", "method", "params"}:
+            fail("editor bridge request schema is invalid")
+        correlation = bridge_positive(message["id"], "bridge correlation", 2**53 - 1)
+        if correlation <= self.last_id:
+            fail("editor bridge correlation must increase; requests are never replayed")
+        self.last_id = correlation
+        method, params = message["method"], message["params"]
+        try:
+            if not isinstance(method, str) or method not in BRIDGE_PARAMETERS:
+                fail("editor bridge operation is not allowed")
+            if not isinstance(params, dict) or set(params) != BRIDGE_PARAMETERS[method]:
+                fail("editor bridge parameters are invalid")
+            result = self.dispatch(correlation, method, params)
+        except (EditorError, OSError) as error:
+            self.emit({"id": correlation, "error": bounded_log_detail(str(error), 512)})
+        else:
+            self.emit({"id": correlation, "result": result})
+
+
+class BridgePipe:
+    """Bound input frames and queued output without blocking the stdin leash."""
+
+    def __init__(self, input_fd: int, output_fd: int) -> None:
+        self.input_fd, self.output_fd = input_fd, output_fd
+        self.incoming = bytearray()
+        self.outgoing = bytearray()
+
+    def emit(self, value: dict[str, object]) -> None:
+        """Queue one JSON line, keeping diagnostics off the protocol stream."""
+        payload = bridge_json(value) + b"\n"
+        if (
+            len(payload) > MAX_JSON_BYTES
+            or len(self.outgoing) + len(payload) > MAX_BRIDGE_OUTPUT_BYTES
+        ):
+            fail("editor bridge output exceeds its byte limit")
+        self.outgoing.extend(payload)
+
+    def read(self, bridge: EditorBridge) -> bool:
+        """Consume fragmented lines and return false on a closed parent pipe."""
+        payload = os.read(self.input_fd, 4096)
+        if not payload:
+            if self.incoming:
+                fail("editor bridge closed with an incomplete JSON line")
+            return False
+        self.incoming.extend(payload)
+        while b"\n" in self.incoming:
+            line, _, rest = self.incoming.partition(b"\n")
+            self.incoming = bytearray(rest)
+            if len(line) + 1 > MAX_JSON_BYTES:
+                fail("editor bridge request exceeds 64 KiB")
+            bridge.receive(bytes(line))
+        if len(self.incoming) >= MAX_JSON_BYTES:
+            fail("editor bridge request exceeds 64 KiB")
+        return True
+
+    def flush(self) -> None:
+        """Write only available pipe capacity, preserving partial writes."""
+        try:
+            written = os.write(self.output_fd, self.outgoing)
+        except BlockingIOError:
+            return
+        del self.outgoing[:written]
+
+    def run(self, bridge: EditorBridge) -> None:
+        """Service RPC and deadlines until either editor pipe closes."""
+        os.set_blocking(self.output_fd, False)
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.input_fd, selectors.EVENT_READ)
+            while True:
+                if selector.select(POLL_SECONDS) and not self.read(bridge):
+                    return
+                bridge.tick()
+                if self.outgoing:
+                    self.flush()
+
+
+def cmd_bridge(arguments: argparse.Namespace) -> None:
+    """Serve one editor using stdlib-only bounded JSON lines.
+
+    :param arguments: CLI bounds, or the read-only capability probe.
+    """
+    if arguments.probe:
+        print(json.dumps({"protocol": BRIDGE_PROTOCOL}))
+        return
+    timeout = bridge_positive(arguments.ack_timeout_ms, "ACK timeout")
+    batch_size = bridge_positive(arguments.max_messages_per_tick, "inbox batch size")
+    pipe = BridgePipe(sys.stdin.fileno(), sys.stdout.fileno())
+    with contextlib.ExitStack() as resources:
+        bridge = EditorBridge(resources, pipe.emit, timeout, batch_size)
+        try:
+            pipe.run(bridge)
+        except BrokenPipeError:
+            return
+
+
 def parser() -> argparse.ArgumentParser:
     """Build the Dev Container editor command-line parser."""
     value = argparse.ArgumentParser(description=__doc__)
     commands = value.add_subparsers(dest="command", required=True)
+    bridge = commands.add_parser("bridge")
+    bridge.add_argument("--probe", action="store_true")
+    bridge.add_argument("--ack-timeout-ms", type=int, default=5000)
+    bridge.add_argument("--max-messages-per-tick", type=int, default=32)
+    bridge.set_defaults(callback=cmd_bridge)
     up = commands.add_parser("up")
     up.add_argument("--repo")
     up.add_argument("--config")

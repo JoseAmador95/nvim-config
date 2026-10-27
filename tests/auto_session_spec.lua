@@ -6,24 +6,10 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local session = require("plugins.auto-session")
 local pre_save = session.opts.pre_save_cmds[1]
@@ -33,10 +19,13 @@ local original_schedule = vim.schedule
 local original_create_autocmd = vim.api.nvim_create_autocmd
 local original_auto_session = package.loaded["auto-session"]
 local original_restore_env = vim.env.NVIM_TMUX_REFRESH_RESTORE
+hooks.post_case = function()
+	vim.schedule = original_schedule
+end
 
-test("autosave leaves transient teardown to the review pre-save hook", function()
+T["autosave leaves transient teardown to the review pre-save hook"] = function()
 	equal(false, session.opts.close_unsupported_windows, "auto-session can close a composer before review suspension")
-end)
+end
 
 local function reset_editor()
 	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -49,7 +38,7 @@ local function reset_editor()
 	vim.cmd("enew!")
 end
 
-test("pre-save remains harmless without code review and preserves skip-empty", function()
+T["pre-save remains harmless without code review and preserves skip-empty"] = function()
 	reset_editor()
 	local attempted_loads = 0
 	package.loaded["config.code_review"] = nil
@@ -62,9 +51,9 @@ test("pre-save remains harmless without code review and preserves skip-empty", f
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-session-normal.lua")
 	equal(true, pre_save(), "normal file window was unexpectedly skipped")
 	equal(0, attempted_loads, "session save activated an unloaded review adapter")
-end)
+end
 
-test("automatic pre-save suspends synchronously and never restores review UI", function()
+T["automatic pre-save suspends synchronously and never restores review UI"] = function()
 	reset_editor()
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-session-review.lua")
 	local suspended = 0
@@ -90,9 +79,9 @@ test("automatic pre-save suspends synchronously and never restores review UI", f
 	equal(0, #scheduled, "automatic save scheduled review tab reacquisition")
 
 	vim.schedule = original_schedule
-end)
+end
 
-test("pre-save vetoes session serialization when review suspension fails", function()
+T["pre-save vetoes session serialization when review suspension fails"] = function()
 	reset_editor()
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-session-failed-review.lua")
 	local scheduled = {}
@@ -111,9 +100,9 @@ test("pre-save vetoes session serialization when review suspension fails", funct
 	equal(false, pre_save(), "failed review suspension did not veto session save")
 	equal(0, #scheduled, "restore was scheduled after failed suspension")
 	vim.schedule = original_schedule
-end)
+end
 
-test("manual save suspends before calling the plugin and bypasses its ignored veto", function()
+T["manual save suspends before calling the plugin and bypasses its ignored veto"] = function()
 	reset_editor()
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-manual-session.lua")
 	local suspended = 0
@@ -155,9 +144,9 @@ test("manual save suspends before calling the plugin and bypasses its ignored ve
 	equal(1, restored, "successful manual save did not restore the review UI")
 	equal(true, lease_active, "successful manual save did not reacquire review UI")
 	vim.schedule = original_schedule
-end)
+end
 
-test("failed manual save leaves review UI suspended and schedules no restore", function()
+T["failed manual save leaves review UI suspended and schedules no restore"] = function()
 	reset_editor()
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-failed-manual-session.lua")
 	local suspended = 0
@@ -187,9 +176,9 @@ test("failed manual save leaves review UI suspended and schedules no restore", f
 	equal(0, restored, "failed manual save restored the review UI")
 	equal(0, #scheduled, "failed manual save scheduled review tab reacquisition")
 	vim.schedule = original_schedule
-end)
+end
 
-test("VimLeavePre is registered before auto-session and suppresses scheduled restoration", function()
+T["VimLeavePre is registered before auto-session and suppresses scheduled restoration"] = function()
 	reset_editor()
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-session-exit.lua")
 	local order = {}
@@ -236,9 +225,9 @@ test("VimLeavePre is registered before auto-session and suppresses scheduled res
 	scheduled[1]()
 	equal(1, suspended, "review was not suspended for the exit save")
 	equal(0, restored, "review was restored while Neovim was exiting")
-end)
+end
 
-test("manual save wrapper preserves upstream options", function()
+T["manual save wrapper preserves upstream options"] = function()
 	reset_editor()
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-session-options.lua")
 	local captured
@@ -258,9 +247,9 @@ test("manual save wrapper preserves upstream options", function()
 	local options = { show_message = false }
 	equal(true, package.loaded["auto-session"].save_session("named", options), "wrapped save failed")
 	equal({ name = "named", options = options }, captured, "wrapped save changed upstream options")
-end)
+end
 
-test("repeated config keeps one wrapper around the same upstream save", function()
+T["repeated config keeps one wrapper around the same upstream save"] = function()
 	reset_editor()
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-session-idempotent.lua")
 	local upstream_calls = 0
@@ -304,9 +293,9 @@ test("repeated config keeps one wrapper around the same upstream save", function
 	)
 	equal(1, upstream_calls, "idempotent wrapper did not call upstream exactly once")
 	equal(3, setup_calls, "repeated config skipped upstream setup")
-end)
+end
 
-test("session serialization cannot resurrect tagged ephemeral terminals", function()
+T["session serialization cannot resurrect tagged ephemeral terminals"] = function()
 	reset_editor()
 	vim.api.nvim_buf_set_name(0, vim.fn.tempname() .. "-durable-session.lua")
 	package.loaded["auto-session"] = {
@@ -345,21 +334,15 @@ test("session serialization cannot resurrect tagged ephemeral terminals", functi
 		end
 	end
 	vim.fn.delete(session_path)
-end)
-
-package.loaded["config.code_review"] = original_code_review
-package.preload["config.code_review"] = original_code_review_preload
-package.loaded["auto-session"] = original_auto_session
-vim.schedule = original_schedule
-vim.api.nvim_create_autocmd = original_create_autocmd
-vim.env.NVIM_TMUX_REFRESH_RESTORE = original_restore_env
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("auto_session_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	package.loaded["config.code_review"] = original_code_review
+	package.preload["config.code_review"] = original_code_review_preload
+	package.loaded["auto-session"] = original_auto_session
+	vim.schedule = original_schedule
+	vim.api.nvim_create_autocmd = original_create_autocmd
+	vim.env.NVIM_TMUX_REFRESH_RESTORE = original_restore_env
+end
+
+return T

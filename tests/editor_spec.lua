@@ -16,24 +16,10 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local editor = require("config.editor")
 local history = require("config.navigation_history")
@@ -61,7 +47,7 @@ local function reset_editor()
 	history.reset()
 end
 
-test("source opening never reuses a file shown only in a transient tab", function()
+T["source opening never reuses a file shown only in a transient tab"] = function()
 	reset_editor()
 	local path = make_file("transient-only")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
@@ -74,9 +60,9 @@ test("source opening never reuses a file shown only in a transient tab", functio
 	assert(not tabs.is_transient(current), "source opening created another transient tab")
 	equal(2, #vim.api.nvim_list_tabpages(), "source opening did not create a normal tab")
 	equal({ 2, 2 }, vim.api.nvim_win_get_cursor(0), "source opening lost its cursor target")
-end)
+end
 
-test("source opening prefers an existing normal tab over a duplicate transient view", function()
+T["source opening prefers an existing normal tab over a duplicate transient view"] = function()
 	reset_editor()
 	local path = make_file("normal-and-transient")
 	vim.cmd("edit! " .. vim.fn.fnameescape(path))
@@ -89,9 +75,9 @@ test("source opening prefers an existing normal tab over a duplicate transient v
 	equal(normal, vim.api.nvim_get_current_tabpage(), "source opening did not prefer the normal tab")
 	equal(2, #vim.api.nvim_list_tabpages(), "source opening created an unnecessary tab")
 	equal({ 3, 1 }, vim.api.nvim_win_get_cursor(0), "normal tab reuse lost its cursor target")
-end)
+end
 
-test("normal semantic navigation remains recorded when the destination also has a transient view", function()
+T["normal semantic navigation remains recorded when the destination also has a transient view"] = function()
 	reset_editor()
 	local origin_path = make_file("record-origin")
 	local target_path = make_file("record-target")
@@ -110,7 +96,7 @@ test("normal semantic navigation remains recorded when the destination also has 
 	equal(2, #snapshot.entries, "normal semantic transition was not recorded")
 	equal(vim.uv.fs_realpath(origin_path), snapshot.entries[1].path, "semantic origin changed")
 	equal(vim.uv.fs_realpath(target_path), snapshot.entries[2].path, "semantic destination changed")
-end)
+end
 
 local review_editor = require("config.native_review").editor
 
@@ -322,7 +308,7 @@ local function namespace_windows()
 	return nil
 end
 
-test("composer respects explicit Normal opening while keeping Insert default", function()
+T["composer respects explicit Normal opening while keeping Insert default"] = function()
 	reset_editor()
 	local source_win = review_source_fixture()
 	local original_cmd = vim.cmd
@@ -382,9 +368,9 @@ test("composer respects explicit Normal opening while keeping Insert default", f
 		pcall(discard_active)
 	end
 	assert(ok, err)
-end)
+end
 
-test("range composer uses a focused body and separate reserved footer", function()
+T["range composer uses a focused body and separate reserved footer"] = function()
 	reset_editor()
 	local source_win, source_buf, source_lines = review_source_fixture()
 	local result = "pending"
@@ -432,9 +418,9 @@ test("range composer uses a focused body and separate reserved footer", function
 	assert(not vim.api.nvim_win_is_valid(footer) and not vim.api.nvim_buf_is_valid(footer_buf))
 	assert(not review_editor.has_active() and not reservation(source_buf))
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "teardown mutated source text")
-end)
+end
 
-test("card composer owns one inline float with type-colored chrome and two reserved rows", function()
+T["card composer owns one inline float with type-colored chrome and two reserved rows"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	assert(review_editor.compose({
@@ -477,9 +463,9 @@ test("card composer owns one inline float with type-colored chrome and two reser
 	assert(config.border[1][2] == "NvimReviewCommentIssue")
 	discard_active()
 	assert(not review_editor.has_active() and not reservation(source_buf))
-end)
+end
 
-test("range reservation renders only in its source window", function()
+T["range reservation renders only in its source window"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	vim.cmd("vsplit")
@@ -507,9 +493,9 @@ test("range reservation renders only in its source window", function()
 	end
 	assert(not reservation(source_buf) and not review_editor.has_active())
 	vim.api.nvim_win_close(sibling, true)
-end)
+end
 
-test("review composer rejects invalid sources and canonical anchor kinds cleanly", function()
+T["review composer rejects invalid sources and canonical anchor kinds cleanly"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local notifications = {}
@@ -546,9 +532,9 @@ test("review composer rejects invalid sources and canonical anchor kinds cleanly
 	assert(#notifications == 5 and not review_editor.has_active() and not reservation(source_buf))
 	assert(notifications[2] == "Review editor anchor kind is missing")
 	assert(notifications[3] == "Review editor anchor kind is not supported: thread")
-end)
+end
 
-test("inline namespace scope failure leaves no editor resources", function()
+T["inline namespace scope failure leaves no editor resources"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local api_name
@@ -585,9 +571,9 @@ test("inline namespace scope failure leaves no editor resources", function()
 	if unscoped then
 		equal({}, unscoped, "scope failure retained a source-window association")
 	end
-end)
+end
 
-test("rejected review save keeps the editor and reservation until acceptance", function()
+T["rejected review save keeps the editor and reservation until acceptance"] = function()
 	reset_editor()
 	local source_win, source_buf, source_lines = review_source_fixture()
 	local accept = false
@@ -623,9 +609,9 @@ test("rejected review save keeps the editor and reservation until acceptance", f
 	submit_enter()
 	assert(calls == 3 and not review_editor.has_active() and not reservation(source_buf))
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "save mutated source text")
-end)
+end
 
-test("empty double-Enter save keeps the editor and reservation", function()
+T["empty double-Enter save keeps the editor and reservation"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local calls = 0
@@ -662,9 +648,9 @@ test("empty double-Enter save keeps the editor and reservation", function()
 	submit_enter()
 	vim.notify = original_notify
 	assert(calls == 1 and not review_editor.has_active() and not reservation(source_buf))
-end)
+end
 
-test("physical Insert Esc input arms discard and mapped jj input does not", function()
+T["physical Insert Esc input arms discard and mapped jj input does not"] = function()
 	with_fake_defer(function(timers)
 		reset_editor()
 		local source_win, source_buf = review_source_fixture()
@@ -751,9 +737,9 @@ test("physical Insert Esc input arms discard and mapped jj input does not", func
 		assert(not review_editor.has_active(), "q did not close an empty composer")
 		assert(cancelled == nil and vim.on_key() == listeners)
 	end)
-end)
+end
 
-test("explicit Enter confirmation resets on opposite, intervening, changed, expired, and rejected actions", function()
+T["explicit Enter confirmation resets on opposite, intervening, changed, expired, and rejected actions"] = function()
 	with_fake_defer(function(timers)
 		reset_editor()
 		local source_win, source_buf = review_source_fixture()
@@ -827,9 +813,9 @@ test("explicit Enter confirmation resets on opposite, intervening, changed, expi
 		assert(calls == 2 and not reservation(source_buf))
 		vim.api.nvim_win_close(sibling, true)
 	end)
-end)
+end
 
-test("a changed draft cannot confirm before its TextChanged autocmd runs", function()
+T["a changed draft cannot confirm before its TextChanged autocmd runs"] = function()
 	with_fake_defer(function(timers)
 		reset_editor()
 		local source_win = review_source_fixture()
@@ -860,9 +846,9 @@ test("a changed draft cannot confirm before its TextChanged autocmd runs", funct
 		submit_enter()
 		assert(calls == 1 and not review_editor.has_active(), "fresh double-Enter did not save changed draft")
 	end)
-end)
+end
 
-test("focus and completion boundaries cancel discard confirmation", function()
+T["focus and completion boundaries cancel discard confirmation"] = function()
 	with_fake_defer(function(timers)
 		reset_editor()
 		local source_win = review_source_fixture()
@@ -905,9 +891,9 @@ test("focus and completion boundaries cancel discard confirmation", function()
 		discard()
 		assert(not review_editor.has_active(), "fresh second Esc did not discard after completion boundary")
 	end)
-end)
+end
 
-test("stale confirmation expiry cannot affect a replacement modal composer", function()
+T["stale confirmation expiry cannot affect a replacement modal composer"] = function()
 	with_fake_defer(function(timers)
 		reset_editor()
 		local source_win = review_source_fixture()
@@ -972,9 +958,9 @@ test("stale confirmation expiry cannot affect a replacement modal composer", fun
 		assert(not review_editor.has_active(), "replacement discard did not complete")
 		assert(saved == nil and vim.on_key() == listeners)
 	end)
-end)
+end
 
-test("review composer persists synchronously and recovers one rejected teardown", function()
+T["review composer persists synchronously and recovers one rejected teardown"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local submitted = 0
@@ -998,9 +984,9 @@ test("review composer persists synchronously and recovers one rejected teardown"
 	assert(review_editor.persist_active())
 	assert(submitted == 1 and recovered == 1)
 	assert(not review_editor.has_active() and not reservation(source_buf))
-end)
+end
 
-test("prepare close cancels an empty composer without submitting it", function()
+T["prepare close cancels an empty composer without submitting it"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local calls = 0
@@ -1018,9 +1004,9 @@ test("prepare close cancels an empty composer without submitting it", function()
 	assert(review_editor.prepare_close())
 	assert(calls == 1 and cancelled == nil)
 	assert(not review_editor.has_active() and not reservation(source_buf))
-end)
+end
 
-test("prepare close vetoes teardown until a nonempty draft is saved or recovered", function()
+T["prepare close vetoes teardown until a nonempty draft is saved or recovered"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local recover = false
@@ -1047,9 +1033,9 @@ test("prepare close vetoes teardown until a nonempty draft is saved or recovered
 	recover = true
 	assert(review_editor.prepare_close())
 	assert(submitted == 2 and recovered == 2 and not review_editor.has_active())
-end)
+end
 
-test("minimal composer cycles type only in Normal mode and preserves the colored badge", function()
+T["minimal composer cycles type only in Normal mode and preserves the colored badge"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local submitted_type
@@ -1097,9 +1083,9 @@ test("minimal composer cycles type only in Normal mode and preserves the colored
 	assert(review_editor.persist_active())
 	assert(submitted_type == "suggestion" and recovered_type == "suggestion")
 	assert(not review_editor.has_active() and not reservation(source_buf))
-end)
+end
 
-test("review composer grows from one to six screen rows and scrolls overflow", function()
+T["review composer grows from one to six screen rows and scrolls overflow"] = function()
 	reset_editor()
 	local source_win, source_buf, source_lines = review_source_fixture()
 	assert(review_editor.compose({
@@ -1149,9 +1135,9 @@ test("review composer grows from one to six screen rows and scrolls overflow", f
 	vim.cmd("stopinsert")
 	discard_active()
 	assert(not review_editor.has_active() and not reservation(source_buf))
-end)
+end
 
-test("inline resize keeps a compact footer below the body and footer closure tears down once", function()
+T["inline resize keeps a compact footer below the body and footer closure tears down once"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	vim.cmd("vsplit")
@@ -1194,9 +1180,9 @@ test("inline resize keeps a compact footer below the body and footer closure tea
 	vim.api.nvim_win_close(footer, true)
 	assert(callbacks == 1 and not review_editor.has_active() and not reservation(source_buf))
 	assert(not vim.api.nvim_win_is_valid(body_win), "footer closure left the Markdown body open")
-end)
+end
 
-test("three-row EOF composer keeps its realized body and footer adjacent through resize", function()
+T["three-row EOF composer keeps its realized body and footer adjacent through resize"] = function()
 	reset_editor()
 	local _, source_buf, source_lines = review_source_fixture()
 	vim.cmd("botright 3split")
@@ -1255,9 +1241,9 @@ test("three-row EOF composer keeps its realized body and footer adjacent through
 	if unscoped then
 		equal({}, unscoped, "EOF teardown retained its namespace scope")
 	end
-end)
+end
 
-test("file and general anchors use one centered rounded modal without source reservations", function()
+T["file and general anchors use one centered rounded modal without source reservations"] = function()
 	reset_editor()
 	local source_win, source_buf = review_source_fixture()
 	local sentinel = vim.api.nvim_buf_set_extmark(source_buf, review_editor._namespace, 0, 0, {
@@ -1371,9 +1357,9 @@ test("file and general anchors use one centered rounded modal without source res
 	assert(cancelled == nil and not review_editor.has_active())
 	assert(#namespace_marks(source_buf) == 1 and namespace_marks(source_buf)[1][1] == sentinel)
 	vim.api.nvim_buf_del_extmark(source_buf, review_editor._namespace, sentinel)
-end)
+end
 
-test("source loss interrupts and recovers exactly once", function()
+T["source loss interrupts and recovers exactly once"] = function()
 	reset_editor()
 	local _, source_buf, source_lines = review_source_fixture()
 	vim.cmd("vsplit")
@@ -1400,9 +1386,9 @@ test("source loss interrupts and recovers exactly once", function()
 	assert(callbacks == 1 and recoveries == 1, "source teardown called callback or recovery more than once")
 	assert(not review_editor.has_active() and not reservation(source_buf))
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "source loss mutated source text")
-end)
+end
 
-test("source buffer replacement interrupts and recovers a modal editor", function()
+T["source buffer replacement interrupts and recovers a modal editor"] = function()
 	reset_editor()
 	local source_win, source_buf, source_lines = review_source_fixture()
 	local callbacks = 0
@@ -1431,23 +1417,17 @@ test("source buffer replacement interrupts and recovers a modal editor", functio
 	assert(not reservation(source_buf), "source replacement leaked its reservation")
 	equal(source_lines, vim.api.nvim_buf_get_lines(source_buf, 0, -1, false), "source replacement mutated text")
 	vim.api.nvim_buf_delete(replacement, { force = true })
-end)
+end
 
-for _, path in ipairs(paths) do
-	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then
-			pcall(vim.api.nvim_buf_delete, buf, { force = true })
+hooks.post_once = function()
+	for _, path in ipairs(paths) do
+		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == path then
+				pcall(vim.api.nvim_buf_delete, buf, { force = true })
+			end
 		end
+		vim.fn.delete(path)
 	end
-	vim.fn.delete(path)
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
-end
-
-print(string.format("editor_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

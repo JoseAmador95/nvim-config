@@ -9,31 +9,13 @@ local follow = require("log_workbench.follow")
 local matches = require("log_workbench.matches")
 local workbench = require("log_workbench")
 local decoder = require("log_workbench.decoder")
-local failures = {}
-local count = 0
+
 local temporary = {}
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(
-			(message or "values differ")
-				.. "\nexpected: "
-				.. vim.inspect(expected)
-				.. "\nactual: "
-				.. vim.inspect(actual)
-		)
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function write_raw(path, data)
 	local fd, open_err = vim.uv.fs_open(path, "w", 384)
@@ -98,7 +80,7 @@ local function watchers()
 	return result
 end
 
-test("decoder replaces an invalid available continuation without hiding following ASCII", function()
+T["decoder replaces an invalid available continuation without hiding following ASCII"] = function()
 	local decoded, carry = assert(decoder.feed("", string.char(0xE2) .. "A"))
 	equal("\239\191\189A", decoded)
 	equal("", carry, "invalid lead plus ASCII remained hidden in carry")
@@ -108,9 +90,9 @@ test("decoder replaces an invalid available continuation without hiding followin
 	decoded, carry = assert(decoder.feed(carry, string.char(0xAC)))
 	equal("\226\130\172", decoded)
 	equal("", carry)
-end)
+end
 
-test("top-level setup configures both modules with an exact option object", function()
+T["top-level setup configures both modules with an exact option object"] = function()
 	equal({
 		poll_interval_ms = 500,
 		max_lines = 100000,
@@ -150,7 +132,7 @@ test("top-level setup configures both modules with an exact option object", func
 	assert(workbench.teardown())
 	assert(workbench.teardown())
 	assert(workbench.status().configured == false)
-end)
+end
 
 local function setup_follow(opts)
 	opts = opts or {}
@@ -175,7 +157,7 @@ local function poll(observed, previous, current)
 	watcher.callback(nil, previous, current)
 end
 
-test("follow decodes invalid and split UTF-8 in a separate ephemeral tail buffer", function()
+T["follow decodes invalid and split UTF-8 in a separate ephemeral tail buffer"] = function()
 	local observed = setup_follow()
 	local path = temporary_file("ok\nbad:\255\254\0\nsplit:\226\130")
 	local session = assert(follow.open(path, { metadata = { source_buf = 42 } }))
@@ -202,9 +184,9 @@ test("follow decodes invalid and split UTF-8 in a separate ephemeral tail buffer
 	end, "split UTF-8 codepoint was not carried across appends")
 	equal(42, session:status().metadata.source_buf)
 	session:stop()
-end)
+end
 
-test("follow reconciles partial append, copytruncate, rotation, deletion, and recreation within limits", function()
+T["follow reconciles partial append, copytruncate, rotation, deletion, and recreation within limits"] = function()
 	local observed = setup_follow({ max_lines = 3, max_bytes = 32 })
 	local path = temporary_file("one\ntwo\nthree\nfour")
 	local rotated = path .. ".old"
@@ -253,9 +235,9 @@ test("follow reconciles partial append, copytruncate, rotation, deletion, and re
 		return vim.deep_equal(lines(buf), { "recreated" })
 	end, "recreated path did not reload")
 	session:stop()
-end)
+end
 
-test("change event detects copytruncate after the replacement regrows beyond the previous offset", function()
+T["change event detects copytruncate after the replacement regrows beyond the previous offset"] = function()
 	local events = {}
 	local observed = setup_follow({
 		event = function(event)
@@ -285,9 +267,9 @@ test("change event detects copytruncate after the replacement regrows beyond the
 		"continuity break did not emit a reload"
 	)
 	session:stop()
-end)
+end
 
-test("same-size rewrites reload instead of being mistaken for idle files", function()
+T["same-size rewrites reload instead of being mistaken for idle files"] = function()
 	local observed = setup_follow()
 	local path = temporary_file("old-a\nold-b\n")
 	local session = assert(follow.open(path))
@@ -303,9 +285,9 @@ test("same-size rewrites reload instead of being mistaken for idle files", funct
 		return vim.deep_equal(lines(session:buffer()), { "new-a", "new-b" })
 	end, "same-size rewrite was not reloaded")
 	session:stop()
-end)
+end
 
-test("copytruncate cannot collide only on a short continuity suffix", function()
+T["copytruncate cannot collide only on a short continuity suffix"] = function()
 	local observed = setup_follow({ max_bytes = 200000, continuity_bytes = 64 * 1024 })
 	local shared = string.rep("x", 65536)
 	local path = temporary_file("OLD\n" .. shared)
@@ -322,9 +304,9 @@ test("copytruncate cannot collide only on a short continuity suffix", function()
 		return lines(session:buffer())[1] == "NEW"
 	end, "copytruncate prefix change collided on a shared 64 KiB suffix")
 	session:stop()
-end)
+end
 
-test("continuity verification is distributed and independently byte bounded", function()
+T["continuity verification is distributed and independently byte bounded"] = function()
 	local reads = {}
 	local uv = setmetatable({
 		fs_read = function(fd, length, offset, callback)
@@ -372,9 +354,9 @@ test("continuity verification is distributed and independently byte bounded", fu
 	assert_sample(1, append_index - 1, 0, old_offset)
 	assert_sample(append_index + 1, #reads, 1, old_offset + 1)
 	session:stop()
-end)
+end
 
-test("invalid per-session bounds fail before publishing a buffer or identity", function()
+T["invalid per-session bounds fail before publishing a buffer or identity"] = function()
 	setup_follow()
 	local path = temporary_file("bounded\n")
 	local before = #follow.status()
@@ -384,9 +366,9 @@ test("invalid per-session bounds fail before publishing a buffer or identity", f
 	assert(not session and err:find("unknown option", 1, true), "per-session continuity override was accepted")
 	equal(before, #follow.status(), "invalid open published a follow session")
 	assert(follow.find(path) == nil, "invalid open claimed the source path")
-end)
+end
 
-test("fs-event storms coalesce, change appends incrementally, and uncertain identity reloads", function()
+T["fs-event storms coalesce, change appends incrementally, and uncertain identity reloads"] = function()
 	local events = {}
 	local observed = setup_follow({
 		event = function(event)
@@ -443,9 +425,9 @@ test("fs-event storms coalesce, change appends incrementally, and uncertain iden
 		return count > reloads
 	end, "unknown event flags did not force identity revalidation")
 	session:stop()
-end)
+end
 
-test("pause closes watchers, resume revalidates, and status exposes health and drops", function()
+T["pause closes watchers, resume revalidates, and status exposes health and drops"] = function()
 	local observed = setup_follow()
 	local path = temporary_file("paused")
 	local session = assert(follow.open(path))
@@ -473,9 +455,9 @@ test("pause closes watchers, resume revalidates, and status exposes health and d
 	end, "resume did not force a current-path reload")
 	assert(not session:status().paused and session:status().health == "healthy")
 	session:stop()
-end)
+end
 
-test("single long lines retain a valid UTF-8 suffix inside the byte ceiling", function()
+T["single long lines retain a valid UTF-8 suffix inside the byte ceiling"] = function()
 	setup_follow({ max_lines = 5, max_bytes = 7 })
 	local path = temporary_file("abcdef€")
 	local session = assert(follow.open(path))
@@ -484,9 +466,9 @@ test("single long lines retain a valid UTF-8 suffix inside the byte ceiling", fu
 	end, "long-line suffix was not UTF-8 aligned")
 	equal(7, session:status().buffer_bytes)
 	session:stop()
-end)
+end
 
-test("stop closes both watcher types and a delayed read cannot mutate after teardown", function()
+T["stop closes both watcher types and a delayed read cannot mutate after teardown"] = function()
 	local delayed
 	local uv = setmetatable({
 		fs_read = function(_, _, _, callback)
@@ -513,7 +495,7 @@ test("stop closes both watcher types and a delayed read cannot mutate after tear
 	end, "late callback recreated a stopped session")
 	follow.teardown()
 	equal({}, follow.status())
-end)
+end
 
 local function manual_scheduler()
 	local pending = {}
@@ -527,7 +509,7 @@ local function manual_scheduler()
 		end
 end
 
-test("matches scan bounded suffix chunks, coalesce edits, and preserve prefix extmarks", function()
+T["matches scan bounded suffix chunks, coalesce edits, and preserve prefix extmarks"] = function()
 	local pending, schedule, tick = manual_scheduler()
 	local events = {}
 	assert(matches.setup({
@@ -592,9 +574,9 @@ test("matches scan bounded suffix chunks, coalesce edits, and preserve prefix ex
 	equal({}, matches.locations(buf))
 	matches.teardown()
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("match caps select deterministic pattern-order results and refill after prefix edits", function()
+T["match caps select deterministic pattern-order results and refill after prefix edits"] = function()
 	local pending, schedule, tick = manual_scheduler()
 	local events = {}
 	assert(matches.setup({
@@ -633,9 +615,9 @@ test("match caps select deterministic pattern-order results and refill after pre
 	equal(event_count, #events)
 	matches.teardown()
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
+end
 
-test("regex scans use match_line offsets, advance zero-width matches, and honor the cap", function()
+T["regex scans use match_line offsets, advance zero-width matches, and honor the cap"] = function()
 	local original_regex = vim.regex
 	local ok, err = xpcall(function()
 		local offsets = {}
@@ -667,9 +649,9 @@ test("regex scans use match_line offsets, advance zero-width matches, and honor 
 	end, debug.traceback)
 	vim.regex = original_regex
 	assert(ok, err)
-end)
+end
 
-test("matches use stable IDs and extmarks with automatic refresh and navigation", function()
+T["matches use stable IDs and extmarks with automatic refresh and navigation"] = function()
 	assert(matches.setup())
 	local buf = vim.api.nvim_create_buf(true, false)
 	vim.api.nvim_set_current_buf(buf)
@@ -707,20 +689,14 @@ test("matches use stable IDs and extmarks with automatic refresh and navigation"
 	matches.teardown()
 	equal(0, #vim.api.nvim_buf_get_extmarks(buf, matches.namespace(), 0, -1, {}))
 	vim.api.nvim_buf_delete(buf, { force = true })
-end)
-
-follow.teardown()
-matches.teardown()
-for _, path in ipairs(temporary) do
-	vim.fn.delete(path, "rf")
 end
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	follow.teardown()
+	matches.teardown()
+	for _, path in ipairs(temporary) do
+		vim.fn.delete(path, "rf")
 	end
-	vim.cmd("cquit")
 end
 
-print(("log_workbench_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+return T

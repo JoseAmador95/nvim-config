@@ -32,14 +32,6 @@ M.servers = {
 	},
 }
 
-function M.server_names()
-	local names = {}
-	for _, server in ipairs(M.servers) do
-		names[#names + 1] = server.name
-	end
-	return names
-end
-
 function M.enabled_servers()
 	local names = {}
 	for _, server in ipairs(M.servers) do

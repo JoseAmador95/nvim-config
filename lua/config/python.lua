@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.python")
 -- Host adapters for project-python.nvim. Commands, mappings, prompts, LSP
 -- restarts, and upstream plugin integration remain configuration policy.
 local M = {}
@@ -17,7 +18,6 @@ local repl_drain_scheduled = {}
 local dap_python_module
 
 local plugin_config = local_config.plugin("project_python", {
-	test_runner = "pytest",
 	repl = {
 		readiness_timeout_ms = 5000,
 		poll_interval_ms = 50,
@@ -185,7 +185,6 @@ local function ensure_engine()
 		explicit = explicit_from_project_settings,
 		fallback = fallback_python,
 		terminal = terminal_bridge,
-		test_runner = plugin_config.test_runner,
 		repl = plugin_config.repl,
 	})
 	if not ok or not result then
@@ -499,14 +498,6 @@ function M.on_new_config(config, root)
 	return apply_ty_settings(config, root or (config and config.root_dir) or M.root(0))
 end
 
-function M.neotest_python(root)
-	return engine.neotest_python(root)
-end
-
-function M.neotest_runner()
-	return engine.neotest_runner()
-end
-
 function M.setup_dap(dap, dap_python)
 	dap_python_module = dap_python or package.loaded["dap-python"]
 	install_dap_resolver()
@@ -658,11 +649,11 @@ function M.setup()
 	vim.api.nvim_create_user_command("PythonEnvironmentClear", function()
 		run_change(M.clear, "cleared")
 	end, { desc = "Clear the current project's manual Python environment", force = true })
-	vim.keymap.set("n", "<leader>pr", M.open_repl, { desc = "Python REPL" })
-	vim.keymap.set("n", "<leader>ps", function()
+	usage_map("n", "<leader>pr", M.open_repl, { desc = "Python REPL" })
+	usage_map("n", "<leader>ps", function()
 		M.send(false)
 	end, { desc = "Send line to Python REPL" })
-	vim.keymap.set("x", "<leader>ps", function()
+	usage_map("x", "<leader>ps", function()
 		M.send(true)
 	end, { desc = "Send selection to Python REPL" })
 end

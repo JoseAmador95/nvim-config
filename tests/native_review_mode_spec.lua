@@ -9,17 +9,8 @@ vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local mode = require("config.native_review").mode
 local review_lsp = require("config.native_review").lsp
@@ -56,7 +47,7 @@ local function buffer_mapping(buf, lhs)
 	return mapping
 end
 
-test("enable protects affected real buffers and restores exact local mappings", function()
+T["enable protects affected real buffers and restores exact local mappings"] = function()
 	reset()
 	local buf = vim.api.nvim_get_current_buf()
 	vim.keymap.set("n", "[h", "gg", { buffer = buf, silent = false, nowait = true, desc = "Previous custom map" })
@@ -79,9 +70,9 @@ test("enable protects affected real buffers and restores exact local mappings", 
 	end
 	vim.keymap.del("n", "[h", { buffer = buf })
 	vim.keymap.del("n", "]h", { buffer = buf })
-end)
+end
 
-test("active protection immediately rejects local option escapes", function()
+T["active protection immediately rejects local option escapes"] = function()
 	reset()
 	local buf = vim.api.nvim_get_current_buf()
 	local state = mode.new(workspace())
@@ -100,9 +91,9 @@ test("active protection immediately rejects local option escapes", function()
 	assert(vim.bo[buf].readonly and not vim.bo[buf].modifiable)
 	mode.disable(state)
 	assert(not vim.bo[buf].readonly and vim.bo[buf].modifiable, "disable did not restore ordinary options")
-end)
+end
 
-test("transient protection rejects escapes without active-buffer roles and releases every owner", function()
+T["transient protection rejects escapes without active-buffer roles and releases every owner"] = function()
 	reset()
 	local state = mode.new(workspace())
 	assert(mode.enable(state))
@@ -143,9 +134,9 @@ test("transient protection rejects escapes without active-buffer roles and relea
 	assert(next(state.protected_transients) == nil, "disable retained transient ownership")
 	assert(mode.active_for_buffer(lingering) == nil and mode.enforce_protection(lingering) == false)
 	vim.api.nvim_buf_delete(lingering, { force = true })
-end)
+end
 
-test("modified affected buffers are refused without partial state", function()
+T["modified affected buffers are refused without partial state"] = function()
 	reset()
 	local buf = vim.api.nvim_get_current_buf()
 	vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "modified" })
@@ -154,9 +145,9 @@ test("modified affected buffers are refused without partial state", function()
 	assert(enabled == nil and err:find("unsaved changes", 1, true))
 	assert(not state.enabled and mode.active_for_buffer(buf) == nil and vim.bo[buf].modifiable)
 	vim.bo[buf].modified = false
-end)
+end
 
-test("non-current buffer mappings are captured and restored in that buffer", function()
+T["non-current buffer mappings are captured and restored in that buffer"] = function()
 	reset()
 	local origin = vim.api.nvim_get_current_buf()
 	local hidden = vim.api.nvim_create_buf(true, true)
@@ -182,9 +173,9 @@ test("non-current buffer mappings are captured and restored in that buffer", fun
 		end
 	end)
 	vim.api.nvim_buf_delete(hidden, { force = true })
-end)
+end
 
-test("suspend restores and reenrolls while disable closes only owned auxiliary windows", function()
+T["suspend restores and reenrolls while disable closes only owned auxiliary windows"] = function()
 	reset()
 	local state = mode.new(workspace())
 	assert(mode.enable(state))
@@ -206,9 +197,9 @@ test("suspend restores and reenrolls while disable closes only owned auxiliary w
 	assert(vim.api.nvim_win_is_valid(unrelated_win), "unrelated window was closed")
 	assert(#vim.api.nvim_list_tabpages() == tabs_before, "ordinary review created or closed a tab")
 	vim.api.nvim_win_close(unrelated_win, true)
-end)
+end
 
-test("suspend and disable invalidate CURRENT definition routing metadata", function()
+T["suspend and disable invalidate CURRENT definition routing metadata"] = function()
 	reset()
 	local buf = vim.api.nvim_get_current_buf()
 	local state = mode.new(workspace())
@@ -234,9 +225,9 @@ test("suspend and disable invalidate CURRENT definition routing metadata", funct
 	mode.disable(state)
 	assert(not restored.valid(), "disabling review left a CURRENT definition response live")
 	assert(review_lsp._metadata[buf] == nil and review_lsp.definition_options(buf) == nil)
-end)
+end
 
-test("restore enrolls affected buffers opened while review mode is suspended", function()
+T["restore enrolls affected buffers opened while review mode is suspended"] = function()
 	reset()
 	local state = mode.new({
 		root = vim.uv.fs_realpath(fixture),
@@ -266,9 +257,9 @@ test("restore enrolls affected buffers opened while review mode is suspended", f
 		assert(mode.active_for_buffer(buf) == nil)
 	end
 	vim.api.nvim_buf_delete(late, { force = true })
-end)
+end
 
-test("restore preflight failure leaves every affected buffer in its prior ordinary state", function()
+T["restore preflight failure leaves every affected buffer in its prior ordinary state"] = function()
 	reset()
 	local state = mode.new({
 		root = vim.uv.fs_realpath(fixture),
@@ -295,9 +286,9 @@ test("restore preflight failure leaves every affected buffer in its prior ordina
 	end
 	vim.cmd("edit!")
 	vim.api.nvim_buf_delete(late, { force = true })
-end)
+end
 
-test("restore rolls back exact buffer state when reenrollment fails partway", function()
+T["restore rolls back exact buffer state when reenrollment fails partway"] = function()
 	reset()
 	local state = mode.new({
 		root = vim.uv.fs_realpath(fixture),
@@ -344,9 +335,9 @@ test("restore rolls back exact buffer state when reenrollment fails partway", fu
 	vim.keymap.del("n", "[h", { buffer = origin })
 	vim.keymap.del("n", "[h", { buffer = late })
 	vim.api.nvim_buf_delete(late, { force = true })
-end)
+end
 
-test("suspend restore disable preserves exact manual fold states", function()
+T["suspend restore disable preserves exact manual fold states"] = function()
 	reset()
 	local lines = { "one", "two", "three", "four", "five", "six", "seven", "eight" }
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
@@ -368,9 +359,9 @@ test("suspend restore disable preserves exact manual fold states", function()
 	assert(vim.wo[win].foldmethod == "manual" and vim.wo[win].foldenable and vim.wo[win].foldlevel == 0)
 	assert(vim.fn.foldclosed(1) == -1, "disable closed the manually opened fold")
 	assert(vim.fn.foldclosed(5) == 5, "disable opened the manually closed fold")
-end)
+end
 
-test("window restoration leaves non-manual fold definitions derived from the buffer", function()
+T["window restoration leaves non-manual fold definitions derived from the buffer"] = function()
 	reset()
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "-- {{{", "inside", "-- }}}", "outside" })
 	vim.bo.modified = false
@@ -387,9 +378,9 @@ test("window restoration leaves non-manual fold definitions derived from the buf
 	mode.disable(state)
 	assert(vim.wo[win].foldmethod == "marker" and vim.wo[win].foldenable and vim.wo[win].foldlevel == 0)
 	assert(vim.fn.foldclosedend(1) == 3, "non-manual fold definition or state changed")
-end)
+end
 
-test("window snapshots are consumed so later cycles preserve newer ordinary state", function()
+T["window snapshots are consumed so later cycles preserve newer ordinary state"] = function()
 	reset()
 	local win = vim.api.nvim_get_current_win()
 	vim.wo[win].wrap = true
@@ -407,9 +398,9 @@ test("window snapshots are consumed so later cycles preserve newer ordinary stat
 	mode.disable(state)
 	assert(not vim.wo[win].wrap, "second cycle clobbered the newer ordinary option")
 	assert(state.window_snapshots[win] == nil, "second restored snapshot was retained")
-end)
+end
 
-test("window snapshots restore the exact local winbar across review cycles", function()
+T["window snapshots restore the exact local winbar across review cycles"] = function()
 	reset()
 	local win = vim.api.nvim_get_current_win()
 	local first = "%#Title#ordinary %% first%*"
@@ -429,9 +420,9 @@ test("window snapshots restore the exact local winbar across review cycles", fun
 	mode.disable(state)
 	assert(vim.wo[win].winbar == second, "later review cycle restored a stale winbar")
 	assert(state.window_snapshots[win] == nil, "restored winbar snapshot was retained")
-end)
+end
 
-test("window snapshots restore gutter options and inherited fillchars exactly", function()
+T["window snapshots restore gutter options and inherited fillchars exactly"] = function()
 	reset()
 	local win = vim.api.nvim_get_current_win()
 	local previous_global_fillchars = vim.o.fillchars
@@ -476,9 +467,9 @@ test("window snapshots restore gutter options and inherited fillchars exactly", 
 		vim.wo[win][name] = value
 	end
 	assert(ok, err)
-end)
+end
 
-test("late affected buffers enroll only while enabled and refuse unsaved changes", function()
+T["late affected buffers enroll only while enabled and refuse unsaved changes"] = function()
 	reset()
 	local state = mode.new({
 		root = vim.uv.fs_realpath(fixture),
@@ -504,14 +495,10 @@ test("late affected buffers enroll only while enabled and refuse unsaved changes
 	mode.disable(state)
 	assert(mode.enroll_affected_buffer(state, late) == false)
 	assert(mode.active_for_buffer(late) == nil and vim.bo[late].modifiable)
-end)
-
-vim.fn.delete(fixture, "rf")
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("review_mode_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

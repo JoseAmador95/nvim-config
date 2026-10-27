@@ -22,6 +22,9 @@ editor, nvimpager, and stubbed VSCode-Neovim plugin profiles and waits for the
 configured editor and pager parsers. The final check disables installers, is
 offline, validates all four validator pins plus `cc`, and fails if an installed
 plugin does not match the lock.
+Usage suites also require the host `sqlite3` CLI and use temporary databases.
+They check concurrent writers, retries and reset, plus actual Neovim input and native Lazy key activation.
+The LSP and Markdown navigation suites enable instrumentation to check mapping ownership and removal.
 
 The engine screen-geometry spec uses `-c 'lua dofile(...)'` so Neovim has
 initialized its screen before the test changes `lines` and `columns`. Running
@@ -33,8 +36,9 @@ byte-for-byte to a profile-local state file before Lazy starts; Lazy may prune
 that writable copy for the allowlist but can never rewrite the committed lock.
 Bootstrap snapshots the source lock, fails if any profile changes it, and
 checks every active pager checkout against the corresponding source-lock SHA.
-Both bootstrap and the offline gate isolate `XDG_CONFIG_HOME`, so a persisted
-`:Theme` choice on the host cannot change their versioned-default assertions.
+Both bootstrap and the offline gate isolate `XDG_CONFIG_HOME` and override
+`NVIM_CONFIG_FILE`, so host settings cannot change the tested defaults.
+Theme checks exercise automatic and pinned light/dark VSCode profiles.
 
 ## Runtime provisioning contract
 
@@ -96,11 +100,11 @@ but excluded from executable selection. GumTree is removed; historical origins
 in review comments remain inert and readable.
 
 Rust remains external-only, with managed and old Mason roots excluded; Rust
-formatting stays disabled. `rsvg-convert`, CMake/CTest, Just and host utilities
+formatting stays disabled. `rsvg-convert`, CMake/CTest and host utilities
 remain outside this catalog. Native LSP, Conform, lint, DAP, diagrams, review,
 JSON tools and Markdown Preview use the same catalog launchers. Their existing
 execution grants, deadlines and cancellation remain in force. Project Python
-selection continues to feed ty, Neotest, DAP and the REPL independently of the
+selection continues to feed ty, DAP and the REPL independently of the
 Python used to run installed tooling.
 
 | Area | Automated evidence | Manual evidence still required |
@@ -110,11 +114,11 @@ Python used to run installed tooling.
 | Markdown reading view | Exact v3.10.3 checkout and media guard, local images and per-document approved https images (session, saved owner-only, revoked, offline, http/tmux refused), inert diagram/video/expand paths, raw editable source, focused read-only render tab and close/reopen, centered 90%-up-to-120-column page whose virtual margin stays out of the cursor, Visual selections and yanks, with resize reflow, continuous code shading and pastel heading pills over soft bands with bounded fallback and no terminal text scaling, complete tables bounded by the centered page while wrapped, with top/bottom rules, outer vertical borders and links, wrapped default and `:ToggleWrap` natural-width/horizontal-scroll mode (including actions inside callbacks) across live updates, resizes and pager toggles, clicks and keys never collapsing tables or code, code extending to the window edge, rendered-link `gd`, unsaved live updates, pager source recovery and filetype changes | Visual layout and inline images in Ghostty and the real `nvimpager` executable |
 | nvimpager | Allowlist, source-lock SHA parity, parser set, argv/stdin filetype behavior, mappings and absence of editor-only services | Rendering in the real `nvimpager` executable |
 | VSCode Neovim | Stubbed profile and action mappings; terminal-only commands/plugins stay absent | A live VS Code extension host |
-| Themes | VSCode default, Catppuccin Latte/Mocha switching, local persistence, editor/pager availability and VSCode exclusion | Visual judgement in the real terminal and pager |
+| Theme | Fixed VSCode, automatic/pinned light and dark backgrounds, editor/pager availability and VSCode exclusion | Visual judgement in the real terminal and pager |
 | Runtime provisioning | CLI/schema v2, offline authorization boundary, private HOME/XDG/report paths, atomic `0600` reports, exact inventories, lock immutability, extras preservation and idempotence | Network downloads on every supported OS/architecture and recovery from a deliberately stale operator lock |
 | Tree-sitter | Installed/missing parser lifecycle, completion retry, large-file guard and textobject surfaces | Language-specific highlighting judgement |
 | LSP | Server catalog, bounded JSONC/fingerprint approval for project settings, mutation revocation, merge order, profile isolation, single/multiple-result tab navigation and clangd command construction | Connecting to every external language server |
-| DAP | Adapter resolution, VSCode aliases, exclusive UI selection, lifecycle, views and tab-aware fixture navigation | Real adapter behavior and interactive UI judgement |
+| DAP | Adapter resolution, VSCode aliases, dap-view lifecycle, views and tab-aware fixture navigation | Real adapter behavior and interactive UI judgement |
 | Lint/format | Save-only lint routing, formatter chains, no-LSP fallback and missing-tool behavior | Project-specific linter configuration |
 | Diagrams | Scanner, renderer generations, atomic cache writes, corruption and pruning | Kitty image display, browser opening and visual layout |
 | LogWatch | Append, partial lines, truncation, rotation, deletion/recreation and retention limits | Sustained observation of a high-volume production log |

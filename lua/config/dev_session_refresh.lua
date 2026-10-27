@@ -1,4 +1,5 @@
 local M = {}
+local devcontainer = require("config.devcontainer")
 
 local helper = vim.fs.normalize(vim.fn.expand("~/.config/tmux/scripts/dev-session-refresh.sh"))
 
@@ -111,8 +112,7 @@ local function refresh_host(pane)
 end
 
 function M.refresh()
-	local loaded, devcontainer = pcall(require, "config.devcontainer")
-	if loaded and devcontainer.in_workspace() then
+	if devcontainer.in_workspace() then
 		return refresh_devcontainer(devcontainer)
 	end
 

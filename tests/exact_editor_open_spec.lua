@@ -81,19 +81,10 @@ assert(vim.fn.writefile({
 }, fake_nvim) == 0)
 assert(vim.fn.setfperm(fake_nvim, "rwxr-xr-x") == 1)
 
-local failures = {}
-local count = 0
 local socket_handles = {}
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local function reset()
 	for _, handle in ipairs(socket_handles) do
@@ -215,14 +206,14 @@ local function assert_server_only()
 	end
 end
 
-test("zero live editors fails without plain-nvim fallback", function()
+T["zero live editors fails without plain-nvim fallback"] = function()
 	reset()
 	local result = invoke()
 	assert(result.code ~= 0 and result.stderr:find("no live registered editor", 1, true))
 	assert(#calls() == 0)
-end)
+end
 
-test("dead records and stale requests are pruned at entry", function()
+T["dead records and stale requests are pruned at entry"] = function()
 	reset()
 	local dead, dead_socket = record("11111111-1111-4111-8111-111111111111", 2147483647)
 	local stale = state .. "/requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json"
@@ -239,9 +230,9 @@ test("dead records and stale requests are pruned at entry", function()
 	assert(vim.uv.fs_lstat(stale) == nil, "stale request was not pruned")
 	assert(vim.uv.fs_lstat(stale_wait) == nil, "stale wait state was not pruned")
 	assert(#calls() == 0)
-end)
+end
 
-test("a transient probe failure is retried before delivering the request", function()
+T["a transient probe failure is retried before delivering the request"] = function()
 	reset()
 	local live = record("12121212-1212-4212-8212-121212121212")
 	local result = invoke({ FAKE_NVIM_PROBE_FAIL_ONCE = "1" })
@@ -249,18 +240,18 @@ test("a transient probe failure is retried before delivering the request", funct
 	assert(vim.uv.fs_lstat(live), "transient probe failure deleted a live registry")
 	assert(#calls() == 3, "expected one failed probe, one successful probe, and one request")
 	assert_server_only()
-end)
+end
 
-test("version-1 registry records remain selectable as host workspaces", function()
+T["version-1 registry records remain selectable as host workspaces"] = function()
 	reset()
 	record("15151515-1515-4515-8515-151515151515", nil, nil, nil, true)
 	local result = invoke()
 	assert(result.code == 0, result.stderr)
 	assert(#calls() == 2)
 	assert(calls()[2]:match('v:lua%.ExactEditorRequest%("[0-9a-f%-]+"%)$'))
-end)
+end
 
-test("a persistently unreachable editor fails closed after bounded retries", function()
+T["a persistently unreachable editor fails closed after bounded retries"] = function()
 	reset()
 	local live = record("13131313-1313-4313-8313-131313131313")
 	local result = invoke({ FAKE_NVIM_PROBE_FAIL = "1" })
@@ -268,9 +259,9 @@ test("a persistently unreachable editor fails closed after bounded retries", fun
 	assert(vim.uv.fs_lstat(live), "unreachable live registry was deleted")
 	assert(#calls() == 3, "persistent probe was not bounded to three attempts")
 	assert_server_only()
-end)
+end
 
-test("a live record with a missing socket fails closed and is retained", function()
+T["a live record with a missing socket fails closed and is retained"] = function()
 	reset()
 	local live, socket = record("14141414-1414-4414-8414-141414141414")
 	assert(vim.uv.fs_unlink(socket))
@@ -278,9 +269,9 @@ test("a live record with a missing socket fails closed and is retained", functio
 	assert(result.code == 2 and result.stderr:find("temporarily unreachable; retry", 1, true), result.stderr)
 	assert(vim.uv.fs_lstat(live), "active broken registry was incorrectly cleaned")
 	assert(#calls() == 0, "missing socket was passed to nvim")
-end)
+end
 
-test("multiple matching live editors fail visibly after server-only probes", function()
+T["multiple matching live editors fail visibly after server-only probes"] = function()
 	reset()
 	record("22222222-2222-4222-8222-222222222222")
 	record("33333333-3333-4333-8333-333333333333")
@@ -288,9 +279,9 @@ test("multiple matching live editors fail visibly after server-only probes", fun
 	assert(result.code ~= 0 and result.stderr:find("multiple live", 1, true))
 	assert(#calls() == 2)
 	assert_server_only()
-end)
+end
 
-test("normal requests can bind selection to one exact tmux pane", function()
+T["normal requests can bind selection to one exact tmux pane"] = function()
 	reset()
 	local other_id = "25252525-2525-4525-8525-252525252525"
 	local expected_id = "35353535-3535-4535-8535-353535353535"
@@ -304,9 +295,9 @@ test("normal requests can bind selection to one exact tmux pane", function()
 	assert(request.instance_id == expected_id, "normal request selected a different tmux pane")
 	local invalid = invoke(nil, "README.md", 1, 1, nil, "not-a-pane")
 	assert(invalid.code ~= 0 and invalid.stderr:find("exact tmux pane id", 1, true), invalid.stderr)
-end)
+end
 
-test("a transiently unreachable peer cannot conceal editor ambiguity", function()
+T["a transiently unreachable peer cannot conceal editor ambiguity"] = function()
 	reset()
 	record("24242424-2424-4424-8424-242424242424")
 	record("34343434-3434-4434-8434-343434343434")
@@ -314,9 +305,9 @@ test("a transiently unreachable peer cannot conceal editor ambiguity", function(
 	assert(result.code ~= 0 and result.stderr:find("multiple live", 1, true))
 	assert(#calls() == 4, "both editors were not reprobed before ambiguity resolution")
 	assert_server_only()
-end)
+end
 
-test("one exact editor receives only opaque UUID and exact line and column", function()
+T["one exact editor receives only opaque UUID and exact line and column"] = function()
 	reset()
 	local id = "44444444-4444-4444-8444-444444444444"
 	record(id)
@@ -334,9 +325,9 @@ test("one exact editor receives only opaque UUID and exact line and column", fun
 	assert(final:match('v:lua%.ExactEditorRequest%("[0-9a-f%-]+"%)$'))
 	assert(not final:find("README.md", 1, true) and not final:find(repo, 1, true), "raw path reached remote expression")
 	assert_server_only()
-end)
+end
 
-test("workspace runtime, root, and repository identity select exactly one editor", function()
+T["workspace runtime, root, and repository identity select exactly one editor"] = function()
 	reset()
 	local host_id = "45454545-4545-4545-8545-454545454545"
 	local container_id = "56565656-5656-4656-8656-565656565656"
@@ -355,9 +346,9 @@ test("workspace runtime, root, and repository identity select exactly one editor
 	assert(#files == 1)
 	local request = vim.json.decode(table.concat(vim.fn.readfile(files[1]), "\n"))
 	assert(request.instance_id == container_id and request.repo_root == "/workspaces/project")
-end)
+end
 
-test("a complete environment triplet selects the container workspace", function()
+T["a complete environment triplet selects the container workspace"] = function()
 	reset()
 	local host_id = "61616161-6161-4161-8161-616161616161"
 	local container_id = "62626262-6262-4262-8262-626262626262"
@@ -376,9 +367,9 @@ test("a complete environment triplet selects the container workspace", function(
 	assert(#files == 1)
 	local request = vim.json.decode(table.concat(vim.fn.readfile(files[1]), "\n"))
 	assert(request.instance_id == container_id and request.repo_root == "/workspaces/environment")
-end)
+end
 
-test("a complete command-line triplet overrides a conflicting environment", function()
+T["a complete command-line triplet overrides a conflicting environment"] = function()
 	reset()
 	local cli_id = "63636363-6363-4363-8363-636363636363"
 	local env_id = "64646464-6464-4464-8464-646464646464"
@@ -408,9 +399,9 @@ test("a complete command-line triplet overrides a conflicting environment", func
 	assert(#files == 1)
 	local request = vim.json.decode(table.concat(vim.fn.readfile(files[1]), "\n"))
 	assert(request.instance_id == cli_id and request.repo_root == "/workspaces/cli")
-end)
+end
 
-test("partial command-line and environment identities fail before editor lookup", function()
+T["partial command-line and environment identities fail before editor lookup"] = function()
 	reset()
 	record("65656565-6565-4565-8565-656565656565")
 	local base = { helper, "--cwd", repo, "--file", "README.md" }
@@ -431,9 +422,9 @@ test("partial command-line and environment identities fail before editor lookup"
 	}):wait()
 	assert(result.code ~= 0 and result.stderr:find("requires runtime, root, and repository identity", 1, true))
 	assert(#calls() == 0, "partial environment identity reached editor lookup")
-end)
+end
 
-test("wait-editor inherits the exact environment workspace without raw path transport", function()
+T["wait-editor inherits the exact environment workspace without raw path transport"] = function()
 	reset()
 	local id = "66666666-6666-4666-8666-666666666666"
 	local identity = "blocking-environment-repository"
@@ -454,9 +445,9 @@ test("wait-editor inherits the exact environment workspace without raw path tran
 	local request = vim.json.decode(table.concat(vim.fn.readfile(request_log), "\n"))
 	assert(request.instance_id == id and request.repo_root == "/workspaces/blocking")
 	vim.fn.delete(target)
-end)
+end
 
-test("corrupt permissions are cleaned and symlinked registry entries fail closed", function()
+T["corrupt permissions are cleaned and symlinked registry entries fail closed"] = function()
 	reset()
 	local corrupt = record("57575757-5757-4757-8757-575757575757")
 	assert(vim.fn.setfperm(corrupt, "rw-r--r--") == 1)
@@ -471,9 +462,9 @@ test("corrupt permissions are cleaned and symlinked registry entries fail closed
 	result = invoke()
 	assert(result.code == 2 and result.stderr:find("unsafe entry", 1, true), result.stderr)
 	assert(vim.uv.fs_lstat(state .. "/editors/hostile.json").type == "link")
-end)
+end
 
-test("wait-editor sends exact version-2 request, signals readiness, and blocks until completion", function()
+T["wait-editor sends exact version-2 request, signals readiness, and blocks until completion"] = function()
 	reset()
 	local id = "46464646-4646-4646-8646-464646464646"
 	record(id)
@@ -506,9 +497,9 @@ test("wait-editor sends exact version-2 request, signals readiness, and blocks u
 	assert(#vim.fn.glob(state .. "/requests/*.json", false, true) == 0)
 	assert(#vim.fn.glob(state .. "/waits/*.json", false, true) == 0)
 	vim.fn.delete(target)
-end)
+end
 
-test("wait-editor accepts completion before polling and reports an aborted edit", function()
+T["wait-editor accepts completion before polling and reports an aborted edit"] = function()
 	reset()
 	record("47474747-4747-4747-8747-474747474747")
 	local target = vim.fn.tempname()
@@ -522,9 +513,9 @@ test("wait-editor accepts completion before polling and reports an aborted edit"
 	assert(aborted.code ~= 0 and aborted.stderr:find("without saving", 1, true))
 	assert(#vim.fn.glob(state .. "/waits/*.json", false, true) == 0)
 	vim.fn.delete(target)
-end)
+end
 
-test("wait-editor can bind selection to one exact tmux pane", function()
+T["wait-editor can bind selection to one exact tmux pane"] = function()
 	reset()
 	local other_id = "49494949-4949-4949-8949-494949494949"
 	local expected_id = "50505050-5050-4050-8050-505050505050"
@@ -543,9 +534,9 @@ test("wait-editor can bind selection to one exact tmux pane", function()
 	local invalid = invoke_editor(nil, target, false, "not-a-pane")
 	assert(invalid.code ~= 0 and invalid.stderr:find("exact tmux pane id", 1, true), invalid.stderr)
 	vim.fn.delete(target)
-end)
+end
 
-test("wait-editor bounds an unresponsive RPC delivery", function()
+T["wait-editor bounds an unresponsive RPC delivery"] = function()
 	reset()
 	record("54545454-5454-4454-8454-545454545454")
 	local target = vim.fn.tempname()
@@ -557,9 +548,9 @@ test("wait-editor bounds an unresponsive RPC delivery", function()
 	assert(elapsed < 3, "RPC timeout was not bounded")
 	assert(#vim.fn.glob(state .. "/requests/*.json", false, true) == 0)
 	vim.fn.delete(target)
-end)
+end
 
-test("wait-editor bounds a live editor that never completes", function()
+T["wait-editor bounds a live editor that never completes"] = function()
 	reset()
 	record("58585858-5858-4858-8858-585858585858")
 	local target = vim.fn.tempname()
@@ -568,9 +559,9 @@ test("wait-editor bounds a live editor that never completes", function()
 	assert(result.code == 2 and result.stderr:find("timed out waiting", 1, true), result.stderr)
 	assert(#vim.fn.glob(state .. "/waits/*.json", false, true) == 0)
 	vim.fn.delete(target)
-end)
+end
 
-test("wait-editor rejects missing, malformed, and symlinked durable state", function()
+T["wait-editor rejects missing, malformed, and symlinked durable state"] = function()
 	local target = vim.fn.tempname()
 	assert(vim.fn.writefile({ "text" }, target) == 0)
 	local ids = {
@@ -586,9 +577,9 @@ test("wait-editor rejects missing, malformed, and symlinked durable state", func
 		assert(result.stderr:find("wait state", 1, true), result.stderr)
 	end
 	vim.fn.delete(target)
-end)
+end
 
-test("wait-editor fails closed when the selected editor dies while waiting", function()
+T["wait-editor fails closed when the selected editor dies while waiting"] = function()
 	reset()
 	local sleeper = vim.system({ "sleep", "10" })
 	assert(type(sleeper.pid) == "number" and sleeper.pid > 0)
@@ -600,9 +591,9 @@ test("wait-editor fails closed when the selected editor dies while waiting", fun
 	sleeper:wait(1000)
 	assert(#vim.fn.glob(state .. "/waits/*.json", false, true) == 0)
 	vim.fn.delete(target)
-end)
+end
 
-test("wait-editor rejects symlink and binary targets before editor lookup", function()
+T["wait-editor rejects symlink and binary targets before editor lookup"] = function()
 	reset()
 	local target = vim.fn.tempname()
 	local link = fixture .. "/editor-target-link"
@@ -620,18 +611,18 @@ test("wait-editor rejects symlink and binary targets before editor lookup", func
 	vim.fn.delete(target)
 	vim.fn.delete(link)
 	vim.fn.delete(binary)
-end)
+end
 
-test("non-acknowledging editor fails and removes its request", function()
+T["non-acknowledging editor fails and removes its request"] = function()
 	reset()
 	record("55555555-5555-4555-8555-555555555555")
 	local result = invoke({ FAKE_NVIM_FINAL = "not-one" })
 	assert(result.code ~= 0 and result.stderr:find("rejected", 1, true))
 	assert(#vim.fn.glob(state .. "/requests/*.json", false, true) == 0)
 	assert_server_only()
-end)
+end
 
-test("target containment rejects symlink escape before editor lookup", function()
+T["target containment rejects symlink escape before editor lookup"] = function()
 	reset()
 	local outside = vim.fn.tempname()
 	local link = repo .. "/.exact-editor-open-escape"
@@ -642,16 +633,10 @@ test("target containment rejects symlink escape before editor lookup", function(
 	vim.fn.delete(outside)
 	assert(result.code ~= 0 and result.stderr:find("outside the repository", 1, true))
 	assert(#calls() == 0)
-end)
-
-vim.fn.delete(fixture, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("exact_editor_open_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.fn.delete(fixture, "rf")
+end
+
+return T

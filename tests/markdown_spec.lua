@@ -1,3 +1,4 @@
+local MiniTest = require("mini.test")
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
 
@@ -6,24 +7,11 @@ vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
+require("config.usage").setup({ enabled = true }, vim.fn.tempname() .. "/usage.sqlite3")
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(("%s\nexpected: %s\nactual:   %s"):format(message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local function temp_dir()
 	local path = vim.fn.tempname()
@@ -31,7 +19,7 @@ local function temp_dir()
 	return path
 end
 
-test("Markdown gd follows public Tree-sitter injections and routes targets conservatively", function()
+T["Markdown gd follows public Tree-sitter injections and routes targets conservatively"] = function()
 	local original_editor = package.loaded["config.editor"]
 	local original_pager = package.loaded["config.pager"]
 	local original_clipboard = package.loaded["config.clipboard"]
@@ -312,9 +300,9 @@ test("Markdown gd follows public Tree-sitter injections and routes targets conse
 	package.loaded["config.pager"] = original_pager
 	package.loaded["config.clipboard"] = original_clipboard
 	package.loaded["config.markdown_navigation"] = original_navigation
-end)
+end
 
-test("LSP boundary selects Marksman exactly and reports its absence without fallback", function()
+T["LSP boundary selects Marksman exactly and reports its absence without fallback"] = function()
 	local saved = {}
 	local original_navigation_history = package.loaded["config.navigation_history"]
 	for _, name in ipairs({
@@ -436,11 +424,6 @@ test("LSP boundary selects Marksman exactly and reports its absence without fall
 		package.loaded[name] = value
 	end
 	package.loaded["config.navigation_history"] = original_navigation_history
-end)
-
-if #failures > 0 then
-	error(table.concat(failures, "\n\n"))
 end
 
-print(("markdown_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+return T

@@ -8,17 +8,7 @@ vim.opt.runtimepath:prepend(root .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ root .. "/lua/?.lua", root .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local review_lsp = require("config.native_review").lsp
 local lsp_navigation = require("config.lsp_navigation")
@@ -93,7 +83,7 @@ local function clear_unified_fixture(fixture)
 	vim.fn.delete(fixture.directory, "rf")
 end
 
-test("roles gate root discovery and racing attachments", function()
+T["roles gate root discovery and racing attachments"] = function()
 	local old = vim.api.nvim_create_buf(false, true)
 	assert(review_lsp.mark(old, "old"))
 	assert(review_lsp.blocked(old))
@@ -142,9 +132,9 @@ test("roles gate root discovery and racing attachments", function()
 	vim.api.nvim_buf_delete(old, { force = true })
 	vim.api.nvim_buf_delete(unified, { force = true })
 	vim.api.nvim_buf_delete(current, { force = true })
-end)
+end
 
-test("late LspAttach consumers stay fail-closed after didOpen fallback", function()
+T["late LspAttach consumers stay fail-closed after didOpen fallback"] = function()
 	local snapshot = vim.api.nvim_create_buf(false, true)
 	local normal = vim.api.nvim_create_buf(false, true)
 	local active = { [snapshot] = { { id = 41 } }, [normal] = {} }
@@ -289,9 +279,9 @@ test("late LspAttach consumers stay fail-closed after didOpen fallback", functio
 	vim.api.nvim_buf_delete(snapshot, { force = true })
 	vim.api.nvim_buf_delete(normal, { force = true })
 	assert(ok, err)
-end)
+end
 
-test("line mapping accepts only unchanged regions", function()
+T["line mapping accepts only unchanged regions"] = function()
 	local snapshot = { "one", "two", "three", "four" }
 	local current = { "zero", "one", "changed", "three", "four" }
 	assert(review_lsp.map_line(snapshot, current, 1) == 2)
@@ -302,9 +292,9 @@ test("line mapping accepts only unchanged regions", function()
 	local reverse, reverse_err = review_lsp.map_current_line(snapshot, current, 3)
 	assert(reverse == nil and reverse_err:find("changed hunk", 1, true))
 	assert(review_lsp.map_current_line(snapshot, current, 4) == 3)
-end)
+end
 
-test("review definition options supersede older and unrouted requests and clear with their buffer", function()
+T["review definition options supersede older and unrouted requests and clear with their buffer"] = function()
 	local current = vim.api.nvim_create_buf(false, true)
 	local available = true
 	local routed
@@ -344,9 +334,9 @@ test("review definition options supersede older and unrouted requests and clear 
 	review_lsp.clear(current)
 	assert(not third.valid(), "clearing the review buffer left a definition request live")
 	vim.api.nvim_buf_delete(current, { force = true })
-end)
+end
 
-test("historical-new gd requests from hidden CURRENT and old never invokes LSP", function()
+T["historical-new gd requests from hidden CURRENT and old never invokes LSP"] = function()
 	local fixture = vim.fn.tempname()
 	assert(vim.fn.mkdir(fixture, "p") == 1)
 	local path = fixture .. "/sample.lua"
@@ -396,9 +386,9 @@ test("historical-new gd requests from hidden CURRENT and old never invokes LSP",
 	vim.api.nvim_buf_delete(snapshot, { force = true })
 	vim.api.nvim_buf_delete(old, { force = true })
 	vim.fn.delete(fixture, "rf")
-end)
+end
 
-test("historical-new gd times out without issuing a request", function()
+T["historical-new gd times out without issuing a request"] = function()
 	local fixture = vim.fn.tempname()
 	assert(vim.fn.mkdir(fixture, "p") == 1)
 	local path = fixture .. "/sample.lua"
@@ -457,9 +447,9 @@ test("historical-new gd times out without issuing a request", function()
 	assert(not timed_out and definitions == 0 and #deferred == 0, "cleared review request reached timeout or LSP")
 	vim.api.nvim_buf_delete(snapshot, { force = true })
 	vim.fn.delete(fixture, "rf")
-end)
+end
 
-test("unified read-only LSP actions map NEW rows and reject OLD rows", function()
+T["unified read-only LSP actions map NEW rows and reject OLD rows"] = function()
 	local opened = {}
 	local requests = {}
 	local fixture = unified_fixture({
@@ -551,9 +541,9 @@ test("unified read-only LSP actions map NEW rows and reject OLD rows", function(
 		"late LspAttach did not restore the safe unified bridge"
 	)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("unified historical NEW mapping refuses changed, modified, and disk-diverged current source", function()
+T["unified historical NEW mapping refuses changed, modified, and disk-diverged current source"] = function()
 	local fixture = unified_fixture({
 		current_text = "zero\none\nchanged\nthree\nfour\n",
 		new_text = "one\ntwo\nthree\nfour\n",
@@ -574,9 +564,9 @@ test("unified historical NEW mapping refuses changed, modified, and disk-diverge
 	local disagreed, disagreement_err = review_lsp.resolve_current_position(fixture.display, first)
 	assert(disagreed == nil and disagreement_err:find("differs from the file on disk", 1, true), disagreement_err)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("unified empty rows fail before opening or requesting CURRENT navigation", function()
+T["unified empty rows fail before opening or requesting CURRENT navigation"] = function()
 	local opened = 0
 	local requests = 0
 	local fixture = unified_fixture({
@@ -600,9 +590,9 @@ test("unified empty rows fail before opening or requesting CURRENT navigation", 
 	assert(ok == nil and err:find("no CURRENT source location", 1, true), err)
 	assert(opened == 0 and requests == 0)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("an invalid later gd supersedes pending unified and snapshot definitions without full polling", function()
+T["an invalid later gd supersedes pending unified and snapshot definitions without full polling"] = function()
 	local deferred = {}
 	local requests = 0
 	local pending_checks = 0
@@ -671,9 +661,9 @@ test("an invalid later gd supersedes pending unified and snapshot definitions wi
 	assert(#snapshot_deferred == 0 and snapshot_requests == 0)
 	vim.api.nvim_buf_delete(snapshot, { force = true })
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("an invalid later gd supersedes definitions already queued through vim.schedule", function()
+T["an invalid later gd supersedes definitions already queued through vim.schedule"] = function()
 	local fixture = unified_fixture({
 		current_text = "one\nnew\nthree\n",
 		metadata = {
@@ -736,9 +726,9 @@ test("an invalid later gd supersedes definitions already queued through vim.sche
 	end
 	clear_unified_fixture(fixture)
 	assert(ok, err)
-end)
+end
 
-test("unified LSP bridge revalidates source and mapping after waiting for a client", function()
+T["unified LSP bridge revalidates source and mapping after waiting for a client"] = function()
 	local requests = 0
 	local opened = 0
 	local notifications = {}
@@ -779,9 +769,9 @@ test("unified LSP bridge revalidates source and mapping after waiting for a clie
 		vim.inspect(notifications)
 	)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("unified diagnostics mirror complete visible NEW ranges and inherit the global toggle", function()
+T["unified diagnostics mirror complete visible NEW ranges and inherit the global toggle"] = function()
 	local source_namespace = vim.api.nvim_create_namespace("NvimReviewLspSpecSource")
 	local fixture = unified_fixture({
 		context = "hunks",
@@ -869,9 +859,9 @@ test("unified diagnostics mirror complete visible NEW ranges and inherit the glo
 	assert(#source_diagnostics == 1 and source_diagnostics[1].message == "must clear")
 	vim.diagnostic.reset(source_namespace, fixture.source)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("unified diagnostics omit CURRENT ranges that do not map to frozen NEW", function()
+T["unified diagnostics omit CURRENT ranges that do not map to frozen NEW"] = function()
 	local source_namespace = vim.api.nvim_create_namespace("NvimReviewLspSpecDriftedSource")
 	local fixture = unified_fixture({
 		current_text = "zero\none\nchanged\nthree\nfour\n",
@@ -893,9 +883,9 @@ test("unified diagnostics omit CURRENT ranges that do not map to frozen NEW", fu
 	assert(mirrored[1].message == "unchanged" and mirrored[1].lnum == 2, vim.inspect(mirrored))
 	vim.diagnostic.reset(source_namespace, fixture.source)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("unified diagnostic mirror recovers after an initially modified CURRENT source is reconciled", function()
+T["unified diagnostic mirror recovers after an initially modified CURRENT source is reconciled"] = function()
 	local prepared_source
 	local source_namespace = vim.api.nvim_create_namespace("NvimReviewLspSpecRecoveredSource")
 	local fixture = unified_fixture({
@@ -927,9 +917,9 @@ test("unified diagnostic mirror recovers after an initially modified CURRENT sou
 	)
 	vim.diagnostic.reset(source_namespace, fixture.source)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("unified diagnostic refreshes coalesce and clean up on either buffer wipe", function()
+T["unified diagnostic refreshes coalesce and clean up on either buffer wipe"] = function()
 	local reads = 0
 	local fixture = unified_fixture({
 		current_text = "one\n",
@@ -978,9 +968,9 @@ test("unified diagnostic refreshes coalesce and clean up on either buffer wipe",
 		"destination wipe retained diagnostic mirror ownership"
 	)
 	clear_unified_fixture(destination_fixture)
-end)
+end
 
-test("unified diagnostics preserve half-open ranges ending after an empty NEW row", function()
+T["unified diagnostics preserve half-open ranges ending after an empty NEW row"] = function()
 	local source_namespace = vim.api.nvim_create_namespace("NvimReviewLspSpecEmptyRange")
 	local fixture = unified_fixture({
 		current_text = "head\nstart\n\nend\n",
@@ -1001,9 +991,9 @@ test("unified diagnostics preserve half-open ranges ending after an empty NEW ro
 	assert(mirrored[1].lnum == 1 and mirrored[1].end_lnum == 3 and mirrored[1].end_col == 0, vim.inspect(mirrored))
 	vim.diagnostic.reset(source_namespace, fixture.source)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("unified projection metadata refuses mismatched CURRENT paths and missing hunk visibility", function()
+T["unified projection metadata refuses mismatched CURRENT paths and missing hunk visibility"] = function()
 	local fixture = unified_fixture({
 		context = "hunks",
 		current_text = "one\nnew\nthree\n",
@@ -1030,9 +1020,9 @@ test("unified projection metadata refuses mismatched CURRENT paths and missing h
 	assert(position == nil and position_err:find("NEW path", 1, true), position_err)
 	vim.diagnostic.reset(source_namespace, fixture.source)
 	clear_unified_fixture(fixture)
-end)
+end
 
-test("explicit location requests keep their target buffer and per-client encoding", function()
+T["explicit location requests keep their target buffer and per-client encoding"] = function()
 	local target = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_lines(target, 0, -1, false, { "aéz" })
 	local other = vim.api.nvim_create_buf(false, true)
@@ -1124,9 +1114,9 @@ test("explicit location requests keep their target buffer and per-client encodin
 	vim.api.nvim_buf_delete(target, { force = true })
 	vim.api.nvim_buf_delete(other, { force = true })
 	assert(ok, err)
-end)
+end
 
-test("definition results route from CURRENT review panes with picker-time revalidation", function()
+T["definition results route from CURRENT review panes with picker-time revalidation"] = function()
 	local target = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_lines(target, 0, -1, false, { "definition source" })
 	vim.api.nvim_set_current_buf(target)
@@ -1242,9 +1232,9 @@ test("definition results route from CURRENT review panes with picker-time revali
 	review_lsp.clear(target)
 	vim.api.nvim_buf_delete(target, { force = true })
 	assert(ok, err)
-end)
+end
 
-test("explicit hover requests source coordinates without leaving the review window", function()
+T["explicit hover requests source coordinates without leaving the review window"] = function()
 	local source = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_lines(source, 0, -1, false, { "aéz" })
 	local review = vim.api.nvim_create_buf(false, true)
@@ -1302,13 +1292,6 @@ test("explicit hover requests source coordinates without leaving the review wind
 	vim.api.nvim_buf_delete(source, { force = true })
 	vim.api.nvim_buf_delete(review, { force = true })
 	assert(ok, err)
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
-print(("review_lsp_spec: %d tests passed"):format(count))
-vim.cmd("quitall!")
+
+return T

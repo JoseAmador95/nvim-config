@@ -8,17 +8,7 @@ vim.opt.runtimepath:prepend(repo .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local exporter = require("config.native_review").export
 local comment_types = require("native_review.comment_types")
@@ -64,7 +54,7 @@ local function session()
 	}
 end
 
-test("Markdown includes exact scope, compact anchors, status, and replies", function()
+T["Markdown includes exact scope, compact anchors, status, and replies"] = function()
 	local markdown, ids = assert(exporter.render(session()))
 	assert(markdown:find("Commit: `" .. oid .. "`", 1, true))
 	local legend = assert(markdown:find("## Message type legend", 1, true))
@@ -83,9 +73,9 @@ test("Markdown includes exact scope, compact anchors, status, and replies", func
 	assert(not markdown:find("right, historical", 1, true))
 	assert(markdown:find("### Reply: OBJECTION! — lua/config/example.lua:8 [NEW]", 1, true))
 	assert(vim.deep_equal(ids, { "root", "reply" }))
-end)
+end
 
-test("regular and recovery exports label each comment and reply with its own engine", function()
+T["regular and recovery exports label each comment and reply with its own engine"] = function()
 	local value = session()
 	value.items[1].origin_engine = { id = "main", version = "builtin-v1 / Neovim 0.12.0" }
 	value.items[1].anchor.side = "left"
@@ -124,9 +114,9 @@ test("regular and recovery exports label each comment and reply with its own eng
 		end,
 	}))
 	assert(result.previewed and previewed == markdown, "fallback preview omitted per-item origins")
-end)
+end
 
-test("missing origins are reported without inventing a main engine", function()
+T["missing origins are reported without inventing a main engine"] = function()
 	local value = session()
 	local before = vim.deepcopy(value)
 	local regular = assert(exporter.render(value))
@@ -137,16 +127,16 @@ test("missing origins are reported without inventing a main engine", function()
 		assert(not markdown:find("Origin engine: `main`", 1, true))
 	end
 	assert(vim.deep_equal(value, before))
-end)
+end
 
-test("printable version punctuation remains inside a safe Markdown code span", function()
+T["printable version punctuation remains inside a safe Markdown code span"] = function()
 	local value = session()
 	value.items[1].origin_engine = { id = "future_engine", version = "v1 `build` **release**" }
 	local markdown = assert(exporter.render(value))
 	assert(markdown:find("Origin engine: `future_engine`; version: `` v1 `build` **release** ``", 1, true))
-end)
+end
 
-test("type legend follows configuration and labels retired types used in the review", function()
+T["type legend follows configuration and labels retired types used in the review"] = function()
 	local original = comment_types.all()
 	table.remove(original, 1)
 	for _, definition in ipairs(original) do
@@ -184,9 +174,9 @@ test("type legend follows configuration and labels retired types used in the rev
 	end, debug.traceback)
 	comment_types.configure(original)
 	assert(ok, err)
-end)
+end
 
-test("Markdown renders old multiline anchors without source context", function()
+T["Markdown renders old multiline anchors without source context"] = function()
 	local value = session()
 	value.items[1].anchor.path = "lua/config/old.lua"
 	value.items[1].anchor.side = "left"
@@ -199,9 +189,9 @@ test("Markdown renders old multiline anchors without source context", function()
 	assert(markdown:find("## OBJECTION! — lua/config/old.lua:3-5 [OLD]", 1, true))
 	assert(not markdown:find("private old source", 1, true))
 	assert(not markdown:find(value.items[1].anchor.context_hash, 1, true))
-end)
+end
 
-test("Markdown renders file-level comments without inventing a line", function()
+T["Markdown renders file-level comments without inventing a line"] = function()
 	local value = session()
 	value.items = {
 		{
@@ -224,9 +214,9 @@ test("Markdown renders file-level comments without inventing a line", function()
 	assert(markdown:find("## SUGGESTION — lua/config/example.lua [NEW]", 1, true))
 	assert(not markdown:find("lua/config/example.lua:1", 1, true))
 	assert(vim.deep_equal(ids, { "file" }))
-end)
+end
 
-test("Markdown renders review-level comments without a file or side", function()
+T["Markdown renders review-level comments without a file or side"] = function()
 	local value = session()
 	value.items = {
 		{
@@ -243,9 +233,9 @@ test("Markdown renders review-level comments without a file or side", function()
 	assert(markdown:find("## PRAISE — REVIEW", 1, true))
 	assert(not markdown:find("## PRAISE — REVIEW [", 1, true))
 	assert(vim.deep_equal(ids, { "review" }))
-end)
+end
 
-test("recovery records an intentionally empty live review without changing normal export", function()
+T["recovery records an intentionally empty live review without changing normal export"] = function()
 	local value = session()
 	value.items = {}
 	local markdown, export_err = exporter.render(value, true)
@@ -254,9 +244,9 @@ test("recovery records an intentionally empty live review without changing norma
 	assert(recovery:find("Empty live review state", 1, true))
 	assert(recovery:find("removed every comment", 1, true))
 	assert(vim.deep_equal(ids, {}))
-end)
+end
 
-test("normal export refuses stale anchors while bang labels them", function()
+T["normal export refuses stale anchors while bang labels them"] = function()
 	local value = session()
 	value.items[1].anchor.stale = true
 	local markdown, err = exporter.render(value)
@@ -267,9 +257,9 @@ test("normal export refuses stale anchors while bang labels them", function()
 	value.stale = true
 	markdown = assert(exporter.render(value, true))
 	assert(markdown:find("stale", 1, true), "scope drift was not labeled")
-end)
+end
 
-test("clipboard failure previews without returning ids to lock", function()
+T["clipboard failure previews without returning ids to lock"] = function()
 	local previewed
 	local result = assert(exporter.deliver(session(), false, {
 		has_clipboard = false,
@@ -300,9 +290,9 @@ test("clipboard failure previews without returning ids to lock", function()
 		end,
 	}))
 	assert(result.previewed and #result.ids == 0 and previewed == result.markdown)
-end)
+end
 
-test("repeated clipboard previews stay in one ordinary tab and replace only their float", function()
+T["repeated clipboard previews stay in one ordinary tab and replace only their float"] = function()
 	local original_tab = vim.api.nvim_get_current_tabpage()
 	local original_win = vim.api.nvim_get_current_win()
 	local original_buf = vim.api.nvim_get_current_buf()
@@ -365,9 +355,9 @@ test("repeated clipboard previews stay in one ordinary tab and replace only thei
 	for _, key in ipairs({ "lnum", "col", "topline", "leftcol", "skipcol", "curswant" }) do
 		assert(restored_source_view[key] == source_view[key], "preview source view changed at " .. key)
 	end
-end)
+end
 
-test("session restoration gives a rebuilt review target to a focused preview", function()
+T["session restoration gives a rebuilt review target to a focused preview"] = function()
 	vim.cmd("only")
 	local fallback_win = vim.api.nvim_get_current_win()
 	vim.cmd("vnew")
@@ -382,9 +372,9 @@ test("session restoration gives a rebuilt review target to a focused preview", f
 	assert(vim.api.nvim_buf_get_name(restored_buf) == "review-export://markdown")
 	vim.api.nvim_feedkeys("q", "xt", false)
 	assert(vim.api.nvim_get_current_win() == fallback_win, "preview did not return to the rebuilt review target")
-end)
+end
 
-test("failed restore owns its replacement buffer for one exact retry and cleanup", function()
+T["failed restore owns its replacement buffer for one exact retry and cleanup"] = function()
 	local source_win = vim.api.nvim_get_current_win()
 	local result = assert(exporter.deliver(session(), false, { has_clipboard = false }))
 	assert(result.previewed)
@@ -418,9 +408,9 @@ test("failed restore owns its replacement buffer for one exact retry and cleanup
 	vim.api.nvim_feedkeys("q", "xt", false)
 	assert(vim.api.nvim_get_current_win() == source_win)
 	assert(not vim.api.nvim_buf_is_valid(replacement_buf), "restored replacement was not cleaned up")
-end)
+end
 
-test("replacement setup failure removes its allocation and preserves a rival name", function()
+T["replacement setup failure removes its allocation and preserves a rival name"] = function()
 	local source_win = vim.api.nvim_get_current_win()
 	local result = assert(exporter.deliver(session(), false, { has_clipboard = false }))
 	assert(result.previewed)
@@ -448,9 +438,9 @@ test("replacement setup failure removes its allocation and preserves a rival nam
 	assert(vim.api.nvim_buf_get_name(replacement) == "review-export://markdown")
 	vim.api.nvim_feedkeys("q", "xt", false)
 	assert(not vim.api.nvim_buf_is_valid(replacement), "retried replacement was not cleaned up")
-end)
+end
 
-test("failed replacement cleanup retains one owned buffer for retry", function()
+T["failed replacement cleanup retains one owned buffer for retry"] = function()
 	local source_win = vim.api.nvim_get_current_win()
 	assert(exporter.deliver(session(), false, { has_clipboard = false }).previewed)
 	local suspended = assert(exporter.suspend_preview())
@@ -475,9 +465,9 @@ test("failed replacement cleanup retains one owned buffer for retry", function()
 	assert(vim.api.nvim_get_current_buf() == retained, "retry allocated over the retained owned buffer")
 	vim.api.nvim_feedkeys("q", "xt", false)
 	assert(not vim.api.nvim_buf_is_valid(retained), "retried owned buffer was not cleaned up")
-end)
+end
 
-test("clipboard export is complete while legacy delivery history remains inert", function()
+T["clipboard export is complete while legacy delivery history remains inert"] = function()
 	local value = session()
 	value.items[1].resolution = "resolved"
 	value.items[2].resolution = "legacy_unknown"
@@ -494,9 +484,9 @@ test("clipboard export is complete while legacy delivery history remains inert",
 	assert(result.markdown:find("legacy_unknown", 1, true))
 	assert(not result.markdown:find("remote%-reply"))
 	assert(vim.deep_equal(result.ids, {}))
-end)
+end
 
-test("repeated renders and clipboard deliveries are byte-identical and non-mutating", function()
+T["repeated renders and clipboard deliveries are byte-identical and non-mutating"] = function()
 	local value = session()
 	local before = vim.deepcopy(value)
 	local first_markdown, first_ids = assert(exporter.render(value))
@@ -518,14 +508,6 @@ test("repeated renders and clipboard deliveries are byte-identical and non-mutat
 	assert(first.markdown == second.markdown and copied[1] == copied[2])
 	assert(vim.deep_equal(first.ids, {}) and vim.deep_equal(second.ids, {}))
 	assert(vim.deep_equal(value, before) and value.revision == 9)
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("review_export_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

@@ -9,24 +9,12 @@ package.path = table.concat({
 	package.path,
 }, ";")
 
-local failures = {}
-local count = 0
+require("config.usage").setup({ enabled = true }, vim.fn.tempname() .. "/usage.sqlite3")
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(string.format("%s\nexpected: %s\nactual:   %s", message, vim.inspect(expected), vim.inspect(actual)))
-	end
-end
+local equal = require("tests.helpers").equal
 
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local markdown_handlers = {}
 local markdown_setup
@@ -205,14 +193,14 @@ vim.keymap.set("n", "grn", external_global, { desc = "External rename" })
 local navigation = require("config.lsp_navigation")
 navigation.setup()
 
-test("setup removes only exact native global defaults", function()
+T["setup removes only exact native global defaults"] = function()
 	equal(nil, global_mapping("n", "gri"), "exact native default survived setup")
 	local mapping = global_mapping("n", "grn")
 	assert(mapping and mapping.callback == external_global, "external global mapping was removed")
 	equal("External rename", mapping.desc, "external global mapping changed")
-end)
+end
 
-test("FileType removes only exact native buffer defaults", function()
+T["FileType removes only exact native buffer defaults"] = function()
 	local bufnr = new_buffer()
 	local native = function() end
 	local external = function() end
@@ -223,9 +211,9 @@ test("FileType removes only exact native buffer defaults", function()
 	local mapping = buffer_mapping(bufnr, "n", "gra")
 	assert(mapping and mapping.callback == external, "external buffer mapping was removed")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("host mappings survive one detach and clear after the last client", function()
+T["host mappings survive one detach and clear after the last client"] = function()
 	local bufnr = new_buffer()
 	clients = { { id = 11 }, { id = 12 } }
 	vim.api.nvim_exec_autocmds("LspAttach", { buffer = bufnr, data = { client_id = 11 } })
@@ -240,9 +228,9 @@ test("host mappings survive one detach and clear after the last client", functio
 	equal(nil, buffer_mapping(bufnr, "n", "gd"), "last detach retained owned gd")
 	equal(nil, buffer_mapping(bufnr, "n", "K"), "last detach retained owned K")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("last detach preserves a mapping replaced by another owner", function()
+T["last detach preserves a mapping replaced by another owner"] = function()
 	local bufnr = new_buffer()
 	clients = { { id = 21 } }
 	vim.api.nvim_exec_autocmds("LspAttach", { buffer = bufnr, data = { client_id = 21 } })
@@ -254,9 +242,9 @@ test("last detach preserves a mapping replaced by another owner", function()
 	equal("External hover", mapping.desc, "replacement mapping changed")
 	equal(nil, buffer_mapping(bufnr, "n", "gD"), "detach retained an untouched owned mapping")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("Markdown keeps callback identity across attach and detach", function()
+T["Markdown keeps callback identity across attach and detach"] = function()
 	local bufnr = new_buffer()
 	local markdown = function() end
 	markdown_handlers[bufnr] = markdown
@@ -271,9 +259,9 @@ test("Markdown keeps callback identity across attach and detach", function()
 	equal("Follow Markdown link", detached.desc, "Markdown mapping metadata changed")
 	markdown_handlers[bufnr] = nil
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("LspAttach does not clobber an existing buffer-local owner", function()
+T["LspAttach does not clobber an existing buffer-local owner"] = function()
 	local bufnr = new_buffer()
 	local external = function() end
 	vim.keymap.set("n", "gd", external, { buffer = bufnr, desc = "External definition" })
@@ -283,9 +271,9 @@ test("LspAttach does not clobber an existing buffer-local owner", function()
 	assert(mapping and mapping.callback == external, "LspAttach clobbered buffer-local gd")
 	equal("External definition", mapping.desc, "external gd metadata changed")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("single and multi-result LSP navigation retain one immutable request origin", function()
+T["single and multi-result LSP navigation retain one immutable request origin"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_win_set_buf(0, bufnr)
@@ -328,9 +316,9 @@ test("single and multi-result LSP navigation retain one immutable request origin
 	equal({}, history_records, "ordinary multi-result dispatch recorded outside the editor")
 	clients = {}
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("successful review routing records the routed destination exactly once", function()
+T["successful review routing records the routed destination exactly once"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_win_set_buf(0, bufnr)
@@ -366,9 +354,9 @@ test("successful review routing records the routed destination exactly once", fu
 	)
 	clients = {}
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("consumed review no-ops do not fabricate navigation history", function()
+T["consumed review no-ops do not fabricate navigation history"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_win_set_buf(0, bufnr)
@@ -388,9 +376,9 @@ test("consumed review no-ops do not fabricate navigation history", function()
 	equal({}, history_records, "consumed review no-op fabricated a transition")
 	clients = {}
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("consumed review routes require two capturable endpoints", function()
+T["consumed review routes require two capturable endpoints"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_win_set_buf(0, bufnr)
@@ -416,9 +404,9 @@ test("consumed review routes require two capturable endpoints", function()
 	capture_override = nil
 	clients = {}
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("native gd fallback records movement and ignores an exact no-op", function()
+T["native gd fallback records movement and ignores an exact no-op"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "local target = 1", "", "print(target)" })
@@ -444,9 +432,9 @@ test("native gd fallback records movement and ignores an exact no-op", function(
 	equal({}, history_records, "native gd no-op fabricated a transition")
 	capture_override = nil
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("explicit aggregate and named-client requests keep their issuance origin", function()
+T["explicit aggregate and named-client requests keep their issuance origin"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_win_set_buf(0, bufnr)
@@ -486,9 +474,9 @@ test("explicit aggregate and named-client requests keep their issuance origin", 
 	equal(issued, opened[1].options.history_origin, "named-client request recaptured a late origin")
 	clients = {}
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("aggregate requests expose client errors and retain partial successes", function()
+T["aggregate requests expose client errors and retain partial successes"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_win_set_buf(0, bufnr)
@@ -516,9 +504,9 @@ test("aggregate requests expose client errors and retain partial successes", fun
 	assert(notifications[1].message:find("broken%-lsp: partial failure"), notifications[1].message)
 	clients = {}
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("request guard exceptions retain their diagnostic text", function()
+T["request guard exceptions retain their diagnostic text"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_win_set_buf(0, bufnr)
@@ -553,9 +541,9 @@ test("request guard exceptions retain their diagnostic text", function()
 	assert(notifications[1].message:find("valid boom", 1, true), notifications[1].message)
 	clients = {}
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("gi and gr picker confirms use exact positions and invocation origins", function()
+T["gi and gr picker confirms use exact positions and invocation origins"] = function()
 	reset_observations()
 	local bufnr = new_buffer()
 	vim.api.nvim_win_set_buf(0, bufnr)
@@ -598,9 +586,9 @@ test("gi and gr picker confirms use exact positions and invocation origins", fun
 	vim.api.nvim_buf_delete(special, { force = true })
 	clients = {}
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
+end
 
-test("historical review buffers fail closed before mappings are installed", function()
+T["historical review buffers fail closed before mappings are installed"] = function()
 	local bufnr = new_buffer()
 	blocked_buffers[bufnr] = true
 	clients = { { id = 51 } }
@@ -611,27 +599,20 @@ test("historical review buffers fail closed before mappings are installed", func
 	equal({ bufnr = bufnr, client_id = 51 }, last, "review enforcement did not receive the attach identity")
 	blocked_buffers[bufnr] = nil
 	vim.api.nvim_buf_delete(bufnr, { force = true })
-end)
-
-assert(type(markdown_setup) == "table", "Markdown navigation was not configured")
-assert(type(markdown_setup.eligible) == "function", "Markdown eligibility bridge is missing")
-
-vim.lsp.get_clients = original_get_clients
-vim.lsp.get_client_by_id = original_get_client_by_id
-vim.lsp.buf_request_all = original_buf_request_all
-vim.lsp.util.locations_to_items = original_locations_to_items
-vim.lsp.buf.definition = original_definition
-vim.lsp.buf.declaration = original_declaration
-vim.notify = original_notify
-pcall(vim.keymap.del, "n", "grn")
-pcall(vim.api.nvim_del_augroup_by_name, "LspKeymaps")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("lsp_navigation_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	assert(type(markdown_setup) == "table", "Markdown navigation was not configured")
+	assert(type(markdown_setup.eligible) == "function", "Markdown eligibility bridge is missing")
+	vim.lsp.get_clients = original_get_clients
+	vim.lsp.get_client_by_id = original_get_client_by_id
+	vim.lsp.buf_request_all = original_buf_request_all
+	vim.lsp.util.locations_to_items = original_locations_to_items
+	vim.lsp.buf.definition = original_definition
+	vim.lsp.buf.declaration = original_declaration
+	vim.notify = original_notify
+	pcall(vim.keymap.del, "n", "grn")
+	pcall(vim.api.nvim_del_augroup_by_name, "LspKeymaps")
+end
+
+return T

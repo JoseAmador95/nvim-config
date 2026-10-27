@@ -5,18 +5,8 @@ local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
 
 local environment_names = {
 	"HOME",
@@ -48,7 +38,7 @@ vim.env.NVIM_CONFIG_MASON_ROOT = nil
 package.loaded["config.tool_paths"] = nil
 local paths = require("config.tool_paths")
 
-test("primary roots are shared with the pager profile", function()
+T["primary roots are shared with the pager profile"] = function()
 	vim.env.NVIM_APPNAME = "nvimpager"
 	assert(paths.primary_data_root() == root .. "/data/nvim")
 	assert(paths.primary_state_root() == root .. "/state/nvim")
@@ -56,9 +46,9 @@ test("primary roots are shared with the pager profile", function()
 	assert(paths.mason_root() == root .. "/data/nvim/mason")
 	vim.env.NVIM_APPNAME = "nvim"
 	assert(paths.primary_data_root() == root .. "/data/nvim")
-end)
+end
 
-test("PATH order puts Mise launchers before every local, host, and managed path", function()
+T["PATH order puts Mise launchers before every local, host, and managed path"] = function()
 	local managed = paths.managed_bin()
 	local mason = paths.mason_bin()
 	local segments = paths.compose_segments(
@@ -78,9 +68,9 @@ test("PATH order puts Mise launchers before every local, host, and managed path"
 	assert(segments[5] == "/usr/bin")
 	assert(segments[6] == "/opt/bin")
 	assert(#segments == 6, "PATH segments were not exactly deduplicated")
-end)
+end
 
-test("an explicit local override remains after verified shims but before managed roots", function()
+T["an explicit local override remains after verified shims but before managed roots"] = function()
 	local managed = paths.managed_bin()
 	local segments = paths.compose_segments({ managed, root .. "/custom" }, managed .. ":/usr/bin")
 	assert(segments[1] == managed)
@@ -92,9 +82,9 @@ test("an explicit local override remains after verified shims but before managed
 		end
 	end
 	assert(occurrences == 1)
-end)
+end
 
-test("external executable probes ignore verified shims, managed, and Mason binaries", function()
+T["external executable probes ignore verified shims, managed, and Mason binaries"] = function()
 	local external_bin = root .. "/external/bin"
 	assert(vim.fn.mkdir(external_bin, "p") == 1)
 	assert(vim.fn.mkdir(paths.managed_bin(), "p") == 1)
@@ -117,19 +107,13 @@ test("external executable probes ignore verified shims, managed, and Mason binar
 	assert(vim.deep_equal(paths.external_candidates("probe-tool", external_bin .. ":" .. external_bin), {
 		external_bin .. "/probe-tool",
 	}))
-end)
-
-for _, name in ipairs(environment_names) do
-	vim.env[name] = original[name] or nil
 end
-vim.fn.delete(root, "rf")
 
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
+hooks.post_once = function()
+	for _, name in ipairs(environment_names) do
+		vim.env[name] = original[name] or nil
 	end
-	vim.cmd("cquit")
+	vim.fn.delete(root, "rf")
 end
 
-print(string.format("tool_paths_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T

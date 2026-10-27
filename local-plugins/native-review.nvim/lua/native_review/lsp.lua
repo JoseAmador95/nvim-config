@@ -4,6 +4,7 @@ local M = {}
 local dependencies = require("native_review.dependencies")
 local editor = dependencies.get("editor")
 local repo = dependencies.get("repo")
+local buffers = require("native_review.buffers")
 
 local BLOCKED = { old = true, snapshot = true, unified = true, markdown = true, panel = true }
 local DIAGNOSTIC_NAMESPACE = vim.api.nvim_create_namespace("NvimReviewCurrentDiagnostics")
@@ -436,12 +437,6 @@ local function read_file(path)
 	return value, read_err
 end
 
-local function buffer_text(buf)
-	local separator = ({ dos = "\r\n", mac = "\r" })[vim.bo[buf].fileformat] or "\n"
-	local value = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), separator)
-	return vim.bo[buf].endofline and value .. separator or value
-end
-
 local function same_path(left, right)
 	local normalized_left = vim.fs.normalize(vim.uv.fs_realpath(left) or left)
 	local normalized_right = vim.fs.normalize(vim.uv.fs_realpath(right) or right)
@@ -480,7 +475,7 @@ local function resolve_current_source(metadata, expected_buf)
 	elseif vim.bo[current_buf].modified then
 		return nil, "current source has unsaved changes"
 	end
-	local loaded = buffer_text(current_buf)
+	local loaded = buffers.text(current_buf)
 	if loaded ~= disk then
 		return nil, "current source buffer differs from the file on disk"
 	end
@@ -1103,7 +1098,7 @@ function M.goto_definition(buf, line, column, metadata)
 		return nil, map_err
 	end
 	local snapshot_changedtick = vim.api.nvim_buf_get_changedtick(buf)
-	local snapshot_text = buffer_text(buf)
+	local snapshot_text = buffers.text(buf)
 	local snapshot_name = vim.api.nvim_buf_get_name(buf)
 	local current_name = vim.api.nvim_buf_get_name(current.buf)
 	local target_column = column or metadata.column or 1
@@ -1117,7 +1112,7 @@ function M.goto_definition(buf, line, column, metadata)
 			or role(buf) ~= "snapshot"
 			or metadata_by_buffer[buf] ~= metadata
 			or vim.api.nvim_buf_get_changedtick(buf) ~= snapshot_changedtick
-			or buffer_text(buf) ~= snapshot_text
+			or buffers.text(buf) ~= snapshot_text
 		then
 			return false
 		end

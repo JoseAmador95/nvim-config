@@ -190,17 +190,7 @@ local function emit(kind, details)
 	pcall(configured.on_state_change, event)
 end
 
-local function exact_options(value, allowed, label)
-	if type(value) ~= "table" then
-		return nil, label .. " must be a table"
-	end
-	for key in pairs(value) do
-		if type(key) ~= "string" or not allowed[key] then
-			return nil, label .. " contains an unknown option: " .. tostring(key)
-		end
-	end
-	return true
-end
+local exact_options = contracts.exact_options
 
 local function same_identity(left, right)
 	return left and right and left.type == right.type and left.dev == right.dev and left.ino == right.ino

@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.lsp_commands")
 local H = require("config.lsp_helpers")
 
 -- Code Actions
@@ -10,7 +11,7 @@ vim.api.nvim_create_user_command("ToggleInlineDiagnostics", function()
 	H.ToggleInlineDiagnostics()
 end, { desc = "Toggle inline diagnostics" })
 
-vim.keymap.set("n", "<leader>xi", "<cmd>ToggleInlineDiagnostics<cr>", {
+usage_map("n", "<leader>xi", "<cmd>ToggleInlineDiagnostics<cr>", {
 	desc = "Toggle inline diagnostics",
 })
 

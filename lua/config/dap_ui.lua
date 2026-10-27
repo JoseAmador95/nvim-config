@@ -1,84 +1,33 @@
+local dap_view = require("dap-view")
+local editor = require("config.editor")
 local M = {}
 
-local DEFAULT_UI = "dap-ui"
-local VALID_UI = {
-	["dap-ui"] = true,
-	["dap-view"] = true,
-}
 local LISTENER_ID = "nvim_config_dap_ui"
-
-local selected_ui
 local initialized = false
-
-local function notify(message, level)
-	vim.notify(message, level or vim.log.levels.WARN, { title = "DAP UI" })
-end
-
-local function configured_ui()
-	local configured = require("config.local_config").get("dap", {}).ui
-	return VALID_UI[configured] and configured or DEFAULT_UI
-end
-
-function M.selected()
-	if selected_ui then
-		return selected_ui
-	end
-
-	selected_ui = configured_ui()
-	local override = vim.env.NVIM_DAP_UI
-	if override and override ~= "" then
-		if VALID_UI[override] then
-			selected_ui = override
-		else
-			notify("NVIM_DAP_UI must be dap-ui or dap-view; using " .. selected_ui)
-		end
-	end
-
-	return selected_ui
-end
-
-local function implementation()
-	if M.selected() == "dap-view" then
-		return require("dap-view")
-	end
-	return require("dapui")
-end
 
 local function dap_view_switchbuf(bufnr)
 	local path = vim.api.nvim_buf_get_name(bufnr)
 	if path == "" then
 		return nil
 	end
-	require("config.editor").open_file_in_tab(path)
+	editor.open_file_in_tab(path)
 	return vim.api.nvim_get_current_win()
 end
 
 function M.open()
-	implementation().open()
+	dap_view.open()
 end
 
 function M.close()
-	if M.selected() == "dap-view" then
-		implementation().close(true)
-	else
-		implementation().close()
-	end
+	dap_view.close(true)
 end
 
 function M.toggle()
-	if M.selected() == "dap-view" then
-		implementation().toggle(true)
-	else
-		implementation().toggle()
-	end
+	dap_view.toggle(true)
 end
 
 function M.eval()
-	if M.selected() == "dap-view" then
-		implementation().hover(nil, true, { context = "repl" })
-	else
-		implementation().eval()
-	end
+	dap_view.hover(nil, true, { context = "repl" })
 end
 
 function M.setup(dap)
@@ -87,18 +36,14 @@ function M.setup(dap)
 	end
 	initialized = true
 
-	if M.selected() == "dap-view" then
-		implementation().setup({
-			auto_toggle = false,
-			follow_tab = true,
-			switchbuf = dap_view_switchbuf,
-			winbar = {
-				sections = { "watches", "scopes", "exceptions", "breakpoints", "threads", "repl", "console" },
-			},
-		})
-	else
-		implementation().setup()
-	end
+	dap_view.setup({
+		auto_toggle = false,
+		follow_tab = true,
+		switchbuf = dap_view_switchbuf,
+		winbar = {
+			sections = { "watches", "scopes", "exceptions", "breakpoints", "threads", "repl", "console" },
+		},
+	})
 
 	-- Keep source navigation out of debug panels and reuse existing tabs before
 	-- creating a new one. dap-view additionally routes its own jumps through

@@ -112,17 +112,7 @@ local function copy(value)
 	return vim.deepcopy(value)
 end
 
-local function exact_options(value, allowed, label)
-	if type(value) ~= "table" then
-		return nil, label .. " must be a table"
-	end
-	for key in pairs(value) do
-		if type(key) ~= "string" or not allowed[key] then
-			return nil, label .. " contains an unknown option: " .. tostring(key)
-		end
-	end
-	return true
-end
+local exact_options = contracts.exact_options
 
 local function workspace_identity(workspace)
 	if not workspace then

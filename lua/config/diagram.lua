@@ -1,3 +1,4 @@
+local usage_map = require("config.usage").mapper("config.diagram")
 -- Host adapter for diagram-view.nvim. Tool discovery, user commands, keymaps,
 -- and the concrete Neovim/Snacks presenters deliberately stay in config.
 local M = {}
@@ -61,7 +62,7 @@ local function make_float(title, session)
 		session:cancel("presenter closed")
 	end
 	for _, lhs in ipairs({ "q", "<Esc>" }) do
-		vim.keymap.set("n", lhs, close, { buffer = buf, nowait = true, desc = "Close diagram" })
+		usage_map("n", lhs, close, { buffer = buf, nowait = true, desc = "Close diagram" })
 	end
 	vim.api.nvim_create_autocmd("BufWipeout", {
 		buffer = buf,
@@ -333,14 +334,14 @@ local function image_presenter()
 			presentation.viewport = { zoom = 1, x = 0.5, y = 0.5 }
 			presentation.shown_viewport = vim.deepcopy(presentation.viewport)
 			for _, lhs in ipairs({ "+", "=" }) do
-				vim.keymap.set("n", lhs, function()
+				usage_map("n", lhs, function()
 					move_viewport(presentation, presentation.viewport.zoom * 1.5)
 				end, { buffer = presentation.buf, nowait = true, desc = "Zoom into diagram" })
 			end
-			vim.keymap.set("n", "-", function()
+			usage_map("n", "-", function()
 				move_viewport(presentation, presentation.viewport.zoom / 1.5)
 			end, { buffer = presentation.buf, nowait = true, desc = "Zoom out of diagram" })
-			vim.keymap.set("n", "0", function()
+			usage_map("n", "0", function()
 				move_viewport(presentation, 1)
 			end, { buffer = presentation.buf, nowait = true, desc = "Fit diagram to window" })
 			for _, mapping in ipairs({
@@ -353,12 +354,12 @@ local function image_presenter()
 				{ "k", 0, -0.2 },
 				{ "<Up>", 0, -0.2 },
 			}) do
-				vim.keymap.set("n", mapping[1], function()
+				usage_map("n", mapping[1], function()
 					move_viewport(presentation, nil, mapping[2], mapping[3])
 				end, { buffer = presentation.buf, nowait = true, desc = "Pan diagram" })
 			end
 			image_footer(presentation, false)
-			vim.keymap.set("n", "y", function()
+			usage_map("n", "y", function()
 				if not presentation.path then
 					return
 				end
@@ -812,19 +813,14 @@ local function register_interface()
 	})
 
 	if require("config.pager").active then
-		vim.keymap.set("n", "<leader>md", "<cmd>DiagramShow<cr>", { desc = "Show diagram (SVG/ASCII)" })
-		vim.keymap.set("x", "<leader>md", ":<C-U>'<,'>DiagramShow<CR>", { desc = "Show selected diagram" })
+		usage_map("n", "<leader>md", "<cmd>DiagramShow<cr>", { desc = "Show diagram (SVG/ASCII)" })
+		usage_map("x", "<leader>md", ":<C-U>'<,'>DiagramShow<CR>", { desc = "Show selected diagram" })
 		return
 	end
 
 	local function map(buf)
-		vim.keymap.set("n", "<leader>md", "<cmd>DiagramShow<cr>", { buffer = buf, desc = "Show diagram (SVG/ASCII)" })
-		vim.keymap.set(
-			"x",
-			"<leader>md",
-			":<C-U>'<,'>DiagramShow<CR>",
-			{ buffer = buf, desc = "Show selected diagram" }
-		)
+		usage_map("n", "<leader>md", "<cmd>DiagramShow<cr>", { buffer = buf, desc = "Show diagram (SVG/ASCII)" })
+		usage_map("x", "<leader>md", ":<C-U>'<,'>DiagramShow<CR>", { buffer = buf, desc = "Show selected diagram" })
 	end
 	vim.api.nvim_create_autocmd("FileType", {
 		pattern = { "markdown", "plantuml", "md-render" },

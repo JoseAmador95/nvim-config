@@ -27,17 +27,7 @@ local function copy(value)
 	return vim.deepcopy(value)
 end
 
-local function exact_keys(value, allowed, label)
-	if type(value) ~= "table" then
-		return nil, label .. " must be a table"
-	end
-	for key in pairs(value) do
-		if type(key) ~= "string" or not allowed[key] then
-			return nil, label .. " contains an unknown option: " .. tostring(key)
-		end
-	end
-	return true
-end
+local exact_keys = contracts.exact_options
 
 local function now_ms()
 	return math.floor(uv.hrtime() / 1000000)
@@ -47,51 +37,13 @@ local function non_empty_string(value)
 	return type(value) == "string" and value ~= "" and not value:find("\0", 1, true)
 end
 
-local function normalize_argv(argv)
-	if type(argv) ~= "table" or not vim.islist(argv) or #argv == 0 then
-		return nil, "launch.argv must be a non-empty array"
-	end
-	local normalized = {}
-	for index, value in ipairs(argv) do
-		if type(value) ~= "string" or value:find("\0", 1, true) or (index == 1 and value == "") then
-			local requirement = index == 1 and "a non-empty string without NUL bytes" or "a string without NUL bytes"
-			return nil, ("launch.argv[%d] must be %s"):format(index, requirement)
-		end
-		normalized[index] = value
-	end
-	return normalized
-end
-
 local function normalize_directory(path)
-	if not non_empty_string(path) or path:sub(1, 1) ~= "/" then
-		return nil, "launch.cwd must be an absolute path"
-	end
 	local normalized = vim.fs.normalize(path)
 	local stat = uv.fs_stat(normalized)
 	if not stat or stat.type ~= "directory" then
 		return nil, "launch.cwd is not a directory: " .. normalized
 	end
 	return uv.fs_realpath(normalized) or normalized
-end
-
-local function normalize_env(env)
-	if type(env) ~= "table" or (next(env) ~= nil and vim.islist(env)) then
-		return nil, "launch.env must be an explicit string map (use {} to inherit the host environment)"
-	end
-	local normalized = vim.empty_dict()
-	for name, value in pairs(env) do
-		if
-			type(name) ~= "string"
-			or name == ""
-			or name:find("[=%z]")
-			or type(value) ~= "string"
-			or value:find("\0", 1, true)
-		then
-			return nil, "launch.env must contain only valid string names and values"
-		end
-		normalized[name] = value
-	end
-	return normalized
 end
 
 local function normalize_key_list(value, label)
@@ -101,84 +53,56 @@ local function normalize_key_list(value, label)
 	if type(value) ~= "table" or not vim.islist(value) then
 		return nil, label .. " must be an array"
 	end
-	local normalized = {}
 	for index, key in ipairs(value) do
 		if not non_empty_string(key) then
 			return nil, ("%s[%d] must be a non-empty string without NUL bytes"):format(label, index)
 		end
-		normalized[index] = key
 	end
-	return normalized
-end
-
-local function normalize_map(value, label)
-	if value == nil then
-		return vim.empty_dict()
-	end
-	if type(value) ~= "table" or (next(value) ~= nil and vim.islist(value)) then
-		return nil, label .. " must be a map"
-	end
-	return copy(value)
+	return value
 end
 
 local function normalize(spec)
-	local shared, shared_err = contracts.normalize_terminal_spec(spec)
-	if not shared then
-		return nil, shared_err
+	local normalized, err = contracts.normalize_terminal_spec(spec)
+	if not normalized then
+		return nil, err
 	end
-	spec = shared
-	local argv, argv_err = normalize_argv(spec.launch.argv)
-	if not argv then
-		return nil, argv_err
-	end
-	local cwd, cwd_err = normalize_directory(spec.launch.cwd)
+	local cwd, cwd_err = normalize_directory(normalized.launch.cwd)
 	if not cwd then
 		return nil, cwd_err
 	end
-	local env, env_err = normalize_env(spec.launch.env)
-	if not env then
-		return nil, env_err
+	normalized.launch.cwd = cwd
+	if next(normalized.launch.env) == nil then
+		normalized.launch.env = vim.empty_dict()
 	end
-	local policy, policy_err = normalize_map(spec.policy, "policy")
-	if not policy then
-		return nil, policy_err
+	for _, name in ipairs({ "policy", "view", "metadata" }) do
+		local value = normalized[name]
+		if next(value) ~= nil and vim.islist(value) then
+			return nil, name .. " must be a map"
+		end
 	end
-	if policy.dispose_on_success ~= nil and type(policy.dispose_on_success) ~= "boolean" then
-		return nil, "policy.dispose_on_success must be boolean"
-	end
-	if policy.dispose_on_stop ~= nil and type(policy.dispose_on_stop) ~= "boolean" then
-		return nil, "policy.dispose_on_stop must be boolean"
+	local policy, view = normalized.policy, normalized.view
+	for _, name in ipairs({ "dispose_on_success", "dispose_on_stop" }) do
+		if policy[name] ~= nil and type(policy[name]) ~= "boolean" then
+			return nil, "policy." .. name .. " must be boolean"
+		end
 	end
 	policy.dispose_on_success = policy.dispose_on_success ~= false
 	policy.dispose_on_stop = policy.dispose_on_stop == true
-
-	local view, view_err = normalize_map(spec.view, "view")
-	if not view then
-		return nil, view_err
+	for _, name in ipairs({ "passthrough", "hide_keys" }) do
+		local keys, keys_err = normalize_key_list(view[name], "view." .. name)
+		if not keys then
+			return nil, keys_err
+		end
+		view[name] = keys
 	end
-	local passthrough, passthrough_err = normalize_key_list(view.passthrough, "view.passthrough")
-	if not passthrough then
-		return nil, passthrough_err
+	if dependencies and dependencies.backend.normalize_view then
+		local normalized_view, view_err = dependencies.backend.normalize_view(view)
+		if not normalized_view then
+			return nil, view_err
+		end
+		normalized.view = normalized_view
 	end
-	local hide_keys, hide_keys_err = normalize_key_list(view.hide_keys, "view.hide_keys")
-	if not hide_keys then
-		return nil, hide_keys_err
-	end
-	view.passthrough = passthrough
-	view.hide_keys = hide_keys
-
-	local metadata, metadata_err = normalize_map(spec.metadata, "metadata")
-	if not metadata then
-		return nil, metadata_err
-	end
-
-	return {
-		key = spec.key,
-		launch = { argv = argv, cwd = cwd, env = env },
-		policy = policy,
-		view = view,
-		metadata = metadata,
-	}
+	return normalized
 end
 
 local function key_for(value)
@@ -591,6 +515,9 @@ function M.setup(opts)
 			error("terminal_lifecycle.setup backend requires " .. name)
 		end
 	end
+	if backend.normalize_view ~= nil and type(backend.normalize_view) ~= "function" then
+		error("terminal_lifecycle.setup backend.normalize_view must be a function")
+	end
 	if opts.backend ~= nil and opts.presenter ~= nil and opts.backend ~= opts.presenter then
 		error("setup.backend and setup.presenter cannot disagree")
 	end
@@ -940,7 +867,6 @@ function M.lines(identity)
 	return result
 end
 
-M._normalize = normalize
 M._reset = function()
 	local active = records
 	records = {}

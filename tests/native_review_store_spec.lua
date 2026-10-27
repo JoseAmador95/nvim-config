@@ -8,30 +8,20 @@ vim.opt.runtimepath:prepend(repo .. "/local-plugins/native-review.nvim")
 package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
 require("config.local_plugins").setup()
 
-local failures = {}
-local count = 0
 local state
 local comment_types
 local host_comment_types
-local function test(name, callback)
-	count = count + 1
+local hooks = {}
+local T = MiniTest.new_set({ hooks = hooks })
+hooks.pre_case = function()
 	if state then
 		vim.fn.delete(state, "rf")
 		assert(vim.fn.mkdir(state, "p") == 1)
 	end
-	local ok, err = xpcall(function()
-		comment_types.configure({})
-		callback()
-	end, debug.traceback)
-	local restored, restore_err = pcall(comment_types.configure, host_comment_types)
-	if not restored then
-		failures[#failures + 1] = name .. "\nCould not restore host comment types: " .. tostring(restore_err)
-	end
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
+	comment_types.configure({})
+end
+hooks.post_case = function()
+	comment_types.configure(host_comment_types)
 end
 
 local config_fs = require("config.fs")
@@ -143,7 +133,7 @@ local function write_legacy(session)
 	return path, encoded
 end
 
-test("session and scope identities are deterministic and include the working fingerprint", function()
+T["session and scope identities are deterministic and include the working fingerprint"] = function()
 	local first = fresh()
 	local second = fresh()
 	assert(first.version == 3 and first.scope.version == 1)
@@ -152,9 +142,9 @@ test("session and scope identities are deterministic and include the working fin
 	assert(changed_scope.id ~= first.id)
 	local changed = assert(store.new(root, changed_scope, deps))
 	assert(changed.id == changed_scope.id)
-end)
+end
 
-test("legacy bridge and delivery metadata round-trip strictly but remain inert", function()
+T["legacy bridge and delivery metadata round-trip strictly but remain inert"] = function()
 	local session = add_root(fresh())
 	session.bridge = {
 		backend = "tuicr",
@@ -178,9 +168,9 @@ test("legacy bridge and delivery metadata round-trip strictly but remain inert",
 	loaded.bridge.backend = "github"
 	local invalid_backend, backend_err = store.save(root, loaded, deps)
 	assert(not invalid_backend and backend_err:find("backend must be tuicr", 1, true))
-end)
+end
 
-test("anchor metadata survives add, edit, reply, save, and load", function()
+T["anchor metadata survives add, edit, reply, save, and load"] = function()
 	local session = add_root(fresh())
 	local root_item = session.items[1]
 	assert(root_item.anchor.layer == "working")
@@ -211,9 +201,9 @@ test("anchor metadata survives add, edit, reply, save, and load", function()
 	local loaded = assert(store.load(root, saved.id, deps))
 	assert(vim.deep_equal(loaded.items[1].anchor, updated_anchor))
 	assert(vim.deep_equal(loaded.items[2].anchor, updated_anchor))
-end)
+end
 
-test("item origins survive lifecycle changes and replies record their own engine", function()
+T["item origins survive lifecycle changes and replies record their own engine"] = function()
 	local main = { id = "main", version = "builtin-v1 / Neovim 0.12.0" }
 	local difftastic = { id = "difftastic", version = "0.71.0" }
 	local session = assert(store.add(fresh(), {
@@ -244,23 +234,32 @@ test("item origins survive lifecycle changes and replies record their own engine
 	assert(vim.deep_equal(loaded, saved))
 	assert(loaded.scope.backend_id == "diffview" and loaded.id == session.id)
 	assert(loaded.items[1].anchor.start_line == 9 and loaded.items[1].anchor.side == "right")
-end)
+end
 
-test("retired GumTree origins remain readable and round-trip without an engine", function()
-	local origin = { id = "gumtree", version = "4.0.0" }
-	local session = assert(store.add(fresh(), {
-		type = "issue",
-		body = "Historical structural comment",
-		anchor = { path = "src/main.lua", side = "left", start_line = 4 },
-		origin_engine = origin,
-	}, deps))
+T["retired origins remain readable and round-trip without an engine"] = function()
+	local origins = {
+		{ id = "gumtree", version = "4.0.0" },
+		{ id = "patience", version = "builtin-v1 / Neovim 0.12.0" },
+	}
+	local session = fresh()
+	for _, origin in ipairs(origins) do
+		session = assert(store.add(session, {
+			type = "issue",
+			body = "Historical engine comment",
+			anchor = { path = "src/main.lua", side = "left", start_line = 4 },
+			origin_engine = origin,
+		}, deps))
+	end
 	local saved = assert(store.save(root, session, deps))
 	local loaded = assert(store.load(root, saved.id, deps))
-	assert(vim.deep_equal(loaded.items[1].origin_engine, origin))
-	assert(vim.deep_equal(assert(store.save(root, loaded, deps)).items[1].origin_engine, origin))
-end)
+	local resaved = assert(store.save(root, loaded, deps))
+	for index, origin in ipairs(origins) do
+		assert(vim.deep_equal(loaded.items[index].origin_engine, origin))
+		assert(vim.deep_equal(resaved.items[index].origin_engine, origin))
+	end
+end
 
-test("v3 engine origins are strict and bounded without restricting future engine names", function()
+T["v3 engine origins are strict and bounded without restricting future engine names"] = function()
 	local session = add_root(fresh())
 	local saved, path = assert(store.save(root, session, deps))
 	local before = writes
@@ -313,9 +312,9 @@ test("v3 engine origins are strict and bounded without restricting future engine
 		origin_engine = { id = "future_engine-" .. string.rep("a", 50), version = string.rep("v", 128) },
 	}, deps))
 	assert(#future.items[2].origin_engine.id == 64 and #future.items[2].origin_engine.version == 128)
-end)
+end
 
-test("file-level anchors survive save and load without invented line metadata", function()
+T["file-level anchors survive save and load without invented line metadata"] = function()
 	local anchor = { kind = "file", path = "src/file.lua", side = "right", layer = "working", stale = false }
 	local session = assert(store.add(fresh(), {
 		type = "issue",
@@ -326,9 +325,9 @@ test("file-level anchors survive save and load without invented line metadata", 
 	local loaded = assert(store.load(root, saved.id, deps))
 	assert(vim.deep_equal(loaded.items[1].anchor, anchor))
 	assert(loaded.items[1].anchor.start_line == nil and loaded.items[1].anchor.end_line == nil)
-end)
+end
 
-test("saved v3 rationale comments load as objection! and save canonically", function()
+T["saved v3 rationale comments load as objection! and save canonically"] = function()
 	local session = add_root(fresh())
 	local saved, path = assert(store.save(root, session, deps))
 	local legacy = vim.deepcopy(saved)
@@ -344,9 +343,9 @@ test("saved v3 rationale comments load as objection! and save canonically", func
 	assert(updated.items[1].type == "objection!")
 	local persisted = assert(vim.json.decode(assert(config_fs.read_binary(path))))
 	assert(persisted.items[1].type == "objection!")
-end)
+end
 
-test("retired and removed types survive load, edit, reply, and save without becoming selectable", function()
+T["retired and removed types survive load, edit, reply, and save without becoming selectable"] = function()
 	local types = { "issue", "suggestion", "objection!", "question", "pedantic", "praise", "archived" }
 	local session = fresh()
 	for _ = 1, #types do
@@ -377,9 +376,9 @@ test("retired and removed types survive load, edit, reply, and save without beco
 	local persisted = assert(store.save(root, replied, deps))
 	assert(persisted.items[#types].type == "archived")
 	assert(assert(store.load(root, saved.id, deps)).items[#types].type == "archived")
-end)
+end
 
-test("configured additional types are selectable and remain readable after removal", function()
+T["configured additional types are selectable and remain readable after removal"] = function()
 	comment_types.configure({
 		{
 			id = "note",
@@ -398,9 +397,9 @@ test("configured additional types are selectable and remain readable after remov
 	assert(assert(store.save(root, edited, deps)).items[1].type == "note")
 	local added, add_err = store.add(edited, { type = "note", body = "No new custom finding", anchor = {} }, deps)
 	assert(not added and add_err:find("active configured", 1, true))
-end)
+end
 
-test("stored type identifiers cannot inject UI or Markdown lines", function()
+T["stored type identifiers cannot inject UI or Markdown lines"] = function()
 	local saved, path = assert(store.save(root, add_root(fresh()), deps))
 	for _, item_type in ipairs({ "bad\n# heading", "../../outside", string.rep("x", 128), "" }) do
 		local unsafe = vim.deepcopy(saved)
@@ -410,9 +409,9 @@ test("stored type identifiers cannot inject UI or Markdown lines", function()
 		local loaded, err = store.load(root, saved.id, deps)
 		assert(not loaded and err:find("valid review type identifier", 1, true), tostring(err))
 	end
-end)
+end
 
-test("active types, normalized anchors, replies, and resolution lifecycle are strict", function()
+T["active types, normalized anchors, replies, and resolution lifecycle are strict"] = function()
 	local session = add_root(fresh())
 	assert(#session.items == 1 and session.items[1].anchor.path == "src/main.lua")
 	local invalid, invalid_err = store.add(session, { type = "note", body = "no", anchor = {} }, deps)
@@ -440,9 +439,9 @@ test("active types, normalized anchors, replies, and resolution lifecycle are st
 	assert(session.items[#session.items].body == "changed")
 	local deleted, delete_err = store.delete(session, root_item.id, deps)
 	assert(not deleted and delete_err:find("has replies", 1, true))
-end)
+end
 
-test("type changes from retired types preserve resolved lifecycle metadata", function()
+T["type changes from retired types preserve resolved lifecycle metadata"] = function()
 	local session = add_root(fresh())
 	session.items[1].type = "objection!"
 	local id = session.items[1].id
@@ -461,9 +460,9 @@ test("type changes from retired types preserve resolved lifecycle metadata", fun
 	local retired, retired_err = store.set_type(session, id, "question", deps)
 	assert(not retired and retired_err:find("active configured", 1, true))
 	assert(session.items[1].type == "issue" and session.items[1].resolution == "resolved")
-end)
+end
 
-test("anchor metadata is strictly typed and bounded", function()
+T["anchor metadata is strictly typed and bounded"] = function()
 	local invalid_utf8 = string.char(0xF0, 0x9F, 0x99)
 	for _, anchor in ipairs({
 		{ layer = string.rep("x", 129) },
@@ -478,9 +477,9 @@ test("anchor metadata is strictly typed and bounded", function()
 		local added, err = store.add(fresh(), { type = "issue", body = "invalid anchor", anchor = anchor }, deps)
 		assert(not added and err, "invalid anchor metadata was accepted")
 	end
-end)
+end
 
-test("UTF-8 context bounds retain only complete code points", function()
+T["UTF-8 context bounds retain only complete code points"] = function()
 	local emoji = "🙂"
 	local context = "x" .. string.rep(emoji, 5000)
 	local truncated = assert(store.truncate_utf8(context, store.max_anchor_context))
@@ -508,9 +507,9 @@ test("UTF-8 context bounds retain only complete code points", function()
 	local saved = assert(store.save(root, session, deps))
 	local loaded = assert(store.load(root, saved.id, deps))
 	assert(loaded.items[1].anchor.context == truncated)
-end)
+end
 
-test("atomic save uses exact versioned path and owner-only permissions", function()
+T["atomic save uses exact versioned path and owner-only permissions"] = function()
 	local session = add_root(fresh())
 	session.stale = true
 	local saved, path = assert(store.save(root, session, deps))
@@ -531,9 +530,9 @@ test("atomic save uses exact versioned path and owner-only permissions", functio
 	assert(loaded.stale and loaded.items[1].body == session.items[1].body)
 	local listed = assert(store.list(root, deps))
 	assert(#listed >= 1 and listed[1].id == session.id)
-end)
+end
 
-test("v1 loads without writes and materializes safely only on explicit save", function()
+T["v1 loads without writes and materializes safely only on explicit save"] = function()
 	local source = add_root(fresh())
 	source = assert(store.reply(source, source.items[1].id, { body = "Legacy reply" }, deps))
 	source = add_root(source)
@@ -600,9 +599,9 @@ test("v1 loads without writes and materializes safely only on explicit save", fu
 	assert(assert(vim.uv.fs_lstat(backup)).mode % 512 == 384)
 	assert(assert(vim.uv.fs_lstat(saved_path)).mode % 512 == 384)
 	assert(vim.deep_equal(assert(store.load(root, legacy.id, deps)), saved))
-end)
+end
 
-test("v2 sessions migrate without inventing origins and preserve exact inert metadata", function()
+T["v2 sessions migrate without inventing origins and preserve exact inert metadata"] = function()
 	local source = add_root(fresh())
 	source = assert(store.reply(source, source.items[1].id, { body = "Legacy v2 reply" }, deps))
 	source = assert(store.set_resolution(source, source.items[1].id, "resolved", deps))
@@ -652,9 +651,9 @@ test("v2 sessions migrate without inventing origins and preserve exact inert met
 	assert(vim.deep_equal(assert(store.load(root, source.id, deps)), saved))
 	listed = assert(store.list(root, deps))
 	assert(#listed == 1 and vim.deep_equal(listed[1], saved), "v3 duplicated older sessions")
-end)
+end
 
-test("older codecs reject injected origin fields instead of silently discarding them", function()
+T["older codecs reject injected origin fields instead of silently discarding them"] = function()
 	for _, version in ipairs({ 1, 2 }) do
 		local source = add_root(assert(store.new(root, working_scope(vim.fn.sha256("strict-v" .. version)), deps)))
 		if version == 1 then
@@ -667,9 +666,9 @@ test("older codecs reject injected origin fields instead of silently discarding 
 		local loaded, load_err = store.load(root, source.id, deps)
 		assert(not loaded and load_err:find("unknown key", 1, true))
 	end
-end)
+end
 
-test("failed v2 reload rolls back only created v3 files and preserves originals", function()
+T["failed v2 reload rolls back only created v3 files and preserves originals"] = function()
 	local source = add_root(fresh())
 	source.version = 2
 	local legacy_path, encoded = write_legacy(source)
@@ -693,14 +692,19 @@ test("failed v2 reload rolls back only created v3 files and preserves originals"
 	assert(config_fs.read_binary(legacy_path) == encoded)
 	assert(not vim.uv.fs_lstat(legacy_path .. ".lock") and not vim.uv.fs_lstat(target .. ".lock"))
 
+	assert(config_fs.write_binary_atomic(backup, encoded))
+	saved, save_err = store.save(root, loaded, failing)
+	assert(not saved and save_err:find("reload validation", 1, true))
+	assert(not vim.uv.fs_lstat(target) and config_fs.read_binary(backup) == encoded)
+
 	assert(config_fs.write_binary_atomic(backup, "mismatching backup"))
 	saved, save_err = store.save(root, loaded, deps)
 	assert(not saved and save_err:find("backup does not match", 1, true))
 	assert(not vim.uv.fs_lstat(target) and config_fs.read_binary(backup) == "mismatching backup")
 	assert(config_fs.read_binary(legacy_path) == encoded)
-end)
+end
 
-test("failed v1 migration rolls back v3 and its new backup without exposing bodies", function()
+T["failed v1 migration rolls back v3 and its new backup without exposing bodies"] = function()
 	local source = add_root(fresh())
 	source.items[1].body = "secret migration body"
 	local legacy = legacy_value(source, { "draft" })
@@ -725,9 +729,41 @@ test("failed v1 migration rolls back v3 and its new backup without exposing bodi
 	assert(vim.uv.fs_lstat(target) == nil)
 	assert(vim.uv.fs_lstat(legacy_path:sub(1, -6) .. ".v1-backup") == nil)
 	assert(vim.uv.fs_lstat(legacy_path).type == "file")
-end)
+end
 
-test("complete recovery Markdown is owner-only and verified before discard", function()
+T["migration permission failures preserve originals and continue backup cleanup"] = function()
+	local source = add_root(fresh())
+	source.version = 2
+	local legacy_path, encoded = write_legacy(source)
+	local backup = legacy_path:sub(1, -6) .. ".v2-backup"
+	local target = vim.fs.joinpath(state, "nvim-config", "reviews", "v3", vim.fn.sha256(root), source.id .. ".json")
+	for _, removal_failure in ipairs({ false, true }) do
+		local failing = vim.tbl_extend("force", deps, {
+			uv = setmetatable({
+				fs_chmod = function(path, mode)
+					if path == target then
+						return nil, "injected permission failure"
+					end
+					return vim.uv.fs_chmod(path, mode)
+				end,
+				fs_unlink = function(path)
+					if path == target and removal_failure then
+						return nil, "injected target removal failure"
+					end
+					return vim.uv.fs_unlink(path)
+				end,
+			}, { __index = vim.uv }),
+		})
+		local loaded = assert(store.load(root, source.id, failing))
+		local saved, err = store.save(root, loaded, failing)
+		assert(not saved and err:find(removal_failure and "target removal failure" or "permission failure", 1, true))
+		assert((vim.uv.fs_lstat(target) ~= nil) == removal_failure)
+		assert(not vim.uv.fs_lstat(backup) and config_fs.read_binary(legacy_path) == encoded)
+		assert(not vim.uv.fs_lstat(legacy_path .. ".lock") and not vim.uv.fs_lstat(target .. ".lock"))
+	end
+end
+
+T["complete recovery Markdown is owner-only and verified before discard"] = function()
 	local session = add_root(fresh())
 	local markdown = "# Recovery\n\nComplete review body\n"
 	local receipt = assert(store.save_recovery(root, session, markdown, deps))
@@ -741,9 +777,9 @@ test("complete recovery Markdown is owner-only and verified before discard", fun
 	assert(config_fs.write_binary_atomic(receipt.path, markdown .. "changed"))
 	local verified, verify_err = store.verify_recovery(root, receipt, deps)
 	assert(not verified and verify_err:find("changed", 1, true))
-end)
+end
 
-test("near-limit v3 sessions produce complete owner-only verified recovery", function()
+T["near-limit v3 sessions produce complete owner-only verified recovery"] = function()
 	local session = fresh()
 	local context_marker = "PRIVATE_SOURCE_CONTEXT"
 	local context = context_marker .. string.rep("\n", store.max_anchor_context - #context_marker)
@@ -783,9 +819,9 @@ test("near-limit v3 sessions produce complete owner-only verified recovery", fun
 	assert(assert(vim.uv.fs_lstat(receipt.path)).mode % 512 == 384, "near-limit recovery is not 0600")
 	assert(config_fs.read_binary(receipt.path) == markdown, "near-limit recovery was truncated")
 	assert(store.verify_recovery(root, receipt, deps))
-end)
+end
 
-test("cross-process saves reject stale writers without losing comments", function()
+T["cross-process saves reject stale writers without losing comments"] = function()
 	local initial = assert(store.save(root, fresh(), deps))
 	local writer_a = assert(store.load(root, initial.id, deps))
 	local writer_b = assert(store.load(root, initial.id, deps))
@@ -798,9 +834,9 @@ test("cross-process saves reject stale writers without losing comments", functio
 	local final = assert(store.load(root, initial.id, deps))
 	assert(final.revision == saved_a.revision)
 	assert(#final.items == 1 and final.items[1].body == "writer A")
-end)
+end
 
-test("a crashed lock owner is recovered without bypassing the revision check", function()
+T["a crashed lock owner is recovered without bypassing the revision check"] = function()
 	local initial, path = assert(store.save(root, fresh(), deps))
 	local changed = assert(store.add(initial, { type = "issue", body = "after crash", anchor = {} }, deps))
 	local lock_path = path .. ".lock"
@@ -822,9 +858,9 @@ test("a crashed lock owner is recovered without bypassing the revision check", f
 	))
 	assert(recovered.revision == 2)
 	assert(vim.uv.fs_lstat(lock_path) == nil)
-end)
+end
 
-test("unknown JSON fields and symlink state files fail closed", function()
+T["unknown JSON fields and symlink state files fail closed"] = function()
 	local session, path = store.save(root, add_root(fresh()), deps)
 	assert(session and path)
 	local value = vim.json.decode(assert(config_fs.read_binary(path)))
@@ -843,9 +879,9 @@ test("unknown JSON fields and symlink state files fail closed", function()
 	assert(not saved and save_err:find("symlink", 1, true))
 	vim.fn.delete(outside)
 	vim.fn.delete(path)
-end)
+end
 
-test("item and encoded byte limits reject oversized state", function()
+T["item and encoded byte limits reject oversized state"] = function()
 	local too_many = fresh()
 	too_many.items = {}
 	for index = 1, store.max_items + 1 do
@@ -860,24 +896,18 @@ test("item and encoded byte limits reject oversized state", function()
 	end
 	local written, size_err = store.save(root, large, deps)
 	assert(not written and size_err:find("maximum", 1, true), tostring(size_err))
-end)
+end
 
-test("strict validation rejects injected fields before any write", function()
+T["strict validation rejects injected fields before any write"] = function()
 	local before = writes
 	local session = fresh()
 	session.scope.callback = "danger"
 	local saved, err = store.save(root, session, deps)
 	assert(not saved and err:find("unknown key", 1, true) and writes == before)
-end)
-
-vim.fn.delete(state, "rf")
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("review_store_spec: %d tests passed", count))
-vim.cmd("quitall!")
+hooks.post_once = function()
+	vim.fn.delete(state, "rf")
+end
+
+return T

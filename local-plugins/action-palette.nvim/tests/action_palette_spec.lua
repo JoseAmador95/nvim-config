@@ -5,34 +5,13 @@ local root = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(root .. "/local-plugins/action-palette.nvim")
 package.path = table.concat({ root .. "/local-plugins/_shared/lua/?.lua", package.path }, ";")
 
-local failures = {}
-local count = 0
+local equal = require("tests.helpers").equal
 
-local function equal(expected, actual, message)
-	if not vim.deep_equal(expected, actual) then
-		error(
-			(message or "values differ")
-				.. "\nexpected: "
-				.. vim.inspect(expected)
-				.. "\nactual: "
-				.. vim.inspect(actual)
-		)
-	end
-end
-
-local function test(name, callback)
-	count = count + 1
-	local ok, err = xpcall(callback, debug.traceback)
-	if ok then
-		print("ok - " .. name)
-	else
-		failures[#failures + 1] = name .. "\n" .. err
-	end
-end
+local T = MiniTest.new_set()
 
 local action_palette = require("action_palette")
 
-test("lifecycle defaults are copied and rejected setup is non-mutating", function()
+T["lifecycle defaults are copied and rejected setup is non-mutating"] = function()
 	local defaults = action_palette.effective_config()
 	equal({ target_default = "exact", unavailable = "hide" }, defaults)
 	assert(action_palette.status().configured == false)
@@ -42,7 +21,7 @@ test("lifecycle defaults are copied and rejected setup is non-mutating", functio
 	local ok, err = pcall(action_palette.setup, { unknown = true })
 	assert(not ok and tostring(err):find("unknown option", 1, true), tostring(err))
 	equal(before, action_palette.status(), "rejected setup mutated the default registry")
-end)
+end
 
 local function catalog(when)
 	return {
@@ -57,7 +36,7 @@ local function catalog(when)
 	}
 end
 
-test("schema accepts only exact ActionTarget and catalog fields", function()
+T["schema accepts only exact ActionTarget and catalog fields"] = function()
 	local target = action_palette.capture_target()
 	assert(action_palette.schema.action_target(target))
 	local injected = vim.deepcopy(target)
@@ -74,9 +53,9 @@ test("schema accepts only exact ActionTarget and catalog fields", function()
 	with_callback[1].items[1].run = callback
 	sections, sections_err = action_palette.schema.catalog(with_callback)
 	assert(not sections and sections_err:find("unknown key", 1, true))
-end)
+end
 
-test("capture and revalidation fail closed for changed content and cursor", function()
+T["capture and revalidation fail closed for changed content and cursor"] = function()
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_set_current_buf(buf)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two" })
@@ -91,9 +70,9 @@ test("capture and revalidation fail closed for changed content and cursor", func
 	vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "changed" })
 	local changed, changed_err = action_palette.revalidate_target(target)
 	assert(not changed and changed_err:find("buffer changed", 1, true))
-end)
+end
 
-test("availability is filtered and revalidated immediately before execution", function()
+T["availability is filtered and revalidated immediately before execution"] = function()
 	local allowed = true
 	local executions = 0
 	local registry = action_palette.new({
@@ -124,9 +103,9 @@ test("availability is filtered and revalidated immediately before execution", fu
 	assert(not ok and err:find("no longer available", 1, true))
 	equal(0, executions, "unavailable action executed")
 	assert(not run(), "consumed unavailable action ran twice")
-end)
+end
 
-test("structured availability exposes reasons and callback errors only when configured", function()
+T["structured availability exposes reasons and callback errors only when configured"] = function()
 	local registry = action_palette.new({ unavailable = "show" })
 	local current = "reason"
 	registry:register_catalog(catalog(), {
@@ -167,9 +146,9 @@ test("structured availability exposes reasons and callback errors only when conf
 		}
 	)
 	equal(1, #hidden:sections(context, "palette")[1].items, "default hide exposed unavailable action")
-end)
+end
 
-test("action target policies exact, buffer, window, and none are enforced independently", function()
+T["action target policies exact, buffer, window, and none are enforced independently"] = function()
 	local executions = {}
 	local registry = action_palette.new()
 	local sections = catalog()
@@ -209,9 +188,9 @@ test("action target policies exact, buffer, window, and none are enforced indepe
 		end, executions)
 	)
 	assert(executions[3].target == nil, "none target leaked a captured target")
-end)
+end
 
-test("confirmation is intrinsic and a bound callback executes at most once", function()
+T["confirmation is intrinsic and a bound callback executes at most once"] = function()
 	local prompts = {}
 	local decision
 	local executions = {}
@@ -241,9 +220,9 @@ test("confirmation is intrinsic and a bound callback executes at most once", fun
 	decision(true)
 	decision(true)
 	equal({ { id = "sample.confirm", surface = "context" } }, executions, "exactly-once execution")
-end)
+end
 
-test("confirmation accepts only an explicit boolean true", function()
+T["confirmation accepts only an explicit boolean true"] = function()
 	local decision
 	local executions = 0
 	local registry = action_palette.new({
@@ -266,9 +245,9 @@ test("confirmation accepts only an explicit boolean true", function()
 	decision("yes")
 	decision(true)
 	equal(0, executions, "truthy non-boolean confirmation bypassed explicit acceptance")
-end)
+end
 
-test("confirmation revalidates the target again immediately before execution", function()
+T["confirmation revalidates the target again immediately before execution"] = function()
 	local decision
 	local executions = 0
 	local notifications = {}
@@ -297,9 +276,9 @@ test("confirmation revalidates the target again immediately before execution", f
 	decision(true)
 	equal(0, executions, "changed target executed after confirmation")
 	assert(notifications[1]:find("buffer changed", 1, true), "target drift was not reported")
-end)
+end
 
-test("confirmation fails closed without a host presentation adapter", function()
+T["confirmation fails closed without a host presentation adapter"] = function()
 	local executions = 0
 	local notification
 	local registry = action_palette.new({
@@ -322,9 +301,9 @@ test("confirmation fails closed without a host presentation adapter", function()
 	assert(not ok and err == "Confirmation adapter is unavailable", "missing confirmation adapter did not fail closed")
 	equal(0, executions, "confirmed action executed without a host presentation adapter")
 	equal(err, notification, "missing confirmation adapter was not reported")
-end)
+end
 
-test("adapter failures are contained and consume the bound invocation", function()
+T["adapter failures are contained and consume the bound invocation"] = function()
 	local executions = 0
 	local notifications = {}
 	local events = {}
@@ -402,9 +381,9 @@ test("adapter failures are contained and consume the bound invocation", function
 	assert(not ok and err:find("Confirmation adapter failed", 1, true), tostring(err))
 	equal(0, executions, "failed confirmation adapter reached execution")
 	assert(not run(), "failed confirmation adapter left a reusable invocation")
-end)
+end
 
-test("a confirmation exception after resolving is still reported once", function()
+T["a confirmation exception after resolving is still reported once"] = function()
 	local executions = 0
 	local events = {}
 	local notifications = {}
@@ -443,9 +422,9 @@ test("a confirmation exception after resolving is still reported once", function
 	)
 	equal(1, #notifications, "late confirmation failure was not reported exactly once")
 	assert(not run(), "late confirmation failure left a reusable invocation")
-end)
+end
 
-test("plugin setup creates no global commands, mappings, or config imports", function()
+T["plugin setup creates no global commands, mappings, or config imports"] = function()
 	local commands_before = vim.api.nvim_get_commands({ builtin = false })
 	local maps_before = vim.api.nvim_get_keymap("n")
 	action_palette.setup({ notify = function() end })
@@ -454,9 +433,9 @@ test("plugin setup creates no global commands, mappings, or config imports", fun
 	for name in pairs(package.loaded) do
 		assert(not name:match("^config%."), "plugin imported host module " .. name)
 	end
-end)
+end
 
-test("repeated setup replaces state and teardown is deterministic", function()
+T["repeated setup replaces state and teardown is deterministic"] = function()
 	action_palette.setup({ target_default = "buffer", unavailable = "show" })
 	action_palette.register_catalog(catalog(), {
 		supports = function()
@@ -481,14 +460,6 @@ test("repeated setup replaces state and teardown is deterministic", function()
 	assert(action_palette.teardown())
 	assert(action_palette.status().configured == false)
 	equal({ target_default = "exact", unavailable = "hide" }, action_palette.effective_config())
-end)
-
-if #failures > 0 then
-	for _, failure in ipairs(failures) do
-		vim.api.nvim_err_writeln(failure)
-	end
-	vim.cmd("cquit")
 end
 
-print(string.format("action_palette_spec: %d tests passed", count))
-vim.cmd("quitall!")
+return T
