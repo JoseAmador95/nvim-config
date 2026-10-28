@@ -5,6 +5,7 @@ local M = {}
 
 local deferred = require("config.deferred")
 local diagram_image = require("config.diagram_image")
+local diagram_viewport = require("config.diagram_viewport")
 local local_config = require("config.local_config")
 local markdown_view = require("config.markdown_view")
 local code_review = require("config.code_review")
@@ -72,9 +73,19 @@ local function make_float(title, session)
 	return { buf = buf, win = win, width = width, height = height }
 end
 
+local function stop_refinement(presentation)
+	local timer = presentation.refine_timer
+	presentation.refine_timer = nil
+	if timer and not timer:is_closing() then
+		timer:stop()
+		timer:close()
+	end
+end
+
 local function close_float(presentation)
 	presentation.closed = true
 	presentation.generation = (presentation.generation or 0) + 1
+	stop_refinement(presentation)
 	local cancelled = true
 	for _, name in ipairs({ "pending_frame", "displayed_frame" }) do
 		local frame = presentation[name]
@@ -91,6 +102,11 @@ local function close_float(presentation)
 	if not cancelled then
 		return false
 	end
+	if presentation.resize_autocmd then
+		pcall(vim.api.nvim_del_autocmd, presentation.resize_autocmd)
+		presentation.resize_autocmd = nil
+	end
+	diagram_viewport.close(presentation)
 	if presentation.placement then
 		pcall(function()
 			presentation.placement:close()
@@ -207,11 +223,14 @@ end
 
 local function place_image(presentation, path, full)
 	local geometry = image_geometry(presentation, full)
-	local padding = {}
-	for _ = 1, geometry.top + geometry.height - 1 do
-		padding[#padding + 1] = ""
+	-- Keep the preview anchor until the sharp placement is ready.
+	if not presentation.preview then
+		local padding = {}
+		for _ = 1, geometry.top + geometry.height - 1 do
+			padding[#padding + 1] = ""
+		end
+		set_float_lines(presentation.buf, padding)
 	end
-	set_float_lines(presentation.buf, padding)
 	local placement = Snacks.image.placement.new(presentation.buf, path, {
 		inline = true,
 		conceal = true,
@@ -220,6 +239,11 @@ local function place_image(presentation, path, full)
 		max_width = geometry.width,
 		max_height = geometry.height,
 		auto_resize = true,
+		on_update = presentation.preview and function(current)
+			if not presentation.closed and presentation.placement == current then
+				diagram_viewport.hide(presentation)
+			end
+		end,
 	})
 	if presentation.placement then
 		presentation.placement:close()
@@ -227,8 +251,29 @@ local function place_image(presentation, path, full)
 	presentation.placement = placement
 end
 
+local function preview_viewport(presentation)
+	if not diagram_viewport.supported() then
+		return false
+	end
+	local geometry = image_geometry(presentation)
+	local width, height = scaled_image_size(presentation, geometry)
+	local rows = vim.api.nvim_win_get_height(presentation.win)
+	local columns = vim.api.nvim_win_get_width(presentation.win)
+	if
+		presentation.placement
+		or presentation.preview_columns ~= columns
+		or vim.api.nvim_buf_line_count(presentation.buf) ~= rows
+	then
+		set_float_lines(presentation.buf, vim.fn["repeat"]({ string.rep(" ", columns) }, rows))
+		presentation.preview_columns = columns
+	end
+	return diagram_viewport.show(presentation, geometry, width, height)
+end
+
 local function replace_frame(presentation, path, frame)
-	place_image(presentation, path, frame ~= nil)
+	if frame or not preview_viewport(presentation) then
+		place_image(presentation, path, frame ~= nil)
+	end
 	local previous = presentation.displayed_frame
 	presentation.displayed_frame = frame
 	if previous then
@@ -238,24 +283,7 @@ local function replace_frame(presentation, path, frame)
 	image_footer(presentation, false)
 end
 
-local function render_viewport(presentation)
-	presentation.generation = presentation.generation + 1
-	local generation = presentation.generation
-	local previous = presentation.pending_frame
-	if previous then
-		local cancelled, err = previous:cancel("diagram viewport changed")
-		if cancelled == nil then
-			presentation.viewport = vim.deepcopy(presentation.shown_viewport)
-			image_footer(presentation, false)
-			notify("Could not stop diagram frame: " .. tostring(err), vim.log.levels.ERROR)
-			return
-		end
-	end
-	presentation.pending_frame = nil
-	if presentation.viewport.zoom == 1 then
-		replace_frame(presentation, presentation.path)
-		return
-	end
+local function refine_viewport(presentation, generation)
 	local geometry = image_geometry(presentation)
 	local viewport = presentation.viewport
 	local metadata = vim.deepcopy(presentation.request.metadata)
@@ -271,6 +299,7 @@ local function render_viewport(presentation)
 		presenter = "image_frame",
 		kind = presentation.request.kind,
 		source = presentation.request.source,
+		plantuml_profile = presentation.request.plantuml_profile,
 		metadata = metadata,
 		on_done = function(result, err, session)
 			completed = true
@@ -299,6 +328,42 @@ local function render_viewport(presentation)
 	elseif not completed then
 		presentation.pending_frame = frame
 	end
+end
+
+local function render_viewport(presentation, resized)
+	presentation.generation = presentation.generation + 1
+	local generation = presentation.generation
+	stop_refinement(presentation)
+	local preview = preview_viewport(presentation)
+	if preview then
+		presentation.shown_viewport = vim.deepcopy(presentation.viewport)
+	end
+	local previous = presentation.pending_frame
+	if previous then
+		local cancelled, err = previous:cancel("diagram viewport changed")
+		if cancelled == nil then
+			presentation.viewport = vim.deepcopy(presentation.shown_viewport)
+			image_footer(presentation, false)
+			notify("Could not stop diagram frame: " .. tostring(err), vim.log.levels.ERROR)
+			return
+		end
+	end
+	presentation.pending_frame = nil
+	if presentation.viewport.zoom == 1 and not resized then
+		replace_frame(presentation, presentation.path)
+		return
+	end
+	if not preview then
+		refine_viewport(presentation, generation)
+		return
+	end
+	image_footer(presentation, true)
+	presentation.refine_timer = (setup_options.defer or vim.defer_fn)(function()
+		presentation.refine_timer = nil
+		if not presentation.closed and generation == presentation.generation then
+			refine_viewport(presentation, generation)
+		end
+	end, 100)
 end
 
 local function pan_axis(position, delta, page, content)
@@ -333,6 +398,35 @@ local function image_presenter()
 			presentation.generation = 0
 			presentation.viewport = { zoom = 1, x = 0.5, y = 0.5 }
 			presentation.shown_viewport = vim.deepcopy(presentation.viewport)
+			presentation.resize_autocmd = vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
+				callback = function(event)
+					if presentation.closed or not vim.api.nvim_win_is_valid(presentation.win) then
+						return true
+					end
+					if event.event == "VimResized" then
+						local width = math.max(1, math.floor(vim.o.columns * 0.9))
+						local height = math.max(1, math.floor(vim.o.lines * 0.9))
+						vim.api.nvim_win_set_config(presentation.win, {
+							width = width,
+							height = height,
+							row = math.max(0, math.floor((vim.o.lines - height) / 2)),
+							col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+						})
+					end
+					if presentation.path then
+						local geometry = image_geometry(presentation)
+						local size = { geometry.pixel_width, geometry.pixel_height }
+						if not vim.deep_equal(presentation.size, size) then
+							presentation.size = size
+							local width, height = scaled_image_size(presentation, geometry)
+							local viewport = presentation.viewport
+							viewport.x = pan_axis(viewport.x, 0, geometry.pixel_width, width)
+							viewport.y = pan_axis(viewport.y, 0, geometry.pixel_height, height)
+							render_viewport(presentation, true)
+						end
+					end
+				end,
+			})
 			for _, lhs in ipairs({ "+", "=" }) do
 				usage_map("n", lhs, function()
 					move_viewport(presentation, presentation.viewport.zoom * 1.5)
@@ -386,6 +480,8 @@ local function image_presenter()
 			assert(dimensions and dimensions.width > 0 and dimensions.height > 0, "invalid rendered image dimensions")
 			presentation.dimensions = dimensions
 			presentation.path = result.path
+			local geometry = image_geometry(presentation)
+			presentation.size = { geometry.pixel_width, geometry.pixel_height }
 			replace_frame(presentation, result.path)
 		end,
 		error = present_error,
@@ -395,6 +491,10 @@ end
 
 local function valid_png(data)
 	return type(data) == "string" and data:sub(1, 8) == "\137PNG\r\n\26\n"
+end
+
+local function valid_svg(data)
+	return type(data) == "string" and data:find("<svg[%s/>]") ~= nil
 end
 
 local function image_conversion_argv(metadata)
@@ -445,7 +545,11 @@ local function register_renderers()
 				return {
 					extension = "png",
 					stages = {
-						{ argv = { request.metadata.executables.mmdflux, "-f", "svg" }, text = true },
+						{
+							argv = { request.metadata.executables.mmdflux, "-f", "svg" },
+							text = true,
+							cache = { extension = "svg", validate = valid_svg },
+						},
 						{
 							argv = image_conversion_argv(request.metadata),
 						},
@@ -469,7 +573,11 @@ local function register_renderers()
 				return {
 					extension = "png",
 					stages = {
-						{ argv = { request.metadata.executables.plantuml, "-tsvg", "-pipe" }, text = true },
+						{
+							argv = { request.metadata.executables.plantuml, "-tsvg", "-pipe" },
+							text = true,
+							cache = { extension = "svg", validate = valid_svg },
+						},
 						{
 							argv = image_conversion_argv(request.metadata),
 						},

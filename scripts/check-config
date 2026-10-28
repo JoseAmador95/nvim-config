@@ -344,6 +344,10 @@ run_check "hex_startup_spec (text)" env NVIM_CONFIG_TEST="$repo_root/tests/hex_s
 	NVIM_CONFIG_HEX_FILE="$hex_text" NVIM_CONFIG_HEX_EXPECTED=text "$NVIM_BIN" --headless -i NONE \
 	--cmd 'lua dofile(vim.env.NVIM_CONFIG_ROOT .. "/tests/runner.lua")' -u "$repo_root/init.lua" "$hex_text"
 run_config_test load_contract_spec "$repo_root/tests/load_contract_spec.lua"
+run_config_test diagram_viewport_profile_spec "$repo_root/tests/diagram_viewport_profile_spec.lua"
+run_check "diagram_viewport_profile_spec (pager)" env NVIM_APPNAME=nvimpager \
+	NVIM_CONFIG_TEST="$repo_root/tests/diagram_viewport_profile_spec.lua" "$NVIM_BIN" --headless -i NONE \
+	--cmd 'lua dofile(vim.env.NVIM_CONFIG_ROOT .. "/tests/runner.lua")' -u "$repo_root/init.lua" "$repo_root/AGENTS.md"
 run_config_test oil_git_status_spec "$repo_root/tests/oil_git_status_spec.lua"
 run_redraw_profile_test full full current-line "$check_tmp/no-local-config.lua" SSH_TTY= SSH_CONNECTION=
 run_redraw_profile_test low-bandwidth low-bandwidth off "$low_bandwidth_config" SSH_TTY= SSH_CONNECTION=

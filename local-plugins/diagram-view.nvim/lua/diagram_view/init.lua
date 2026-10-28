@@ -269,6 +269,17 @@ local function validate_plan(plan)
 			env[name] = value
 		end
 		stages[index] = { argv = argv, env = env, text = stage.text == true }
+		if stage.cache ~= nil then
+			if
+				type(stage.cache) ~= "table"
+				or type(stage.cache.extension) ~= "string"
+				or not stage.cache.extension:match("^[%w%-]+$")
+				or (stage.cache.validate ~= nil and type(stage.cache.validate) ~= "function")
+			then
+				return nil, ("renderer stage %d has invalid cache options"):format(index)
+			end
+			stages[index].cache = { extension = stage.cache.extension, validate = stage.cache.validate }
+		end
 	end
 	if plan.validate ~= nil and type(plan.validate) ~= "function" then
 		return nil, "renderer validate must be a function"
@@ -295,9 +306,12 @@ local function complete_request(session, result, err)
 	return true
 end
 
-local function plan_key(renderer_name, request, plan, security_profile)
+local function plan_key(renderer_name, request, plan, security_profile, stage_index)
 	local stages = {}
 	for index, stage in ipairs(plan.stages) do
+		if stage_index and index > stage_index then
+			break
+		end
 		stages[index] = {
 			argv = stage.argv,
 			env = stage.env,
@@ -306,7 +320,8 @@ local function plan_key(renderer_name, request, plan, security_profile)
 		}
 	end
 	local material, err = encode({
-		version = "diagram-cache-v3",
+		version = stage_index and "diagram-stage-cache-v1" or "diagram-cache-v3",
+		extension = stage_index and plan.stages[stage_index].cache.extension or nil,
 		renderer = renderer_name,
 		kind = request.kind,
 		source = request.source,
@@ -318,6 +333,21 @@ local function plan_key(renderer_name, request, plan, security_profile)
 		return nil, err
 	end
 	return vim.fn.sha256(material)
+end
+
+local function read_output(key, extension, validate)
+	local data, err, path, identity = cache.read(key, extension, validate)
+	if data then
+		return data, nil, path
+	end
+	if err and path then
+		local removed, remove_err = cache.remove(path, identity)
+		if not removed then
+			notify("invalid diagram cache entry was preserved: " .. tostring(remove_err), vim.log.levels.WARN)
+		end
+	elseif err then
+		return nil, "could not read diagram cache: " .. tostring(err)
+	end
 end
 
 local function present_error(session, message)
@@ -359,6 +389,28 @@ local function deliver(session, result)
 	complete_request(session, session.result, nil)
 end
 
+function Session:_advance_stage(generation, output)
+	self.stage_input = output
+	self.stage_index = self.stage_index + 1
+	if self.stage_index <= #self.plan.stages then
+		self:_start_stage(generation)
+		return
+	end
+	if not valid_output(self.plan, output) then
+		present_error(self, "diagram renderer returned invalid output")
+		return
+	end
+	local path, write_err = cache.write(self.cache_key, self.plan.extension, output)
+	if not path then
+		present_error(self, "could not cache diagram output: " .. tostring(write_err))
+		return
+	end
+	deliver(self, { data = output, path = path, extension = self.plan.extension, cached = false })
+	state.options.schedule(function()
+		cache.prune()
+	end)
+end
+
 function Session:_finish_stage(generation, result)
 	if self.closed or generation ~= self.generation then
 		return
@@ -388,25 +440,19 @@ function Session:_finish_stage(generation, result)
 		)
 		return
 	end
-	self.stage_input = output
-	self.stage_index = self.stage_index + 1
-	if self.stage_index <= #self.plan.stages then
-		self:_start_stage(generation)
-		return
+	local stage_cache = self.plan.stages[self.stage_index].cache
+	if stage_cache then
+		if not valid_output(stage_cache, output) then
+			present_error(self, "diagram renderer stage returned invalid output")
+			return
+		end
+		local path, err = cache.write(self.stage_keys[self.stage_index], stage_cache.extension, output)
+		if not path then
+			present_error(self, "could not cache diagram stage: " .. tostring(err))
+			return
+		end
 	end
-	if not valid_output(self.plan, output) then
-		present_error(self, "diagram renderer returned invalid output")
-		return
-	end
-	local path, write_err = cache.write(self.cache_key, self.plan.extension, output)
-	if not path then
-		present_error(self, "could not cache diagram output: " .. tostring(write_err))
-		return
-	end
-	deliver(self, { data = output, path = path, extension = self.plan.extension, cached = false })
-	state.options.schedule(function()
-		cache.prune()
-	end)
+	self:_advance_stage(generation, output)
 end
 
 function Session:_start_stage(generation)
@@ -414,6 +460,19 @@ function Session:_start_stage(generation)
 		return
 	end
 	local stage = self.plan.stages[self.stage_index]
+	if stage.cache then
+		local output, err = read_output(self.stage_keys[self.stage_index], stage.cache.extension, function(data)
+			return #data <= state.options.config.max_stage_output_bytes and valid_output(stage.cache, data)
+		end)
+		if err then
+			present_error(self, err)
+			return
+		end
+		if output then
+			self:_advance_stage(generation, output)
+			return
+		end
+	end
 	local env = copy(stage.env)
 	if self.security_profile then
 		env.PLANTUML_SECURITY_PROFILE = self.security_profile
@@ -497,6 +556,10 @@ function Session:cancel(reason)
 	self.active = nil
 	cache.release(self.retained)
 	self.retained = nil
+	for _, path in pairs(self.retained_stages) do
+		cache.release(path)
+	end
+	self.retained_stages = {}
 	state.sessions[self.id] = nil
 	emit("cancelled", self, { reason = self.cancel_reason })
 	complete_request(self, nil, self.cancel_reason)
@@ -742,6 +805,17 @@ function M.open(request)
 	if not cache_key then
 		return nil, key_err
 	end
+	local stage_keys, stage_paths = {}, {}
+	for index, stage in ipairs(plan.stages) do
+		if stage.cache then
+			local key, err = plan_key(request.renderer, normalized_request, plan, security_profile, index)
+			if not key then
+				return nil, err
+			end
+			stage_keys[index] = key
+			stage_paths[index] = assert(cache.path(key, stage.cache.extension))
+		end
+	end
 
 	state.next_session = state.next_session + 1
 	local session = setmetatable({
@@ -756,6 +830,8 @@ function M.open(request)
 		request = normalized_request,
 		plan = plan,
 		cache_key = cache_key,
+		stage_keys = stage_keys,
+		retained_stages = stage_paths,
 		security_profile = security_profile,
 		stage_index = 1,
 		stage_input = normalized_request.source,
@@ -767,22 +843,21 @@ function M.open(request)
 		return nil, "diagram presenter failed to open: " .. tostring(presentation)
 	end
 	session.presentation = presentation
+	-- Keep intermediates live even when the final PNG is already cached.
+	for _, path in pairs(stage_paths) do
+		cache.retain(path)
+	end
 	emit("opened", session)
 
-	local cached, read_err, path, cache_identity = cache.read(cache_key, plan.extension, function(data)
+	local cached, read_err, path = read_output(cache_key, plan.extension, function(data)
 		return valid_output(plan, data)
 	end)
 	if cached then
 		deliver(session, { data = cached, path = path, extension = plan.extension, cached = true })
 		return session
 	end
-	if read_err and path then
-		local removed, remove_err = cache.remove(path, cache_identity)
-		if not removed then
-			notify("invalid diagram cache entry was preserved: " .. tostring(remove_err), vim.log.levels.WARN)
-		end
-	elseif read_err then
-		present_error(session, "could not read diagram cache: " .. tostring(read_err))
+	if read_err then
+		present_error(session, read_err)
 		return session
 	end
 	session:_start_stage(session.generation)

@@ -365,9 +365,17 @@ and `-` zoom between 100% and 800%; `0` fits the whole diagram. Move around the
 enlarged image with `h`/`j`/`k`/`l` or the arrow keys. `y` copies the whole
 diagram, and `q` or Escape closes the window. Zoom uses the full float as its
 viewport while preserving the diagram's aspect ratio; an axis that still fits
-stays centered. Zoomed views render from the
-original diagram, preserving readable text; the previous view stays visible
-while the new one renders. `:LogWatchCurrentFile` follows
+stays centred.
+In detected Ghostty 1.4+ and Kitty 0.31+ terminals, including through tmux, zoom and pan immediately crop and scale
+the already uploaded image.
+This preview can look softer while moving.
+After 100 ms without movement, refinement starts and replaces the preview when the sharp viewport is ready.
+The viewer reuses the prepared SVG instead of running Mermaid or PlantUML again for each viewport.
+A failed refinement leaves the preview visible and reports the error.
+Other terminals, or terminals whose version cannot be detected, keep the previous view visible until the new render
+is ready.
+`y` always copies the complete original image, including while a preview is visible.
+`:LogWatchCurrentFile` follows
 files incrementally, preserves partial lines, survives rotation, and refuses
 to overwrite unsaved buffer changes. Automatic log highlighting applies only
 to the `log` filetype and `*.log`; ordinary `*.txt` files remain untouched.

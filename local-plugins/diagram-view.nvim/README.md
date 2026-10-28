@@ -34,6 +34,14 @@ and ranged commands. A request `on_done` callback is completed at most once on
 presentation, failure, or successful cancellation, including runner exceptions
 and duplicate late completions.
 
+A renderer stage may set `cache = { extension = "svg", validate = function(data) ... end }`
+to reuse an intermediate result across requests.
+Its identity includes the source, preceding stages, executable signals and effective security profile,
+so changes confined to later rasterisation arguments reuse the SVG.
+Intermediate entries use the same private, bounded cache as final output and remain retained while their sessions
+are live.
+They are validated on both production and retrieval; cancelled work cannot publish late results.
+
 The repository host adapter resolves managed `mmdflux` and PlantUML commands
 through `verified-tools.nvim` immediately before an explicit render. This
 resolution stays deferred until `:DiagramShow`; it never installs or repairs a

@@ -191,11 +191,50 @@ T["managed tool resolution stays deferred until an explicit render"] = function(
 	assert(ok, err)
 end
 
-local function with_image_viewer(callback)
+local function with_image_viewer(callback, options)
+	options = options or {}
 	local original_snacks = _G.Snacks
 	local original_notify = vim.notify
 	local jobs, placements = {}, {}
 	local context = { jobs = jobs, placements = placements }
+	local timers, images = {}, {}
+	context.requests = {}
+	context.uploads = 0
+	local next_id = 0
+	local function new_image(path)
+		if not images[path] then
+			context.uploads = context.uploads + 1
+			images[path] = {
+				id = context.uploads + 100,
+				ready = function()
+					return true
+				end,
+				place = function(_, placement)
+					if not placement.id then
+						next_id = next_id + 1
+						placement.id = next_id
+					end
+				end,
+				del = function() end,
+			}
+		end
+		return images[path]
+	end
+	context.idle = function()
+		for _, timer in ipairs(timers) do
+			if timer.ms == 100 and not timer.closed then
+				timer.closed = true
+				timer.callback()
+			end
+		end
+	end
+	context.present = function()
+		for _, placement in ipairs(placements) do
+			if not placement.closed and placement.opts.on_update then
+				placement.opts.on_update(placement)
+			end
+		end
+	end
 	local adapter = assert(package.loaded["config.diagram"])
 	local function complete(job, output, code)
 		job.callback({ code = code or 0, stdout = output or "", stderr = code and "fixture failure" or "" })
@@ -209,18 +248,54 @@ local function with_image_viewer(callback)
 					return true
 				end,
 				terminal = {
+					env = function()
+						return { placeholders = options.placeholders == true }
+					end,
+					detect = function(callback)
+						callback({ terminal = options.terminal or "ghostty", version = options.version or "1.4.0" })
+					end,
+					request = function(request)
+						context.requests[#context.requests + 1] = vim.deepcopy(request)
+					end,
 					size = function()
 						return { cell_width = 10, cell_height = 20 }
 					end,
 				},
+				image = { new = new_image },
 				util = {
 					dim = function()
 						return context.dimensions or { width = 600, height = 300 }
 					end,
 				},
 				placement = {
-					new = function(buf, path, options)
-						local placement = { buf = buf, path = path, options = options }
+					new = function(buf, path, opts)
+						local placement = {
+							buf = buf,
+							path = path,
+							options = opts,
+							opts = opts,
+							img = new_image(path),
+						}
+						placement.img:place(placement)
+						placement.ready = function()
+							return not placement.closed
+						end
+						placement.wins = function()
+							return vim.fn.win_findbuf(buf)
+						end
+						placement.render_grid = function(_, loc)
+							if placement.hidden then
+								placement.grid = nil
+							else
+								placement.grid = vim.deepcopy(loc)
+							end
+						end
+						placement.show = function()
+							placement.hidden = false
+						end
+						placement.hide = function()
+							placement.hidden = true
+						end
 						placement.close = function()
 							placement.closed = true
 						end
@@ -250,6 +325,18 @@ local function with_image_viewer(callback)
 			schedule = function(done)
 				done()
 			end,
+			defer = function(done, ms)
+				local timer = { callback = done, ms = ms }
+				timer.stop = function() end
+				timer.close = function()
+					timer.closed = true
+				end
+				timer.is_closing = function()
+					return timer.closed == true
+				end
+				timers[#timers + 1] = timer
+				return timer
+			end,
 			notify = function() end,
 		}))
 		local buf = vim.api.nvim_create_buf(false, true)
@@ -267,9 +354,11 @@ local function with_image_viewer(callback)
 		end
 		context.finish = function()
 			local source_job = jobs[#jobs]
-			complete(source_job, "<svg/>")
+			if source_job.argv[1] == "/verified/mmdflux" then
+				complete(source_job, "<svg/>")
+			end
 			local raster_job = jobs[#jobs]
-			assert(raster_job ~= source_job, "renderer never reached raster stage")
+			equal("/verified/rsvg-convert", raster_job.argv[1], "renderer never reached raster stage")
 			complete(raster_job, "\137PNG\r\n\26\n" .. table.concat(raster_job.argv, "|"))
 			return raster_job
 		end
@@ -281,6 +370,136 @@ local function with_image_viewer(callback)
 	_G.Snacks = original_snacks
 	vim.notify = original_notify
 	assert(ok, err)
+end
+
+T["placeholder zoom and pan respond before rendering and refine only after a pause"] = function()
+	with_image_viewer(function(context)
+		context.finish()
+		local presentation = context.presentation
+		local base = presentation.preview
+		local original = presentation.path
+		equal(2, context.uploads)
+		context.press("+")
+		for _ = 1, 20 do
+			context.press("l")
+			context.press("h")
+		end
+		equal(2, #context.jobs, "input started renderer processes before the pause")
+		equal(2, context.uploads, "pan retransmitted the base image")
+		equal(1, #context.placements, "pan recreated the placement")
+		local crop = context.requests[#context.requests]
+		equal(presentation.preview_source.id, crop.i)
+		equal(presentation.preview_owner.id, crop.p)
+		equal(base.img.id, crop.P)
+		equal(base.id, crop.Q)
+		assert(not crop.U, "Ghostty ignores cropping on virtual placements")
+		assert(crop.w < presentation.dimensions.width, "preview did not crop the image")
+		context.idle()
+		equal(3, #context.jobs, "the pause did not run exactly one rasterizer")
+		equal("/verified/rsvg-convert", context.jobs[3].argv[1])
+		equal("<svg/>", context.jobs[3].options.stdin)
+		context.finish()
+		assert(not base.hidden, "preview was hidden before the sharp image was ready")
+		context.present()
+		assert(base.hidden and not base.grid, "sharp image did not hide the preview")
+		context.press("l")
+		assert(not base.hidden and base.grid, "pan did not restore the uploaded preview")
+		equal(3, #context.jobs)
+		equal(3, context.uploads, "pan uploaded another PNG")
+		context.press("0")
+		context.idle()
+		equal(3, #context.jobs, "fit did not cancel the refinement timer")
+		equal(original, presentation.path, "preview changed the whole-diagram clipboard image")
+		context.press("+")
+		context.idle()
+		equal(3, #context.jobs, "cached refinement reran its renderer")
+		assert(presentation.pending_frame == nil, "synchronous cached refinement left pending work")
+	end, { placeholders = true })
+end
+
+T["preview retains the requested view on failure and cancels late work on movement or close"] = function()
+	with_image_viewer(function(context)
+		context.finish()
+		context.press("+")
+		context.idle()
+		local obsolete = context.jobs[#context.jobs]
+		context.press("+")
+		assert(obsolete.killed)
+		local count = #context.placements
+		context.complete(obsolete, "\137PNG\r\n\26\nlate")
+		equal(count, #context.placements, "late raster replaced the current preview")
+		context.idle()
+		context.complete(context.jobs[#context.jobs], "", 1)
+		equal(2.25, context.presentation.viewport.zoom, "refinement failure jumped back to an old viewport")
+		assert(context.presentation.preview.grid)
+		context.press("l")
+		context.idle()
+		local pending = context.jobs[#context.jobs]
+		pending.fail_kill = true
+		context.press("q")
+		assert(vim.api.nvim_win_is_valid(context.presentation.win), "failed cancellation lost its retry UI")
+		pending.fail_kill = false
+		context.press("q")
+		assert(not vim.api.nvim_win_is_valid(context.presentation.win))
+		context.complete(pending, "\137PNG\r\n\26\nlate")
+		context.idle()
+		equal(count, #context.placements, "late work recreated a closed image")
+	end, { placeholders = true })
+end
+
+T["preview geometry keeps centred axes, bounds and the resized viewport"] = function()
+	for _, dimensions in ipairs({ { width = 600, height = 1800 }, { width = 3600, height = 300 } }) do
+		with_image_viewer(function(context)
+			context.dimensions = dimensions
+			context.finish()
+			context.press("+")
+			local presentation = context.presentation
+			local portrait = dimensions.height > dimensions.width
+			local before = #context.requests
+			context.press(portrait and "l" or "j")
+			equal(before, #context.requests, "a fitting axis moved")
+			for _ = 1, 40 do
+				context.press(portrait and "j" or "l")
+			end
+			local crop = context.requests[#context.requests]
+			assert(crop.x >= 0 and crop.x + crop.w <= dimensions.width)
+			assert(crop.y >= 0 and crop.y + crop.h <= dimensions.height)
+			assert(
+				portrait and crop.c < vim.api.nvim_win_get_width(presentation.win)
+					or not portrait and crop.r < vim.api.nvim_win_get_height(presentation.win)
+			)
+			vim.api.nvim_win_set_config(presentation.win, { width = 55, height = 14 })
+			vim.api.nvim_exec_autocmds("WinResized", { modeline = false })
+			crop = context.requests[#context.requests]
+			assert(crop.c <= 55 and crop.r <= 14)
+			equal(14, vim.api.nvim_buf_line_count(presentation.buf))
+			context.press("q")
+			context.idle()
+			equal(2, #context.jobs, "closing did not cancel resized refinement")
+		end, { placeholders = true })
+	end
+end
+
+T["terminal version reports select only compatible relative placements"] = function()
+	for _, case in ipairs({
+		{ "ghostty", "1.3.0", false },
+		{ "ghostty", "unknown", false },
+		{ "kitty(0.30.0)\27\\", "", false },
+		{ "kitty(0.31.0)\27\\", "", true },
+		{ "ghostty", "1.4.0\27\\", true },
+	}) do
+		with_image_viewer(function(context)
+			context.finish()
+			equal(case[3], context.presentation.preview ~= nil)
+			context.press("+")
+			equal(case[3] and 2 or 3, #context.jobs, "incorrect preview or fallback rendering")
+			context.idle()
+			context.finish()
+			if not case[3] then
+				equal(0, #context.requests, "unsupported terminal received a relative placement")
+			end
+		end, { placeholders = true, terminal = case[1], version = case[2] })
+	end
 end
 
 local function argument(argv, name)
@@ -313,7 +532,7 @@ T["image zoom and pan crop the source, cancel obsolete frames, and keep the floa
 		equal("cancelled", obsolete_frame:status().state)
 		assert(not context.placements[1].closed, "old image disappeared while zoom was rendering")
 		local raster = context.finish()
-		equal("graph LR\nA --> B", jobs[#jobs - 1].options.stdin)
+		equal("<svg/>", raster.options.stdin, "viewport did not reuse the prepared SVG")
 		assert(argument(raster.argv, "-w") > argument(raster.argv, "--page-width"))
 		assert(argument(raster.argv, "-h") > argument(raster.argv, "--page-height"))
 		assert(argument(raster.argv, "--left") < 0 and argument(raster.argv, "--top") < 0)

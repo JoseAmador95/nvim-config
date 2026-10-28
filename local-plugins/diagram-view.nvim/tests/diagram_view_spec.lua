@@ -91,6 +91,118 @@ local function presenter(log, name)
 	}))
 end
 
+local function staged_renderer()
+	assert(diagram.register_renderer("staged", {
+		plantuml = true,
+		build = function(request)
+			return {
+				extension = "png",
+				stages = {
+					{
+						argv = { "compiler", request.metadata.option or "default" },
+						text = true,
+						cache = {
+							extension = "svg",
+							validate = function(data)
+								return data:find("<svg", 1, true) ~= nil
+							end,
+						},
+					},
+					{ argv = { "rasterizer", tostring(request.metadata.zoom or 1) } },
+				},
+			}
+		end,
+	}))
+	presenter({})
+end
+
+local function staged_request(source, zoom, option, profile)
+	return {
+		renderer = "staged",
+		presenter = "test",
+		kind = "plantuml",
+		source = source or "A",
+		metadata = { zoom = zoom or 1, option = option },
+		plantuml_profile = profile,
+	}
+end
+
+T["cached stages reuse source across viewports but honour source, tool options and security"] = function()
+	local jobs = {}
+	setup({
+		spawn = function(argv, options, done)
+			jobs[#jobs + 1] = { argv = argv, input = options.stdin }
+			done({ code = 0, stdout = argv[1] == "compiler" and "<svg>prepared</svg>" or "PNG" })
+			return { kill = function() end }
+		end,
+		plantuml_policy = function()
+			return "local-trusted"
+		end,
+	})
+	staged_renderer()
+	assert(diagram.open(staged_request()))
+	assert(diagram.open(staged_request("A", 2)))
+	equal(3, #jobs, "a different viewport recompiled the source")
+	equal({ argv = { "rasterizer", "2" }, input = "<svg>prepared</svg>" }, jobs[3])
+	assert(diagram.open(staged_request("A", 2)))
+	equal(3, #jobs, "a cached final result still ran stages")
+	assert(diagram.open(staged_request("B", 2)))
+	assert(diagram.open(staged_request("A", 2, "different")))
+	assert(diagram.open(staged_request("A", 2, nil, "ALLOWLIST")))
+	equal(9, #jobs, "a changed source, option or trust profile reused stale SVG")
+end
+
+T["stage cache remains live through pruning and is released with its session"] = function()
+	local root = cache_root()
+	local compiled = 0
+	setup({
+		cache_root = root,
+		cache = { max_bytes = 1 },
+		spawn = function(argv, _, done)
+			if argv[1] == "compiler" then
+				compiled = compiled + 1
+			end
+			done({ code = 0, stdout = argv[1] == "compiler" and "<svg/>" or "PNG" })
+			return { kill = function() end }
+		end,
+	})
+	staged_renderer()
+	local base = assert(diagram.open(staged_request()))
+	local reopened = assert(diagram.open(staged_request()))
+	assert(base:cancel())
+	assert(cache.prune())
+	equal(1, #vim.fn.glob(root .. "/*.svg", false, true), "a cached PNG did not retain its SVG")
+	local frame = assert(diagram.open(staged_request("A", 2)))
+	equal(1, compiled)
+	assert(frame:cancel())
+	assert(cache.prune())
+	equal(1, #vim.fn.glob(root .. "/*.svg", false, true), "pruning removed a live intermediate")
+	assert(reopened:cancel())
+	assert(cache.prune())
+	equal({}, vim.fn.glob(root .. "/*", false, true), "cancelled sessions pinned cache entries")
+end
+
+T["invalid or late stage output cannot populate the intermediate cache"] = function()
+	local root = cache_root()
+	local done
+	setup({
+		cache_root = root,
+		spawn = function(_, _, callback)
+			done = callback
+			return { kill = function() end }
+		end,
+	})
+	staged_renderer()
+	local invalid = assert(diagram.open(staged_request()))
+	done({ code = 0, stdout = "not SVG" })
+	equal("error", invalid:status().state)
+	equal({}, vim.fn.glob(root .. "/*", false, true))
+	local cancelled = assert(diagram.open(staged_request()))
+	assert(cancelled:cancel())
+	done({ code = 0, stdout = "<svg/>" })
+	equal({}, vim.fn.glob(root .. "/*", false, true), "late stage output was cached")
+end
+
 T["extracts homogeneous fences, explicit selections, and whole buffers"] = function()
 	local fences = assert(diagram.find_fences({
 		"````Mermaid title",
