@@ -143,6 +143,9 @@ end
 T["ReviewOpen parser keeps the exact native scope vocabulary"] = function()
 	assert(vim.deep_equal(review._parse_open({}), { kind = "branch" }))
 	assert(vim.deep_equal(review._parse_open({ "working" }), { kind = "working" }))
+	assert(vim.deep_equal(review._parse_open({ "all" }), { kind = "all" }))
+	assert(vim.deep_equal(review._parse_open({ "all", "HEAD~2" }), { kind = "all", base = "HEAD~2" }))
+	assert(review._parse_open({ "all", "base", "head" }) == nil)
 	assert(vim.deep_equal(review._parse_open({ "commit", "topic" }), { kind = "commit", rev = "topic" }))
 	assert(vim.deep_equal(review._parse_open({ "commit" }), { kind = "commit", rev = "HEAD" }))
 	assert(vim.deep_equal(review._parse_open({ "range", "base", "head" }), {

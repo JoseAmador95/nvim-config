@@ -278,6 +278,8 @@ run_check "native_review_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/local-plugins/native-review.nvim/tests/native_review_spec.lua"
 run_check "native_review_changes_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/tests/native_review_changes_spec.lua"
+run_check "native_review_all_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/runner.lua" "$repo_root/tests/native_review_all_spec.lua"
 run_check "native_review_projection_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/tests/native_review_projection_spec.lua"
 run_check "native_review_diff_spec" "$NVIM_BIN" --headless -u NONE -i NONE \

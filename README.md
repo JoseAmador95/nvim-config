@@ -409,6 +409,18 @@ review-level comment. `<leader>rR` provides the same review-level action from
 review code buffers. Reanchoring remains available through
 `:ReviewReanchor` and the command palette.
 
+`:ReviewOpen all` reviews committed, staged, unstaged and untracked changes as one
+final diff per file, comparing the branch merge base with the current files on disk.
+It uses the same automatic base-branch detection as `:ReviewOpen branch`.
+`:ReviewOpen all REV` instead compares directly against that exact revision.
+The **All changes…** entry in `:ReviewScope` / `<leader>rs` accepts an optional base;
+submit an empty input for the automatic base, or cancel to keep the current review.
+Changes that cancel each other disappear, and ignored files are excluded.
+The Commits pane lists commits from the frozen base to `HEAD`; returning from a
+commit restores the combined review.
+The session freezes its base and local state, so subsequent edits require opening
+a new review rather than refreshing comments onto changed content.
+
 Review mode makes affected source buffers read-only only while its owned UI is
 active and restores their prior state on release. `<leader>rv` switches between
 one inline unified projection and a native synchronized side-by-side diff;

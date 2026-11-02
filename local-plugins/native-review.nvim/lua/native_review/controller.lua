@@ -622,7 +622,7 @@ local function mutation_failed(workspace, err)
 end
 
 local function stale_now(workspace, control)
-	if workspace.scope.kind ~= "working" then
+	if not review_scope.has_worktree(workspace.scope) then
 		return false
 	end
 	local drift, err = review_scope.detect_drift(workspace.scope, construction_options(control))
@@ -1887,8 +1887,8 @@ local function open_resolved(root, scope, supplied, options)
 			return nil, load_err
 		end
 	end
-	if session.scope.kind == "working" and session.stale then
-		return nil, "saved working review is stale; use :ReviewOpen working for a new exact scope"
+	if review_scope.has_worktree(session.scope) and session.stale then
+		return nil, "saved local review is stale; use :ReviewOpen " .. session.scope.kind .. " for a new exact scope"
 	end
 	local model, model_err = review_changes.build(root, scope, construction_options(options and options.control))
 	if not model then
@@ -3484,6 +3484,7 @@ local function scope_picker(root, callback)
 		{ label = "Working tree · staged / unstaged / untracked", action = "working" },
 		{ label = "Commit…", action = "commit" },
 		{ label = "Range…", action = "range" },
+		{ label = "All changes…", action = "all" },
 		{ label = "Saved review session…", action = "saved" },
 	}
 	local function opened(request)
@@ -3508,6 +3509,13 @@ local function scope_picker(root, callback)
 			return
 		elseif choice.action == "branch" or choice.action == "working" then
 			opened({ kind = choice.action })
+		elseif choice.action == "all" then
+			vim.ui.input({ prompt = "Base revision (empty = branch merge base): " }, function(value)
+				if value ~= nil and resolve_interaction_token(token, "selecting a review scope") then
+					local base = vim.trim(value)
+					opened({ kind = "all", base = base ~= "" and base or nil })
+				end
+			end)
 		elseif choice.action == "commit" then
 			user_input("Commit: ", token, function(revision)
 				opened({ kind = "commit", rev = revision })
@@ -4505,7 +4513,10 @@ local function refresh_current(options)
 	end
 	if stale then
 		mark_stale(workspace)
-		notify("Working review became stale; open a new exact working scope", vim.log.levels.ERROR)
+		notify(
+			"Local review became stale; open a new exact scope with :ReviewOpen " .. workspace.scope.kind,
+			vim.log.levels.ERROR
+		)
 		return nil
 	end
 	local loaded, load_err = review_store.load(workspace.root, workspace.session.id)
@@ -5118,6 +5129,8 @@ local function parse_open(arguments)
 	local kind = arguments[1] or "branch"
 	if kind == "working" and #arguments == 1 then
 		return { kind = kind }
+	elseif kind == "all" and #arguments <= 2 then
+		return { kind = kind, base = arguments[2] }
 	elseif kind == "commit" and #arguments <= 2 then
 		return { kind = kind, rev = arguments[2] or "HEAD" }
 	elseif kind == "range" and #arguments == 3 then
@@ -5170,7 +5183,7 @@ local function setup_autocmds()
 			local workspace = current_workspace()
 			if
 				workspace
-				and workspace.scope.kind == "working"
+				and review_scope.has_worktree(workspace.scope)
 				and vim.bo[event.buf].modified
 				and buffer_in_root(workspace.root, event.buf)
 			then

@@ -533,7 +533,7 @@ local function preflight(root, entries, deps)
 			if entry.new_path then
 				local plan
 				local plan_err
-				if entry.layer == "unstaged" or entry.layer == "untracked" then
+				if entry.layer == "unstaged" or entry.layer == "untracked" or entry.layer == "all" then
 					plan, plan_err = inspect_worktree(root, entry, "NEW", deps)
 				else
 					plan, plan_err = blob_plan(entry, "NEW")
@@ -875,6 +875,51 @@ local function build_working(root, scope, deps)
 	return { old_oid = scope.head_oid, new_oid = nil, commits = {}, entries = entries }
 end
 
+local function build_all(root, scope, deps)
+	if not valid_oid(scope.from_oid or "") or not valid_oid(scope.head_oid or "") then
+		return nil, failure("invalid_scope", "all scope endpoints are missing or invalid")
+	end
+	local tracked, tracked_err = load_raw(root, { "diff", scope.from_oid }, "all", deps)
+	if not tracked then
+		return nil, tracked_err
+	end
+	local untracked, untracked_err = load_untracked(root, deps)
+	if not untracked then
+		return nil, untracked_err
+	end
+	local replacements = {}
+	for _, entry in ipairs(untracked) do
+		entry.layer = "all"
+		replacements[entry.new_path] = entry
+	end
+	local entries = {}
+	for _, entry in ipairs(tracked) do
+		local replacement = replacements[entry.old_path]
+		if replacement then
+			-- An index deletion or rename can leave its base path untracked.
+			-- Compare that path once, and keep a rename destination as an addition.
+			replacement.old_path = entry.old_path
+			replacement.old_oid = entry.old_oid
+			replacement.old_mode = entry.old_mode
+			replacement.status = entry.old_mode:sub(1, 3) == replacement.new_mode:sub(1, 3) and "M" or "T"
+			entry.old_path = nil
+			entry.old_oid = nil
+			entry.old_mode = "000000"
+			entry.status = "A"
+			entry.score = nil
+		end
+		if entry.old_path or entry.new_path then
+			entries[#entries + 1] = entry
+		end
+	end
+	append(entries, untracked)
+	local commits, commits_err = historical_commits(root, scope, scope.from_oid, scope.head_oid, deps)
+	if not commits then
+		return nil, commits_err
+	end
+	return { old_oid = scope.from_oid, new_oid = nil, commits = commits, entries = entries }
+end
+
 local function sort_entries(entries)
 	table.sort(entries, function(left, right)
 		local left_layer = LAYER_ORDER[left.layer] or 0
@@ -942,7 +987,7 @@ function M.build(root, scope, options)
 		max_file_bytes = deps.max_file_bytes,
 		max_model_bytes = deps.max_model_bytes,
 	}
-	if scope.kind == "working" and type(scope.fingerprint) == "string" then
+	if review_scope.has_worktree(scope) and type(scope.fingerprint) == "string" then
 		local drift, drift_err = review_scope.detect_drift(scope, scope_options)
 		if not drift then
 			return nil, drift_err
@@ -954,6 +999,8 @@ function M.build(root, scope, options)
 	local built, build_err
 	if scope.kind == "working" then
 		built, build_err = build_working(canonical, scope, deps)
+	elseif scope.kind == "all" then
+		built, build_err = build_all(canonical, scope, deps)
 	elseif scope.kind == "commit" or scope.kind == "range" or scope.kind == "branch" then
 		built, build_err = build_historical(canonical, scope, deps)
 	else
@@ -970,7 +1017,7 @@ function M.build(root, scope, options)
 	if not materialized then
 		return nil, materialize_err
 	end
-	if scope.kind == "working" and type(scope.fingerprint) == "string" then
+	if review_scope.has_worktree(scope) and type(scope.fingerprint) == "string" then
 		local drift, drift_err = review_scope.detect_drift(scope, scope_options)
 		if not drift then
 			return nil, drift_err
@@ -978,6 +1025,15 @@ function M.build(root, scope, options)
 		if drift.stale then
 			return nil, failure("working_tree_changed", "working tree changed during review model construction")
 		end
+	end
+	if scope.kind == "all" then
+		built.entries = vim.tbl_filter(function(entry)
+			return entry.submodule
+				or entry.conflicted
+				or entry.old_path ~= entry.new_path
+				or entry.old_mode ~= entry.new_mode
+				or entry.old_text ~= entry.new_text
+		end, built.entries)
 	end
 	sort_entries(built.entries)
 	built.root = canonical
@@ -990,7 +1046,7 @@ end
 ---Find one entry by either old or new path; a working-tree layer disambiguates duplicates.
 ---@param model table
 ---@param path string
----@param layer? "staged"|"unstaged"|"untracked"
+---@param layer? "staged"|"unstaged"|"untracked"|"all"
 ---@return table?
 function M.find(model, path, layer)
 	local found

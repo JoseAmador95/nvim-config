@@ -543,8 +543,8 @@ local function validate_scope(scope, root, deps)
 	end
 
 	local expected_range
-	if scope.kind == "working" then
-		if #scope.diffview_args ~= 0 then
+	if review_scope.has_worktree(scope) then
+		if scope.kind == "working" and #scope.diffview_args ~= 0 then
 			return nil, "working scope must use the aggregate index-to-local Diffview"
 		end
 		if not valid_oid(scope.head_oid) or not valid_digest(scope.fingerprint) then
@@ -565,9 +565,16 @@ local function validate_scope(scope, root, deps)
 		then
 			return nil, "working scope layers are invalid"
 		end
-		expected_range = scope.head_oid
-		if not null(scope.file_history_range) then
-			return nil, "working scope must not define file_history_range"
+		if scope.kind == "all" then
+			if not valid_oid(scope.from_oid) or #scope.diffview_args ~= 1 or argument ~= scope.from_oid then
+				return nil, "all scope base or diffview_args are invalid"
+			end
+			expected_range = scope.from_oid .. ".." .. scope.head_oid
+		else
+			expected_range = scope.head_oid
+			if not null(scope.file_history_range) then
+				return nil, "working scope must not define file_history_range"
+			end
 		end
 	elseif scope.kind == "commit" then
 		if not valid_oid(scope.commit_oid) then
@@ -593,7 +600,7 @@ local function validate_scope(scope, root, deps)
 	else
 		return nil, "scope.kind is invalid"
 	end
-	if scope.kind ~= "working" and (#scope.diffview_args ~= 1 or argument ~= expected_range) then
+	if not review_scope.has_worktree(scope) and (#scope.diffview_args ~= 1 or argument ~= expected_range) then
 		return nil, "scope.diffview_args does not match its frozen object IDs"
 	end
 	if scope.kind ~= "working" and scope.file_history_range ~= expected_range then

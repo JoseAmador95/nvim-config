@@ -11,7 +11,13 @@ local PREVIEW_RECEIPT = {}
 local preview_state
 
 local function scope_fields(scope)
-	if scope.kind == "working" then
+	if scope.kind == "all" then
+		return {
+			"Base: `" .. scope.from_oid .. "`",
+			"HEAD: `" .. scope.head_oid .. "`",
+			"Working fingerprint: `" .. scope.fingerprint .. "`",
+		}
+	elseif scope.kind == "working" then
 		return {
 			"HEAD: `" .. scope.head_oid .. "`",
 			"Working fingerprint: `" .. scope.fingerprint .. "`",

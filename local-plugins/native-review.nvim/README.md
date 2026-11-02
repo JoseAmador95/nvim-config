@@ -80,6 +80,17 @@ review until its scope, store, and complete immutable model have succeeded.
 `status()` exposes a copied `pending`/`operation` snapshot only while work is in
 flight.
 
+The request `{ kind = "all", base = optional_revision }` combines committed and
+local changes into one final OLD/NEW entry per file, with `layer = "all"`.
+An explicit base is used exactly; an omitted base uses the merge base of the
+detected default branch and `HEAD`.
+The scope records `from_oid`, `head_oid`, the local fingerprint and its layers;
+its identity includes the effective base, `HEAD` and fingerprint.
+Untracked files are included, index deletions with untracked replacements are
+reconciled, and entries with unchanged paths, bytes and modes are omitted.
+The host command and picker workflow are documented in the repository's
+[native review guide](../../README.md#native-review).
+
 ## Diff detail and structural view
 
 The principal engine keeps its canonical Git hunks and adds character ranges to

@@ -4,6 +4,8 @@
 -- the index, the worktree, or the object database.
 local M = {}
 
+local repo = require("native_review.dependencies").get("repo")
+
 local DEFAULT_BACKEND = "diffview"
 local HASH_VERSION = "nvim-review-scope-v1"
 local EXECUTABLE_BITS = tonumber("111", 8)
@@ -17,6 +19,7 @@ local DEFAULT_LIMITS = {
 local COMMON_KEYS = { kind = true, backend_id = true }
 local REQUEST_KEYS = {
 	working = COMMON_KEYS,
+	all = { kind = true, backend_id = true, base = true },
 	commit = { kind = true, backend_id = true, rev = true },
 	range = { kind = true, backend_id = true, from = true, to = true },
 	branch = { kind = true, backend_id = true, base = true, head = true },
@@ -83,14 +86,18 @@ local function exact_keys(value, allowed)
 	return true
 end
 
-local function make_dependencies(options)
+local function binary_runner(command)
+	return vim.system(repo.clean_git_command(command), { text = false }):wait()
+end
+
+local function make_dependencies(options, binary)
 	options = options or {}
-	local repo = options.repo or require("native_review.dependencies").get("repo")
+	local repository = options.repo or repo
 	return {
-		repo = repo,
-		root = options.root or repo.root,
+		repo = repository,
+		root = options.root or repository.root,
 		git = options.git,
-		runner = options.runner,
+		runner = options.runner or (binary and repository == repo and binary_runner or nil),
 		hash = options.hash or vim.fn.sha256,
 		lstat = options.lstat or vim.uv.fs_lstat,
 		readlink = options.readlink or vim.uv.fs_readlink,
@@ -565,6 +572,8 @@ end
 local function identity_fields(scope)
 	if scope.kind == "working" then
 		return { scope.head_oid, scope.fingerprint }
+	elseif scope.kind == "all" then
+		return { scope.from_oid, scope.head_oid, scope.fingerprint }
 	elseif scope.kind == "commit" then
 		return { scope.commit_oid }
 	elseif scope.kind == "range" then
@@ -714,13 +723,65 @@ local function resolve_branch(root, request, deps)
 	}, deps)
 end
 
+local function resolve_all(root, request, deps)
+	local snapshot, snapshot_err = fingerprint_worktree(root, deps)
+	if not snapshot then
+		return nil, snapshot_err
+	end
+	local from_oid, base_label
+	if request.base then
+		local from_err
+		from_oid, from_err = resolve_oid(root, request.base, deps)
+		if not from_oid then
+			return nil, from_err
+		end
+		base_label = request.base
+	else
+		local default, default_err = default_branch(root, deps)
+		if not default then
+			return nil,
+				failure(
+					default_err.code,
+					default_err.message .. "; use :ReviewOpen all REV to select an exact base",
+					default_err.details
+				)
+		end
+		local output, merge_err = git_required(
+			root,
+			{ "merge-base", default.oid, snapshot.head_oid },
+			deps,
+			"merge_base_unavailable",
+			"cannot resolve branch merge base; use :ReviewOpen all REV to select an exact base"
+		)
+		if not output then
+			return nil, merge_err
+		end
+		from_oid = vim.trim(output):lower()
+		if not valid_oid(from_oid) then
+			return nil, failure("invalid_git_output", "Git returned an invalid merge-base object ID")
+		end
+		base_label = "merge-base(" .. default.ref .. ", HEAD)"
+	end
+	return finish(root, {
+		kind = "all",
+		backend_id = request.backend_id,
+		label = base_label .. " → working tree",
+		from_oid = from_oid,
+		head_oid = snapshot.head_oid,
+		fingerprint = snapshot.fingerprint,
+		layers = snapshot.layers,
+		diffview_args = { from_oid },
+		file_history_range = from_oid .. ".." .. snapshot.head_oid,
+	}, deps)
+end
+
 function M.resolve(root, request, options)
 	if type(request) ~= "table" or vim.islist(request) then
 		return nil, failure("invalid_scope", "scope request must be an object")
 	end
 	local allowed = REQUEST_KEYS[request.kind]
 	if not allowed then
-		return nil, failure("invalid_scope", "kind must be working, commit, range, or branch")
+		return nil, failure("invalid_scope", "kind must be working, all, commit, range, or branch")
 	end
 	local keys_ok, keys_err = exact_keys(request, allowed)
 	if not keys_ok then
@@ -732,13 +793,15 @@ function M.resolve(root, request, options)
 		return nil, failure("invalid_scope", "backend_id is invalid")
 	end
 
-	local deps = make_dependencies(options)
+	local deps = make_dependencies(options, request.kind == "all")
 	local resolved_root, root_err = canonical_root(root, deps)
 	if not resolved_root then
 		return nil, root_err
 	end
 	if request.kind == "working" then
 		return resolve_working(resolved_root, request, deps)
+	elseif request.kind == "all" then
+		return resolve_all(resolved_root, request, deps)
 	elseif request.kind == "commit" then
 		return resolve_commit(resolved_root, request, deps)
 	elseif request.kind == "range" then
@@ -756,8 +819,8 @@ function M.default_branch(root, options)
 	return default_branch(resolved_root, deps)
 end
 
-function M.working_fingerprint(root, options)
-	local deps = make_dependencies(options)
+local function working_fingerprint(root, options, binary)
+	local deps = make_dependencies(options, binary)
 	local resolved_root, root_err = canonical_root(root, deps)
 	if not resolved_root then
 		return nil, root_err
@@ -765,17 +828,25 @@ function M.working_fingerprint(root, options)
 	return fingerprint_worktree(resolved_root, deps)
 end
 
+function M.working_fingerprint(root, options)
+	return working_fingerprint(root, options)
+end
+
+function M.has_worktree(scope)
+	return scope.kind == "working" or scope.kind == "all"
+end
+
 function M.detect_drift(scope, options)
 	if type(scope) ~= "table" or vim.islist(scope) then
 		return nil, failure("invalid_scope", "scope must be an object")
 	end
-	if scope.kind ~= "working" then
+	if not M.has_worktree(scope) then
 		return { stale = false }
 	end
 	if type(scope.root) ~= "string" or scope.root == "" or type(scope.fingerprint) ~= "string" then
 		return nil, failure("invalid_scope", "working scope root or fingerprint is missing")
 	end
-	local current, err = M.working_fingerprint(scope.root, options)
+	local current, err = working_fingerprint(scope.root, options, scope.kind == "all")
 	if not current then
 		return nil, err
 	end

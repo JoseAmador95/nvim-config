@@ -100,12 +100,15 @@ local function setup_commands()
 		if request then
 			review_controller.open_async(request)
 		else
-			notify("Usage: ReviewOpen [working|commit [REV]|range FROM TO|branch [BASE [HEAD]]]", vim.log.levels.ERROR)
+			notify(
+				"Usage: ReviewOpen [working|all [BASE]|commit [REV]|range FROM TO|branch [BASE [HEAD]]]",
+				vim.log.levels.ERROR
+			)
 		end
 	end, {
 		nargs = "*",
 		complete = function()
-			return { "working", "commit", "range", "branch" }
+			return { "working", "all", "commit", "range", "branch" }
 		end,
 	})
 	command("ReviewScope", function()
