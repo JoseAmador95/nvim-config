@@ -383,10 +383,12 @@ to the `log` filetype and `*.log`; ordinary `*.txt` files remain untouched.
 The tab line uses the active colorscheme's `Visual` background (falling back to
 `PmenuSel`) and bold text for the selected tab. Unmodified tabs have a native
 per-tab X, while modified tabs show the modified marker in its place. The X,
-middle click, `<leader>q`, and `:CloseTab` all route safely through `config.tabs`;
+middle click, and `:CloseTab` all route safely through `config.tabs`;
 right click opens the hierarchical menu. Closing the final work tab preserves
 user buffers, creates a pristine home tab, and opens the Snacks dashboard;
 `<leader>Q` remains the explicit close-all flow.
+`<leader>q` closes the active buffer through Snacks while preserving tabs and split windows,
+and prompts to save, discard, or cancel when the buffer has unsaved changes.
 
 ## Native review
 
@@ -504,7 +506,7 @@ returning to its parent reuse and retitle the same live tab. `<leader>rm` off
 prepares an open composer, releases all review UI, and returns to the latest
 ordinary invocation while keeping the frozen review resumable; turning it on
 acquires a fresh generation and rebuilds the view. Supported X, middle-click,
-`<leader>q`, and `:CloseTab` paths can veto closure when a nonempty composer can
+and `:CloseTab` paths can veto closure when a nonempty composer can
 be neither saved nor verified through recovery. Raw `:tabclose` is reconciled
 after best-effort composer recovery and never recreates the tab by itself.
 `:ReviewClose` alone removes the logical review and retains its verified

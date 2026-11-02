@@ -655,8 +655,6 @@ T["setup owns CloseTab only in the full terminal editor"] = function()
 	assert(_G.NvimConfigCloseTab == nil, "obsolete global tabline callback exists before setup")
 	tabs.setup()
 	equal(2, vim.fn.exists(":CloseTab"), "CloseTab command is missing")
-	local mapping = vim.fn.maparg("<leader>q", "n", false, true)
-	equal("<cmd>CloseTab<cr>", mapping.rhs, "editor close mapping bypasses CloseTab")
 	assert(_G.NvimConfigCloseTab == nil, "setup recreated the obsolete global tabline callback")
 
 	local requested

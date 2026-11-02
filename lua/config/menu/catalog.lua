@@ -100,7 +100,7 @@ function M.definitions()
 			palette_item("file.save_as", "Save As...", nil, nil, { "saveas", "rename" }),
 			palette_item("file.save_all", "Save All", nil, nil, { "wall" }),
 			palette_item("file.revert", "Revert File...", nil, nil, { "reload", "discard changes" }),
-			palette_item("file.close_tab", "Close Tab", "<leader>q"),
+			palette_item("file.close_tab", "Close Tab"),
 			palette_item("file.close_all", "Close All...", "<leader>Q", nil, { "quit all" }),
 			palette_item("file.open_under_cursor", "Open File Under Cursor", "gf"),
 			palette_item("file.set_filetype", "Set File Type...", nil, nil, { "setfiletype", "set ft" }),

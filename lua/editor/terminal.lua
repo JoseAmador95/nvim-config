@@ -53,6 +53,11 @@ if not pager.active then
 		silent = true,
 		desc = "Save",
 	})
+	usage_map("n", "<leader>q", "<cmd>lua Snacks.bufdelete()<cr>", {
+		noremap = true,
+		silent = true,
+		desc = "Close buffer",
+	})
 	require("config.tabs").setup()
 	require("config.menu").setup()
 else

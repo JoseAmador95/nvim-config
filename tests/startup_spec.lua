@@ -145,7 +145,7 @@ T["startup"] = function()
 		assert(diagnostics_enabled.virtual_lines == false, "settled diagnostics enabled the native cursor handler")
 	end
 	local close_map = vim.fn.maparg("<leader>q", "n", false, true)
-	assert(close_map.rhs == "<cmd>CloseTab<cr>", "full editor close mapping bypasses CloseTab")
+	assert(close_map.rhs == "<cmd>lua Snacks.bufdelete()<cr>", "full editor close mapping does not delete the buffer")
 	local close_all_map = vim.fn.maparg("<leader>Q", "n", false, true)
 	assert(close_all_map.rhs == "<cmd>CloseAll<cr>", "CloseAll mapping drifted")
 	for _, lhs in ipairs({ "[b", "]b", "<leader>bd", "gF" }) do

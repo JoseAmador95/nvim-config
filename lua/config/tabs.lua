@@ -1,4 +1,3 @@
-local usage_map = require("config.usage").mapper("config.tabs")
 local M = {}
 local runtime = require("tab_first")
 local local_config = require("config.local_config")
@@ -157,12 +156,6 @@ function M.setup()
 	vim.api.nvim_create_user_command("CloseTab", function()
 		M.request_close(vim.api.nvim_get_current_tabpage())
 	end, { force = true, desc = "Close tab and return home when it is the last work tab" })
-
-	usage_map("n", "<leader>q", "<cmd>CloseTab<cr>", {
-		noremap = true,
-		silent = true,
-		desc = "Close tab",
-	})
 
 	local home_group = vim.api.nvim_create_augroup("NvimConfigTabsHome", { clear = true })
 	vim.api.nvim_create_autocmd("UIEnter", {
