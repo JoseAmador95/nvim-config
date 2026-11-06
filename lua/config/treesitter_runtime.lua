@@ -101,6 +101,7 @@ end
 ---@field timeout? integer Maximum wait in milliseconds (default 300000).
 ---@field summary? boolean Show nvim-treesitter's installation summary.
 ---@field force? boolean Reinstall requested parsers even when present.
+---@field on_done? fun(ok: boolean, err?: string) Replace the failure notification for asynchronous installs.
 
 ---Install configured parsers explicitly through the host plugin API.
 ---@param requested? string|string[] Defaults to the parsers passed to setup().
@@ -147,12 +148,19 @@ function M.install(requested, opts)
 
 	task:await(function(err, result)
 		vim.schedule(function()
-			if err then
+			local ok = err == nil and result == true
+			if ok then
+				M.retry()
+			end
+			if opts.on_done then
+				local detail = err and tostring(err)
+					or (not ok and "Tree-sitter parser installation did not complete successfully")
+					or nil
+				opts.on_done(ok, detail)
+			elseif err then
 				notify("Parser installation failed: " .. tostring(err))
 			elseif result ~= true then
 				notify("Parser installation did not complete successfully")
-			else
-				M.retry()
 			end
 		end)
 	end)

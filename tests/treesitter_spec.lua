@@ -3,17 +3,13 @@ vim.o.swapfile = false
 
 local repo = vim.fn.getcwd()
 local treesitter_plugin = repo .. "/local-plugins/treesitter-runtime.nvim"
-local trusted_plugin = repo .. "/local-plugins/trusted-workspace.nvim"
 local shared = repo .. "/local-plugins/_shared"
 vim.opt.runtimepath:prepend(treesitter_plugin)
-vim.opt.runtimepath:prepend(trusted_plugin)
 vim.opt.runtimepath:prepend(shared)
 vim.opt.runtimepath:prepend(repo)
 package.path = table.concat({
 	treesitter_plugin .. "/lua/?.lua",
 	treesitter_plugin .. "/lua/?/init.lua",
-	trusted_plugin .. "/lua/?.lua",
-	trusted_plugin .. "/lua/?/init.lua",
 	shared .. "/lua/?.lua",
 	shared .. "/lua/?/init.lua",
 	repo .. "/lua/?.lua",

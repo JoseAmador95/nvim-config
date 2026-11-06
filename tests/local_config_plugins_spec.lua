@@ -14,14 +14,11 @@ local T = MiniTest.new_set({ hooks = hooks })
 local root = vim.fn.tempname()
 assert(vim.fn.mkdir(root, "p", 448) == 1)
 local config_path = vim.fs.joinpath(root, "host.lua")
-local state_root = vim.fs.joinpath(root, "state")
 assert(vim.fn.writefile({ "return {}" }, config_path) == 0)
 
 local original_config = vim.env.NVIM_CONFIG_FILE
-local original_state = vim.env.NVIM_CONFIG_TRUST_STATE_ROOT
 local original_notify = vim.notify
 vim.env.NVIM_CONFIG_FILE = config_path
-vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = state_root
 vim.notify = function() end
 
 package.loaded["config.local_config"] = nil
@@ -39,7 +36,6 @@ local plugin_names = {
 	"diagram_view",
 	"log_workbench",
 	"clangd_compile_db",
-	"trusted_workspace",
 	"treesitter_runtime",
 }
 
@@ -709,7 +705,6 @@ end
 hooks.post_once = function()
 	vim.notify = original_notify
 	vim.env.NVIM_CONFIG_FILE = original_config
-	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = original_state
 	vim.fn.delete(root, "rf")
 end
 

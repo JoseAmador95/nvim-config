@@ -7,6 +7,7 @@ local toolchain = require("config.toolchain")
 local tool_paths = require("config.tool_paths")
 
 local local_plugins = require("config.local_plugins")
+local plugin_state = require("config.plugin_state")
 
 local function version_string()
 	local version = vim.version()
@@ -103,6 +104,36 @@ local function check_tool(name, feature, install, required, configured)
 	return false
 end
 
+-- A catalog tool without a launcher yet is still usable: the first use runs it
+-- through `mise exec`, which installs the locked version.
+local function check_managed_tool(tool, feature, configured)
+	local command = toolchain.tools[tool].commands[1]
+	local path = vim.fn.exepath(command)
+	if path ~= "" then
+		health.ok(("%s available for %s (%s): %s"):format(command, feature, path_origin(path, configured), path))
+		return true
+	end
+	local uname = uv.os_uname()
+	if not toolchain.supported(tool, toolchain.target_key(uname.sysname, uname.machine)) then
+		health.info(("%s is not available on this platform (%s)"):format(command, feature))
+		return false
+	end
+	if vim.fn.executable("mise") == 1 then
+		health.ok(
+			("%s for %s installs through Mise on first use; :NvimConfigToolsInstall %s preinstalls it"):format(
+				command,
+				feature,
+				tool
+			)
+		)
+		return true
+	end
+	health.warn(("%s is unavailable (%s) until Mise is installed"):format(command, feature), {
+		"Run :NvimConfigMiseInstall",
+	})
+	return false
+end
+
 local function check_external_tool(name, feature, install, configured)
 	local path = tool_paths.external_executable(name)
 	if path then
@@ -118,7 +149,8 @@ local function check_validation_tool(name, expected_line, configured)
 	local path = vim.fn.exepath(name)
 	local install = "Run: scripts/install-ci-tools /absolute/path/to/bin"
 	if path == "" then
-		health.warn(("%s is missing; reproducible validation will fail. %s"):format(name, install))
+		-- Only scripts/check-config needs the validators; the editor does not.
+		health.info(("%s is not installed; only scripts/check-config needs it. %s"):format(name, install))
 		return
 	end
 
@@ -273,6 +305,114 @@ local function check_validation_contract(configured)
 	check_tool("cc", "Tree-sitter parser compilation", "Install a host C compiler.", true, configured)
 end
 
+local function check_plugins()
+	health.start("Plugins")
+	local state = plugin_state.inspect()
+	if not state.loaded then
+		health.info("lazy.nvim is not loaded in this session; plugin state was not inspected")
+		return
+	end
+	if #state.missing == 0 then
+		health.ok(("%d plugins installed"):format(state.total))
+	else
+		health.warn(("%d plugin(s) are not installed: %s"):format(#state.missing, table.concat(state.missing, ", ")), {
+			"Restart Neovim with network access; missing plugins install automatically at their locked commits",
+			"Or run :Lazy install",
+		})
+	end
+	if #state.drift == 0 then
+		health.ok("installed plugin commits match " .. (state.lockfile or "the lockfile"))
+		return
+	end
+	local rows = {}
+	for _, item in ipairs(state.drift) do
+		rows[#rows + 1] = ("%s (%s, lock %s)"):format(item.name, item.head:sub(1, 7), item.locked:sub(1, 7))
+	end
+	health.warn(("%d plugin(s) differ from the lockfile: %s"):format(#rows, table.concat(rows, ", ")), {
+		"Startup moves them to the locked commits when downloads are allowed; this one could not be moved",
+		"Run :Lazy restore",
+	})
+end
+
+local function check_parsers()
+	health.start("Tree-sitter parsers")
+	local runtime = package.loaded["config.treesitter_runtime"]
+	if type(runtime) ~= "table" or type(runtime.inventory) ~= "function" then
+		health.info("Tree-sitter runtime is not configured in this session")
+		return
+	end
+	local ok, inventory = pcall(runtime.inventory)
+	if not ok or type(inventory) ~= "table" then
+		health.warn("could not inspect the configured parsers: " .. tostring(inventory))
+		return
+	end
+	if inventory.exact then
+		health.ok(("%d configured parsers are installed at their pinned revisions"):format(#inventory.required))
+		return
+	end
+	health.warn("parsers are missing or stale: " .. table.concat(inventory.problems, ", "), {
+		"They install in the background when Neovim starts with a UI and network access",
+		"Or run :NvimConfigParsersInstall (needs Mise for the tree-sitter CLI and a C compiler)",
+	})
+end
+
+local function check_markdown_view()
+	local markdown_view = package.loaded["config.markdown_view"]
+	if type(markdown_view) ~= "table" or type(markdown_view.status) ~= "function" then
+		return
+	end
+	local ok, status = pcall(markdown_view.status)
+	if not ok or type(status) ~= "table" then
+		health.warn("could not read the Markdown reading view state: " .. tostring(status))
+	elseif status.error then
+		health.warn(status.error, { "Restart Neovim with network access or run :Lazy restore md-render.nvim" })
+	elseif status.configured then
+		health.ok("Markdown reading view (md-render.nvim) is ready")
+	else
+		health.info("Markdown reading view is not configured in this session")
+	end
+end
+
+local AUTO_INSTALL_ADVICE = {
+	mise = "Run :NvimConfigMiseInstall (or scripts/install-mise)",
+	parsers = "Run :NvimConfigParsersInstall",
+}
+
+local function check_auto_install()
+	health.start("Automatic installs")
+	if vim.env.NVIM_CONFIG_OFFLINE == "1" then
+		health.info("NVIM_CONFIG_OFFLINE=1: nothing is downloaded automatically")
+	end
+	local auto = package.loaded["config.auto_install"]
+	if type(auto) ~= "table" or type(auto.status) ~= "function" then
+		health.info("automatic installs are not configured in this profile")
+		return
+	end
+	local ok, status = pcall(auto.status)
+	if not ok or type(status) ~= "table" then
+		health.warn("could not read the automatic install state: " .. tostring(status))
+		return
+	end
+	if status.skipped then
+		health.info("automatic installs did not run in this session: " .. status.skipped)
+	end
+	local steps = vim.tbl_keys(status.failures or {})
+	table.sort(steps)
+	for _, step in ipairs(steps) do
+		local failure = status.failures[step]
+		local at = type(failure) == "table" and tonumber(failure.at) or nil
+		local when = at and os.date("%Y-%m-%d %H:%M", at) or "an unknown time"
+		local retry = at and os.date("%Y-%m-%d %H:%M", at + (status.retry_seconds or 0)) or "the next start"
+		health.warn(("%s automatic install failed at %s: %s"):format(step, when, tostring(failure.detail or failure)), {
+			AUTO_INSTALL_ADVICE[step] or "Retry the installation manually",
+			"The automatic retry runs after " .. retry,
+		})
+	end
+	if #steps == 0 then
+		health.ok("no automatic install failures recorded")
+	end
+end
+
 local function check_undo()
 	local active = vim.fs.joinpath(vim.fn.stdpath("state"), "undo")
 	local stat = uv.fs_stat(active)
@@ -330,9 +470,19 @@ function M.check()
 	)
 	check_profile()
 	check_local_products()
+	check_plugins()
+	check_markdown_view()
+	check_parsers()
+	check_auto_install()
 
 	health.start("Mise tools")
-	check_tool("mise", "locked editor tools", "Install Mise or run :NvimConfigMiseInstall.", true, configured)
+	check_tool(
+		"mise",
+		"locked editor tools: LSP servers, formatters, linters, debug adapters and parser builds",
+		"The full editor installs it in the background on startup; or run :NvimConfigMiseInstall.",
+		true,
+		configured
+	)
 	health.info(
 		"Mise minimum version: " .. toolchain.versions.mise .. "; version execution is reserved for provisioning"
 	)
@@ -348,8 +498,8 @@ function M.check()
 	)
 
 	health.start("Optional feature dependencies")
-	check_tool("mmdflux", "Mermaid ASCII/SVG rendering", "Run :NvimConfigToolsInstall mmdflux.", false, configured)
-	check_tool("plantuml", "PlantUML ASCII/SVG rendering", "Run :NvimConfigToolsInstall plantuml.", false, configured)
+	check_managed_tool("mmdflux", "Mermaid ASCII/SVG rendering", configured)
+	check_managed_tool("plantuml", "PlantUML ASCII/SVG rendering", configured)
 	check_external_tool(
 		"rust-analyzer",
 		"Rust language intelligence (host/user only)",
@@ -357,13 +507,7 @@ function M.check()
 		configured
 	)
 	health.info("Rust formatting is disabled until rustfmt has an exact manifest contract")
-	check_tool(
-		"cmake-language-server",
-		"CMake language intelligence",
-		"Run :NvimConfigToolsInstall cmake-language-server.",
-		false,
-		configured
-	)
+	check_managed_tool("cmake-language-server", "CMake language intelligence", configured)
 	check_tool(
 		"rsvg-convert",
 		"SVG diagram rasterization",

@@ -53,13 +53,12 @@
 -- Override the host path with $NVIM_CONFIG_FILE (for testing).
 
 local fs = require("config.fs")
-local trusted_workspace = require("trusted_workspace")
+local contracts = require("local_plugins.contracts")
 
 local M = {}
 
 local TITLE = "nvim.config"
 local PROJECT_NAME = ".nvim-local.lua"
-local PROJECT_SOURCE_ID = "local-config-project"
 
 local KIBIBYTE = 1024
 local MEBIBYTE = 1024 * KIBIBYTE
@@ -402,7 +401,6 @@ local SCHEMA = {
 					max_validation_bytes = integer(256 * MEBIBYTE, MEBIBYTE, 256 * MEBIBYTE),
 				},
 			},
-			trusted_workspace = { type = "table", fields = {} },
 			treesitter_runtime = {
 				type = "table",
 				fields = {
@@ -519,24 +517,11 @@ local function project_path()
 	return vim.fn.fnamemodify(vim.fn.getcwd() .. "/" .. PROJECT_NAME, ":p")
 end
 
-local function trust_state_root()
-	local override = vim.env.NVIM_CONFIG_TRUST_STATE_ROOT
-	if override and override ~= "" then
-		return vim.fn.fnamemodify(vim.fn.expand(override), ":p")
-	end
-	return vim.fs.joinpath(vim.fn.stdpath("state"), "trusted-workspace")
-end
-
 local function workspace_mode()
 	if vim.g.vscode or vim.env.NVIM_APPNAME == "nvimpager" then
 		return "host-only"
 	end
 	return "full"
-end
-
-local function repo_identity()
-	local cwd = vim.fn.getcwd()
-	return vim.uv.fs_realpath(cwd) or vim.fs.normalize(cwd)
 end
 
 -- Loading -----------------------------------------------------------------
@@ -592,7 +577,7 @@ local function load_project(path)
 	end
 	local chunk, err = load(contents, "@" .. path)
 	local result = run_chunk(chunk, err, path)
-	return result, result and "loaded" or "error", result and vim.fn.sha256(contents) or nil
+	return result, result and "loaded" or "error"
 end
 
 -- Validation --------------------------------------------------------------
@@ -763,100 +748,169 @@ end
 
 -- Compute -----------------------------------------------------------------
 
+local PROJECT_LOG_LIMITS = { max_lines = 100000, max_bytes = 64 * MEBIBYTE }
+
+-- Copy one source as plain data; functions, cycles and other non-data values
+-- reject that source instead of reaching the merged configuration.
+local function plain_value(id, value)
+	local snapshot, err = contracts.normalize_snapshot({
+		generation = 0,
+		source = id,
+		validity = true,
+		value = value,
+	})
+	if not snapshot then
+		return nil, err
+	end
+	return snapshot.value
+end
+
+-- A project file may only tune the review context, reduce the displayed log
+-- retention and select clangd's executable/profile. Any other field rejects the
+-- complete project source, so it is never partially applied.
+local function project_value(value)
+	local top_ok, top_err = contracts.exact_options(value, { plugins = true }, "project source value")
+	if not top_ok then
+		return nil, top_err
+	end
+	local plugins = value.plugins or {}
+	local plugins_ok, plugins_err = contracts.exact_options(
+		plugins,
+		{ native_review = true, log_workbench = true, clangd_compile_db = true },
+		"project source value.plugins"
+	)
+	if not plugins_ok then
+		return nil, plugins_err
+	end
+	local normalized = {}
+	if plugins.native_review ~= nil then
+		local review_ok, review_err = contracts.exact_options(
+			plugins.native_review,
+			{ hunk_context = true },
+			"project source value.plugins.native_review"
+		)
+		if not review_ok then
+			return nil, review_err
+		end
+		local context = plugins.native_review.hunk_context
+		if context ~= nil and (type(context) ~= "number" or context < 0 or context % 1 ~= 0) then
+			return nil, "project source value.plugins.native_review.hunk_context must be a non-negative integer"
+		end
+		normalized.native_review = vim.deepcopy(plugins.native_review)
+	end
+	if plugins.log_workbench ~= nil then
+		local logs_ok, logs_err = contracts.exact_options(
+			plugins.log_workbench,
+			{ max_lines = true, max_bytes = true },
+			"project source value.plugins.log_workbench"
+		)
+		if not logs_ok then
+			return nil, logs_err
+		end
+		for name, maximum in pairs(PROJECT_LOG_LIMITS) do
+			local configured = plugins.log_workbench[name]
+			if
+				configured ~= nil
+				and (type(configured) ~= "number" or configured < 1 or configured % 1 ~= 0 or configured > maximum)
+			then
+				return nil,
+					("project source value.plugins.log_workbench.%s must be a positive integer no greater than %d"):format(
+						name,
+						maximum
+					)
+			end
+		end
+		normalized.log_workbench = vim.deepcopy(plugins.log_workbench)
+	end
+	if plugins.clangd_compile_db ~= nil then
+		local clangd_ok, clangd_err = contracts.exact_options(
+			plugins.clangd_compile_db,
+			{ path = true, profile = true },
+			"project source value.plugins.clangd_compile_db"
+		)
+		if not clangd_ok then
+			return nil, clangd_err
+		end
+		local clangd = plugins.clangd_compile_db
+		if
+			clangd.path ~= nil
+			and (type(clangd.path) ~= "string" or clangd.path == "" or clangd.path:find("\0", 1, true))
+		then
+			return nil, "project source value.plugins.clangd_compile_db.path must be a non-empty string"
+		end
+		if clangd.profile ~= nil and clangd.profile ~= "full" and clangd.profile ~= "light" then
+			return nil, "project source value.plugins.clangd_compile_db.profile must be full or light"
+		end
+		normalized.clangd_compile_db = vim.deepcopy(clangd)
+	end
+	return next(normalized) ~= nil and { plugins = normalized } or {}
+end
+
+local function merge_into(target, incoming, layer, prefix)
+	for key, value in pairs(incoming) do
+		local path = prefix == "" and tostring(key) or (prefix .. "." .. tostring(key))
+		if type(value) == "table" and not vim.islist(value) and next(value) ~= nil then
+			if type(target[key]) ~= "table" or vim.islist(target[key]) then
+				target[key] = {}
+			end
+			merge_into(target[key], value, layer, path)
+		else
+			-- Project log limits may only reduce the host's displayed retention.
+			local raises_host_limit = layer == "project"
+				and (path == "plugins.log_workbench.max_lines" or path == "plugins.log_workbench.max_bytes")
+				and type(target[key]) == "number"
+				and type(value) == "number"
+				and value > target[key]
+			if not raises_host_limit then
+				target[key] = vim.deepcopy(value)
+			end
+		end
+	end
+	return target
+end
+
 local function compute()
 	sources = {}
 	last_errors = {}
 	local mode = workspace_mode()
-	local setup_ok, setup_err = trusted_workspace.setup({
-		state_root = trust_state_root(),
-		mode = mode,
-	})
-	if not setup_ok then
-		last_errors[#last_errors + 1] = "trusted workspace state: " .. tostring(setup_err)
-	end
+	local merged = {}
 
 	local home = home_path()
 	local host_cfg, host_status = read_host()
 	sources[#sources + 1] = { path = home, status = host_status }
-	local _, host_err = trusted_workspace.register_source({
-		id = "local-config-host",
-		layer = "host",
-		value = host_cfg or {},
-	})
-	if host_err then
-		last_errors[#last_errors + 1] = "host source: " .. tostring(host_err)
+	if host_cfg then
+		local value, host_err = plain_value("local-config-host", host_cfg)
+		if value then
+			merge_into(merged, value, "host", "")
+		else
+			last_errors[#last_errors + 1] = "host source: " .. tostring(host_err)
+		end
 	end
 
 	local project = project_path()
 	if project ~= home then
 		local proj_cfg
 		local proj_status
-		local fingerprint
 		if mode == "full" then
-			proj_cfg, proj_status, fingerprint = load_project(project)
+			proj_cfg, proj_status = load_project(project)
 		else
 			proj_status = "disabled"
 		end
 		sources[#sources + 1] = { path = project, status = proj_status }
 		if proj_cfg then
-			local repo = repo_identity()
-			local _, source_err = trusted_workspace.register_source({
-				id = PROJECT_SOURCE_ID,
-				layer = "project",
-				repo = repo,
-				fingerprint = fingerprint,
-				value = proj_cfg,
-			})
-			if source_err then
-				last_errors[#last_errors + 1] = "project source: " .. tostring(source_err)
+			local value, value_err = plain_value("local-config-project", proj_cfg)
+			if value then
+				value, value_err = project_value(value)
+			end
+			if value then
+				merge_into(merged, value, "project", "")
 			else
-				local approved, approval_err = trusted_workspace.approve(repo, PROJECT_SOURCE_ID, fingerprint)
-				if not approved then
-					last_errors[#last_errors + 1] = "project approval: " .. tostring(approval_err)
-				end
+				last_errors[#last_errors + 1] = "project source: " .. tostring(value_err)
 			end
-		else
-			local _, source_err = trusted_workspace.register_source({
-				id = PROJECT_SOURCE_ID,
-				layer = "project",
-				repo = repo_identity(),
-				fingerprint = "disabled:" .. tostring(proj_status),
-				value = {},
-				enabled = false,
-			})
-			if source_err then
-				last_errors[#last_errors + 1] = "project source: " .. tostring(source_err)
-			end
-		end
-	else
-		local _, source_err = trusted_workspace.register_source({
-			id = PROJECT_SOURCE_ID,
-			layer = "project",
-			repo = repo_identity(),
-			fingerprint = "disabled:same-as-host",
-			value = {},
-			enabled = false,
-		})
-		if source_err then
-			last_errors[#last_errors + 1] = "project source: " .. tostring(source_err)
 		end
 	end
 
-	local snapshot, snapshot_err = trusted_workspace.snapshot()
-	if not snapshot then
-		last_errors[#last_errors + 1] = "trusted workspace snapshot: " .. tostring(snapshot_err)
-		snapshot = { value = {} }
-	end
-	local authority_status = trusted_workspace.status()
-	if
-		type(authority_status) == "table"
-		and type(authority_status.candidate) == "table"
-		and type(authority_status.candidate.validity) == "table"
-		and type(authority_status.candidate.validity.errors) == "table"
-	then
-		vim.list_extend(last_errors, authority_status.candidate.validity.errors)
-	end
-	local validated = validate_fields(SCHEMA, snapshot.value, "", last_errors)
+	local validated = validate_fields(SCHEMA, merged, "", last_errors)
 	if #last_errors > 0 then
 		notify("Local config issues:\n  " .. table.concat(last_errors, "\n  "))
 	end
@@ -895,9 +949,8 @@ function M.plugin(name, default)
 end
 
 -- Read one plugin's owner-controlled host policy without consulting a project
--- file or initializing trusted-workspace state. Headless host adapters use this
--- boundary before they have a normal editor session in which project approval
--- can be requested safely.
+-- file. Headless host adapters use this boundary before they have a normal
+-- editor session in which the project file prompt can be shown safely.
 function M.host_plugin(name, default)
 	if type(name) ~= "string" or name == "" then
 		error("plugin name must be a non-empty string")
@@ -954,8 +1007,8 @@ function M.errors()
 end
 
 -- Return only state that has already been computed by a normal config caller.
--- Health checks use this seam so observation can never trigger trust prompts,
--- approvals, source registration, or persistent-state writes.
+-- Health checks use this seam so observation can never trigger the project
+-- file prompt or re-run either configuration file.
 function M.observation()
 	return vim.deepcopy({
 		evaluated = cache ~= nil,
@@ -1082,7 +1135,6 @@ return {
       restart_timeout_ms = 5000,
       max_validation_bytes = 256 * 1024 * 1024,
     },
-    trusted_workspace = {}, -- security policy is not user-configurable
     treesitter_runtime = {
       max_bytes = 200 * 1024,
       reevaluate_debounce_ms = 50,

@@ -7,16 +7,34 @@ This is a Neovim 0.12+ configuration with a full editor profile and a small
 
 ## Setup and optional features
 
-Clone the repository as `~/.config/nvim`. Install Mise yourself and put it on
-`PATH`; this catalog requires Mise 2026.10.4 or newer. Alternatively, explicitly
-run `./scripts/install-mise` or `:NvimConfigMiseInstall` to install the pinned
-executable into `~/.local/bin/mise`. Startup and provisioning never install Mise.
-Startup registers tool commands without probing or installing tools. An actual
-feature use runs `mise exec`, which installs missing locked tools automatically.
-Use `:NvimConfigToolsInstall [all|name]` to preinstall them, or `!` to reinstall.
-`NVIM_CONFIG_OFFLINE=1` disables downloads and reports missing tools.
+Clone the repository as `~/.config/nvim` and start Neovim. Everything else is
+installed automatically:
 
-An existing `lazy.nvim` checkout is still validated fail-closed. After one
+- The first start clones `lazy.nvim` at its locked commit and installs every
+  missing plugin at its `lazy-lock.json` commit before the UI appears.
+- Every start moves installed plugins whose checkout differs from the lockfile
+  (for example after pulling this repository on another machine) to their
+  locked commits before they load.
+- Once the UI is up, a background step installs the pinned Mise into
+  `~/.local/bin/mise` when it is not on `PATH` (full editor only) and builds
+  missing or stale Tree-sitter parsers.
+- Locked tools (language servers, formatters, linters, debug adapters, diagram
+  renderers) install through `mise exec` on their first use.
+
+Anything that could not be installed is listed by `:checkhealth nvimconfig`,
+together with the command that fixes it. A failed background step is retried
+24 hours later; `:NvimConfigMiseInstall`, `:NvimConfigParsersInstall`,
+`:NvimConfigToolsInstall [all|name]` (`!` reinstalls) and `:Lazy restore` run the
+same work on demand. Parser builds need a host C compiler. This catalog requires
+Mise 2026.10.4 or newer when you install Mise yourself.
+`NVIM_CONFIG_OFFLINE=1` disables every download and only reports what is
+missing; headless sessions never download in the background. The VSCode profile
+installs nothing itself: it reuses the plugins the terminal editor installed
+(start `nvim` once first, or run `scripts/bootstrap-config`).
+
+An existing `lazy.nvim` checkout is still validated before it is loaded. When a
+clean checkout is only at a different commit than the lock and downloads are
+allowed, startup checks out the locked commit first. Otherwise, after one
 authoritative Git identity/status/hidden-index scan, startup may use a private
 `0600` metadata attestation under a private `0700` cache directory. A fast hit
 requires the locked resolved HEAD/ref material, index and shared-index set,
@@ -106,7 +124,7 @@ definitions. Existing comments of removed types still load and display.
 Log workbench limits also live in the host file under
 `plugins.log_workbench`. `continuity_bytes`, `max_matches`, and
 `scan_lines_per_tick` bound host-side verification and indexing work; project
-configuration cannot replace them. A trusted project may only reduce
+configuration cannot replace them. A project file may only reduce
 `max_lines` and `max_bytes` for its displayed log retention.
 
 The terminal editor starts with `ui = { redraw_profile = "full" }`. Set
@@ -253,22 +271,20 @@ Neovim and remains fail-closed in historical review buffers.
 Every local product exposes a strict setup contract plus copied `status()` and
 `effective_config()` snapshots.
 `:checkhealth nvimconfig` aggregates the registered
-surfaces without refreshing state, starting processes, installing tools, or
-downloading parsers. Workflow commands remain in the host configuration rather
+surfaces, plugins that are missing or differ from the lockfile, missing or
+stale Tree-sitter parsers, and failed automatic installs, each with the command
+that fixes it. It only reads state: it never starts processes, installs tools,
+or downloads parsers. Workflow commands remain in the host configuration rather
 than inside the plugins.
 
-Workspace execution is opt-in per canonical repository and capability. Use
-`:NvimConfigExecutionAuthorize lint-format`, `test`, `build`, or `debug` to
-grant one capability, `:NvimConfigExecutionRevoke <capability>` to revoke it,
-and `:NvimConfigExecutionStatus [capability]` to inspect the durable state.
-There is no implicit prompt: an unauthorized action stops before its runner is
-started. Grants express trust in that repository; they are not a sandbox.
-Tool acquisition through `mise exec` is independent of these execution grants;
-`NVIM_CONFIG_OFFLINE=1` disables downloads.
+Lint/format, test, build and debug run in every directory without any
+per-repository authorization. Inside Git the workspace is the repository root;
+outside Git it is the file's directory (or the current directory).
+`NVIM_CONFIG_OFFLINE=1` disables tool downloads.
 
 Local plugin directories are registered once from `config.local_plugins` and
 stay on `runtimepath`; none is registered as a Lazy plugin.
-The startup-owned foundations are `trusted-workspace`, `tab-first`,
+The startup-owned foundations are `tab-first`
 and `treesitter-runtime` (VSCode and pager use their smaller
 profile-specific subsets).
 Exact-editor loads only after a stable interactive
@@ -648,10 +664,9 @@ Conda environments are considered in that order. `:VenvSelect` remains the
 manual override for cached or external environments. Explicit VSCode/neoconf
 `ty.configuration.environment.python` settings take precedence, with the
 existing VSCode/neoconf Python interpreter fields retained as a lower-priority
-compatibility input, only after
-`:NvimConfigTrustProjectSettings` approves the exact combined fingerprint of
-`.vscode/settings.json` and `.neoconf.json`; any edit revokes their effect until
-they are approved again. Selection never changes global `PATH`,
+compatibility input, as soon as `.vscode/settings.json` or `.neoconf.json`
+exists; edits apply the next time a language server starts. Selection never
+changes global `PATH`,
 `VIRTUAL_ENV` or terminal activation. The effective interpreter for each root
 is shared by ty, DAP, the REPL and an event-refreshed statusline
 cache. Statusline renders read cached labels only; project discovery, Git and
@@ -803,7 +818,8 @@ runs the pure and full-profile specs (including the provisioning contract),
 startup smoke, StyLua, ShellCheck for the validation/provisioning scripts,
 actionlint, the exact tree-sitter CLI, a host C compiler, and `git diff --check`.
 Writable state, cache, temporary files, and logs are isolated. The check is
-offline; only `bootstrap-config` restores plugins and parsers, while
+offline (`NVIM_CONFIG_OFFLINE=1`), so startup installs nothing during it; only
+`bootstrap-config` restores plugins and parsers there, while
 `install-ci-tools` prepares the exact validator versions and mini.test. Both
 preparation commands may need network access on a cold cache.
 GitHub Actions runs the same contract on Linux and macOS with Neovim 0.12.4 and
@@ -823,9 +839,10 @@ references are checked in: missing references fail. Set
 `NVIM_CONFIG_UPDATE_SCREENSHOTS=1` explicitly to update them locally after
 reviewing a deliberate visual change; CI forbids reference updates.
 
-Tree-sitter never installs parsers implicitly during startup. Install the
-configured set explicitly with `:NvimConfigParsersInstall`; bootstrap uses the
-same API and waits for completion. Dockerfile, Markdown, sh, and Bash lint only
+Tree-sitter parsers never block startup. Missing or stale configured parsers
+build in the background once an interactive UI starts;
+`:NvimConfigParsersInstall` installs the configured set on demand, and
+bootstrap uses the same API and waits for completion. Dockerfile, Markdown, sh, and Bash lint only
 on `BufWritePost`, never on read, create, or `InsertLeave`.
 
 Formatting on save is intentionally disabled by default:

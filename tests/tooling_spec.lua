@@ -62,37 +62,9 @@ T["tooling"] = function()
 	}, project .. "/.vscode/settings.json") == 0)
 	assert(vim.fn.writefile({ '{ "lspconfig": { "ruff": false } }' }, project .. "/.neoconf.json") == 0)
 
-	local current_source
-	local approved_fingerprint
-	local authority = {
-		register_source = function(source)
-			current_source = vim.deepcopy(source)
-			return true
-		end,
-		status = function(workspace)
-			local source = vim.deepcopy(current_source)
-			assert(vim.deep_equal(workspace, source.workspace))
-			source.repo = source.workspace.repo_identity
-			source.approved = approved_fingerprint == source.fingerprint
-			return { sources = { source } }
-		end,
-		has_approval = function(request)
-			assert(vim.deep_equal(request.workspace, current_source.workspace))
-			assert(request.source == current_source.id and request.fingerprint == current_source.fingerprint)
-			return approved_fingerprint == request.fingerprint
-		end,
-		approve = function(request)
-			assert(vim.deep_equal(request.workspace, current_source.workspace))
-			assert(request.workspace.root == project and request.source == "project-lsp-settings")
-			assert(current_source.fingerprint == request.fingerprint)
-			approved_fingerprint = request.fingerprint
-			return true
-		end,
-	}
 	local project_settings = require("config.project_settings")
 	project_settings.setup({
 		active = true,
-		authority = authority,
 		repo = {
 			root = function()
 				return project
@@ -100,7 +72,7 @@ T["tooling"] = function()
 		},
 		neoconf = neoconf,
 	})
-	assert(vim.fn.exists(":NvimConfigTrustProjectSettings") == 2, "project trust command is missing")
+	assert(vim.fn.exists(":NvimConfigTrustProjectSettings") == 0, "removed project trust command remains")
 	assert(vim.fn.exists(":Neoconf") == 2, "Neoconf global UI command is missing")
 	assert(vim.fn.exists("#Neoconf#BufWritePost") == 0, "Neoconf live reload remains enabled")
 	for _, item in
@@ -114,7 +86,7 @@ T["tooling"] = function()
 	end
 	assert(
 		neoconf.get("lspconfig.ruff", {}, { file = project .. "/disabled.py" }) ~= false,
-		"Neoconf still imported unapproved project settings directly"
+		"Neoconf imported project settings directly instead of through the adapter"
 	)
 
 	local startup_config = vim.deepcopy(vim.lsp.config.ty)
@@ -123,34 +95,9 @@ T["tooling"] = function()
 	vim.lsp.config.ty.before_init({}, startup_config)
 	assert(rawequal(startup_config.settings, startup_client.settings))
 	assert(
-		startup_client.settings.ty.configuration.rules == nil
-			or startup_client.settings.ty.configuration.rules["unresolved-reference"] ~= "warn",
-		"unapproved VSCode settings reached ty"
+		startup_client.settings.ty.configuration.rules["unresolved-reference"] == "warn",
+		"project VSCode settings did not reach ty"
 	)
-	assert(startup_client.settings.ty.configuration.environment.python == local_python)
-
-	local disabled_buf = vim.api.nvim_create_buf(false, false)
-	vim.api.nvim_buf_set_name(disabled_buf, project .. "/disabled.py")
-	local started_before_approval = false
-	vim.lsp.config.ruff.root_dir(disabled_buf, function()
-		started_before_approval = true
-	end)
-	assert(started_before_approval, "unapproved server setting gated startup")
-	vim.api.nvim_set_current_buf(disabled_buf)
-	vim.cmd("NvimConfigTrustProjectSettings")
-	assert(approved_fingerprint, "trust command did not persist the exact fingerprint")
-	local approved_vscode, approved_err = project_settings.get("vscode", {}, project)
-	assert(
-		approved_vscode.ty.configuration.rules["unresolved-reference"] == "warn",
-		"approved adapter value is missing: " .. vim.inspect({ approved_vscode, approved_err, current_source })
-	)
-
-	startup_config = vim.deepcopy(vim.lsp.config.ty)
-	startup_config.root_dir = project
-	startup_client = { settings = startup_config.settings }
-	vim.lsp.config.ty.before_init({}, startup_config)
-	assert(rawequal(startup_config.settings, startup_client.settings))
-	assert(startup_client.settings.ty.configuration.rules["unresolved-reference"] == "warn")
 	assert(startup_client.settings.ty.disableLanguageServices == false)
 	assert(startup_client.settings.ty.configuration.environment.python == project .. "/.venv")
 	assert(require("config.python").for_root(project) == local_python)
@@ -161,11 +108,14 @@ T["tooling"] = function()
 	assert(rawequal(updated_config.settings, updated_settings))
 	assert(updated_config.settings.ty.configuration.environment.python == project .. "/.venv")
 	assert(updated_config.settings.ty.configuration.rules["unresolved-reference"] == "warn")
+
+	local disabled_buf = vim.api.nvim_create_buf(false, false)
+	vim.api.nvim_buf_set_name(disabled_buf, project .. "/disabled.py")
 	local disabled_started = false
 	vim.lsp.config.ruff.root_dir(disabled_buf, function()
 		disabled_started = true
 	end)
-	assert(not disabled_started, "approved lspconfig.ruff=false did not gate startup")
+	assert(not disabled_started, "project lspconfig.ruff=false did not gate startup")
 
 	local real_config = {
 		name = "ty",
@@ -174,12 +124,12 @@ T["tooling"] = function()
 			ty = { configuration = { rules = { ["possibly-unresolved-reference"] = "ignore" } } },
 		},
 	}
-	local upstream_saw_settings = false
+	local upstream_rule
 	local wrapped_before_init = require("config.lsp_neoconf").wrap_before_init("ty", function(_, config)
-		upstream_saw_settings = config.settings.ty.configuration.rules["unresolved-reference"] == "warn"
+		upstream_rule = config.settings.ty.configuration.rules["unresolved-reference"]
 	end)
 	wrapped_before_init({}, real_config)
-	assert(upstream_saw_settings, "approved settings were not merged before upstream before_init")
+	assert(upstream_rule == "warn", "project settings were not merged before upstream before_init")
 	assert(real_config.settings.ty.configuration.rules["possibly-unresolved-reference"] == "ignore")
 
 	assert(vim.fn.writefile({
@@ -187,29 +137,26 @@ T["tooling"] = function()
 	}, project .. "/.vscode/settings.json") == 0)
 	local changed = { root_dir = project, settings = {} }
 	vim.lsp.config.ty.before_init({}, changed)
-	local changed_rules = changed.settings.ty and changed.settings.ty.configuration.rules or {}
-	assert(changed_rules["unresolved-reference"] ~= "error", "changed unapproved project settings remained active")
-	upstream_saw_settings = true
+	assert(
+		changed.settings.ty.configuration.rules["unresolved-reference"] == "error",
+		"edited project settings were not applied"
+	)
 	local stable_settings = real_config.settings
 	wrapped_before_init({}, real_config)
-	assert(rawequal(stable_settings, real_config.settings), "LSP settings table identity changed on revocation")
-	assert(not upstream_saw_settings, "revoked settings remained visible to the upstream hook")
-	assert(
-		real_config.settings.ty.configuration.rules["unresolved-reference"] == nil,
-		"revoked settings remained sticky"
-	)
+	assert(rawequal(stable_settings, real_config.settings), "LSP settings table identity changed on edit")
+	assert(upstream_rule == "error", "edited settings were not visible to the upstream hook")
 	assert(
 		real_config.settings.ty.configuration.rules["possibly-unresolved-reference"] == "ignore",
 		"base settings were lost"
 	)
+	assert(vim.fn.writefile({ "{}" }, project .. "/.neoconf.json") == 0)
 	disabled_started = false
 	vim.lsp.config.ruff.root_dir(disabled_buf, function()
 		disabled_started = true
 	end)
-	assert(disabled_started, "combined-fingerprint mutation did not revoke the startup gate")
+	assert(disabled_started, "removing lspconfig.ruff=false did not release the startup gate")
 	vim.api.nvim_buf_delete(disabled_buf, { force = true })
 	project_settings.setup({
-		authority = require("trusted_workspace"),
 		repo = require("config.repo"),
 		neoconf = neoconf,
 		notify = vim.notify,

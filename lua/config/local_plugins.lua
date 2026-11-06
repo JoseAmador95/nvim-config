@@ -15,7 +15,6 @@ local NAMES = {
 	"markdown-view.nvim",
 	"log-workbench.nvim",
 	"clangd-compile-db.nvim",
-	"trusted-workspace.nvim",
 	"treesitter-runtime.nvim",
 }
 

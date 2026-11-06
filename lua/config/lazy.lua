@@ -11,6 +11,7 @@ source = uv.fs_realpath(source) or fn.fnamemodify(source, ":p")
 local repo_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(source))))
 local lazy_lock = require("config.lazy_lock")
 local lazy_attestation = require("config.lazy_attestation")
+local plugin_state = require("config.plugin_state")
 local locked_lazy, locked_lazy_err = lazy_lock.plugin(repo_root, "lazy.nvim")
 if not locked_lazy then
 	error("Cannot resolve the locked lazy.nvim bootstrap: " .. tostring(locked_lazy_err))
@@ -196,7 +197,8 @@ validate_lazy_checkout = function(path, options)
 				locked_lazy.commit,
 				head,
 				suffix
-			)
+			),
+			"head-mismatch"
 	end
 
 	if status_code ~= 0 then
@@ -254,22 +256,84 @@ validate_lazy_checkout = function(path, options)
 	return true
 end
 
+-- NVIM_CONFIG_OFFLINE=1 keeps validation and scripted checks network-free; an
+-- explicit NVIM_CONFIG_BOOTSTRAP=1 run may still fetch what it was asked for.
+local explicit_bootstrap = vim.env.NVIM_CONFIG_BOOTSTRAP == "1"
+local network_allowed = vim.env.NVIM_CONFIG_OFFLINE ~= "1" or explicit_bootstrap
+
+local function notify_later(message, level)
+	vim.schedule(function()
+		vim.notify(message, level or vim.log.levels.INFO, { title = "lazy.nvim" })
+	end)
+end
+
+-- A clean checkout at another commit is moved to the locked commit. This is the
+-- normal state after pulling a config whose lock moved lazy.nvim forward.
+local function restore_locked_lazy(path)
+	local present = run_git({ "git", "-C", path, "cat-file", "-e", locked_lazy.commit .. "^{commit}" }) == 0
+	if not present then
+		local fetch_code, _, fetch_detail = run_git({
+			"git",
+			"-C",
+			path,
+			"fetch",
+			"--quiet",
+			"--filter=blob:none",
+			"--no-tags",
+			"origin",
+			locked_lazy.commit,
+		})
+		if fetch_code ~= 0 then
+			return nil,
+				("could not fetch locked lazy.nvim commit %s (git exit %s): %s"):format(
+					locked_lazy.commit,
+					tostring(fetch_code),
+					fetch_detail
+				)
+		end
+	end
+	local checkout_code, _, checkout_detail =
+		run_git({ "git", "-C", path, "checkout", "--quiet", "--detach", locked_lazy.commit })
+	if checkout_code ~= 0 then
+		return nil,
+			("could not check out locked lazy.nvim commit %s (git exit %s): %s"):format(
+				locked_lazy.commit,
+				tostring(checkout_code),
+				checkout_detail
+			)
+	end
+	return true
+end
+
 local lazy_stat = uv.fs_stat(lazypath)
 if not lazy_stat then
-	if vim.env.NVIM_CONFIG_BOOTSTRAP ~= "1" then
+	if not network_allowed then
 		error(
-			("lazy.nvim is missing at %s; run scripts/bootstrap-config explicitly before starting Neovim"):format(
-				lazypath
-			)
+			("lazy.nvim is missing at %s and NVIM_CONFIG_OFFLINE=1 forbids downloading it; "):format(lazypath)
+				.. "unset NVIM_CONFIG_OFFLINE or run scripts/bootstrap-config"
 		)
 	end
 	bootstrap_lazy()
 	lazy_stat = uv.fs_stat(lazypath)
+	if not explicit_bootstrap then
+		notify_later("Installed lazy.nvim " .. locked_lazy.commit:sub(1, 7) .. " from the plugin lock")
+	end
 end
 if lazy_stat.type ~= "directory" then
 	error("Cannot use lazy.nvim path " .. lazypath .. ": destination is not a directory")
 end
-local checkout_ok, checkout_err = validate_lazy_checkout(lazypath, { remediation = true })
+local checkout_ok, checkout_err, checkout_reason = validate_lazy_checkout(lazypath, { remediation = true })
+if not checkout_ok and checkout_reason == "head-mismatch" and network_allowed then
+	local restored, restore_err = restore_locked_lazy(lazypath)
+	if restored then
+		checkout_ok, checkout_err = validate_lazy_checkout(lazypath, { remediation = true, allow_cache = false })
+		if checkout_ok then
+			notify_later("Moved lazy.nvim to the locked commit " .. locked_lazy.commit:sub(1, 7))
+		end
+	else
+		checkout_err = checkout_err .. "\nAutomatic restore failed: " .. tostring(restore_err)
+	end
+end
 if not checkout_ok then
 	error(checkout_err)
 end
@@ -394,12 +458,37 @@ else
 	end
 end
 
+-- A config pulled from another machine can lock plugins at other commits than
+-- the installed ones. Move them before Lazy loads anything, so plugins that
+-- verify their own checkout (md-render) start correctly. Explicit bootstrap and
+-- provisioning runs restore through Lazy themselves.
+if network_allowed and not explicit_bootstrap then
+	local restored, failed = plugin_state.restore_locked(lock_entries, fn.stdpath("data") .. "/lazy", function(argv)
+		return (run_git(argv))
+	end, { ["lazy.nvim"] = true })
+	if #restored > 0 then
+		notify_later("Moved plugins to their lazy-lock.json commits: " .. table.concat(restored, ", "))
+	end
+	if #failed > 0 then
+		notify_later(
+			"Could not move plugins to their lazy-lock.json commits: "
+				.. table.concat(failed, ", ")
+				.. ". Run :Lazy restore; :checkhealth nvimconfig lists them.",
+			vim.log.levels.WARN
+		)
+	end
+end
+
 local runtime_paths = { repo_root }
 vim.list_extend(runtime_paths, require("config.local_plugins").paths())
 
 require("lazy").setup(specs, {
 	defaults = { lazy = true }, -- lazy-load by default
-	install = { missing = vim.env.NVIM_CONFIG_BOOTSTRAP == "1" },
+	-- Missing plugins install at their locked commits on startup, so a new
+	-- machine or a newly added plugin works without a separate bootstrap step.
+	-- VSCode-Neovim shares the editor's plugin directory and is never blocked
+	-- by a first-run install.
+	install = { missing = network_allowed and not (vim.g.vscode == 1 or vim.g.vscode == true) },
 	lockfile = lockfile,
 	ui = { border = "rounded" },
 	change_detection = { notify = false },

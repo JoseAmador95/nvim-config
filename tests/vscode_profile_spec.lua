@@ -31,7 +31,6 @@ T["vscode profile"] = function()
 		"HexDump",
 		"HexAssemble",
 		"HexToggle",
-		"NvimConfigTrustProjectSettings",
 		"NvimConfigToolsInstall",
 		"LogWatchCurrentFile",
 		"Mason",
@@ -49,9 +48,8 @@ T["vscode profile"] = function()
 	assert(package.loaded["config.editor_actions"] == nil, "editor actions loaded in VSCode")
 	assert(package.loaded["config.project_settings"] == nil, "project settings adapter loaded in VSCode")
 	assert(package.loaded.tab_first == nil, "tab-first runtime loaded in VSCode")
-	for _, name in ipairs({ "trusted_workspace", "treesitter_runtime" }) do
-		assert(package.loaded[name] ~= nil, name .. " is missing from the VSCode early allowlist")
-	end
+	assert(package.loaded.treesitter_runtime ~= nil, "treesitter_runtime is missing from the VSCode early allowlist")
+	assert(package.loaded.trusted_workspace == nil, "removed trusted_workspace was loaded")
 	for _, name in ipairs({
 		"exact_editor",
 		"devcontainer_editor",

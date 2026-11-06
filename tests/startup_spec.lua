@@ -71,9 +71,6 @@ T["startup"] = function()
 		"ReviewClose",
 		"ClangdSwitchSourceHeader",
 		"ToggleInlineDiagnostics",
-		"NvimConfigExecutionAuthorize",
-		"NvimConfigExecutionRevoke",
-		"NvimConfigExecutionStatus",
 	}) do
 		assert(vim.fn.exists(":" .. command) == 2, "full editor " .. command .. " command is missing")
 	end

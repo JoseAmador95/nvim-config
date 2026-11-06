@@ -25,16 +25,12 @@ vim.api.nvim_create_autocmd("User", {
 					assert(notify_status.active == "noice", "Noice did not acquire the notification lifecycle")
 					assert(notify_status.leases == 1, "Noice leaked notification provider leases")
 					for _, name in ipairs({
-						"trusted_workspace",
 						"tab_first",
 						"treesitter_runtime",
 					}) do
 						assert(package.loaded[name] ~= nil, name .. " was not loaded at its required early boundary")
 					end
-					assert(
-						package.loaded["config.execution"] ~= nil,
-						"workspace execution authority was not registered at its host startup boundary"
-					)
+					assert(package.loaded.trusted_workspace == nil, "removed trusted_workspace was loaded")
 
 					local deferred_modules = {
 						"exact_editor",

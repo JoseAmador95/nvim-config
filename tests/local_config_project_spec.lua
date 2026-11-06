@@ -20,7 +20,6 @@ end
 
 local original_cwd = vim.fn.getcwd()
 local original_config_file = vim.env.NVIM_CONFIG_FILE
-local original_state_root = vim.env.NVIM_CONFIG_TRUST_STATE_ROOT
 local original_appname = vim.env.NVIM_APPNAME
 local original_secure_read = vim.secure.read
 local original_notify = vim.notify
@@ -31,7 +30,7 @@ vim.notify = function(message)
 	notifications[#notifications + 1] = tostring(message)
 end
 
-T["local_config delegates merge and snapshots while preserving host APIs"] = function()
+T["project local config merges its allowed fields over the host file"] = function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
@@ -62,7 +61,6 @@ T["local_config delegates merge and snapshots while preserving host APIs"] = fun
 
 	vim.cmd.cd(vim.fn.fnameescape(project))
 	vim.env.NVIM_CONFIG_FILE = host_path
-	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = vim.fs.joinpath(root, "trust-state")
 	vim.env.NVIM_APPNAME = nil
 	vim.secure.read = function(path)
 		return table.concat(vim.fn.readfile(path), "\n")
@@ -108,51 +106,6 @@ T["local_config delegates merge and snapshots while preserving host APIs"] = fun
 		"plugin API no longer returns effective values"
 	)
 
-	local authority = require("trusted_workspace")
-	local status = authority.status()
-	equal("applied", status.mode, "secure project source remained pending")
-	equal(0, #status.pending, "secure project source retained a pending approval")
-	equal(
-		"local-config-project",
-		status.applied.validity.provenance["plugins.clangd_compile_db.path"].id,
-		"adapter lost provenance"
-	)
-	assert(vim.fn.filereadable(vim.fs.joinpath(root, "trust-state", "trusted-workspace.json")) == 1)
-
-	local project_source
-	for _, source in ipairs(status.sources) do
-		if source.id == "local-config-project" then
-			project_source = source
-			break
-		end
-	end
-	assert(project_source, "local config project source is missing")
-	local authority_path =
-		vim.fs.joinpath(repo, "local-plugins", "trusted-workspace.nvim", "lua", "trusted_workspace", "init.lua")
-	local external_authority = assert(loadfile(authority_path))()
-	assert(external_authority.setup({ state_root = vim.fs.joinpath(root, "trust-state"), mode = "full" }))
-	assert(external_authority.revoke_approval(project_source.repo, project_source.id))
-	assert(
-		external_authority.has_approval(project_source.repo, project_source.id, project_source.fingerprint) == false,
-		"second authority instance did not durably revoke local config"
-	)
-
-	local authority_approve = authority.approve
-	local approval_calls = 0
-	authority.approve = function(...)
-		approval_calls = approval_calls + 1
-		return authority_approve(...)
-	end
-	local reload_ok, reloaded = xpcall(local_config.reload, debug.traceback)
-	authority.approve = authority_approve
-	assert(reload_ok, reloaded)
-	equal("project-clangd", reloaded.plugins.clangd_compile_db.path, "durable reapproval changed project values")
-	equal(1, approval_calls, "local config did not reconcile its durable exact approval")
-	assert(
-		external_authority.has_approval(project_source.repo, project_source.id, project_source.fingerprint),
-		"local config reload did not restore its exact durable approval"
-	)
-
 	vim.fn.delete(root, "rf")
 end
 
@@ -173,7 +126,6 @@ T["project local config rejects host-only log indexing controls"] = function()
 
 	vim.cmd.cd(vim.fn.fnameescape(project))
 	vim.env.NVIM_CONFIG_FILE = host_path
-	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = vim.fs.joinpath(root, "trust-state")
 	vim.env.NVIM_APPNAME = nil
 	vim.secure.read = function(path)
 		return table.concat(vim.fn.readfile(path), "\n")
@@ -188,7 +140,6 @@ T["project local config rejects host-only log indexing controls"] = function()
 	local errors = table.concat(local_config.errors(), "\n")
 	assert(errors:find("project source", 1, true), "project log indexing rejection was not reported")
 	assert(errors:find("max_matches", 1, true), "project rejection omitted the forbidden log field")
-	equal(0, #require("trusted_workspace").status().pending, "rejected log controls remained pending")
 
 	vim.fn.delete(root, "rf")
 end
@@ -207,7 +158,6 @@ T["project local config permits review context only and rejects host-only review
 
 	vim.cmd.cd(vim.fn.fnameescape(project))
 	vim.env.NVIM_CONFIG_FILE = host_path
-	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = vim.fs.joinpath(root, "trust-state")
 	vim.env.NVIM_APPNAME = nil
 	vim.secure.read = function(path)
 		return table.concat(vim.fn.readfile(path), "\n")
@@ -228,7 +178,6 @@ T["project local config permits review context only and rejects host-only review
 		errors:find("max_files", 1, true) or errors:find("composer", 1, true),
 		"project rejection omitted its first forbidden review control"
 	)
-	equal(0, #require("trusted_workspace").status().pending, "rejected composer remained pending")
 
 	vim.fn.delete(root, "rf")
 end
@@ -240,31 +189,27 @@ T["pager mode does not read or execute project Lua"] = function()
 	local host_path = vim.fs.joinpath(root, "host.lua")
 	assert(vim.fn.writefile({ "return { plugins = { native_review = { hunk_context = 4 } } }" }, host_path) == 0)
 	assert(vim.fn.writefile({
-		"vim.g.trusted_workspace_project_executed = true",
+		"vim.g.local_config_project_executed = true",
 		"return { plugins = { native_review = { hunk_context = 99 } } }",
 	}, vim.fs.joinpath(project, ".nvim-local.lua")) == 0)
 
 	vim.cmd.cd(vim.fn.fnameescape(project))
 	vim.env.NVIM_CONFIG_FILE = host_path
-	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = vim.fs.joinpath(root, "trust-state")
 	vim.env.NVIM_APPNAME = "nvimpager"
-	vim.g.trusted_workspace_project_executed = nil
+	vim.g.local_config_project_executed = nil
 	vim.secure.read = function()
-		error("project trust flow must not run in pager mode")
+		error("the project file prompt must not run in pager mode")
 	end
 	package.loaded["config.local_config"] = nil
 	local local_config = require("config.local_config")
 	equal(4, local_config.plugin("native_review").hunk_context, "host config was not active in pager mode")
 	equal("disabled", local_config.sources()[2].status, "project source was not marked disabled")
-	assert(vim.g.trusted_workspace_project_executed == nil, "pager executed project Lua")
-	local status = require("trusted_workspace").status()
-	equal("host-only", status.profile, "pager did not select host-only authority mode")
-	equal(0, #status.pending, "pager exposed a project approval")
+	assert(vim.g.local_config_project_executed == nil, "pager executed project Lua")
 
 	vim.fn.delete(root, "rf")
 end
 
-T["project redraw settings reject the complete source without approval"] = function()
+T["project redraw settings reject the complete project source"] = function()
 	local root = temp_dir()
 	local project = vim.fs.joinpath(root, "project")
 	assert(vim.fn.mkdir(project, "p", 448) == 1)
@@ -284,7 +229,6 @@ T["project redraw settings reject the complete source without approval"] = funct
 
 	vim.cmd.cd(vim.fn.fnameescape(project))
 	vim.env.NVIM_CONFIG_FILE = host_path
-	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = vim.fs.joinpath(root, "trust-state")
 	vim.env.NVIM_APPNAME = nil
 	vim.secure.read = function(path)
 		return table.concat(vim.fn.readfile(path), "\n")
@@ -298,8 +242,6 @@ T["project redraw settings reject the complete source without approval"] = funct
 	local errors = table.concat(local_config.errors(), "\n")
 	assert(errors:find("project source:", 1, true), "project UI rejection was not reported")
 	assert(errors:find("ui", 1, true), "project UI rejection omitted the forbidden namespace")
-	assert(not errors:find("project approval:", 1, true), "rejected project source was sent for approval")
-	equal(0, #require("trusted_workspace").status().pending, "rejected project source left a pending approval")
 
 	vim.fn.delete(root, "rf")
 end
@@ -307,7 +249,6 @@ end
 hooks.post_once = function()
 	vim.cmd.cd(vim.fn.fnameescape(original_cwd))
 	vim.env.NVIM_CONFIG_FILE = original_config_file
-	vim.env.NVIM_CONFIG_TRUST_STATE_ROOT = original_state_root
 	vim.env.NVIM_APPNAME = original_appname
 	vim.secure.read = original_secure_read
 	vim.notify = original_notify

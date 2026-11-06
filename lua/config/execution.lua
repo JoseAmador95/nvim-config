@@ -1,11 +1,11 @@
--- Host-owned workspace execution authority. This module never installs tools,
--- prompts implicitly, or treats cached UI state as authorization.
-local authority = require("trusted_workspace")
+-- Workspace identity for lint/format, test, build and debug execution.
+-- Execution is never gated on per-repository trust: every capability is
+-- available in every directory. Callers still pass through resolve() so the
+-- capability and the exact workspace stay explicit at each spawn boundary.
 local repo = require("config.repo")
 
 local M = {}
 
-local TITLE = "Workspace execution"
 local CAPABILITIES = {
 	["lint-format"] = true,
 	test = true,
@@ -13,15 +13,6 @@ local CAPABILITIES = {
 	debug = true,
 }
 local CAPABILITY_ORDER = { "lint-format", "test", "build", "debug" }
-local COMMANDS = {
-	"NvimConfigExecutionAuthorize",
-	"NvimConfigExecutionRevoke",
-	"NvimConfigExecutionStatus",
-}
-
-local function notify(message, level)
-	vim.notify(tostring(message), level or vim.log.levels.INFO, { title = TITLE })
-end
 
 local function exact_capability(value)
 	if type(value) ~= "string" or not CAPABILITIES[value] then
@@ -83,7 +74,48 @@ local function container_workspace()
 	})
 end
 
----Resolve the current exact workspace identity without caching authority.
+local function canonical_directory(path)
+	if type(path) ~= "string" or path == "" then
+		return nil
+	end
+	local real = vim.uv.fs_realpath(path)
+	local stat = real and vim.uv.fs_stat(real) or nil
+	if stat and stat.type ~= "directory" then
+		real = vim.uv.fs_realpath(vim.fs.dirname(real))
+		stat = real and vim.uv.fs_stat(real) or nil
+	end
+	if not stat or stat.type ~= "directory" then
+		return nil
+	end
+	return vim.fs.normalize(real)
+end
+
+-- Outside Git the directory that owns the request is the workspace: the
+-- explicit root, the buffer's directory, then the current directory.
+local function directory_workspace(opts)
+	local candidates = {}
+	if opts.root ~= nil then
+		candidates[#candidates + 1] = opts.root
+	else
+		local buf = opts.buf or 0
+		if type(buf) == "number" and vim.api.nvim_buf_is_valid(buf) then
+			local name = vim.api.nvim_buf_get_name(buf)
+			if name ~= "" and not name:match("^%a[%w+.-]*://") then
+				candidates[#candidates + 1] = vim.fs.dirname(name)
+			end
+		end
+		candidates[#candidates + 1] = vim.uv.cwd()
+	end
+	for _, candidate in ipairs(candidates) do
+		local directory = canonical_directory(candidate)
+		if directory then
+			return { runtime = "host", root = directory, repo_identity = directory }
+		end
+	end
+	return nil, "workspace directory is unavailable"
+end
+
+---Resolve the current exact workspace identity.
 ---@param opts? { buf?: integer, root?: string, workspace?: table }
 ---@return table? workspace
 ---@return string? error_message
@@ -107,35 +139,20 @@ function M.workspace(opts)
 	if container or container_err then
 		return container, container_err
 	end
-	local root, root_err
+	local root
 	if opts.root ~= nil then
-		root, root_err = repo.root(opts.root)
+		root = repo.root(opts.root)
 	else
-		root, root_err = repo.current_root(opts.buf or 0)
+		root = repo.current_root(opts.buf or 0)
 	end
-	if not root then
-		return nil, root_err or "workspace is not inside a Git repository"
+	local canonical = root and vim.uv.fs_realpath(root) or nil
+	if canonical and vim.fs.normalize(canonical) == root then
+		return { runtime = "host", root = root, repo_identity = root }
 	end
-	local canonical = vim.uv.fs_realpath(root)
-	if not canonical or vim.fs.normalize(canonical) ~= root then
-		return nil, "repository root is not canonical"
-	end
-	return { runtime = "host", root = root, repo_identity = root }
+	return directory_workspace(opts)
 end
 
-local function durable_grant(workspace, capability)
-	local granted, err = authority.has_grant(workspace.repo_identity, capability)
-	if granted == nil then
-		return nil, "could not verify durable workspace authority: " .. tostring(err)
-	end
-	if granted ~= true then
-		return nil,
-			("workspace is not authorized for %s; run :NvimConfigExecutionAuthorize %s"):format(capability, capability)
-	end
-	return true
-end
-
----Check one durable grant and return the exact WorkspaceKey it authorized.
+---Validate one capability and return the exact workspace it applies to.
 ---@param capability string
 ---@param opts? { buf?: integer, root?: string, workspace?: table }
 ---@return table? workspace
@@ -149,14 +166,10 @@ function M.check(capability, opts)
 	if not workspace then
 		return nil, workspace_err
 	end
-	local granted, grant_err = durable_grant(workspace, requested)
-	if not granted then
-		return nil, grant_err
-	end
 	return vim.deepcopy(workspace)
 end
 
----Re-read authority for the same captured workspace immediately before spawn.
+---Validate a previously captured workspace immediately before spawn.
 ---@param workspace table
 ---@param capability string
 ---@return boolean? ok
@@ -170,11 +183,11 @@ function M.recheck(workspace, capability)
 	if not exact then
 		return nil, workspace_err
 	end
-	return durable_grant(exact, requested)
+	return true
 end
 
----Run a side-effect-free resolver between two durable grant reads. Callers
----must invoke this at their last seam before spawning the returned executable.
+---Run a side-effect-free resolver for one capability. Callers invoke this at
+---their last seam before spawning the returned executable.
 ---@param capability string
 ---@param resolver function
 ---@param opts? { buf?: integer, root?: string, workspace?: table }
@@ -184,9 +197,9 @@ function M.resolve(capability, resolver, opts)
 	if type(resolver) ~= "function" then
 		return nil, "execution resolver must be a function"
 	end
-	local workspace, authority_err = M.check(capability, opts)
+	local workspace, workspace_err = M.check(capability, opts)
 	if not workspace then
-		return nil, authority_err
+		return nil, workspace_err
 	end
 	local called, resolved, resolve_err = xpcall(resolver, debug.traceback)
 	if not called then
@@ -195,132 +208,7 @@ function M.resolve(capability, resolver, opts)
 	if resolved == nil or resolved == false then
 		return nil, tostring(resolve_err or "execution resource is unavailable")
 	end
-	local current, recheck_err = M.recheck(workspace, capability)
-	if not current then
-		return nil, recheck_err
-	end
 	return resolved, vim.deepcopy(workspace)
-end
-
-function M.authorize(capability, opts)
-	local requested, capability_err = exact_capability(capability)
-	if not requested then
-		return nil, capability_err
-	end
-	local workspace, workspace_err = M.workspace(opts)
-	if not workspace then
-		return nil, workspace_err
-	end
-	local ok, err = authority.authorize(workspace.repo_identity, requested)
-	if not ok then
-		return nil, err
-	end
-	return vim.deepcopy(workspace)
-end
-
-function M.revoke(capability, opts)
-	local requested, capability_err = exact_capability(capability)
-	if not requested then
-		return nil, capability_err
-	end
-	local workspace, workspace_err = M.workspace(opts)
-	if not workspace then
-		return nil, workspace_err
-	end
-	local ok, err = authority.revoke(workspace.repo_identity, requested)
-	if not ok then
-		return nil, err
-	end
-	return vim.deepcopy(workspace)
-end
-
-function M.status(capability, opts)
-	if capability ~= nil and capability ~= "" then
-		local requested, capability_err = exact_capability(capability)
-		if not requested then
-			return nil, capability_err
-		end
-		capability = requested
-	end
-	local workspace, workspace_err = M.workspace(opts)
-	if not workspace then
-		return nil, workspace_err
-	end
-	local grants = {}
-	for _, candidate in ipairs(CAPABILITY_ORDER) do
-		if capability == nil or capability == "" or candidate == capability then
-			local granted, err = authority.has_grant(workspace.repo_identity, candidate)
-			if granted == nil then
-				return nil, "could not read durable workspace authority: " .. tostring(err)
-			end
-			grants[candidate] = granted == true
-		end
-	end
-	return { workspace = vim.deepcopy(workspace), grants = grants }
-end
-
-local function completion(prefix)
-	local values = {}
-	for _, capability in ipairs(CAPABILITY_ORDER) do
-		if vim.startswith(capability, prefix) then
-			values[#values + 1] = capability
-		end
-	end
-	return values
-end
-
-local function report_mutation(action, capability, callback)
-	local workspace, err = callback(capability)
-	if not workspace then
-		notify(err, vim.log.levels.ERROR)
-		return
-	end
-	notify(("%s %s for %s"):format(action, capability, workspace.repo_identity))
-end
-
-function M.setup()
-	vim.api.nvim_create_user_command("NvimConfigExecutionAuthorize", function(options)
-		report_mutation("Authorized", options.args, M.authorize)
-	end, {
-		nargs = 1,
-		complete = completion,
-		desc = "Authorize one execution capability for the current repository",
-		force = true,
-	})
-	vim.api.nvim_create_user_command("NvimConfigExecutionRevoke", function(options)
-		report_mutation("Revoked", options.args, M.revoke)
-	end, {
-		nargs = 1,
-		complete = completion,
-		desc = "Revoke one execution capability for the current repository",
-		force = true,
-	})
-	vim.api.nvim_create_user_command("NvimConfigExecutionStatus", function(options)
-		local state, err = M.status(options.args ~= "" and options.args or nil)
-		if not state then
-			notify(err, vim.log.levels.ERROR)
-			return
-		end
-		local rows = { state.workspace.runtime .. " · " .. state.workspace.repo_identity }
-		for _, capability in ipairs(CAPABILITY_ORDER) do
-			if state.grants[capability] ~= nil then
-				rows[#rows + 1] = ("%s: %s"):format(capability, state.grants[capability] and "authorized" or "blocked")
-			end
-		end
-		notify(table.concat(rows, "\n"))
-	end, {
-		nargs = "?",
-		complete = completion,
-		desc = "Read durable execution authority for the current repository",
-		force = true,
-	})
-	return true
-end
-
-function M._reset_for_tests()
-	for _, command in ipairs(COMMANDS) do
-		pcall(vim.api.nvim_del_user_command, command)
-	end
 end
 
 M.capabilities = function()

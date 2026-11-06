@@ -1,27 +1,24 @@
--- Approved project LSP settings from .neoconf.json and .vscode/settings.json.
+-- Project LSP settings from .neoconf.json and .vscode/settings.json.
 --
--- trusted-workspace owns only the fingerprint approval. This adapter reads and
--- parses both files once per operation, then revalidates their complete
--- metadata identities immediately before any setting reaches an LSP client.
+-- Both files apply as soon as they exist; there is no approval step. This
+-- adapter reads and parses them once per operation, then revalidates their
+-- complete metadata identities immediately before any setting reaches an LSP
+-- client.
 local M = {}
 
-local authority_module = require("trusted_workspace")
 local contracts = require("local_plugins.contracts")
 local repo_module = require("config.repo")
 
 local uv = vim.uv
 local MAX_FILE_BYTES = 1024 * 1024
 local SOURCE_ID = "project-lsp-settings"
-local SOURCE_PRIORITY = 100
 local FILES = { ".neoconf.json", ".vscode/settings.json" }
 local NIL_DEFAULT = {}
 
 local configured = {
-	authority = authority_module,
 	repo = repo_module,
 	notify = vim.notify,
 }
-local command_registered = false
 local warned = {}
 
 local function copy(value)
@@ -39,12 +36,6 @@ local function notify_once(message, level)
 	if not warned[message] and type(configured.notify) == "function" then
 		warned[message] = true
 		configured.notify(message, level or vim.log.levels.WARN, { title = "Project settings" })
-	end
-end
-
-local function notify(message, level)
-	if type(configured.notify) == "function" then
-		configured.notify(message, level or vim.log.levels.INFO, { title = "Project settings" })
 	end
 end
 
@@ -434,30 +425,6 @@ local function workspace_for(root)
 	return normalized
 end
 
-local function register_candidate(candidate)
-	local _, err = configured.authority.register_source({
-		id = SOURCE_ID,
-		layer = "project",
-		priority = SOURCE_PRIORITY,
-		enabled = candidate.present,
-		workspace = candidate.workspace,
-		fingerprint = candidate.fingerprint,
-		value = {},
-	})
-	return err == nil and true or nil, err
-end
-
-local function durable_approval(candidate)
-	if type(configured.authority.has_approval) ~= "function" then
-		return nil, "trusted-workspace durable approval API is unavailable"
-	end
-	return configured.authority.has_approval({
-		workspace = candidate.workspace,
-		source = SOURCE_ID,
-		fingerprint = candidate.fingerprint,
-	})
-end
-
 local function resolve_root(start)
 	if not active_profile() then
 		return nil, "project settings are disabled in this profile"
@@ -656,38 +623,21 @@ function M.snapshot(start)
 	if not candidate then
 		return nil, candidate_err
 	end
-	local registered, register_err = register_candidate(candidate)
-	if not registered then
-		return nil, register_err
-	end
 	local current, current_err = revalidate_candidate(candidate)
 	if not current then
 		return nil, current_err
-	end
-	local approved = false
-	if current.present then
-		local approval_err
-		approved, approval_err = durable_approval(current)
-		if approved == nil then
-			return nil, approval_err
-		end
-		current, current_err = revalidate_candidate(current)
-		if not current then
-			return nil, current_err
-		end
 	end
 	return copy({
 		root = current.root,
 		workspace = current.workspace,
 		present = current.present,
 		fingerprint = current.fingerprint,
-		approved = approved,
-		values = approved and current.values or { vscode = {}, neoconf = {} },
+		values = current.present and current.values or { vscode = {}, neoconf = {} },
 	})
 end
 
----Resolve multiple project settings through one candidate, approval lookup, and
----metadata revalidation. Every returned value is a caller-owned copy.
+---Resolve multiple project settings through one candidate read and metadata
+---revalidation. Every returned value is a caller-owned copy.
 ---@param defaults table<string, any>
 ---@param start string
 ---@return table<string, any> values
@@ -719,25 +669,12 @@ function M.get_many(defaults, start)
 		end
 		return globals, candidate_err or global_err
 	end
-	local registered, register_err = register_candidate(candidate)
-	if not registered then
-		notify_once("could not register project settings fingerprint: " .. tostring(register_err))
-		return globals, register_err
-	end
 	local current, current_err = revalidate_candidate(candidate)
 	if not current then
 		return globals, current_err
 	end
 	if not current.present then
 		return globals, global_err
-	end
-	local approved, approval_err = durable_approval(current)
-	if approved ~= true then
-		return globals, approval_err or "project settings are not approved"
-	end
-	current, current_err = revalidate_candidate(current)
-	if not current then
-		return globals, current_err
 	end
 	local result = globals
 	for _, key in ipairs(keys) do
@@ -758,55 +695,9 @@ function M.get(key, default, start)
 	return values[key], err
 end
 
-function M.approve(start)
-	local candidate, candidate_err = read_candidate(start)
-	if not candidate then
-		return nil, candidate_err
-	end
-	if not candidate.present then
-		return nil, "no .neoconf.json or .vscode/settings.json exists in this repository"
-	end
-	local registered, register_err = register_candidate(candidate)
-	if not registered then
-		return nil, register_err
-	end
-	local approved, approval_err = configured.authority.approve({
-		workspace = candidate.workspace,
-		source = SOURCE_ID,
-		fingerprint = candidate.fingerprint,
-	})
-	if not approved then
-		return nil, approval_err
-	end
-	local current, current_err = revalidate_candidate(candidate)
-	if not current then
-		return nil, current_err
-	end
-	return copy({ root = current.root, fingerprint = current.fingerprint })
-end
-
-local function command_start()
-	local name = vim.api.nvim_buf_get_name(0)
-	return name ~= "" and name or (uv.cwd() or vim.fn.getcwd())
-end
-
 function M.setup(opts)
 	opts = opts or {}
 	configured = vim.tbl_extend("force", configured, opts)
-	if active_profile() and opts.command ~= false and not command_registered then
-		vim.api.nvim_create_user_command("NvimConfigTrustProjectSettings", function()
-			local result, err = M.approve(command_start())
-			if not result then
-				notify_once("Project settings were not approved: " .. tostring(err), vim.log.levels.ERROR)
-				return
-			end
-			notify(
-				"Approved current project LSP settings fingerprint; restart existing LSP clients to apply it",
-				vim.log.levels.INFO
-			)
-		end, { desc = "Approve current project .neoconf/.vscode LSP settings" })
-		command_registered = true
-	end
 	return M
 end
 

@@ -120,6 +120,7 @@ local function write_pinned_fake_git(root)
 		[[if [ "$operation" = "diff-index" ] || [ "$operation" = "symbolic-ref" ]; then]],
 		[[  exit 0]],
 		[[fi]],
+		[[if [ "$operation" = "cat-file" ] || [ "$operation" = "fetch" ]; then exit "${FAKE_FETCH_EXIT:-64}"; fi]],
 		[[if [ "$operation" = "remote" ]; then]],
 		[[  if [ "${1:-}" = "get-url" ]; then printf '%s\n' 'https://github.com/folke/lazy.nvim.git'; fi]],
 		[[  exit 0]],
@@ -569,7 +570,7 @@ T["lazy cache attests only a stable complete checkout"] = function()
 	vim.fn.delete(root, "rf")
 end
 
-T["existing lazy checkout mismatch fails closed before loading or mutation"] = function()
+T["offline lazy checkout mismatch fails closed before loading or mutation"] = function()
 	local root = temp_dir()
 	local bin = write_pinned_fake_git(root)
 	local log = root .. "/git.log"
@@ -606,6 +607,7 @@ T["existing lazy checkout mismatch fails closed before loading or mutation"] = f
 			FAKE_GIT_LOG = log,
 			FAKE_LAZY_COMMIT = locked.commit,
 			FAKE_LOADED_MARKER = loaded_marker,
+			NVIM_CONFIG_OFFLINE = "1",
 		},
 	}):wait(10000)
 
@@ -620,6 +622,60 @@ T["existing lazy checkout mismatch fails closed before loading or mutation"] = f
 	assert(vim.fn.readfile(destination .. "/.fake-head")[1] == stale_commit, "stale checkout was mutated")
 	assert(not commands:find("checkout", 1, true), "normal startup tried to repair the existing checkout")
 	assert(not commands:find("clone", 1, true), "normal startup tried to replace the existing checkout")
+	vim.fn.delete(root, "rf")
+end
+
+T["online startup moves a stale lazy checkout to the locked commit"] = function()
+	local root = temp_dir()
+	local bin = write_pinned_fake_git(root)
+	local log = root .. "/git.log"
+	local loaded_marker = root .. "/restored-loaded"
+	local locked = assert(require("config.lazy_lock").plugin(repo, "lazy.nvim"))
+	local stale_commit = string.rep("b", 40)
+	local appname = "nvim-security-existing-restore"
+	local destination = root .. "/data/" .. appname .. "/lazy/lazy.nvim"
+	assert(vim.fn.mkdir(destination .. "/lua/lazy", "p") == 1, "could not create stale lazy fixture")
+	assert(vim.fn.writefile({ stale_commit }, destination .. "/.fake-head") == 0, "could not write stale head")
+	assert(vim.fn.writefile({
+		"vim.fn.writefile({ 'loaded' }, vim.env.FAKE_LOADED_MARKER)",
+		"return { setup = function() end }",
+	}, destination .. "/lua/lazy/init.lua") == 0, "could not write stale lazy module")
+
+	local result = vim.system({
+		vim.v.progpath,
+		"--headless",
+		"-u",
+		"NONE",
+		"--cmd",
+		"set runtimepath^=" .. repo,
+		"-c",
+		"lua require('config.local_plugins').setup(); local ok, err = pcall(require, 'config.lazy'); if ok then vim.cmd('quitall!') else vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 42') end",
+	}, {
+		text = true,
+		env = {
+			PATH = bin .. ":" .. (vim.env.PATH or ""),
+			NVIM_LOG_FILE = root .. "/child-nvim.log",
+			XDG_DATA_HOME = root .. "/data",
+			NVIM_APPNAME = appname,
+			NVIM_CONFIG_FILE = root .. "/no-local-config.lua",
+			FAKE_GIT_LOG = log,
+			FAKE_LAZY_COMMIT = locked.commit,
+			FAKE_LOADED_MARKER = loaded_marker,
+			FAKE_FETCH_EXIT = "0",
+			NVIM_CONFIG_OFFLINE = "0",
+		},
+	}):wait(10000)
+
+	local output = (result.stdout or "") .. "\n" .. (result.stderr or "")
+	local commands = table.concat(vim.fn.readfile(log), "\n")
+	assert(result.code == 0, "restored checkout did not load: " .. output)
+	assert(commands:find("checkout --quiet --detach " .. locked.commit, 1, true), "locked commit was not checked out")
+	assert(not commands:find("clone", 1, true), "restore replaced the existing checkout")
+	assert(
+		vim.fn.readfile(destination .. "/.fake-head")[1] == locked.commit,
+		"checkout did not reach the locked commit"
+	)
+	assert(vim.fn.filereadable(loaded_marker) == 1, "lazy.nvim did not load after the restore")
 	vim.fn.delete(root, "rf")
 end
 

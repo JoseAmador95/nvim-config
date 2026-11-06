@@ -205,7 +205,6 @@ end
 if is_editor then
 	redraw_profile.setup()
 	require("config.project_settings").setup()
-	require("config.execution").setup()
 	local devcontainer = require("config.devcontainer")
 	devcontainer.setup()
 	require("config.navigation_history").setup()
@@ -230,6 +229,8 @@ require("config.lazy")
 if not is_vscode then
 	local theme = require("config.theme")
 	redraw_profile.register_repaint("theme", theme.repaint)
+	-- Background first-run provisioning (Mise, Tree-sitter parsers) once a UI exists.
+	require("config.auto_install").setup({ profile = is_editor and "full" or "pager" })
 end
 
 -- `:syntax enable` also enables filetype detection and replays it for buffers

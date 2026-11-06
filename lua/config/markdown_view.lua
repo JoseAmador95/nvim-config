@@ -92,9 +92,16 @@ function M.configure_renderer()
 		or nil
 	if not ok then
 		disable_upstream_entrypoints()
-		return fail(configure_error)
+		-- Startup stays quiet: the reading view reports this when it is used, and
+		-- :checkhealth nvimconfig lists it.
+		return nil, configure_error
 	end
 	return true
+end
+
+---Copied renderer state for :checkhealth nvimconfig.
+function M.status()
+	return { configured = view.status().configured == true and configure_error == nil, error = configure_error }
 end
 
 local function ensure_renderer()

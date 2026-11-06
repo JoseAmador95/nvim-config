@@ -261,7 +261,10 @@ function M.install(target_name, force)
 	return true
 end
 
-function M.install_mise()
+---Install the pinned Mise asynchronously. `on_done(ok, detail)` replaces the
+---default result notification.
+---@param on_done? fun(ok: boolean, detail: string)
+function M.install_mise(on_done)
 	if vim.env.NVIM_CONFIG_OFFLINE == "1" then
 		notify("Mise installation is disabled offline", vim.log.levels.WARN)
 		return false
@@ -270,10 +273,13 @@ function M.install_mise()
 		{ root .. "/scripts/install-mise" },
 		{ text = true },
 		vim.schedule_wrap(function(result)
-			notify(
-				result.code == 0 and result.stdout or result.stderr,
-				result.code == 0 and vim.log.levels.INFO or vim.log.levels.ERROR
-			)
+			local ok = result.code == 0
+			local detail = vim.trim(ok and result.stdout or result.stderr or "")
+			if on_done then
+				on_done(ok, detail ~= "" and detail or ("install-mise exited with " .. tostring(result.code)))
+				return
+			end
+			notify(ok and result.stdout or result.stderr, ok and vim.log.levels.INFO or vim.log.levels.ERROR)
 		end)
 	)
 	return true

@@ -40,7 +40,6 @@ T["pager profile"] = function()
 		"HexAssemble",
 		"HexToggle",
 		"MermaidPreview",
-		"NvimConfigTrustProjectSettings",
 		"NvimConfigToolsInstall",
 		"Mason",
 		"PlantumlAscii",
@@ -59,9 +58,8 @@ T["pager profile"] = function()
 	assert(package.loaded["config.editor_actions"] == nil, "editor actions loaded in the pager")
 	assert(package.loaded["config.project_settings"] == nil, "project settings adapter loaded in the pager")
 	assert(package.loaded.tab_first == nil, "tab-first runtime loaded in the pager")
-	for _, name in ipairs({ "trusted_workspace", "treesitter_runtime" }) do
-		assert(package.loaded[name] ~= nil, name .. " is missing from the pager's early allowlist")
-	end
+	assert(package.loaded.treesitter_runtime ~= nil, "treesitter_runtime is missing from the pager's early allowlist")
+	assert(package.loaded.trusted_workspace == nil, "removed trusted_workspace was loaded")
 	for _, name in ipairs({
 		"exact_editor",
 		"devcontainer_editor",
