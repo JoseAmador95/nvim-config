@@ -771,7 +771,10 @@ local function parse_commits(output)
 				return nil, failure("invalid_git_output", "Git returned an invalid commit parent")
 			end
 		end
-		if not date:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[+-]%d%d:%d%d$") then
+		if
+			not date:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[+-]%d%d:%d%d$")
+			and not date:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$")
+		then
 			return nil, failure("invalid_git_output", "Git returned an invalid commit date")
 		end
 		if author == "" or author:find("[%c]") or subject:find("[%c]") then
