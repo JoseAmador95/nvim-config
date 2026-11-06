@@ -165,8 +165,8 @@ T["Picker reuses native review style and unavailable engines retain the view"] =
 	local before = workspace.mode_state.presentation
 	vim.ui.select = function(items, opts, callback)
 		assert(opts.kind == "native_review" and opts.prompt == "Review diff engine")
-		assert(items[1].id == "main" and items[2].id == "difftastic")
-		callback(items[2])
+		assert(items[1].id == "main" and items[2].id == "diffbandit" and items[3].id == "difftastic")
+		callback(items[3])
 	end
 	assert(controller.engine())
 	assert(controller.status().engine == "main" and workspace.mode_state.presentation == before)
@@ -354,23 +354,29 @@ T["Split comments keep canonical coordinates and reveal hidden rows in both pane
 	assert(controller.engine("main"))
 	assert(lhs.origin_engine.id == "difftastic" and rhs.origin_engine.id == "difftastic")
 end
-T["both engines retain layout, context, comments and refresh behavior"] = function()
+T["all engines retain layout, context, comments and refresh behavior"] = function()
 	adapter.analyze = function(_, callback)
 		callback(output())
 		return function() end
 	end
-	local expected = { "main", "difftastic" }
+	local expected = { "main", "diffbandit", "difftastic" }
 	assert(vim.deep_equal(vim.fn.getcompletion("ReviewEngine ", "cmdline"), expected))
 	local preserved = workspace.session.items[1].origin_engine.id
 	for _, id in ipairs(expected) do
 		assert(controller.engine(id))
+		assert(
+			vim.wait(6000, function()
+				return workspace.engine == id
+			end, 10),
+			table.concat(notifications, "\n")
+		)
 		assert(workspace.engine == id and workspace.mode_state.presentation.origin_engine.id == id)
 		for _, layout in ipairs({ "inline", "split" }) do
 			for _, context in ipairs({ "hunks", "full" }) do
 				assert(controller.layout(layout) and controller.context(context))
 				local shown = workspace.mode_state.presentation
 				assert(shown.layout == layout and shown.context == context and shown.origin_engine.id == id)
-				assert((shown.projected ~= nil) == (id == "difftastic"))
+				assert((shown.projected ~= nil) == (id ~= "main"))
 				assert(shown.entry.old_text == old_text and shown.entry.new_text == new_text)
 			end
 		end

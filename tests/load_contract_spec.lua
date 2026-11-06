@@ -46,6 +46,7 @@ vim.api.nvim_create_autocmd("User", {
 						"log_workbench",
 						"clangd_compile_db",
 						"native_review",
+						"diffbandit",
 						"nvim-jqx",
 					}
 					for loaded_name in pairs(package.loaded) do
@@ -65,6 +66,7 @@ vim.api.nvim_create_autocmd("User", {
 						"config.log_watch",
 						"config.jqx",
 						"config.native_review",
+						"config.review_diffbandit",
 					}) do
 						assert(package.loaded[name] == nil, name .. " host adapter loaded before its trigger")
 					end

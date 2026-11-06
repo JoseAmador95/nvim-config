@@ -26,7 +26,7 @@ Prepared engines declare native/projected presentation separately from
 structural-only semantics and source-coordinate relations.
 Main stays default.
 Main uses native textual presentation; Difftastic uses its structural projection.
-These are the two selectable engines after retiring Patience and GumTree.
+Diffbandit 0.3.0, added on 2026-11-03, uses a textual projection through the same contract.
 Selection is workspace-local and temporary; only comment provenance is persisted.
 Historical Patience and GumTree origins remain inert and readable.
 The store schema does not change.
@@ -38,16 +38,22 @@ That implementation was removed by ADR 0005.
 
 ## Consequences and limitations
 
-Both engines share layout, context and comment workflows without changing
+All engines share layout, context and comment workflows without changing
 canonical entries or global diff options.
 Main's exact text moves are conservative and omit ambiguous repeats.
 Difftastic's supported text fallbacks visibly use Main.
 Execution errors retain the prior view.
+Diffbandit's Lua comparison runs in a cancellable host-owned Neovim worker with
+a five-second deadline, so its unbounded Myers fallback cannot block the editor.
+The pinned upstream UI remains unloaded.
+Final-newline-presence changes between nonempty documents use Main visibly,
+because Diffbandit's line-array comparison does not represent that distinction.
 
 ## Workflow and user decisions
 
 The original selection was Patience plus exact moved blocks plus GumTree.
 The user later retired GumTree and Patience while keeping Main and Difftastic.
+The user subsequently approved Diffbandit as an optional engine, retaining Main as default.
 `ReviewEngine` and its registry-derived completion expose the remaining engines.
 Exact moved-block annotations remain part of Main; the reviewer keeps its
 existing layout and comment workflow.

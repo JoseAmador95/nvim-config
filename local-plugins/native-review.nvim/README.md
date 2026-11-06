@@ -197,12 +197,11 @@ Only the host knows renderer internals; the plugin never imports
 [ADR 0004](../../docs/adr/0004-markdown-visual-review.md).
 
 `:ReviewEngine` or `<leader>rD` opens the numbered engine picker; use
-`:ReviewEngine main|difftastic` to choose directly.
+`:ReviewEngine main|diffbandit|difftastic` to choose directly.
 Main is the default at startup.
 Selection belongs to the workspace, travels with its
 layout/context preferences, and is never saved in the review store.
-Both
-engines use the existing inline and split reviewer, file panel and comments.
+All engines use the existing inline and split reviewer, file panel and comments.
 The optional Difftastic engine requires the explicitly installed, verified
 0.71.0 tool; selecting it never installs anything or falls back to a host binary.
 
@@ -215,6 +214,25 @@ Longer blocks win; overlapping or ambiguous matches are omitted. Analysis skips
 more than 100,000 changed line/gap tokens and shows `Move analysis limited`.
 These labels and colors are decorations; source rows and comment anchors do not
 move.
+
+Diffbandit 0.3.0 supplies textual block alignment and word-level byte ranges
+through the locked `diffbandit.nvim` dependency.
+Install it explicitly with `:Lazy install diffbandit.nvim` if missing.
+The host invokes only its diff module in a separate Neovim process, with frozen
+OLD/NEW text on stdin, an eight-MiB output limit and a five-second deadline.
+Startup and engine selection never install it or activate its UI, Git actions or mappings.
+The reviewer retains its inline/split layouts, context selection and source anchors.
+Whitespace changes remain visible.
+When both documents are nonempty and the presence of the final newline changes,
+that file uses Main and the winbar explains why; binary and metadata-only entries also use Main.
+Failures retain the previous view, and cancelled or superseded calculations cannot publish a result.
+
+Standalone hosts may inject `diffbandit = { analyze = function(request, callback) ... end }`.
+The request contains the frozen `entry`; the callback receives JSON text or `nil, error`,
+and `analyze` returns a cancellation function.
+The JSON contains four-index textual `hunks` and `intraline.old` / `intraline.new` lists
+of `{ line, start_col, end_col }` using one-based source lines and zero-based, exclusive byte bounds.
+The plugin validates exact unchanged regions and changed-source ranges before presenting them.
 
 Difftastic interprets private copies of the frozen OLD/NEW documents through
 its pinned unstable JSON format. Only structural changes receive backgrounds
@@ -234,7 +252,7 @@ API with a bounded, event-pumping wait for uncached analysis.
 Each new comment and reply captures `origin_engine = { id, version }` when its
 composer opens, using the effective engine for that file.
 Main records
-`builtin-v2` and the Neovim runtime version; Difftastic records `0.71.0`.
+`builtin-v2` and the Neovim runtime version; Diffbandit records `0.3.0` and Difftastic records `0.71.0`.
 Historical Patience and GumTree origins remain inert metadata and round-trip without loading an engine.
 Edits, resolution and reanchoring preserve this origin. Older comments show
 `not recorded`. Markdown exports and recovery exports include the origin and

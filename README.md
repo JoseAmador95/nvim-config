@@ -187,6 +187,15 @@ rendered selections within a single block. Image previews remain references-only
 in Review. Selecting `:ReviewEngine` prepares and returns to source;
 failure preserves the current view. See the [review plugin contract](local-plugins/native-review.nvim/README.md#visual-markdown-diff).
 
+`:ReviewEngine main|diffbandit|difftastic` selects the source diff engine;
+`<leader>rD` opens the selector.
+Main remains the default.
+Diffbandit 0.3.0 adds IntelliJ-style textual matching and word highlighting to
+the existing review views, with frozen source coordinates and comments.
+Install the locked dependency with `:Lazy install diffbandit.nvim` if it is missing.
+Its calculation runs in a cancellable worker with a five-second deadline.
+Changes to the presence of the final newline visibly use Main for that file.
+
 `:MarkdownView` or `<leader>mv` opens a focused, read-only reading view in a
 new tab. The editable source stays in its original tab, and unsaved changes
 update the render live. Invoke the command from the source to focus its existing

@@ -321,6 +321,49 @@ T["textual moves survive every layout/context with exact anchors and labels"] = 
 	assert(ok, err)
 end
 
+T["Diffbandit keeps exact comment anchors and visible rows across both layouts"] = function()
+	local value = entry("same\nlocal a = old_name\nreturn a\n", "same\nlocal a = new_name\nlog(a)\nreturn a\n")
+	local original = vim.deepcopy(value)
+	local analysis, failure, done
+	local cancel = review.engines.prepare("diffbandit", value, function(result, err)
+		analysis, failure, done = result, err, true
+	end)
+	MiniTest.finally(cancel)
+	assert(vim.wait(6000, function()
+		return done
+	end, 10))
+	assert(analysis, failure)
+	vim.cmd("enew!")
+	local state = review.mode.new({ root = fixture, model = { entries = { value } } })
+	assert(review.mode.enable(state))
+	MiniTest.finally(function()
+		review.mode.disable(state)
+	end)
+	for _, layout in ipairs({ "inline", "split" }) do
+		for _, context in ipairs({ "hunks", "full" }) do
+			assert(
+				review.presenter.show(state, value, { layout = layout, context = context, engine_result = analysis })
+			)
+			local p = state.presentation
+			assert(p.projected and not p.structural and vim.deep_equal(value, original))
+			for _, side in ipairs({ "old", "new" }) do
+				local pane = layout == "inline" and p.inline or side == "old" and p.left or p.right
+				local mapping = layout == "inline" and p.projection or pane.projection
+				local display = mapping.by_source[side][2]
+				vim.api.nvim_set_current_win(pane.win)
+				vim.api.nvim_win_set_cursor(pane.win, { display, 10 })
+				vim.cmd("redraw!")
+				local captured = assert(review.presenter.capture_location(state))
+				assert(captured.line == 2 and captured.col == 11 and captured.side == side)
+				local range =
+					assert(review.presenter.resolve_range(state, display, display, p.generation, side, pane.win))
+				assert(range.start_line == 2 and range.end_line == 2 and range.side == side)
+				assert(vim.fn.screenpos(pane.win, display, 1).row > 0)
+			end
+		end
+	end
+end
+
 hooks.post_once = function()
 	vim.fn.delete(fixture, "rf")
 end

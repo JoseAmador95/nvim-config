@@ -41,6 +41,7 @@ function M.setup(opts)
 				or name == "clipboard"
 				or name == "lsp_navigation"
 				or name == "structural_diff"
+				or name == "diffbandit"
 				or name == "markdown"
 				or name == "config"
 				or name == "event",
@@ -80,6 +81,12 @@ function M.setup(opts)
 		)
 	end
 	assert(opts.event == nil or type(opts.event) == "function", "native-review event adapter must be a function")
+	if opts.diffbandit ~= nil then
+		assert(
+			type(opts.diffbandit) == "table" and type(opts.diffbandit.analyze) == "function",
+			"diffbandit.analyze is required"
+		)
+	end
 	if opts.markdown ~= nil then
 		assert(type(opts.markdown) == "table", "native-review adapter markdown must be a table")
 		assert(type(opts.markdown.build_snapshot) == "function", "markdown.build_snapshot is required")
@@ -94,6 +101,7 @@ function M.setup(opts)
 		values[name] = value
 	end
 	values.clipboard = opts.clipboard or default_clipboard()
+	values.diffbandit = opts.diffbandit or {}
 	values.markdown = opts.markdown
 		or {
 			version = "unavailable",

@@ -1,6 +1,7 @@
 local local_config = require("config.local_config")
 local navigation = require("config.lsp_navigation")
 local structural_diff = require("config.review_structural_diff")
+local diffbandit = require("config.review_diffbandit")
 local markdown = require("config.review_markdown")
 local configured = local_config.plugin("native_review", {
 	hunk_context = 3,
@@ -22,6 +23,7 @@ return require("native_review").setup(vim.tbl_extend("force", configured, {
 	clipboard = require("config.clipboard"),
 	lsp_navigation = navigation,
 	structural_diff = structural_diff,
+	diffbandit = diffbandit,
 	markdown = markdown,
 	event = function(status)
 		vim.api.nvim_exec_autocmds("User", {

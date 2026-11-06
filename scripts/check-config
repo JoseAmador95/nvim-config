@@ -288,6 +288,8 @@ run_check "native_review_textual_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/tests/native_review_textual_spec.lua"
 run_check "native_review_difftastic_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/tests/native_review_difftastic_spec.lua"
+run_check "native_review_diffbandit_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/runner.lua" "$repo_root/tests/native_review_diffbandit_spec.lua"
 run_check "native_review_engines_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/tests/native_review_engines_spec.lua"
 # This spec changes screen dimensions: run after screen initialization, not -l.

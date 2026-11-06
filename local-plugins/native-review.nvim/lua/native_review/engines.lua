@@ -1,9 +1,11 @@
 -- Engines interpret frozen sources; they never own Git identities or anchors.
 local dependencies = require("native_review.dependencies")
 local difftastic = require("native_review.difftastic")
+local diffbandit = require("native_review.diffbandit")
 local projection = require("native_review.projection")
 local moves = require("native_review.moves")
 local structural = dependencies.get("structural_diff")
+local bandit = dependencies.get("diffbandit")
 
 local M = {}
 local registry = {}
@@ -82,6 +84,41 @@ M.register("main", {
 		-- The presenter owns Main's selected-entry refinement cache.
 		callback(main(entry))
 		return function() end
+	end,
+})
+
+M.register("diffbandit", {
+	label = "Diffbandit",
+	version = "0.3.0",
+	prepare = function(entry, callback)
+		if entry.metadata_only or entry.binary then
+			callback({ fallback_reason = "Binary or metadata-only file" })
+			return function() end
+		end
+		if
+			entry.old_text ~= ""
+			and entry.new_text ~= ""
+			and (entry.old_text:sub(-1) == "\n") ~= (entry.new_text:sub(-1) == "\n")
+		then
+			callback({ fallback_reason = "Final-newline change; using Main for this file" })
+			return function() end
+		end
+		if type(bandit.analyze) ~= "function" then
+			callback(nil, "No Diffbandit adapter is configured")
+			return function() end
+		end
+		return bandit.analyze({ entry = entry }, function(output, err)
+			if not output then
+				callback(nil, err)
+				return
+			end
+			local ok, decoded = pcall(vim.json.decode, output)
+			if not ok then
+				callback(nil, "Invalid Diffbandit JSON")
+				return
+			end
+			callback(diffbandit.normalize(entry, decoded))
+		end)
 	end,
 })
 

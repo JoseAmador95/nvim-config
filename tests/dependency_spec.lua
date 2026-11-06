@@ -166,10 +166,12 @@ T["dependency"] = function()
 	}) do
 		assert(plugins[name] == nil, "removed plugin remains in the full profile: " .. name)
 	end
-	for _, name in ipairs({ "diffview-plus.nvim", "gitsigns.nvim", "snacks.nvim" }) do
+	for _, name in ipairs({ "diffview-plus.nvim", "gitsigns.nvim", "snacks.nvim", "diffbandit.nvim" }) do
 		assert(plugins[name] ~= nil, "retained Git workflow is missing: " .. name)
 	end
 	assert(plugins["diffview.nvim"] == nil, "retired Diffview source remains in the full profile")
+	assert(plugins["diffbandit.nvim"].version == "v0.3.0", "Diffbandit library version drifted")
+	assert(package.loaded.diffbandit == nil and vim.fn.exists(":DiffBandit") == 0, "Diffbandit UI was loaded")
 	assert(plugins["diffview-plus.nvim"].version == "v0.37", "diffview-plus version constraint drifted")
 	local config_root = assert(vim.env.NVIM_CONFIG_ROOT, "NVIM_CONFIG_ROOT is missing")
 	local lock = vim.json.decode(table.concat(vim.fn.readfile(config_root .. "/lazy-lock.json"), "\n"))
