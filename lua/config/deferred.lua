@@ -9,6 +9,7 @@ local allowed = {
 	["clangd_compile_db"] = true,
 	["config.action_palette"] = true,
 	["config.clangd"] = true,
+	["config.diagram_rex"] = true,
 	["config.jqx"] = true,
 	["config.log_patterns"] = true,
 	["config.log_watch"] = true,
@@ -28,6 +29,7 @@ local allowed = {
 	["nvim-jqx.config"] = true,
 	["oil-git-status"] = true,
 	["project_python"] = true,
+	["rex"] = true,
 	["terminal_lifecycle"] = true,
 }
 

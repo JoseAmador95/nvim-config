@@ -122,6 +122,7 @@ T["canonical plugin schema exposes all products and host-only top-level values"]
 	)
 	equal("workspace", config.plugins.tab_first.history.scope, "tab history is not workspace-scoped")
 	equal(30000, config.plugins.diagram_view.stage_timeout_ms, "diagram timeout default changed")
+	equal("auto", config.plugins.diagram_view.backend, "diagram backend default changed")
 	equal(2000, config.plugins.native_review.max_files, "native review file limit default changed")
 	equal(4 * 1024 * 1024, config.plugins.native_review.max_file_bytes, "native review file byte limit changed")
 	equal(64 * 1024 * 1024, config.plugins.native_review.max_model_bytes, "native review model limit changed")

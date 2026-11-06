@@ -33,7 +33,7 @@ export NVIM_CONFIG_ROOT="$repo_root"
 export NVIM_CONFIG_OFFLINE=1
 export PYTHONDONTWRITEBYTECODE=1
 export TMPDIR="$check_tmp"
-unset NVIM_APPNAME NVIMPAGER_FILETYPE
+unset NVIM_APPNAME NVIMPAGER_FILETYPE REX_SESSION REX_BLOCK REX_SERVER
 
 if [ -n "${NVIM_CONFIG_XDG_ROOT:-}" ]; then
 	export XDG_DATA_HOME="$NVIM_CONFIG_XDG_ROOT/data"
@@ -268,6 +268,9 @@ run_check "tab_first_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/local-plugins/tab-first.nvim/tests/tab_first_spec.lua"
 run_check "diagram_view_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/local-plugins/diagram-view.nvim/tests/diagram_view_spec.lua"
+run_check "rex_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
+	-l "$repo_root/tests/runner.lua" "$repo_root/local-plugins/rex.nvim/tests/rex_spec.lua"
+run_pure_test diagram_rex_spec
 run_check "project_python_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
 	-l "$repo_root/tests/runner.lua" "$repo_root/local-plugins/project-python.nvim/tests/project_python_spec.lua"
 run_check "log_workbench_plugin_spec" "$NVIM_BIN" --headless -u NONE -i NONE \
@@ -382,7 +385,7 @@ run_check "startup smoke" "$NVIM_BIN" --headless -i NONE -u "$repo_root/init.lua
 run_check "provision-runtime syntax" sh -n scripts/provision-runtime
 run_check "devcontainer-runtime syntax" sh -n scripts/devcontainer-runtime
 run_check "devcontainer-runtime shellcheck" "$SHELLCHECK_BIN" -s sh scripts/devcontainer-runtime
-run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests local-plugins
+run_check "StyLua" "$STYLUA_BIN" --check init.lua lua tests local-plugins scripts/rex-diagram-viewer.lua
 run_check "ShellCheck" "$SHELLCHECK_BIN" \
 	scripts/check-config scripts/bootstrap-config scripts/install-ci-tools scripts/provision-runtime \
 	scripts/mise scripts/install-mise scripts/update-tool-lock

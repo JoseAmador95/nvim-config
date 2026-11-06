@@ -369,6 +369,7 @@ local SCHEMA = {
 			diagram_view = {
 				type = "table",
 				fields = {
+					backend = { type = "enum", values = { "auto", "nvim" }, default = "auto" },
 					default_mode = { type = "enum", values = { "svg", "ascii" }, default = "svg" },
 					stage_timeout_ms = integer(30000, 100, 300000),
 					max_stage_output_bytes = integer(16 * MEBIBYTE, KIBIBYTE, 64 * MEBIBYTE),
@@ -1061,6 +1062,7 @@ return {
     },
     action_palette = { target_default = "exact", unavailable = "hide", recent_limit = 5 }, -- 0..20, session-only
     diagram_view = {
+      backend = "auto", -- auto (Rex when available) | nvim
       default_mode = "svg", -- svg | ascii
       stage_timeout_ms = 30000,
       max_stage_output_bytes = 16 * 1024 * 1024,

@@ -11,6 +11,7 @@ local NAMES = {
 	"project-python.nvim",
 	"action-palette.nvim",
 	"diagram-view.nvim",
+	"rex.nvim",
 	"markdown-view.nvim",
 	"log-workbench.nvim",
 	"clangd-compile-db.nvim",

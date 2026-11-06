@@ -13,6 +13,8 @@ local tool_paths = require("config.tool_paths")
 local view
 local configured = false
 local setup_options = {}
+local embedded_presentation
+local embedded_session
 
 local INSTALL = { ["rsvg-convert"] = "brew install librsvg" }
 local DEPS = {
@@ -40,27 +42,50 @@ local function set_float_lines(buf, lines)
 end
 
 local function make_float(title, session)
+	if setup_options.embedded and embedded_presentation and not embedded_presentation.closed then
+		embedded_presentation.session = session
+		return embedded_presentation
+	end
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[buf].buftype = "nofile"
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].swapfile = false
 	local width = math.max(1, math.floor(vim.o.columns * 0.9))
 	local height = math.max(1, math.floor(vim.o.lines * 0.9))
-	local win = vim.api.nvim_open_win(buf, true, {
-		relative = "editor",
+	local win = setup_options.embedded and vim.api.nvim_get_current_win()
+		or vim.api.nvim_open_win(buf, true, {
+			relative = "editor",
+			width = width,
+			height = height,
+			row = math.max(0, math.floor((vim.o.lines - height) / 2)),
+			col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+			style = "minimal",
+			border = "rounded",
+			title = " " .. title .. " ",
+			title_pos = "center",
+		})
+	if setup_options.embedded then
+		vim.api.nvim_win_set_buf(win, buf)
+		width, height = vim.api.nvim_win_get_width(win), vim.api.nvim_win_get_height(win)
+	end
+	local presentation = {
+		buf = buf,
+		win = win,
 		width = width,
 		height = height,
-		row = math.max(0, math.floor((vim.o.lines - height) / 2)),
-		col = math.max(0, math.floor((vim.o.columns - width) / 2)),
-		style = "minimal",
-		border = "rounded",
-		title = " " .. title .. " ",
-		title_pos = "center",
-	})
+		session = session,
+		embedded = setup_options.embedded == true,
+	}
 	vim.wo[win].wrap = false
 	set_float_lines(buf, { "Rendering…" })
 	local function close()
-		session:cancel("presenter closed")
+		if presentation.embedded then
+			if setup_options.on_close then
+				setup_options.on_close()
+			end
+		else
+			presentation.session:cancel("presenter closed")
+		end
 	end
 	for _, lhs in ipairs({ "q", "<Esc>" }) do
 		usage_map("n", lhs, close, { buffer = buf, nowait = true, desc = "Close diagram" })
@@ -70,7 +95,10 @@ local function make_float(title, session)
 		once = true,
 		callback = close,
 	})
-	return { buf = buf, win = win, width = width, height = height }
+	if presentation.embedded then
+		embedded_presentation = presentation
+	end
+	return presentation
 end
 
 local function stop_refinement(presentation)
@@ -83,6 +111,19 @@ local function stop_refinement(presentation)
 end
 
 local function close_float(presentation)
+	if presentation.preserve then
+		presentation.generation = (presentation.generation or 0) + 1
+		stop_refinement(presentation)
+		if presentation.pending_frame then
+			local cancelled, err = presentation.pending_frame:cancel("diagram source changed")
+			if cancelled == nil then
+				notify("Could not stop diagram frame: " .. tostring(err), vim.log.levels.ERROR)
+				return false
+			end
+			presentation.pending_frame = nil
+		end
+		return true
+	end
 	presentation.closed = true
 	presentation.generation = (presentation.generation or 0) + 1
 	stop_refinement(presentation)
@@ -113,13 +154,22 @@ local function close_float(presentation)
 		end)
 		presentation.placement = nil
 	end
-	if vim.api.nvim_win_is_valid(presentation.win) then
+	if presentation.embedded then
+		if setup_options.on_close then
+			setup_options.on_close()
+		end
+	elseif vim.api.nvim_win_is_valid(presentation.win) then
 		pcall(vim.api.nvim_win_close, presentation.win, true)
 	end
 	return cancelled
 end
 
 local function present_error(presentation, message)
+	presentation.stale = message
+	if presentation.embedded and (presentation.path or presentation.delivered) then
+		vim.wo[presentation.win].statusline = (" OUTDATED: " .. message):gsub("%%", "%%%%"):gsub("[\r\n]", " ")
+		return
+	end
 	set_float_lines(presentation.buf, vim.split(message, "\n", { plain = true }))
 end
 
@@ -175,7 +225,46 @@ local function ascii_presenter()
 			return make_float(request.kind .. " (ascii)", session)
 		end,
 		deliver = function(presentation, result)
+			presentation.stale = nil
+			if presentation.embedded and presentation.viewport then
+				for _, lhs in ipairs({
+					"+",
+					"=",
+					"-",
+					"0",
+					"h",
+					"j",
+					"k",
+					"l",
+					"<Left>",
+					"<Down>",
+					"<Up>",
+					"<Right>",
+					"y",
+				}) do
+					pcall(vim.keymap.del, "n", lhs, { buffer = presentation.buf })
+				end
+				if presentation.resize_autocmd then
+					vim.api.nvim_del_autocmd(presentation.resize_autocmd)
+					presentation.resize_autocmd = nil
+				end
+				if presentation.displayed_frame then
+					presentation.displayed_frame:cancel("ASCII view")
+					presentation.displayed_frame = nil
+				end
+				diagram_viewport.close(presentation)
+			end
+			if presentation.placement then
+				presentation.placement:close()
+				presentation.placement = nil
+			end
+			presentation.path = nil
 			set_float_lines(presentation.buf, vim.split(result.data, "\n", { plain = true }))
+			presentation.delivered = true
+			if presentation.embedded then
+				vim.api.nvim_echo({ { "" } }, false, {})
+				vim.wo[presentation.win].statusline = " Diagram (ASCII)   q/Esc close"
+			end
 		end,
 		error = present_error,
 		close = close_float,
@@ -212,11 +301,17 @@ local function image_footer(presentation, rendering)
 	if not vim.api.nvim_win_is_valid(presentation.win) then
 		return
 	end
+	local footer = (" %d%%%s  +/- zoom  0 fit  hjkl/arrows pan  y copy  q close "):format(
+		math.floor(presentation.viewport.zoom * 100 + 0.5),
+		rendering and "…" or ""
+	)
+	if presentation.embedded then
+		local message = presentation.stale and (" OUTDATED: " .. presentation.stale) or footer
+		vim.wo[presentation.win].statusline = message:gsub("%%", "%%%%"):gsub("[\r\n]", " ")
+		return
+	end
 	vim.api.nvim_win_set_config(presentation.win, {
-		footer = (" %d%%%s  +/- zoom  0 fit  hjkl/arrows pan  y copy  q close "):format(
-			math.floor(presentation.viewport.zoom * 100 + 0.5),
-			rendering and "…" or ""
-		),
+		footer = footer,
 		footer_pos = "center",
 	})
 end
@@ -395,15 +490,18 @@ local function image_presenter()
 			local presentation = make_float(title or (request.kind .. " (svg)"), session)
 			presentation.request = request
 			presentation.renderer = session.renderer_name
-			presentation.generation = 0
-			presentation.viewport = { zoom = 1, x = 0.5, y = 0.5 }
+			presentation.generation = (presentation.generation or 0) + 1
+			presentation.viewport = presentation.viewport or { zoom = 1, x = 0.5, y = 0.5 }
 			presentation.shown_viewport = vim.deepcopy(presentation.viewport)
+			if presentation.resize_autocmd then
+				vim.api.nvim_del_autocmd(presentation.resize_autocmd)
+			end
 			presentation.resize_autocmd = vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
 				callback = function(event)
 					if presentation.closed or not vim.api.nvim_win_is_valid(presentation.win) then
 						return true
 					end
-					if event.event == "VimResized" then
+					if event.event == "VimResized" and not presentation.embedded then
 						local width = math.max(1, math.floor(vim.o.columns * 0.9))
 						local height = math.max(1, math.floor(vim.o.lines * 0.9))
 						vim.api.nvim_win_set_config(presentation.win, {
@@ -479,10 +577,18 @@ local function image_presenter()
 			local dimensions = Snacks.image.util.dim(result.path)
 			assert(dimensions and dimensions.width > 0 and dimensions.height > 0, "invalid rendered image dimensions")
 			presentation.dimensions = dimensions
+			presentation.stale = nil
 			presentation.path = result.path
+			if presentation.embedded then
+				vim.api.nvim_echo({ { "" } }, false, {})
+			end
 			local geometry = image_geometry(presentation)
 			presentation.size = { geometry.pixel_width, geometry.pixel_height }
-			replace_frame(presentation, result.path)
+			if presentation.embedded and presentation.viewport.zoom > 1 then
+				render_viewport(presentation, true)
+			else
+				replace_frame(presentation, result.path)
+			end
 		end,
 		error = present_error,
 		close = close_float,
@@ -664,8 +770,10 @@ end
 
 local function image_metadata()
 	local term = Snacks.image.terminal.size()
-	local width = math.max(1, math.floor(vim.o.columns * 0.9))
-	local height = math.max(1, math.floor(vim.o.lines * 0.9))
+	local width = setup_options.embedded and vim.api.nvim_win_get_width(0)
+		or math.max(1, math.floor(vim.o.columns * 0.9))
+	local height = setup_options.embedded and vim.api.nvim_win_get_height(0)
+		or math.max(1, math.floor(vim.o.lines * 0.9))
 	return {
 		pixel_width = math.max(1, math.floor(width * term.cell_width)),
 		pixel_height = math.max(1, math.floor(height * term.cell_height)),
@@ -673,6 +781,7 @@ local function image_metadata()
 end
 
 local DEFAULT_CONFIG = {
+	backend = "auto",
 	default_mode = "svg",
 	stage_timeout_ms = 30000,
 	max_stage_output_bytes = 16 * 1024 * 1024,
@@ -839,6 +948,44 @@ function M.show(mode, selection)
 		end
 		return show_image(core, diagram, target, requested == "ascii")
 	end
+	if
+		effective_config.backend == "auto"
+		and not setup_options.embedded
+		and vim.env.REX_SESSION
+		and vim.env.REX_BLOCK
+	then
+		local ok, rex = deferred.try("config.diagram_rex")
+		if ok then
+			return rex.show(target, diagram, mode, {
+				config = effective_config,
+				cache_root = setup_options.cache_root or (vim.fn.stdpath("cache") .. "/diagram-v3"),
+				resolve_executable = setup_options.resolve_executable or default_resolve_executable,
+				fallback = M.render,
+			})
+		end
+		notify("Rex unavailable: " .. tostring(rex) .. ". Using Neovim.", vim.log.levels.WARN)
+	end
+	return M.render(diagram, mode)
+end
+
+-- The Rex child uses the same renderers and presenters in its ordinary window.
+-- Superseding a request cancels work while keeping the last delivered frame.
+function M.render(diagram, mode, reset)
+	local core, setup_err = ensure_view()
+	if not core then
+		return nil, setup_err
+	end
+	if setup_options.embedded and embedded_session then
+		embedded_presentation.preserve = true
+		local cancelled, err = embedded_session:cancel("diagram source changed")
+		embedded_presentation.preserve = nil
+		if cancelled == nil then
+			return nil, err
+		end
+		if reset then
+			embedded_presentation.viewport = nil
+		end
+	end
 
 	local executables
 	if mode == "svg" then
@@ -862,6 +1009,7 @@ function M.show(mode, selection)
 		if reason then
 			notify("SVG unavailable: " .. reason .. ". Falling back to ASCII.", vim.log.levels.WARN)
 			mode = "ascii"
+			executables = nil
 		end
 	end
 
@@ -886,13 +1034,66 @@ function M.show(mode, selection)
 	if mode == "svg" then
 		metadata = vim.tbl_extend("force", metadata, image_metadata())
 	end
-	return core.open({
+	local session, err = core.open({
 		renderer = diagram.kind .. ":" .. mode,
 		presenter = mode == "svg" and "image" or "ascii",
 		kind = diagram.kind,
 		source = diagram.source,
 		metadata = metadata,
 	})
+	if setup_options.embedded and session then
+		embedded_session = session
+	end
+	return session, err
+end
+
+function M.outdated(message)
+	if embedded_presentation then
+		embedded_presentation.preserve = true
+		if embedded_session then
+			embedded_session:cancel("diagram source invalid")
+		end
+		embedded_presentation.preserve = nil
+		present_error(embedded_presentation, message)
+	else
+		vim.wo.statusline = (" OUTDATED: " .. message):gsub("%%", "%%%%"):gsub("[\r\n]", " ")
+	end
+end
+
+-- Rex may discard uploaded image data while a session is hidden. Reuse the
+-- owned Snacks image and placement on focus; no renderer or source change.
+function M.refresh()
+	local presentation = embedded_presentation
+	local placement = presentation and presentation.placement
+	if not placement or presentation.closed or not placement:ready() then
+		return
+	end
+	local location = placement:state().loc
+	placement.img.sent = false
+	placement.img:send()
+	Snacks.image.terminal.request({
+		a = "p",
+		U = 1,
+		i = placement.img.id,
+		p = placement.id,
+		C = 1,
+		c = location.width,
+		r = location.height,
+	})
+	placement:render_grid(location)
+end
+
+function M.teardown()
+	setup_options.on_close = nil
+	local ok, err = true, nil
+	if view and configured then
+		ok, err = view.teardown()
+	end
+	if ok then
+		configured = false
+		embedded_session, embedded_presentation = nil, nil
+	end
+	return ok, err
 end
 
 local function register_interface()
@@ -958,7 +1159,7 @@ function M.setup(opts)
 	if opts.resolve_executable ~= nil and type(opts.resolve_executable) ~= "function" then
 		return nil, "setup.resolve_executable must be a function"
 	end
-	local candidate_config = local_config.plugin("diagram_view", DEFAULT_CONFIG)
+	local candidate_config = opts.config or local_config.plugin("diagram_view", DEFAULT_CONFIG)
 	if configured then
 		local core, setup_err = configure_view(view, opts, candidate_config)
 		if not core then
@@ -967,7 +1168,9 @@ function M.setup(opts)
 	end
 	setup_options = opts
 	effective_config = candidate_config
-	register_interface()
+	if not opts.embedded then
+		register_interface()
+	end
 	return true
 end
 

@@ -356,6 +356,22 @@ superseded work is cancelled, and content-addressed results are bounded under
 `stdpath("cache")/diagram`. Missing tools are reported with install hints and
 SVG mode falls back to ASCII when possible.
 
+Inside a local Rex session, Mermaid and PlantUML open in a Rex floating pane through the local `rex.nvim` client.
+Use the same `<leader>md` mapping or `:DiagramShow [svg|ascii]` command.
+The viewer follows the selected block, visual range, or PlantUML buffer after a 200 ms pause, including unsaved edits.
+Moving the cursor or changing editor tabs does not change that source.
+One viewer is reused per Neovim instance; reopening another diagram resets zoom, while edits preserve zoom and pan.
+Invalid or removed source keeps the last good image visible with an `OUTDATED` message until it recovers.
+Code-review snapshots remain frozen.
+The Rex pane uses the same renderers, cache and controls as the Neovim viewer, and closes with `q` or Escape.
+Updates do not take focus; closing the pane releases its observer and private local RPC socket.
+Rex graphics support is probed before rendering, with an announced ASCII fallback when unavailable.
+The CLI must already be installed; startup does not launch Rex or install anything.
+Local Markdown image references continue to use the Neovim viewer.
+Outside Rex, or if its inherited session cannot be verified, diagrams use the ordinary Neovim float.
+Set `plugins.diagram_view.backend = "nvim"` in the local configuration to always use that backend.
+The default is `"auto"`; remote Rex servers are outside this initial integration.
+
 The same viewer opens the Markdown image under the cursor, so `<leader>md`
 either renders the fence it sits in or the image the line references. Inline
 `![alt](path)`, reference-style `![alt][label]`, and single-line `<img src=...>`

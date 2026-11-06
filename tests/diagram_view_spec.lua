@@ -1,5 +1,7 @@
 vim.o.shadafile = "NONE"
 vim.o.swapfile = false
+-- This suite owns the Neovim backend; Rex routing has a separate adapter suite.
+vim.env.REX_SESSION = nil
 
 local repo = vim.fn.getcwd()
 local plugin = repo .. "/local-plugins/diagram-view.nvim"
@@ -206,6 +208,9 @@ local function with_image_viewer(callback, options)
 			context.uploads = context.uploads + 1
 			images[path] = {
 				id = context.uploads + 100,
+				send = function()
+					context.resends = (context.resends or 0) + 1
+				end,
 				ready = function()
 					return true
 				end,
@@ -283,6 +288,11 @@ local function with_image_viewer(callback, options)
 						placement.wins = function()
 							return vim.fn.win_findbuf(buf)
 						end
+						placement.state = function()
+							return {
+								loc = { opts.pos[1], opts.pos[2], width = opts.max_width, height = opts.max_height },
+							}
+						end
 						placement.render_grid = function(_, loc)
 							if placement.hidden then
 								placement.grid = nil
@@ -309,6 +319,10 @@ local function with_image_viewer(callback, options)
 			cache_root = cache_root(),
 			resolve_executable = function(executable)
 				return "/verified/" .. executable
+			end,
+			embedded = options.embedded,
+			on_close = function()
+				context.closed = true
 			end,
 			spawn = function(argv, options, done)
 				local job = { argv = vim.deepcopy(argv), options = vim.deepcopy(options), callback = done }
@@ -344,6 +358,7 @@ local function with_image_viewer(callback, options)
 		vim.bo[buf].filetype = "mermaid"
 		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "graph LR", "A --> B" })
 		context.session = assert(adapter.show("svg"))
+		context.adapter = adapter
 		context.presentation = context.session.presentation
 		context.press = function(lhs)
 			vim.api.nvim_buf_call(context.presentation.buf, function()
@@ -367,9 +382,96 @@ local function with_image_viewer(callback, options)
 	if context.session then
 		context.session:cancel("test cleanup")
 	end
+	if options.embedded then
+		adapter.teardown()
+	end
 	_G.Snacks = original_snacks
 	vim.notify = original_notify
 	assert(ok, err)
+end
+
+T["embedded viewer preserves zoom and the last good frame, and closes after source invalidation"] = function()
+	with_image_viewer(function(context)
+		context.finish()
+		equal("", vim.api.nvim_win_get_config(context.presentation.win).relative)
+		context.press("+")
+		context.finish()
+		local presentation = context.presentation
+		local old_frame = presentation.placement
+		local session = assert(context.adapter.render({ kind = "mermaid", source = "graph LR\nA --> D" }, "svg", false))
+		equal(presentation, session.presentation)
+		equal(1.5, presentation.viewport.zoom)
+		context.jobs[#context.jobs].callback({ code = 1, stdout = "", stderr = "Invalid source" })
+		equal(old_frame, presentation.placement)
+		assert(vim.wo[presentation.win].statusline:find("OUTDATED", 1, true))
+		context.adapter.outdated("Fence removed")
+		context.press("q")
+		assert(context.closed, "a cancelled source session prevented closing the viewer")
+		assert(context.adapter.render({ kind = "mermaid", source = "graph LR\nNEW --> SOURCE" }, "svg", true))
+		equal(1, presentation.viewport.zoom)
+	end, { embedded = true, terminal = "rex", placeholders = true })
+end
+
+T["embedded source replacement retains a frame whose cancellation failed and permits retry"] = function()
+	with_image_viewer(function(context)
+		context.finish()
+		context.press("+")
+		local frame = assert(context.presentation.pending_frame)
+		local job = context.jobs[#context.jobs]
+		job.fail_kill = true
+		local count = #context.jobs
+		local next_source = { kind = "mermaid", source = "graph LR\nA --> D" }
+		local session, err = context.adapter.render(next_source, "svg", false)
+		assert(session == nil and err, "replacement started despite a failed cancellation")
+		equal(count, #context.jobs)
+		equal(frame, context.presentation.pending_frame)
+		equal("cancel-failed", frame:status().state)
+		job.fail_kill = false
+		assert(context.adapter.render(next_source, "svg", false))
+		assert(job.killed, "retry did not stop the retained process")
+		assert(context.presentation.pending_frame == nil)
+	end, { embedded = true, terminal = "rex", placeholders = true })
+end
+
+T["switching an embedded image to ASCII restores ordinary navigation"] = function()
+	with_image_viewer(function(context)
+		context.finish()
+		local placement = context.presentation.placement
+		assert(context.adapter.render({ kind = "mermaid", source = "graph LR\nA --> B" }, "ascii", false))
+		context.complete(context.jobs[#context.jobs], "first\nsecond\nthird")
+		assert(placement.closed, "ASCII retained the image overlay")
+		assert(context.presentation.resize_autocmd == nil)
+		vim.api.nvim_buf_call(context.presentation.buf, function()
+			assert(vim.tbl_isempty(vim.fn.maparg("j", "n", false, true)), "ASCII kept the pan mapping")
+			vim.cmd("normal j")
+			equal(2, vim.api.nvim_win_get_cursor(0)[1])
+		end)
+		assert(context.adapter.render({ kind = "mermaid", source = "graph LR\nA --> B" }, "svg", false))
+		vim.api.nvim_buf_call(context.presentation.buf, function()
+			equal("Pan diagram", vim.fn.maparg("j", "n", false, true).desc)
+		end)
+	end, { embedded = true, terminal = "rex", placeholders = true })
+end
+
+T["focus repaint restores the owned image and grid without rendering or resetting zoom"] = function()
+	with_image_viewer(function(context)
+		context.finish()
+		context.press("+")
+		context.finish()
+		local count = #context.jobs
+		local placement = context.presentation.placement
+		context.adapter.refresh()
+		equal(1, context.resends)
+		equal(count, #context.jobs)
+		equal(1.5, context.presentation.viewport.zoom)
+		equal(placement, context.presentation.placement)
+		local request = context.requests[#context.requests]
+		equal("p", request.a)
+		equal(1, request.U)
+		equal(placement.id, request.p)
+		equal(placement.img.id, request.i)
+		assert(placement.grid, "focus did not restore the image's Unicode grid")
+	end, { embedded = true, terminal = "rex", placeholders = true })
 end
 
 T["placeholder zoom and pan respond before rendering and refine only after a pause"] = function()
@@ -944,6 +1046,64 @@ T["an image refuses to degrade to ASCII and reports a missing rasterizer"] = fun
 		assert(context.error:find("rsvg%-convert"), tostring(context.error))
 		assert(context.error:find("shot.png", 1, true), "the failure must name the image")
 	end)
+end
+
+T["auto routes diagrams to Rex while nvim rollback and image references stay local"] = function()
+	local adapter = package.loaded["config.diagram"]
+	local deferred = package.loaded["config.deferred"]
+	local original_try = deferred.try
+	local original_session, original_block = vim.env.REX_SESSION, vim.env.REX_BLOCK
+	local calls = 0
+	local ok, err = xpcall(function()
+		vim.env.REX_SESSION, vim.env.REX_BLOCK = "session:fixture", "block:fixture"
+		deferred.try = function(name)
+			if name == "config.diagram_rex" then
+				return true,
+					{
+						show = function(_, item, mode)
+							calls = calls + 1
+							equal("mermaid", item.kind)
+							equal("ascii", mode)
+							return true
+						end,
+					}
+			end
+			return original_try(name)
+		end
+		local options = {
+			config = { backend = "nvim" },
+			cache_root = cache_root(),
+			resolve_executable = function(name)
+				return "/tools/" .. name
+			end,
+			spawn = function(_, _, done)
+				done({ code = 0, stdout = "ASCII", stderr = "" })
+				return { kill = function() end }
+			end,
+			schedule = function(done)
+				done()
+			end,
+		}
+		local buf = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_set_current_buf(buf)
+		vim.bo[buf].filetype = "markdown"
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "```mermaid", "A --> B", "```" })
+		vim.api.nvim_win_set_cursor(0, { 2, 0 })
+		assert(adapter.setup(options))
+		local session = assert(adapter.show("ascii"))
+		equal(0, calls)
+		session:cancel("test")
+		options.config.backend = "auto"
+		assert(adapter.setup(options))
+		assert(adapter.show("ascii"))
+		equal(1, calls)
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "![local](missing.png)" })
+		adapter.show("svg")
+		equal(1, calls, "image references must not reach Rex")
+	end, debug.traceback)
+	deferred.try = original_try
+	vim.env.REX_SESSION, vim.env.REX_BLOCK = original_session, original_block
+	assert(ok, err)
 end
 
 T["local plugin contains no host imports, global commands, or mappings"] = function()

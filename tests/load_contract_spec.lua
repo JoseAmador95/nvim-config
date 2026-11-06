@@ -43,6 +43,7 @@ vim.api.nvim_create_autocmd("User", {
 						"project_python",
 						"action_palette",
 						"diagram_view",
+						"rex",
 						"log_workbench",
 						"clangd_compile_db",
 						"native_review",
@@ -59,6 +60,9 @@ vim.api.nvim_create_autocmd("User", {
 					end
 					for _, name in ipairs({
 						"config.python",
+						"config.diagram_rex",
+						"config.diagram_rex_source",
+						"config.diagram_rex_viewer",
 						"config.terminal",
 						"config.cmake",
 						"config.action_palette",
