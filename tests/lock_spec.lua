@@ -1,4 +1,7 @@
-local T = MiniTest.new_set()
+-- scripts/bootstrap-config runs this file directly with `nvim -l`, before any
+-- test dependency exists; scripts/check-config runs it through tests/runner.lua.
+local standalone = rawget(_G, "MiniTest") == nil
+local T = standalone and {} or MiniTest.new_set()
 T["lock"] = function()
 	local function fail(message)
 		error("lock_spec: " .. message, 0)
@@ -61,5 +64,8 @@ T["lock"] = function()
 	if #errors > 0 then
 		fail("plugin lock is not restored:\n  - " .. table.concat(errors, "\n  - "))
 	end
+end
+if standalone then
+	T["lock"]()
 end
 return T

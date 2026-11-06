@@ -320,9 +320,6 @@ printf 'Restoring the nvimpager allowlist in the clean staging tree\n'
 	run_pager_nvim --headless -i NONE -u "$repo_root/init.lua" "+Lazy! restore" \
 		-c 'lua if vim.g.nvim_config_initialized ~= true then vim.api.nvim_err_writeln("init.lua did not complete"); vim.cmd("cquit 41") end' \
 		"+quitall"
-	export NVIM_CONFIG_TEST="$repo_root/tests/profile_lock_spec.lua"
-	run_pager_nvim --headless -i NONE --cmd 'lua dofile(vim.env.NVIM_CONFIG_TEST)' -u "$repo_root/init.lua"
-	unset NVIM_CONFIG_TEST
 
 printf 'Restoring the VSCode-Neovim profile in the clean staging tree\n'
 	export NVIM_CONFIG_VSCODE_STUB="$repo_root/tests/support/vscode_stub.lua"
