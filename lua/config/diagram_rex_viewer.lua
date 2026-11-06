@@ -5,6 +5,7 @@ local diagram = require("config.diagram")
 local M = {}
 local generation = 0
 local profile
+local parent_channel
 local executables, unavailable = {}, {}
 
 function M.update(payload)
@@ -19,7 +20,7 @@ function M.update(payload)
 	local item = payload.diagram
 	if
 		type(item) ~= "table"
-		or (item.kind ~= "mermaid" and item.kind ~= "plantuml")
+		or (item.kind ~= "mermaid" and item.kind ~= "plantuml" and item.kind ~= "image")
 		or type(item.source) ~= "string"
 		or #item.source > profile.config.max_stage_output_bytes
 		or (payload.mode ~= "svg" and payload.mode ~= "ascii")
@@ -84,6 +85,7 @@ function M.setup(options)
 		embedded = true,
 		config = options.config,
 		cache_root = options.cache_root,
+		footer = "  <Space>mh hide  <Space>ml layout",
 		resolve_executable = function(name)
 			return executables[name], unavailable[name]
 		end,
@@ -93,6 +95,27 @@ function M.setup(options)
 			end)
 		end,
 	}))
+	vim.api.nvim_create_autocmd("ChanInfo", {
+		callback = function()
+			local info = vim.v.event.info
+			if info.client and info.client.name == "nvim-rex-diagram-source" then
+				parent_channel = info.id
+			end
+		end,
+	})
+	diagram.setup_controls(function(action, argument)
+		local ok = parent_channel
+			and pcall(
+				vim.rpcnotify,
+				parent_channel,
+				"nvim_exec_lua",
+				"local action, argument = ...; return package.loaded['config.diagram_rex'][action](argument)",
+				{ action, argument }
+			)
+		if not ok then
+			vim.notify("The source editor is not connected", vim.log.levels.WARN)
+		end
+	end)
 	_G.NvimRexDiagram = M
 	for _, lhs in ipairs({ "q", "<Esc>" }) do
 		vim.keymap.set("n", lhs, function()

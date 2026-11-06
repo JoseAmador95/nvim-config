@@ -5,13 +5,14 @@ local namespace = vim.api.nvim_create_namespace("DiagramRexSource")
 
 function M.watch(target, diagram, callback)
 	local watcher = { active = true, target = vim.deepcopy(target), diagram = vim.deepcopy(diagram) }
+	target, diagram = watcher.target, watcher.diagram
 	local buf = target.bufnr
 	local origin = diagram.origin
 	local timer
 	local mark
 
 	function watcher:read()
-		if target.frozen or not buf then
+		if target.frozen or not buf or diagram.kind == "image" then
 			return vim.deepcopy(self.diagram)
 		end
 		if not vim.api.nvim_buf_is_loaded(buf) then
@@ -47,6 +48,12 @@ function M.watch(target, diagram, callback)
 	end
 
 	function watcher:matches(next_target, next_diagram)
+		if diagram.kind == "image" or next_diagram.kind == "image" then
+			return diagram.kind == next_diagram.kind
+				and buf == next_target.bufnr
+				and diagram.path == next_diagram.path
+				and vim.deep_equal(diagram.origin, next_diagram.origin)
+		end
 		if target.frozen or next_target.frozen then
 			return target.frozen == next_target.frozen
 				and self.target.path == next_target.path
@@ -72,7 +79,7 @@ function M.watch(target, diagram, callback)
 		end
 	end
 
-	if not target.frozen and buf and vim.api.nvim_buf_is_loaded(buf) then
+	if diagram.kind ~= "image" and not target.frozen and buf and vim.api.nvim_buf_is_loaded(buf) then
 		if origin.type ~= "buffer" then
 			local last_line = vim.api.nvim_buf_get_lines(buf, origin.end_row - 1, origin.end_row, false)[1] or ""
 			mark = vim.api.nvim_buf_set_extmark(buf, namespace, origin.start_row - 1, 0, {

@@ -547,4 +547,87 @@ T["teardown closes existing resources and prevents new creation"] = function()
 	assert(rex.status().pending == 0 and #rex.status().records == 0)
 end
 
+T["hide and restore keep the owned layer alive, including while minimized"] = function()
+	local closed_count, completed = 0, 0
+	local value = open(function()
+		closed_count = closed_count + 1
+	end)
+	local function done(err)
+		assert(not err, err)
+		completed = completed + 1
+	end
+	rex.hide(value, done)
+	response(latest("session.view"), snapshot(value.label, value.block_id))
+	assert(vim.deep_equal(body(latest("session.set_layer_state")), {
+		session_id = value.session_id,
+		layer_id = value.layer_id,
+		state = "minimized",
+	}))
+	response(latest("session.set_layer_state"), { revision = 3 })
+	local hidden = snapshot(value.label)
+	hidden.windows[1].layers[2].state = "minimized"
+	poll()
+	response(latest("session.view"), hidden)
+	assert(closed_count == 0 and #rex.status().records == 1)
+	rex.restore(value, done)
+	response(latest("session.view"), hidden)
+	assert(vim.deep_equal(body(latest("session.set_layer_state")), {
+		session_id = value.session_id,
+		layer_id = value.layer_id,
+		state = "normal",
+		focus = true,
+	}))
+	response(latest("session.set_layer_state"), { revision = 4 })
+	assert(completed == 2 and count("session.new_layer") == 1 and count("session.close_layer") == 0)
+end
+
+T["resize validates and copies bounds without focusing or recreating the layer"] = function()
+	local value = open()
+	for _, bounds in ipairs({ {}, { 0, 0, 0, 1 }, { 0.8, 0, 0.5, 1 }, { 0, 0, 1, 0 / 0 }, { "x", 0, 1, 1 } }) do
+		local failure
+		local before = #calls
+		rex.resize(value, bounds, function(err)
+			failure = err
+		end)
+		flush()
+		assert(failure and #calls == before)
+	end
+	local bounds = { 0.52, 0.05, 0.43, 0.9 }
+	local completed
+	rex.resize(value, bounds, function(err)
+		assert(not err, err)
+		completed = true
+	end)
+	bounds[1] = 0
+	response(latest("session.view"), snapshot(value.label))
+	assert(vim.deep_equal(body(latest("session.resize_layer")).bounds, { 0.52, 0.05, 0.43, 0.9 }))
+	assert(body(latest("session.resize_layer")).layer_id == value.layer_id)
+	response(latest("session.resize_layer"), { revision = 3 })
+	assert(completed and count("session.focus_block") == 0 and count("session.new_layer") == 1)
+end
+
+T["pane controls refuse foreign handles and layers moved out of the owned window"] = function()
+	local closed_count = 0
+	local value = open(function()
+		closed_count = closed_count + 1
+	end)
+	local forged = vim.deepcopy(value)
+	forged.layer_id = "layer:foreign"
+	local failure
+	local before = #calls
+	rex.hide(forged, function(err)
+		failure = err
+	end)
+	flush()
+	assert(failure and #calls == before)
+	rex.restore(value, function(err)
+		failure = err
+	end)
+	local moved = snapshot(value.label)
+	moved.windows[1].window_id = "window:other"
+	response(latest("session.view"), moved)
+	assert(failure:find("source window", 1, true))
+	assert(closed_count == 1 and count("session.set_layer_state") == 0 and #rex.status().records == 0)
+end
+
 return T

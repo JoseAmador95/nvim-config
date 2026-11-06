@@ -7,6 +7,10 @@ local root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(debug.getinfo(1, "S").
 local current
 local initialized = false
 local leaving = false
+local layouts = {
+	center = { 0.05, 0.05, 0.9, 0.9 },
+	right = { 0.52, 0.05, 0.43, 0.9 },
+}
 
 local function notify(message)
 	vim.notify(message, vim.log.levels.WARN, { title = "Rex diagram" })
@@ -47,7 +51,7 @@ local function update(viewer, diagram, err, reset)
 	viewer.generation = viewer.generation + 1
 	viewer.payload = {
 		generation = viewer.generation,
-		diagram = diagram and { kind = diagram.kind, source = diagram.source } or nil,
+		diagram = diagram and { kind = diagram.kind, source = diagram.source, title = diagram.title } or nil,
 		error = err,
 		mode = viewer.mode,
 		reset = reset or (viewer.payload and viewer.payload.reset),
@@ -75,6 +79,7 @@ local function connect(viewer)
 				viewer.timer:stop()
 				viewer.timer:close()
 				viewer.channel = channel
+				vim.rpcnotify(channel, "nvim_set_client_info", "nvim-rex-diagram-source", {}, "remote", {}, {})
 				send(viewer)
 				viewer.payload.reset = false
 			elseif vim.uv.hrtime() > deadline then
@@ -182,7 +187,7 @@ function M.show(target, diagram, mode, options)
 		vim.api.nvim_create_autocmd("VimLeavePre", { callback = M.teardown })
 		initialized = true
 	end
-	local viewer = current or { generation = 0 }
+	local viewer = current or { generation = 0, layout = "center" }
 	local fresh = current == nil
 	local same = viewer.watcher and viewer.watcher:matches(target, diagram)
 	if viewer.watcher then
@@ -190,7 +195,7 @@ function M.show(target, diagram, mode, options)
 	end
 	viewer.mode = mode
 	viewer.executables, viewer.unavailable = {}, {}
-	local dependencies = { diagram.kind == "mermaid" and "mmdflux" or "plantuml" }
+	local dependencies = diagram.kind == "image" and {} or { diagram.kind == "mermaid" and "mmdflux" or "plantuml" }
 	if mode == "svg" then
 		dependencies[#dependencies + 1] = "rsvg-convert"
 	end
@@ -211,11 +216,7 @@ function M.show(target, diagram, mode, options)
 	update(viewer, diagram, nil, not same)
 	if not fresh then
 		if viewer.handle then
-			rex.focus(viewer.handle, function(err)
-				if err then
-					notify(err)
-				end
-			end)
+			M.restore()
 		elseif not viewer.opening and viewer.context then
 			open(viewer)
 		end
@@ -248,6 +249,53 @@ function M.show(target, diagram, mode, options)
 	return true
 end
 
+local function control(action, layout)
+	local viewer = current
+	if not viewer or not viewer.handle or leaving then
+		notify("No Rex preview is open. Use :DiagramShow first.")
+		return nil
+	end
+	if viewer.controlling then
+		notify("A Rex preview control is still pending.")
+		return nil
+	end
+	viewer.controlling = true
+	local function completed(err)
+		viewer.controlling = false
+		if current ~= viewer then
+			return
+		end
+		if err then
+			notify("Could not " .. action .. " Rex preview: " .. err)
+		elseif layout then
+			viewer.layout = layout
+		end
+	end
+	if layout then
+		rex.resize(viewer.handle, layouts[layout], completed)
+	else
+		rex[action](viewer.handle, completed)
+	end
+	return true
+end
+
+function M.hide()
+	return control("hide")
+end
+
+function M.restore()
+	return control("restore")
+end
+
+function M.layout(name)
+	name = name or (current and current.layout == "right" and "center" or "right")
+	if not layouts[name] then
+		notify("usage: :DiagramLayout [center|right]")
+		return nil
+	end
+	return control("resize", name)
+end
+
 function M.teardown()
 	leaving = true
 	local viewer = current
@@ -272,6 +320,7 @@ function M.status()
 				socket = current.socket,
 				generation = current.generation,
 				connected = current.channel ~= nil,
+				layout = current.layout,
 			}
 		or nil
 end

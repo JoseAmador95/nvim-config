@@ -1048,12 +1048,12 @@ T["an image refuses to degrade to ASCII and reports a missing rasterizer"] = fun
 	end)
 end
 
-T["auto routes diagrams to Rex while nvim rollback and image references stay local"] = function()
+T["auto routes diagrams and bounded local images to Rex; nvim remains an explicit backend"] = function()
 	local adapter = package.loaded["config.diagram"]
 	local deferred = package.loaded["config.deferred"]
 	local original_try = deferred.try
 	local original_session, original_block = vim.env.REX_SESSION, vim.env.REX_BLOCK
-	local calls = 0
+	local calls, last, controls = 0, nil, {}
 	local ok, err = xpcall(function()
 		vim.env.REX_SESSION, vim.env.REX_BLOCK = "session:fixture", "block:fixture"
 		deferred.try = function(name)
@@ -1062,9 +1062,17 @@ T["auto routes diagrams to Rex while nvim rollback and image references stay loc
 					{
 						show = function(_, item, mode)
 							calls = calls + 1
-							equal("mermaid", item.kind)
-							equal("ascii", mode)
+							last = { item = item, mode = mode }
 							return true
+						end,
+						hide = function()
+							controls[#controls + 1] = "hide"
+						end,
+						restore = function()
+							controls[#controls + 1] = "restore"
+						end,
+						layout = function(name)
+							controls[#controls + 1] = name or "toggle"
 						end,
 					}
 			end
@@ -1097,9 +1105,34 @@ T["auto routes diagrams to Rex while nvim rollback and image references stay loc
 		assert(adapter.setup(options))
 		assert(adapter.show("ascii"))
 		equal(1, calls)
+		equal("mermaid", last.item.kind)
+		equal("ascii", last.mode)
 		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "![local](missing.png)" })
 		adapter.show("svg")
-		equal(1, calls, "image references must not reach Rex")
+		equal(1, calls, "missing images reached Rex")
+		local root = vim.fs.dirname(cache_root())
+		vim.api.nvim_buf_set_name(buf, root .. "/doc.md")
+		write_file(root .. "/shot.png", png_bytes(640, 480))
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "![local](shot.png)" })
+		-- Rex probes its own terminal, regardless of the source editor's graphics support.
+		assert(adapter.show("svg"))
+		equal(2, calls)
+		equal("image", last.item.kind)
+		equal("svg", last.mode)
+		assert(last.item.source:find("data:image/png;base64,", 1, true))
+		for _, link in ipairs({ "https://example.test/image.png", "//host/image.png" }) do
+			vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "![remote](" .. link .. ")" })
+			assert(not adapter.show("svg"))
+		end
+		equal(2, calls, "remote images reached Rex")
+		vim.cmd("DiagramHide")
+		vim.cmd("DiagramRestore")
+		vim.cmd("DiagramLayout right")
+		vim.cmd("DiagramLayout")
+		equal({ "hide", "restore", "right", "toggle" }, controls)
+		for _, suffix in ipairs({ "mh", "mr", "ml" }) do
+			assert(not vim.tbl_isempty(vim.fn.maparg("<leader>" .. suffix, "n", false, true)))
+		end
 	end, debug.traceback)
 	deferred.try = original_try
 	vim.env.REX_SESSION, vim.env.REX_BLOCK = original_session, original_block

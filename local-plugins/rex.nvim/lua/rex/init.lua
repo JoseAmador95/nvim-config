@@ -527,6 +527,52 @@ function M.focus(value, callback)
 	return api(record, "session.focus_block", { block_id = record.block_id }, callback)
 end
 
+local function layer_action(value, method, body, callback)
+	local record = owned(value)
+	if not record or record.state ~= "live" or stopping then
+		reply(callback, "Rex handle is not an owned live floating layer")
+		return
+	end
+	return view(record, function(err, snapshot)
+		if err then
+			callback(err)
+		elseif records[record.key] ~= record or record.state ~= "live" or stopping then
+			callback("Rex floating layer is no longer live")
+		elseif not find_owned(snapshot, record) then
+			closed(record, "external")
+			callback("Rex floating layer is no longer in its source window")
+		else
+			body.layer_id = record.layer_id
+			api(record, method, body, callback)
+		end
+	end)
+end
+
+function M.hide(value, callback)
+	return layer_action(value, "session.set_layer_state", { state = "minimized" }, callback)
+end
+
+function M.restore(value, callback)
+	return layer_action(value, "session.set_layer_state", { state = "normal", focus = true }, callback)
+end
+
+function M.resize(value, bounds, callback)
+	local valid = list(bounds) and #bounds == 4
+	if valid then
+		for _, number in ipairs(bounds) do
+			if type(number) ~= "number" or number ~= number or number < 0 or number > 1 then
+				valid = false
+				break
+			end
+		end
+	end
+	if not valid or bounds[3] <= 0 or bounds[4] <= 0 or bounds[1] + bounds[3] > 1 or bounds[2] + bounds[4] > 1 then
+		reply(callback, "Rex bounds must be [x, y, width, height] fractions inside the window")
+		return
+	end
+	return layer_action(value, "session.resize_layer", { bounds = vim.deepcopy(bounds) }, callback)
+end
+
 function M.close(value, callback)
 	local record = owned(value)
 	if not record then

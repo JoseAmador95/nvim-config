@@ -263,7 +263,7 @@ local function ascii_presenter()
 			presentation.delivered = true
 			if presentation.embedded then
 				vim.api.nvim_echo({ { "" } }, false, {})
-				vim.wo[presentation.win].statusline = " Diagram (ASCII)   q/Esc close"
+				vim.wo[presentation.win].statusline = " Diagram (ASCII)   q/Esc close" .. (setup_options.footer or "")
 			end
 		end,
 		error = present_error,
@@ -306,7 +306,8 @@ local function image_footer(presentation, rendering)
 		rendering and "…" or ""
 	)
 	if presentation.embedded then
-		local message = presentation.stale and (" OUTDATED: " .. presentation.stale) or footer
+		local message = presentation.stale and (" OUTDATED: " .. presentation.stale)
+			or (footer .. (setup_options.footer or ""))
 		vim.wo[presentation.win].statusline = message:gsub("%%", "%%%%"):gsub("[\r\n]", " ")
 		return
 	end
@@ -852,17 +853,8 @@ local function buffer_directory(bufnr)
 	return vim.fs.dirname(vim.fs.normalize(name))
 end
 
--- An image reference renders through the same SVG pipeline, so zoom, pan, copy,
--- caching, and cancellation behave exactly as they do for a diagram.
-local function show_image(core, reference, target, ascii_requested)
-	if ascii_requested then
-		notify("An image has no ASCII rendering; showing the image instead.", vim.log.levels.WARN)
-	end
-	if not image_terminal_ok() then
-		local message = "Images need inline image support in the terminal (the Kitty graphics protocol)"
-		notify(message, vim.log.levels.ERROR)
-		return nil, message
-	end
+-- Resolve and bound local bytes in the source editor before choosing a viewer.
+local function load_image(reference, target)
 	local path, resolve_err = diagram_image.resolve(reference.source, buffer_directory(target.bufnr))
 	if not path then
 		notify(resolve_err, vim.log.levels.WARN)
@@ -873,29 +865,13 @@ local function show_image(core, reference, target, ascii_requested)
 		notify(load_err, vim.log.levels.ERROR)
 		return nil, load_err
 	end
-	local executables, unavailable = resolve_dependencies("image", "svg")
-	if #unavailable > 0 then
-		local names = unavailable_names(unavailable)
-		local message = ("Cannot render %s: unavailable %s (%s; install: %s)"):format(
-			vim.fs.basename(path),
-			table.concat(names, ", "),
-			unavailable_details(unavailable),
-			install_hint(names)
-		)
-		notify(message, vim.log.levels.ERROR)
-		return nil, message
-	end
-	local metadata = vim.tbl_extend("force", {
-		executables = executables,
-		title = vim.fs.basename(path) .. " (" .. loaded.format .. ")",
-	}, image_metadata())
-	return core.open({
-		renderer = "image:svg",
-		presenter = "image",
+	return {
 		kind = "image",
 		source = loaded.source,
-		metadata = metadata,
-	})
+		origin = reference.origin,
+		path = path,
+		title = vim.fs.basename(path) .. " (" .. loaded.format .. ")",
+	}
 end
 
 function M.show(mode, selection)
@@ -946,7 +922,14 @@ function M.show(mode, selection)
 			notify(message, vim.log.levels.WARN)
 			return nil, message
 		end
-		return show_image(core, diagram, target, requested == "ascii")
+		if requested == "ascii" then
+			notify("An image has no ASCII rendering; showing the image instead.", vim.log.levels.WARN)
+		end
+		local loaded, err = load_image(diagram, target)
+		if not loaded then
+			return nil, err
+		end
+		diagram, mode = loaded, "svg"
 	end
 	if
 		effective_config.backend == "auto"
@@ -971,6 +954,9 @@ end
 -- The Rex child uses the same renderers and presenters in its ordinary window.
 -- Superseding a request cancels work while keeping the last delivered frame.
 function M.render(diagram, mode, reset)
+	if diagram.kind == "image" then
+		mode = "svg"
+	end
 	local core, setup_err = ensure_view()
 	if not core then
 		return nil, setup_err
@@ -1007,6 +993,11 @@ function M.render(diagram, mode, reset)
 			end
 		end
 		if reason then
+			if diagram.kind == "image" then
+				local message = "Cannot render " .. (diagram.title or "image") .. ": " .. reason
+				notify(message, vim.log.levels.ERROR)
+				return nil, message
+			end
 			notify("SVG unavailable: " .. reason .. ". Falling back to ASCII.", vim.log.levels.WARN)
 			mode = "ascii"
 			executables = nil
@@ -1030,7 +1021,7 @@ function M.render(diagram, mode, reset)
 		end
 	end
 
-	local metadata = { executables = executables }
+	local metadata = { executables = executables, title = diagram.title }
 	if mode == "svg" then
 		metadata = vim.tbl_extend("force", metadata, image_metadata())
 	end
@@ -1096,6 +1087,27 @@ function M.teardown()
 	return ok, err
 end
 
+-- The source editor owns Rex; its auxiliary viewer forwards the same controls.
+function M.setup_controls(callback)
+	for _, control in ipairs({
+		{ command = "DiagramHide", action = "hide", key = "<leader>mh", description = "Hide Rex preview" },
+		{ command = "DiagramRestore", action = "restore", key = "<leader>mr", description = "Restore Rex preview" },
+		{ command = "DiagramLayout", action = "layout", key = "<leader>ml", description = "Toggle Rex preview layout" },
+	}) do
+		pcall(vim.api.nvim_del_user_command, control.command)
+		vim.api.nvim_create_user_command(control.command, function(options)
+			callback(control.action, options.args ~= "" and options.args or nil)
+		end, {
+			nargs = control.action == "layout" and "?" or 0,
+			complete = control.action == "layout" and function()
+				return { "center", "right" }
+			end or nil,
+			desc = control.description,
+		})
+		usage_map("n", control.key, "<cmd>" .. control.command .. "<cr>", { desc = control.description })
+	end
+end
+
 local function register_interface()
 	pcall(vim.api.nvim_del_user_command, "DiagramShow")
 	vim.api.nvim_create_user_command("DiagramShow", function(options)
@@ -1120,6 +1132,14 @@ local function register_interface()
 		end,
 		desc = "Show diagram under cursor (svg default, ascii fallback)",
 	})
+	M.setup_controls(function(action, argument)
+		local ok, rex = deferred.try("config.diagram_rex")
+		if ok then
+			rex[action](argument)
+		else
+			notify("Rex preview unavailable: " .. tostring(rex), vim.log.levels.WARN)
+		end
+	end)
 
 	if require("config.pager").active then
 		usage_map("n", "<leader>md", "<cmd>DiagramShow<cr>", { desc = "Show diagram (SVG/ASCII)" })

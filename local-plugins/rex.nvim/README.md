@@ -27,9 +27,15 @@ end)
 `open_float()` creates a centred 90% layer in that block's window and returns a cancellation ticket.
 Operation callbacks are error-first; `on_close(handle, reason)` reports the end of an owned float.
 Handles and configuration snapshots are caller-owned copies.
+`hide(handle, callback)` minimises the layer while its process keeps running.
+`restore(handle, callback)` restores, raises and focuses the same layer without changing its bounds.
+`resize(handle, { x, y, width, height }, callback)` moves and resizes it without changing focus.
+Bounds are fractions of the source window; width and height must be positive and the rectangle must fit inside it.
+These operations verify the owned layer and block in their original window before mutation.
 Reusing the same context, label and argv returns the owned float or reconciles an uncertain creation.
 A timeout never permits an unverified second creation.
 Polling detects external closure without stealing focus, and cleanup targets only the owned layer and block.
+A minimised layer remains owned and is cleaned up on teardown like a visible one.
 `teardown()` starts asynchronous cancellation and cleanup; the host must allow the event loop to finish during exit.
 `status()` exposes pending calls and unresolved records so failures can be reported.
 Remote servers are rejected.

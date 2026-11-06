@@ -85,6 +85,9 @@ vim.api.nvim_create_autocmd("User", {
 					for _, command in ipairs({
 						"MenuOpen",
 						"DiagramShow",
+						"DiagramHide",
+						"DiagramRestore",
+						"DiagramLayout",
 						"MarkdownView",
 						"MarkdownImages",
 						"LogHlAdd",

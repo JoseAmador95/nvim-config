@@ -121,6 +121,7 @@ T["host reuses one viewer and sends structured updates without stealing focus"] 
 	local original_runtime, original_connect, original_notify =
 		vim.api.nvim_get_runtime_file, vim.fn.sockconnect, vim.rpcnotify
 	local requests, messages, focus, closed = {}, {}, 0, false
+	local controls, resize_done, identified = {}, nil, false
 	package.loaded.rex = {
 		setup = function()
 			return true
@@ -132,9 +133,18 @@ T["host reuses one viewer and sends structured updates without stealing focus"] 
 			requests[#requests + 1] = options
 			callback(nil, { layer_id = "owned-layer" })
 		end,
-		focus = function(_, callback)
+		restore = function(_, callback)
 			focus = focus + 1
+			controls[#controls + 1] = "restore"
 			callback()
+		end,
+		hide = function(_, callback)
+			controls[#controls + 1] = "hide"
+			callback()
+		end,
+		resize = function(_, bounds, callback)
+			controls[#controls + 1] = vim.deepcopy(bounds)
+			resize_done = callback
 		end,
 		close = function(_, callback)
 			requests[1].on_close()
@@ -160,6 +170,11 @@ T["host reuses one viewer and sends structured updates without stealing focus"] 
 		return 999
 	end
 	vim.rpcnotify = function(_, method, code, args)
+		if method == "nvim_set_client_info" then
+			equal("nvim-rex-diagram-source", code)
+			identified = true
+			return
+		end
 		equal("nvim_exec_lua", method)
 		equal("NvimRexDiagram.update(...)", code)
 		messages[#messages + 1] = vim.deepcopy(args[1])
@@ -183,6 +198,7 @@ T["host reuses one viewer and sends structured updates without stealing focus"] 
 			return #messages == 1
 		end))
 		equal(1, #requests)
+		assert(identified, "viewer cannot identify the source channel for controls")
 		equal("source-window", requests[1].context.window_id)
 		assert(not table.concat(requests[1].command, " "):find("A --> B", 1, true))
 		local directory = vim.fs.dirname(adapter.status().socket)
@@ -202,6 +218,50 @@ T["host reuses one viewer and sends structured updates without stealing focus"] 
 		local other = document({ "```mermaid", "NEW --> DIAGRAM", "```" })
 		adapter.show(other, assert(extract(other)), "ascii", options)
 		equal(true, messages[4].reset)
+		equal(1, #requests)
+		local generation = adapter.status().generation
+		assert(adapter.hide())
+		assert(adapter.restore())
+		equal(generation, adapter.status().generation, "visibility controls resent source or reset zoom")
+		equal({ "hide", "restore" }, { controls[#controls - 1], controls[#controls] })
+		assert(adapter.layout("right"))
+		equal("center", adapter.status().layout, "unconfirmed resize changed layout")
+		equal({ 0.52, 0.05, 0.43, 0.9 }, controls[#controls])
+		assert(not adapter.hide(), "overlapping controls were sent out of order")
+		resize_done("resize failed")
+		equal("center", adapter.status().layout)
+		assert(adapter.layout("right"))
+		resize_done()
+		equal("right", adapter.status().layout)
+		assert(adapter.layout())
+		equal({ 0.05, 0.05, 0.9, 0.9 }, controls[#controls])
+		resize_done()
+		assert(not adapter.layout("invalid"))
+		equal(generation, adapter.status().generation)
+		local item = {
+			kind = "image",
+			source = "<svg/>",
+			path = "/picture.svg",
+			title = "picture.svg (svg)",
+			origin = { type = "image", row = 1, start_col = 1, end_col = 20 },
+		}
+		adapter.show(other, item, "svg", options)
+		local message = messages[#messages]
+		equal({ ["rsvg-convert"] = "/tools/rsvg-convert" }, message.executables)
+		equal(item.title, message.diagram.title)
+		assert(message.diagram.path == nil, "image paths leaked into the child payload")
+		assert(message.reset)
+		local before = #messages
+		vim.api.nvim_buf_set_lines(other.bufnr, 0, -1, false, { "unrelated source edit" })
+		vim.wait(250, function()
+			return #messages > before
+		end)
+		equal(before, #messages, "image snapshots started a source observer")
+		adapter.show(other, item, "svg", options)
+		equal(false, messages[#messages].reset)
+		item.path = "/another.svg"
+		adapter.show(other, item, "svg", options)
+		equal(true, messages[#messages].reset)
 		equal(1, #requests)
 		requests[1].on_close()
 		assert(adapter.status() == nil)

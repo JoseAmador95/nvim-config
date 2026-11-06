@@ -356,7 +356,8 @@ superseded work is cancelled, and content-addressed results are bounded under
 `stdpath("cache")/diagram`. Missing tools are reported with install hints and
 SVG mode falls back to ASCII when possible.
 
-Inside a local Rex session, Mermaid and PlantUML open in a Rex floating pane through the local `rex.nvim` client.
+Inside a local Rex session, Mermaid, PlantUML and local Markdown images open in a Rex floating pane
+through the local `rex.nvim` client.
 Use the same `<leader>md` mapping or `:DiagramShow [svg|ascii]` command.
 The viewer follows the selected block, visual range, or PlantUML buffer after a 200 ms pause, including unsaved edits.
 Moving the cursor or changing editor tabs does not change that source.
@@ -365,9 +366,26 @@ Invalid or removed source keeps the last good image visible with an `OUTDATED` m
 Code-review snapshots remain frozen.
 The Rex pane uses the same renderers, cache and controls as the Neovim viewer, and closes with `q` or Escape.
 Updates do not take focus; closing the pane releases its observer and private local RPC socket.
-Rex graphics support is probed before rendering, with an announced ASCII fallback when unavailable.
+Rex graphics support is probed before rendering; Mermaid and PlantUML announce an ASCII fallback when unavailable.
 The CLI must already be installed; startup does not launch Rex or install anything.
-Local Markdown image references continue to use the Neovim viewer.
+PNG, JPEG, GIF and SVG references use the same image controls.
+The source editor resolves local paths and reads at most 8 MiB before sending the image to the viewer.
+Images are snapshots: invoke `<leader>md` again to reload changed bytes or a changed link.
+Remote references are not fetched, and frozen Review images remain references.
+
+These controls work in the source editor and the Rex viewer:
+
+| Key | Command | Effect |
+| --- | --- | --- |
+| `<leader>mh` | `:DiagramHide` | Minimise the preview while keeping its process, zoom and pan. |
+| `<leader>mr` | `:DiagramRestore` | Restore and focus the existing preview, wherever the source cursor is. |
+| `<leader>ml` | `:DiagramLayout` | Toggle between the large centred float and a smaller float on the right. |
+
+`:DiagramLayout center` and `:DiagramLayout right` select a position explicitly.
+The right layout overlays the editor's right side; it does not split the editor.
+Hiding retains the layout, and live diagrams keep updating without taking focus or revealing the preview.
+`q` and Escape still close the viewer and release its resources.
+
 Outside Rex, or if its inherited session cannot be verified, diagrams use the ordinary Neovim float.
 Set `plugins.diagram_view.backend = "nvim"` in the local configuration to always use that backend.
 The default is `"auto"`; remote Rex servers are outside this initial integration.
