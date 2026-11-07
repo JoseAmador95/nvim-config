@@ -2,6 +2,9 @@ local store = require("config.usage_store")
 
 local M = {}
 local enabled, paused, database, timer, warning
+-- Why collection could not start (for example a missing sqlite3 CLI). Startup
+-- never notifies about it; :checkhealth nvimconfig and :UsageResume report it.
+local unavailable, store_path
 local inventory = {}
 
 local function notify_error(err)
@@ -138,6 +141,9 @@ end
 
 function M.report(origin, days)
 	if not database then
+		if unavailable then
+			return nil, "collection is inactive: " .. unavailable
+		end
 		return nil, "collection is inactive; use :UsageResume or enable telemetry in ~/.nvim-local.lua"
 	end
 	return database:report(origin or "all", days or 30)
@@ -199,17 +205,22 @@ function M.setup(options, path)
 			)
 		)
 	paused = false
-	local function start()
+	local function start(explicit)
 		if not enabled or database then
 			return
 		end
 		local profile = vim.g.vscode and "vscode" or vim.env.NVIM_APPNAME == "nvimpager" and "pager" or "editor"
 		path = path or vim.fs.joinpath(vim.fs.dirname(vim.fn.stdpath("state")), "nvim", "usage", "usage.sqlite3")
+		store_path = path
 		local ok, value, err = pcall(store.open, path, profile)
 		if not ok or not value then
-			notify_error(ok and err or value)
+			unavailable = tostring(ok and err or value)
+			if explicit then
+				notify_error(unavailable)
+			end
 			return
 		end
+		unavailable = nil
 		database = value
 		for _, entry in pairs(inventory) do
 			record(entry[1], entry[2], entry[3], 0)
@@ -224,7 +235,12 @@ function M.setup(options, path)
 		)
 	end
 	local group = vim.api.nvim_create_augroup("ConfigUsage", { clear = true })
-	vim.api.nvim_create_autocmd("UIEnter", { group = group, callback = start })
+	vim.api.nvim_create_autocmd("UIEnter", {
+		group = group,
+		callback = function()
+			start(false)
+		end,
+	})
 	vim.api.nvim_create_autocmd("VimLeavePre", {
 		group = group,
 		callback = function()
@@ -245,7 +261,7 @@ function M.setup(options, path)
 	end, { desc = "Pause usage collection in this editor" })
 	vim.api.nvim_create_user_command("UsageResume", function()
 		M.pause(false)
-		start()
+		start(true)
 		if not enabled then
 			vim.notify("Enable telemetry in ~/.nvim-local.lua and restart Neovim", vim.log.levels.INFO)
 		end
@@ -263,8 +279,19 @@ function M.setup(options, path)
 		)
 	end, { desc = "Reset shared local usage statistics" })
 	if path or vim.g.vscode or #vim.api.nvim_list_uis() > 0 then
-		start()
+		start(false)
 	end
+end
+
+---Copied collection state for :checkhealth nvimconfig. Never opens the store.
+function M.status()
+	return {
+		enabled = enabled == true,
+		collecting = database ~= nil,
+		paused = paused == true,
+		path = store_path,
+		error = unavailable or (database and database.error) or nil,
+	}
 end
 
 return M

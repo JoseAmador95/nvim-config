@@ -776,7 +776,7 @@ legacy undo state.
 ## Local usage statistics
 
 Interactive editor, pager and VSCode sessions count configuration-owned mappings and executed palette actions.
-Collection uses the host `sqlite3` CLI; a missing CLI produces a warning without interrupting editing.
+Collection uses the host `sqlite3` CLI. Without it collection stays off silently; `:checkhealth nvimconfig` reports it and `:UsageResume` retries after you install it.
 Set `telemetry = { enabled = false }` in `~/.nvim-local.lua` and restart to disable collection.
 Headless checks, bootstrap and CI do not collect usage.
 

@@ -171,6 +171,38 @@ T["native Lazy keys count first and subsequent invocations once"] = function()
 	equal(1, uses("lazy-fixture:Z", "o"))
 end
 
+T["a missing sqlite3 CLI is reported on demand, never at startup"] = function()
+	child.restart({ "-u", "NONE", "-i", "NONE" })
+	local result = child.lua_func(function(repo, path)
+		vim.opt.runtimepath:prepend(repo)
+		require("config.local_plugins").setup()
+		local notifications = {}
+		vim.notify = function(message)
+			notifications[#notifications + 1] = message
+		end
+		local exepath = vim.fn.exepath
+		vim.fn.exepath = function(name)
+			if name == "sqlite3" then
+				return ""
+			end
+			return exepath(name)
+		end
+		local usage = require("config.usage")
+		usage.setup({ enabled = true }, path .. "/usage.sqlite3")
+		local startup = #notifications
+		local status = usage.status()
+		local _, report_err = usage.report("all", 0)
+		vim.cmd("UsageResume")
+		return { startup = startup, status = status, report_err = report_err, notifications = notifications }
+	end, root, directory)
+	equal(0, result.startup, "startup notified about the missing sqlite3 CLI")
+	assert(result.status.enabled and not result.status.collecting, vim.inspect(result.status))
+	assert(result.status.error:find("sqlite3", 1, true), vim.inspect(result.status))
+	assert(result.report_err:find("collection is inactive: install the host sqlite3", 1, true), result.report_err)
+	equal(1, #result.notifications, ":UsageResume did not report the missing CLI")
+	assert(result.notifications[1]:find("sqlite3", 1, true), result.notifications[1])
+end
+
 T["terminal escape preserves the configured jj behaviour"] = function()
 	child.lua([[
 		require("config.usage").mapper("fixture")("t", "jj", "<C-\\><C-n>")

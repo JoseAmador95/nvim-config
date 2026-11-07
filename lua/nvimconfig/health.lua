@@ -373,6 +373,30 @@ local function check_markdown_view()
 	end
 end
 
+local function check_usage()
+	local usage = package.loaded["config.usage"]
+	if type(usage) ~= "table" or type(usage.status) ~= "function" then
+		return
+	end
+	health.start("Usage statistics")
+	local ok, status = pcall(usage.status)
+	if not ok or type(status) ~= "table" then
+		health.warn("could not read the usage statistics state: " .. tostring(status))
+	elseif not status.enabled then
+		health.info("local usage statistics are disabled in this session (telemetry off, headless, CI or tests)")
+	elseif status.error then
+		health.warn("local usage statistics are off: " .. tostring(status.error), {
+			"Install the host sqlite3 CLI: macOS ships /usr/bin/sqlite3; Ubuntu/Debian: sudo apt install sqlite3; "
+				.. "Fedora: sudo dnf install sqlite",
+			"Then run :UsageResume, or restart Neovim",
+		})
+	elseif status.collecting then
+		health.ok(("local usage statistics are collected in %s"):format(tostring(status.path)))
+	else
+		health.info("local usage statistics start once a UI attaches")
+	end
+end
+
 local AUTO_INSTALL_ADVICE = {
 	mise = "Run :NvimConfigMiseInstall (or scripts/install-mise)",
 	parsers = "Run :NvimConfigParsersInstall",
@@ -474,6 +498,7 @@ function M.check()
 	check_markdown_view()
 	check_parsers()
 	check_auto_install()
+	check_usage()
 
 	health.start("Mise tools")
 	check_tool(
