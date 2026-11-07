@@ -486,9 +486,12 @@ require("lazy").setup(specs, {
 	defaults = { lazy = true }, -- lazy-load by default
 	-- Missing plugins install at their locked commits on startup, so a new
 	-- machine or a newly added plugin works without a separate bootstrap step.
-	-- VSCode-Neovim shares the editor's plugin directory and is never blocked
-	-- by a first-run install.
-	install = { missing = network_allowed and not (vim.g.vscode == 1 or vim.g.vscode == true) },
+	-- An ordinary VSCode-Neovim start shares the editor's plugin directory and is
+	-- never blocked by a first-run install; an explicit bootstrap still installs
+	-- the VSCode-only plugins so the lock is reproduced.
+	install = {
+		missing = explicit_bootstrap or (network_allowed and not (vim.g.vscode == 1 or vim.g.vscode == true)),
+	},
 	lockfile = lockfile,
 	ui = { border = "rounded" },
 	change_detection = { notify = false },
