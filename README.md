@@ -30,7 +30,8 @@ follows; `:let g:nvimconfig_health_details = 1` also lists the PATH order and
 the Mise catalog. A failed background step is retried
 24 hours later; `:NvimConfigMiseInstall`, `:NvimConfigParsersInstall`,
 `:NvimConfigToolsInstall [all|name]` (`!` reinstalls) and `:Lazy restore` run the
-same work on demand. Parser builds need a host C compiler. This catalog requires
+same work on demand. Parser builds need a host C compiler; a background build
+skipped for lack of one retries as soon as a compiler is on `PATH`. This catalog requires
 Mise 2026.10.4 or newer when you install Mise yourself.
 `NVIM_CONFIG_OFFLINE=1` disables every download and only reports what is
 missing; headless sessions never download in the background. The VSCode profile
@@ -847,7 +848,8 @@ reviewing a deliberate visual change; CI forbids reference updates.
 
 Tree-sitter parsers never block startup. Missing or stale configured parsers
 build in the background once an interactive UI starts;
-`:NvimConfigParsersInstall` installs the configured set on demand, and
+`:NvimConfigParsersInstall [name...]` installs missing parsers and rebuilds
+those at another revision than the lock on demand (`!` reinstalls them all), and
 bootstrap uses the same API and waits for completion. Dockerfile, Markdown, sh, and Bash lint only
 on `BufWritePost`, never on read, create, or `InsertLeave`.
 

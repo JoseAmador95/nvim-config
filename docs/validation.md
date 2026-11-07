@@ -87,8 +87,9 @@ with pygls 2. No `latest` selector is used.
 - Runtime launchers use ordinary `mise exec`, including automatic installation
   of missing tools. Offline execution disables that installation and fails when
   the requested tool is absent. Preinstall before retrying a timed-out cold use.
-- `:NvimConfigParsersInstall` explicitly resolves the managed tree-sitter CLI
-  and installs configured parsers. Startup never installs parsers.
+- `:NvimConfigParsersInstall` explicitly resolves the managed tree-sitter CLI,
+  installs missing configured parsers and rebuilds those whose revision differs
+  from the lock; `!` reinstalls them all. Startup never installs parsers.
 
 Tools and launchers are under `~/.local/share/mise`; state is under
 `~/.local/state/mise` and caches under `~/.cache/mise`. Editor and pager share

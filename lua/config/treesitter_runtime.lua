@@ -29,6 +29,9 @@ local function dispatch_policy(event)
 	end
 end
 
+local NO_COMPILER = "parsers are compiled locally and no C compiler (cc) is on PATH; see :checkhealth nvimconfig"
+local INCOMPLETE = "Tree-sitter parser installation did not complete successfully; the build errors are in :messages"
+
 local function notify(message, level)
 	vim.notify(message, level or vim.log.levels.ERROR, { title = "Tree-sitter" })
 end
@@ -118,6 +121,9 @@ function M.install(requested, opts)
 	if not executable then
 		return false, tool_err
 	end
+	if not M.compiler_available() then
+		return false, NO_COMPILER
+	end
 
 	local loaded, treesitter = pcall(require, "nvim-treesitter")
 	if not loaded then
@@ -140,7 +146,7 @@ function M.install(requested, opts)
 			return false, tostring(result)
 		end
 		if result ~= true then
-			return false, "Tree-sitter parser installation did not complete successfully"
+			return false, INCOMPLETE
 		end
 		M.retry()
 		return true, task
@@ -153,18 +159,23 @@ function M.install(requested, opts)
 				M.retry()
 			end
 			if opts.on_done then
-				local detail = err and tostring(err)
-					or (not ok and "Tree-sitter parser installation did not complete successfully")
-					or nil
+				local detail = err and tostring(err) or (not ok and INCOMPLETE) or nil
 				opts.on_done(ok, detail)
 			elseif err then
 				notify("Parser installation failed: " .. tostring(err))
 			elseif result ~= true then
-				notify("Parser installation did not complete successfully")
+				notify(INCOMPLETE)
 			end
 		end)
 	end)
 	return true, task
+end
+
+---Whether the C compiler that `tree-sitter build` uses ($CC, else cc) is on PATH.
+---@return boolean
+function M.compiler_available()
+	local compiler = vim.env.CC and vim.env.CC:match("^%s*(%S+)") or "cc"
+	return vim.fn.executable(compiler) == 1
 end
 
 ---Return the configured parser allowlist as an immutable copy.
@@ -261,6 +272,23 @@ function M.inventory(requested)
 	return { required = required, exact = #problems == 0, problems = problems, extras = extras }
 end
 
+---Parsers that need work: missing ones and installed ones at another revision
+---than the lock. Installed parsers without a locked revision are left alone.
+---@param requested? string|string[] Defaults to the configured parsers.
+---@return string[] names
+---@return boolean reinstall true when a name is already installed, so the install must be forced
+function M.stale(requested)
+	local present = as_set(installed_parsers())
+	local names, reinstall = {}, false
+	for _, item in ipairs(M.inventory(requested).required) do
+		if not item.exact and (item.expected ~= vim.NIL or not present[item.name]) then
+			names[#names + 1] = item.name
+			reinstall = reinstall or present[item.name] == true
+		end
+	end
+	return names, reinstall
+end
+
 ---Reconcile only missing/stale configured parsers after explicit network consent.
 function M.provision_exact(opts)
 	opts = opts or {}
@@ -327,16 +355,29 @@ function M.setup(opts)
 		on_state_change = dispatch_policy,
 	})
 
+	-- nvim-treesitter skips installed parsers unless forced, even at an old
+	-- revision, so outdated ones are reinstalled explicitly. `!` rebuilds all.
 	vim.api.nvim_create_user_command("NvimConfigParsersInstall", function(command)
 		local requested = #command.fargs > 0 and command.fargs or nil
-		local install_ok, err = M.install(requested)
+		local names, reinstall
+		if command.bang then
+			names, reinstall = as_list(requested or parsers), true
+		else
+			names, reinstall = M.stale(requested)
+		end
+		if #names == 0 then
+			notify("Tree-sitter parsers are installed at their locked revisions", vim.log.levels.INFO)
+			return
+		end
+		local install_ok, err = M.install(names, { force = reinstall })
 		if not install_ok then
 			notify("Could not start parser installation: " .. tostring(err))
 		end
 	end, {
 		nargs = "*",
+		bang = true,
 		force = true,
-		desc = "Install the configured Tree-sitter parsers",
+		desc = "Install missing and outdated Tree-sitter parsers (! reinstalls them all)",
 	})
 end
 

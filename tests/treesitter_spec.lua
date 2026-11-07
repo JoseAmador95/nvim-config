@@ -91,6 +91,7 @@ local runtime = require("config.treesitter_runtime")
 local default_expected_revision = runtime._expected_revision
 local default_parser_file = runtime._parser_file
 local default_installed_revision = runtime._installed_revision
+local default_compiler_available = runtime.compiler_available
 
 local function reset_runtime()
 	runtime.setup({ parsers = {}, highlight = false, indent = false })
@@ -101,6 +102,7 @@ local function reset_runtime()
 	runtime._expected_revision = default_expected_revision
 	runtime._parser_file = default_parser_file
 	runtime._installed_revision = default_installed_revision
+	runtime.compiler_available = default_compiler_available
 end
 
 local function starts_for(buf)
@@ -262,6 +264,69 @@ T["parser installation reports missing Mise before starting a task"] = function(
 	tool_error = nil
 	assert(not ok and err:find("NvimConfigMiseInstall", 1, true))
 	assert(#install_calls == before)
+end
+
+T["parser installation reports a missing C compiler before starting a task"] = function()
+	reset_runtime()
+	runtime.compiler_available = function()
+		return false
+	end
+	local ok, err = runtime.install({ "lua" })
+	assert(not ok and err:find("no C compiler", 1, true), tostring(err))
+	equal(0, #install_calls, "an install started without a C compiler")
+	reset_runtime()
+end
+
+T["install command rebuilds outdated parsers, installs missing ones and skips exact ones"] = function()
+	reset_runtime()
+	runtime.setup({ parsers = { "lua", "c", "rust" }, highlight = false, indent = false })
+	runtime.compiler_available = function()
+		return true
+	end
+	local files = {}
+	for _, name in ipairs({ "lua", "c", "rust" }) do
+		files[name] = vim.fn.tempname() .. ".so"
+		paths[#paths + 1] = files[name]
+		assert(vim.fn.writefile({ "parser" }, files[name], "b") == 0)
+	end
+	local locked = { lua = "1", c = "2", rust = "3", toml = "4" }
+	local revisions = { lua = "1", c = "old", rust = "3" }
+	runtime._expected_revision = function(name)
+		return locked[name]
+	end
+	runtime._parser_file = function(name)
+		return files[name] or (vim.fn.tempname() .. ".so")
+	end
+	runtime._installed_revision = function(name)
+		return revisions[name]
+	end
+	installed = { "lua", "c", "rust" }
+	local messages = {}
+	local original_notify = vim.notify
+	vim.notify = function(message, level)
+		messages[#messages + 1] = { message = tostring(message), level = level }
+	end
+
+	vim.cmd("NvimConfigParsersInstall")
+	equal({ "c" }, install_calls[1].parsers, "the command did not select only the outdated parser")
+	equal(true, install_calls[1].opts.force, "nvim-treesitter skips an outdated parser unless forced")
+
+	revisions.c = "2"
+	vim.cmd("NvimConfigParsersInstall")
+	equal(1, #install_calls, "an up-to-date parser set started an install")
+	assert(messages[#messages].message:find("locked revisions", 1, true), vim.inspect(messages))
+
+	vim.cmd("NvimConfigParsersInstall toml")
+	equal({ "toml" }, install_calls[2].parsers, "a requested missing parser was not installed")
+	equal(false, install_calls[2].opts.force, "a missing parser does not need a forced install")
+
+	vim.cmd("NvimConfigParsersInstall!")
+	equal({ "lua", "c", "rust" }, install_calls[3].parsers, "! did not reinstall every configured parser")
+	equal(true, install_calls[3].opts.force, "! did not force the reinstall")
+
+	vim.notify = original_notify
+	installed = {}
+	reset_runtime()
 end
 
 T["blocking install API honors timeout and returns the Task result"] = function()

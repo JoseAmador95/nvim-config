@@ -46,20 +46,40 @@ local function write_failures(failures)
 	pcall(vim.fn.writefile, { vim.json.encode(failures) }, path)
 end
 
-local function record(step, ok, detail)
+---@param extra? table fields persisted with a failure, such as `compiler = false`
+local function record(step, ok, detail, extra)
 	state.steps[step] = { ok = ok, detail = detail and tostring(detail) or nil, at = os.time() }
 	local failures = read_failures()
 	if ok then
 		failures[step] = nil
 	else
-		failures[step] = { at = os.time(), detail = detail and tostring(detail) or "failed" }
+		failures[step] =
+			vim.tbl_extend("force", extra or {}, { at = os.time(), detail = detail and tostring(detail) or "failed" })
 	end
 	write_failures(failures)
 end
 
-local function recently_failed(step)
+-- A step that has nothing left to do drops its old failure, so health and the
+-- retry backoff only reflect problems that still exist.
+local function clear_failure(step)
+	local failures = read_failures()
+	if failures[step] ~= nil then
+		failures[step] = nil
+		write_failures(failures)
+	end
+end
+
+---@param compiler_available? boolean
+local function recently_failed(step, compiler_available)
 	local failure = read_failures()[step]
-	return type(failure) == "table" and type(failure.at) == "number" and os.time() - failure.at < RETRY_SECONDS
+	if type(failure) ~= "table" or type(failure.at) ~= "number" then
+		return false
+	end
+	-- A missing C compiler blocked the last attempt: retry as soon as one exists.
+	if failure.compiler == false and compiler_available then
+		return false
+	end
+	return os.time() - failure.at < RETRY_SECONDS
 end
 
 local function enabled()
@@ -96,9 +116,21 @@ local function install_parsers()
 	local names, force = stale_parsers(treesitter)
 	if #names == 0 then
 		state.steps.parsers = { ok = true, at = os.time() }
+		clear_failure("parsers")
 		return
 	end
-	if recently_failed("parsers") then
+	local compiler = type(treesitter.compiler_available) ~= "function" or treesitter.compiler_available()
+	if recently_failed("parsers", compiler) then
+		return
+	end
+	if not compiler then
+		record("parsers", false, "no C compiler (cc) on PATH", { compiler = false })
+		notify(
+			"Tree-sitter parsers need a C compiler to build: "
+				.. table.concat(names, ", ")
+				.. "; see :checkhealth nvimconfig",
+			vim.log.levels.WARN
+		)
 		return
 	end
 	local started, err = treesitter.install(names, {
@@ -110,7 +142,7 @@ local function install_parsers()
 				notify("Installed Tree-sitter parsers: " .. table.concat(names, ", "))
 			else
 				notify(
-					"Tree-sitter parser install failed: " .. tostring(detail) .. "\nSee :checkhealth nvimconfig",
+					"Tree-sitter parser install failed: " .. tostring(detail) .. "; see :checkhealth nvimconfig",
 					vim.log.levels.WARN
 				)
 			end
@@ -121,9 +153,7 @@ local function install_parsers()
 	else
 		record("parsers", false, err)
 		notify(
-			"Tree-sitter parsers are missing and could not be installed: "
-				.. tostring(err)
-				.. "\nSee :checkhealth nvimconfig",
+			"Tree-sitter parsers could not be installed: " .. tostring(err) .. "; see :checkhealth nvimconfig",
 			vim.log.levels.WARN
 		)
 	end
@@ -131,6 +161,7 @@ end
 
 local function install_mise(continue)
 	if vim.fn.executable("mise") == 1 then
+		clear_failure("mise")
 		return continue()
 	end
 	if recently_failed("mise") then
@@ -142,7 +173,7 @@ local function install_mise(continue)
 		if ok then
 			notify("Mise is installed. Language servers start for files opened from now on.")
 		else
-			notify("Mise install failed: " .. tostring(detail) .. "\nSee :checkhealth nvimconfig", vim.log.levels.WARN)
+			notify("Mise install failed: " .. tostring(detail) .. "; see :checkhealth nvimconfig", vim.log.levels.WARN)
 		end
 		continue()
 	end)

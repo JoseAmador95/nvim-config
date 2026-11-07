@@ -227,22 +227,49 @@ local function check_plugins(report)
 	end
 end
 
+local PARSER_PROBLEMS = {
+	{ reason = "missing", label = "missing" },
+	{ reason = "wrong", label = "not at the locked revision" },
+	{ reason = "unpinned", label = "without a locked revision" },
+}
+
+---@return boolean? exact nil when the runtime is not configured in this session
 local function check_parsers(report)
 	local runtime = package.loaded["config.treesitter_runtime"]
 	if type(runtime) ~= "table" or type(runtime.inventory) ~= "function" then
-		return
+		return nil
 	end
 	local ok, inventory = pcall(runtime.inventory)
 	if not ok or type(inventory) ~= "table" then
 		report:warn("Could not inspect the configured Tree-sitter parsers: " .. tostring(inventory))
-	elseif inventory.exact then
-		report:ok(("%d Tree-sitter parsers installed at their pinned revisions"):format(#inventory.required))
-	else
-		report:warn("Tree-sitter parsers are missing or stale: " .. table.concat(inventory.problems, ", "), {
-			"Run :NvimConfigParsersInstall (needs Mise and a C compiler)",
-			"Neovim also builds them in the background when it starts with a UI and network access",
-		})
+		return false
 	end
+	if inventory.exact then
+		report:ok(("%d Tree-sitter parsers installed at their pinned revisions"):format(#inventory.required))
+		return true
+	end
+	local groups, other = {}, {}
+	for _, problem in ipairs(inventory.problems) do
+		local name, reason = problem:match("^(.+):(%a+)$")
+		if name then
+			groups[reason] = groups[reason] or {}
+			table.insert(groups[reason], name)
+		else
+			other[#other + 1] = problem
+		end
+	end
+	local parts = {}
+	for _, kind in ipairs(PARSER_PROBLEMS) do
+		if groups[kind.reason] then
+			parts[#parts + 1] = kind.label .. ": " .. table.concat(groups[kind.reason], ", ")
+		end
+	end
+	vim.list_extend(parts, other)
+	report:warn("Tree-sitter parsers need an update (" .. table.concat(parts, "; ") .. ")", {
+		"Run :NvimConfigParsersInstall: it installs missing parsers and rebuilds outdated ones (needs Mise and a C compiler)",
+		"Neovim also does it in the background when it starts with a UI and network access",
+	})
+	return false
 end
 
 local function check_markdown_view(report)
@@ -418,7 +445,8 @@ local AUTO_INSTALL_ADVICE = {
 	parsers = "Run :NvimConfigParsersInstall",
 }
 
-local function check_auto_install(report)
+---@param resolved table<string, boolean?> steps whose problem no longer exists
+local function check_auto_install(report, resolved)
 	local offline = vim.env.NVIM_CONFIG_OFFLINE == "1"
 	local auto = package.loaded["config.auto_install"]
 	if type(auto) ~= "table" or type(auto.status) ~= "function" then
@@ -439,7 +467,11 @@ local function check_auto_install(report)
 	end
 	local steps = vim.tbl_keys(status.failures or {})
 	table.sort(steps)
-	for _, step in ipairs(steps) do
+	for _, step in
+		ipairs(vim.tbl_filter(function(step)
+			return not resolved[step]
+		end, steps))
+	do
 		local failure = status.failures[step]
 		local at = type(failure) == "table" and tonumber(failure.at) or nil
 		local when = at and os.date("%Y-%m-%d %H:%M", at) or "an unknown time"
@@ -593,14 +625,14 @@ function M.check(opts)
 	local mise_found = check_required_tools(report)
 	check_path_order(report, local_path_set())
 	check_plugins(report)
-	check_parsers(report)
+	local parsers_exact = check_parsers(report)
 	check_markdown_view(report)
 	check_local_products(report)
 	check_managed_tools(report, mise_found)
 	check_optional_tools(report)
 	check_pager_profile(report)
 	check_usage(report)
-	check_auto_install(report)
+	check_auto_install(report, { mise = mise_found, parsers = parsers_exact })
 	check_undo(report)
 	check_validation(report)
 	if details then

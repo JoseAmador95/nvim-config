@@ -42,6 +42,9 @@ local function fresh_module()
 		end,
 	}
 	package.loaded["config.treesitter_runtime"] = {
+		compiler_available = function()
+			return scenario.compiler ~= false
+		end,
 		inventory = function()
 			return {
 				exact = #scenario.parsers == 0,
@@ -143,6 +146,57 @@ T["failures are recorded, reported and not retried within a day"] = function()
 	settle(auto_install, "parsers")
 	equal(0, calls.mise, "Mise was retried before the backoff expired")
 	assert(auto_install.status().failures.mise, "backoff forgot the recorded failure")
+end
+
+T["a missing C compiler blocks parsers only until one appears"] = function()
+	vim.fn.delete(state_home, "rf")
+	scenario = {
+		mise_ok = true,
+		compiler = false,
+		parsers = { { name = "c", expected = "2", actual = "1", exact = false } },
+	}
+	local auto_install = fresh_module()
+	interactive()
+	mise_present(true)
+	auto_install.setup({ profile = "full" })
+	assert(auto_install.run())
+	settle(auto_install, "parsers")
+	equal(0, #calls.parsers, "parsers were built without a C compiler")
+	local failure = auto_install.status().failures.parsers
+	assert(failure and failure.compiler == false, vim.inspect(failure))
+	assert(
+		vim.iter(notifications):any(function(item)
+			return item.message:find("C compiler", 1, true) ~= nil and item.level == vim.log.levels.WARN
+		end),
+		"the missing compiler was not announced"
+	)
+
+	scenario.compiler = true
+	auto_install = fresh_module()
+	interactive()
+	mise_present(true)
+	auto_install.setup({ profile = "full" })
+	assert(auto_install.run())
+	settle(auto_install, "parsers")
+	equal({ { names = { "c" }, force = true } }, calls.parsers, "a new compiler did not retry the parsers at once")
+	equal({}, auto_install.status().failures, "the compiler failure outlived a successful build")
+end
+
+T["steps with nothing left to do drop their old failures"] = function()
+	vim.fn.delete(state_home, "rf")
+	scenario = { mise_ok = true, parsers = {} }
+	local auto_install = fresh_module()
+	interactive()
+	local path = vim.fs.joinpath(vim.fn.stdpath("state"), "nvim-config", "auto-install.json")
+	vim.fn.mkdir(vim.fs.dirname(path), "p")
+	local failures = { mise = { at = os.time(), detail = "old" }, parsers = { at = os.time(), detail = "old" } }
+	assert(vim.fn.writefile({ vim.json.encode(failures) }, path) == 0)
+	mise_present(true)
+	auto_install.setup({ profile = "full" })
+	assert(auto_install.run())
+	settle(auto_install, "parsers")
+	equal(0, calls.mise + #calls.parsers, "a resolved step started work")
+	equal({}, auto_install.status().failures, "resolved steps kept their failures")
 end
 
 T["pager skips Mise and offline or headless sessions download nothing"] = function()

@@ -269,4 +269,77 @@ T["health lists errors before warnings, each with the fix for the platform"] = f
 	assert(find("Platform: Fedora Linux 43; fixes use dnf"), "the summary does not name the platform")
 end
 
+T["health drops automatic install failures that are already fixed"] = function()
+	local repo = vim.fn.getcwd()
+	vim.opt.runtimepath:prepend(repo)
+	package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+
+	local bin = vim.fn.tempname()
+	vim.fn.mkdir(bin, "p")
+	for _, name in ipairs({ "git", "mise", "cc" }) do
+		local path = vim.fs.joinpath(bin, name)
+		vim.fn.writefile({ "#!/bin/sh" }, path)
+		vim.fn.setfperm(path, "rwx------")
+	end
+	local original_path = vim.env.PATH
+	vim.env.PATH = bin
+	local stubbed = { "config.auto_install", "config.treesitter_runtime" }
+	local originals = {}
+	for _, name in ipairs(stubbed) do
+		originals[name] = package.loaded[name]
+	end
+	local parsers_exact = true
+	package.loaded["config.auto_install"] = {
+		status = function()
+			return {
+				retry_seconds = 60,
+				failures = {
+					mise = { at = 1, detail = "old mise failure" },
+					parsers = { at = 1, detail = "old build" },
+				},
+			}
+		end,
+	}
+	package.loaded["config.treesitter_runtime"] = {
+		inventory = function()
+			if parsers_exact then
+				return { exact = true, required = { {} }, problems = {} }
+			end
+			return { exact = false, required = { {}, {} }, problems = { "c:wrong", "lua:missing" } }
+		end,
+	}
+	local original_warn = vim.health.warn
+	local warnings = {}
+	vim.health.warn = function(message)
+		warnings[#warnings + 1] = tostring(message)
+	end
+	local platform = { os = "linux", name = "Linux", brew = false, rustup = false }
+	package.loaded["nvimconfig.health"] = nil
+	local health = require("nvimconfig.health")
+	local function run()
+		warnings = {}
+		local ok, err = pcall(health.check, { platform = platform })
+		assert(ok, err)
+		return table.concat(warnings, "\n")
+	end
+	local exact_report = run()
+	parsers_exact = false
+	local stale_report = run()
+
+	vim.health.warn = original_warn
+	vim.env.PATH = original_path
+	vim.fn.delete(bin, "rf")
+	for _, name in ipairs(stubbed) do
+		package.loaded[name] = originals[name]
+	end
+
+	assert(not exact_report:find("automatic", 1, true), "fixed steps still reported failures:\n" .. exact_report)
+	assert(stale_report:find("automatic parsers install failed", 1, true), stale_report)
+	assert(not stale_report:find("automatic mise install", 1, true), "Mise is installed:\n" .. stale_report)
+	assert(
+		stale_report:find("Tree-sitter parsers need an update (missing: lua; not at the locked revision: c)", 1, true),
+		stale_report
+	)
+end
+
 return T
