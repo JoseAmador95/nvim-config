@@ -1,13 +1,66 @@
 -- :checkhealth nvimconfig
+--
+-- Health only observes: it never starts processes, installs tools or writes
+-- files (tests/health_spec.lua enforces this). Every check records findings in
+-- a report that prints "Problems" first (errors, then warnings, each with the
+-- fix for this platform) and then a short "Summary" of what works.
+-- `:let g:nvimconfig_health_details = 1` also prints the PATH order and the
+-- locked Mise catalog.
 local M = {}
 
 local health = vim.health
 local uv = vim.uv
-local toolchain = require("config.toolchain")
-local tool_paths = require("config.tool_paths")
-
+local host_packages = require("config.host_packages")
 local local_plugins = require("config.local_plugins")
 local plugin_state = require("config.plugin_state")
+local tool_paths = require("config.tool_paths")
+local toolchain = require("config.toolchain")
+
+local DETAILS_HINT = "PATH order and the Mise catalog: :let g:nvimconfig_health_details = 1 | checkhealth nvimconfig"
+
+local Report = {}
+Report.__index = Report
+
+local function new_report(platform)
+	return setmetatable({ platform = platform, errors = {}, warnings = {}, summary = {}, details = {} }, Report)
+end
+
+local function advice_list(advice)
+	if advice == nil then
+		return nil
+	end
+	advice = type(advice) == "table" and advice or { advice }
+	return #advice > 0 and advice or nil
+end
+
+function Report:error(message, advice)
+	self.errors[#self.errors + 1] = { message = message, advice = advice_list(advice) }
+end
+
+function Report:warn(message, advice)
+	self.warnings[#self.warnings + 1] = { message = message, advice = advice_list(advice) }
+end
+
+function Report:ok(message)
+	self.summary[#self.summary + 1] = { kind = "ok", message = message }
+end
+
+function Report:info(message)
+	self.summary[#self.summary + 1] = { kind = "info", message = message }
+end
+
+function Report:detail(message)
+	self.details[#self.details + 1] = message
+end
+
+---Install commands for a host dependency on this platform, then any follow-up steps.
+function Report:install(name, ...)
+	return vim.list_extend(host_packages.advice(name, self.platform), { ... })
+end
+
+local function enabled(value)
+	return value ~= nil and value ~= false and value ~= 0 and value ~= ""
+end
 
 local function version_string()
 	local version = vim.version()
@@ -64,107 +117,6 @@ local function path_origin(path, configured)
 	return "host", 4
 end
 
-local function check_path_order()
-	local configured = local_path_set()
-	local previous_rank = 0
-	local ordered = true
-	health.info("PATH precedence contract: Mise launchers > local_config.path > ~/.local/bin > host PATH")
-	for index, path in ipairs(split_path(vim.env.PATH)) do
-		local origin, rank = path_origin(path, configured)
-		health.info(("PATH[%02d] %-12s %s"):format(index, origin, normalized(path)))
-		if rank < previous_rank then
-			ordered = false
-		end
-		previous_rank = math.max(previous_rank, rank)
-	end
-	if ordered then
-		health.ok("PATH segments follow the configured precedence")
-	else
-		health.warn(
-			"PATH contains an origin after a lower-precedence segment; restart after reviewing local_config.path"
-		)
-	end
-	return configured
-end
-
-local function check_tool(name, feature, install, required, configured)
-	local path = vim.fn.exepath(name)
-	if path ~= "" then
-		local origin = path_origin(path, configured or local_path_set())
-		health.ok(("%s available for %s (%s): %s"):format(name, feature, origin, path))
-		return true
-	end
-
-	local message = ("%s is missing (%s). %s"):format(name, feature, install)
-	if required then
-		health.error(message)
-	else
-		health.warn(message)
-	end
-	return false
-end
-
--- A catalog tool without a launcher yet is still usable: the first use runs it
--- through `mise exec`, which installs the locked version.
-local function check_managed_tool(tool, feature, configured)
-	local command = toolchain.tools[tool].commands[1]
-	local path = vim.fn.exepath(command)
-	if path ~= "" then
-		health.ok(("%s available for %s (%s): %s"):format(command, feature, path_origin(path, configured), path))
-		return true
-	end
-	local uname = uv.os_uname()
-	if not toolchain.supported(tool, toolchain.target_key(uname.sysname, uname.machine)) then
-		health.info(("%s is not available on this platform (%s)"):format(command, feature))
-		return false
-	end
-	if vim.fn.executable("mise") == 1 then
-		health.ok(
-			("%s for %s installs through Mise on first use; :NvimConfigToolsInstall %s preinstalls it"):format(
-				command,
-				feature,
-				tool
-			)
-		)
-		return true
-	end
-	health.warn(("%s is unavailable (%s) until Mise is installed"):format(command, feature), {
-		"Run :NvimConfigMiseInstall",
-	})
-	return false
-end
-
-local function check_external_tool(name, feature, install, configured)
-	local path = tool_paths.external_executable(name)
-	if path then
-		local origin = path_origin(path, configured or local_path_set())
-		health.ok(("%s available for %s (%s): %s"):format(name, feature, origin, path))
-		return true
-	end
-	health.warn(("%s is missing (%s). %s"):format(name, feature, install))
-	return false
-end
-
-local function check_validation_tool(name, expected_line, configured)
-	local path = vim.fn.exepath(name)
-	local install = "Run: scripts/install-ci-tools /absolute/path/to/bin"
-	if path == "" then
-		-- Only scripts/check-config needs the validators; the editor does not.
-		health.info(("%s is not installed; only scripts/check-config needs it. %s"):format(name, install))
-		return
-	end
-
-	local origin = path_origin(path, configured)
-	health.info(
-		("%s is present for validation (%s): %s; expected %q, version execution is reserved for scripts/check-config"):format(
-			name,
-			origin,
-			path,
-			expected_line
-		)
-	)
-end
-
 local function config_paths()
 	local config_home = vim.env.XDG_CONFIG_HOME
 	if not config_home or config_home == "" then
@@ -175,45 +127,136 @@ local function config_paths()
 	return vim.fs.joinpath(config_home, "nvim"), vim.fs.joinpath(config_home, "nvimpager")
 end
 
-local function check_pager_profile()
-	local main_path, pager_path = config_paths()
-	local pager_stat = uv.fs_lstat(pager_path)
-	local command = ("ln -s %s %s"):format(main_path, pager_path)
-
-	if not pager_stat then
-		health.info(("Pager profile is not linked at %s. Enable it with: %s"):format(pager_path, command))
-		return
-	end
-	if pager_stat.type ~= "link" then
-		health.warn(
-			("Pager profile path exists but is not a symlink: %s (expected target: %s)"):format(pager_path, main_path)
-		)
-		return
-	end
-
-	local actual = uv.fs_realpath(pager_path)
-	local expected = uv.fs_realpath(main_path)
-	if not actual then
-		health.warn(("Pager profile symlink is broken: %s. Recreate it with: %s"):format(pager_path, command))
-	elseif expected and actual == expected then
-		health.ok(("Pager profile links to this config: %s -> %s"):format(pager_path, actual))
-	else
-		health.warn(("Pager profile points to %s, expected %s"):format(actual, expected or main_path))
-	end
-end
-
 local function config_root()
 	local source = debug.getinfo(1, "S").source:gsub("^@", "")
 	return vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(source)))
 end
 
-local function check_profile()
+local function profile_name()
 	if vim.g.vscode == 1 or vim.g.vscode == true then
-		health.ok("VSCode profile active; terminal IDE services are isolated")
+		return "VSCode profile (terminal IDE services are off)"
 	elseif vim.env.NVIM_APPNAME == "nvimpager" then
-		health.ok("nvimpager profile active; only the pager plugin allowlist is available")
+		return "nvimpager profile"
+	end
+	return "full editor profile"
+end
+
+local function check_neovim(report)
+	local version = version_string()
+	if vim.fn.has("nvim-0.12") ~= 1 then
+		report:error(
+			("Neovim %s is unsupported: this configuration needs 0.12 or newer"):format(version),
+			report:install("neovim")
+		)
+		return
+	end
+	local pinned = toolchain.versions.neovim
+	local pin = version == pinned and "" or (" (validation pins " .. pinned .. ")")
+	report:ok(("Neovim %s%s, %s"):format(version, pin, profile_name()))
+end
+
+local REQUIRED_TOOLS = {
+	{ name = "git", effect = "lazy.nvim cannot install or restore plugins and Git workflows fail" },
+	{
+		name = "mise",
+		effect = "language servers, formatters, linters, debug adapters, diagram renderers and parser builds are unavailable",
+		advice = { "Run :NvimConfigMiseInstall (the full editor also installs it in the background at startup)" },
+	},
+	{ name = "cc", effect = "Tree-sitter parsers cannot be built" },
+}
+
+local function check_required_tools(report)
+	local found = {}
+	for _, tool in ipairs(REQUIRED_TOOLS) do
+		if vim.fn.exepath(tool.name) ~= "" then
+			found[#found + 1] = tool.name
+		else
+			report:error(("%s is missing: %s"):format(tool.name, tool.effect), tool.advice or report:install(tool.name))
+		end
+	end
+	if #found > 0 then
+		report:ok("Required tools found: " .. table.concat(found, ", "))
+	end
+	return vim.tbl_contains(found, "mise")
+end
+
+local function check_path_order(report, configured)
+	local previous_rank = 0
+	local late = {}
+	report:detail("PATH precedence: Mise launchers > local_config.path > ~/.local/bin > host PATH")
+	for index, path in ipairs(split_path(vim.env.PATH)) do
+		local origin, rank = path_origin(path, configured)
+		report:detail(("PATH[%02d] %-12s %s"):format(index, origin, normalized(path)))
+		if rank < previous_rank then
+			late[#late + 1] = ("%s (%s)"):format(normalized(path), origin)
+		end
+		previous_rank = math.max(previous_rank, rank)
+	end
+	if #late > 0 then
+		report:warn("PATH lists " .. table.concat(late, ", ") .. " after lower-precedence entries", {
+			"Expected order: Mise launchers, local_config.path, ~/.local/bin, then the host PATH",
+			"Review local_config.path in ~/.nvim-local.lua and your shell PATH, then restart Neovim",
+		})
+	end
+end
+
+local function check_plugins(report)
+	local state = plugin_state.inspect()
+	if not state.loaded then
+		report:info("lazy.nvim is not loaded in this session; plugins were not inspected")
+		return
+	end
+	if #state.missing > 0 then
+		report:warn(("%d plugin(s) are not installed: %s"):format(#state.missing, table.concat(state.missing, ", ")), {
+			"Restart Neovim with network access: missing plugins install at their locked commits",
+			"Or run :Lazy install",
+		})
+	end
+	if #state.drift > 0 then
+		local rows = {}
+		for _, item in ipairs(state.drift) do
+			rows[#rows + 1] = ("%s (%s, lock %s)"):format(item.name, item.head:sub(1, 7), item.locked:sub(1, 7))
+		end
+		report:warn(("%d plugin(s) differ from lazy-lock.json: %s"):format(#rows, table.concat(rows, ", ")), {
+			"Run :Lazy restore",
+			"Startup moves clean checkouts to the locked commits when downloads are allowed",
+		})
+	end
+	if #state.missing == 0 and #state.drift == 0 then
+		report:ok(("%d plugins installed at their locked commits"):format(state.total))
+	end
+end
+
+local function check_parsers(report)
+	local runtime = package.loaded["config.treesitter_runtime"]
+	if type(runtime) ~= "table" or type(runtime.inventory) ~= "function" then
+		return
+	end
+	local ok, inventory = pcall(runtime.inventory)
+	if not ok or type(inventory) ~= "table" then
+		report:warn("Could not inspect the configured Tree-sitter parsers: " .. tostring(inventory))
+	elseif inventory.exact then
+		report:ok(("%d Tree-sitter parsers installed at their pinned revisions"):format(#inventory.required))
 	else
-		health.ok("full terminal editor profile active")
+		report:warn("Tree-sitter parsers are missing or stale: " .. table.concat(inventory.problems, ", "), {
+			"Run :NvimConfigParsersInstall (needs Mise and a C compiler)",
+			"Neovim also builds them in the background when it starts with a UI and network access",
+		})
+	end
+end
+
+local function check_markdown_view(report)
+	local markdown_view = package.loaded["config.markdown_view"]
+	if type(markdown_view) ~= "table" or type(markdown_view.status) ~= "function" then
+		return
+	end
+	local ok, status = pcall(markdown_view.status)
+	if not ok or type(status) ~= "table" then
+		report:warn("Could not read the Markdown reading view state: " .. tostring(status))
+	elseif status.error then
+		report:warn(status.error, { "Run :Lazy restore md-render.nvim, or restart Neovim with network access" })
+	elseif status.configured then
+		report:ok("Markdown reading view (md-render.nvim) is ready")
 	end
 end
 
@@ -251,18 +294,241 @@ local function local_product_status()
 	return rows
 end
 
-local function check_local_products()
-	health.start("Local plugin products")
+local function check_local_products(report)
+	local loaded, waiting = 0, 0
 	for _, row in ipairs(local_product_status()) do
 		if row.error then
-			health.error(row.name .. ": " .. row.error)
-		elseif not row.loaded then
-			health.info(row.name .. ": not loaded; health did not activate it")
+			report:error(("Local plugin %s is broken: %s"):format(row.name, row.error))
+		elseif row.loaded then
+			loaded = loaded + 1
 		else
-			local configured = row.status.configured
-			local suffix = configured == nil and "" or ("; configured=" .. tostring(configured))
-			health.ok(row.name .. ": status and effective configuration available" .. suffix)
+			waiting = waiting + 1
 		end
+	end
+	report:ok(("Local plugins: %d loaded, %d load on first use"):format(loaded, waiting))
+end
+
+local MANAGED_TOOLS = {
+	{ tool = "mmdflux", feature = "Mermaid rendering" },
+	{ tool = "plantuml", feature = "PlantUML rendering" },
+	{ tool = "cmake-language-server", feature = "CMake language intelligence" },
+}
+
+local function check_managed_tools(report, mise_found)
+	if mise_found then
+		report:ok("Mise installs locked tools on first use; :NvimConfigToolsInstall [all|name] preinstalls them")
+	end
+	local uname = uv.os_uname()
+	local target = toolchain.target_key(uname.sysname, uname.machine)
+	local unsupported = {}
+	for _, item in ipairs(MANAGED_TOOLS) do
+		local command = toolchain.tools[item.tool].commands[1]
+		if vim.fn.exepath(command) == "" and not toolchain.supported(item.tool, target) then
+			unsupported[#unsupported + 1] = ("%s (%s)"):format(command, item.feature)
+		end
+	end
+	if #unsupported > 0 then
+		report:info("Not available on this platform: " .. table.concat(unsupported, ", "))
+	end
+end
+
+local function check_optional_tools(report)
+	local found = {}
+	local function optional(name, path, effect)
+		if path and path ~= "" then
+			found[#found + 1] = name
+		else
+			report:warn(("%s is missing: %s"):format(name, effect), report:install(name))
+		end
+	end
+	optional("lazygit", vim.fn.exepath("lazygit"), "the Git terminal UI (<leader>gl) is unavailable")
+	optional(
+		"rsvg-convert",
+		vim.fn.exepath("rsvg-convert"),
+		"diagrams fall back to ASCII and images cannot be previewed"
+	)
+	-- Managed and Mason copies are ignored on purpose: Rust uses host/user tools only.
+	optional(
+		"rust-analyzer",
+		tool_paths.external_executable("rust-analyzer"),
+		"Rust files are edit-only (no language server)"
+	)
+	if #found > 0 then
+		report:ok("Optional tools found: " .. table.concat(found, ", "))
+	end
+end
+
+local function check_pager_profile(report)
+	local main_path, pager_path = config_paths()
+	local stat = uv.fs_lstat(pager_path)
+	local link = ("ln -s %s %s"):format(main_path, pager_path)
+	local installed = vim.fn.exepath("nvimpager") ~= ""
+	if not stat then
+		report:info(
+			installed and ("nvimpager does not use this config yet; link it with: " .. link)
+				or ("Pager profile (optional) is not set up: install nvimpager, then run " .. link)
+		)
+		return
+	end
+	local relink = ("ln -sfn %s %s"):format(main_path, pager_path)
+	if stat.type ~= "link" then
+		report:warn(("%s is not a symlink to this config, so nvimpager ignores it"):format(pager_path), {
+			("Move %s aside, then run: %s"):format(pager_path, link),
+		})
+		return
+	end
+	local actual, expected = uv.fs_realpath(pager_path), uv.fs_realpath(main_path)
+	if not actual then
+		report:warn("The pager profile symlink is broken: " .. pager_path, { relink })
+	elseif expected and actual ~= expected then
+		report:warn(("The pager profile points to %s instead of this config"):format(actual), { relink })
+	elseif not installed then
+		report:warn("nvimpager is missing: the linked pager profile cannot be used", report:install("nvimpager"))
+	else
+		report:ok("Pager profile: nvimpager uses this config")
+	end
+end
+
+local function check_usage(report)
+	local usage = package.loaded["config.usage"]
+	if type(usage) ~= "table" or type(usage.status) ~= "function" then
+		return
+	end
+	local ok, status = pcall(usage.status)
+	if not ok or type(status) ~= "table" then
+		report:warn("Could not read the usage statistics state: " .. tostring(status))
+	elseif not status.enabled then
+		report:info("Usage statistics are disabled in this session (telemetry off, headless, CI or tests)")
+	elseif status.error and vim.fn.exepath("sqlite3") == "" then
+		report:warn(
+			"sqlite3 is missing: local usage statistics are off",
+			report:install("sqlite3", "Then run :UsageResume, or restart Neovim")
+		)
+	elseif status.error then
+		report:warn("Local usage statistics are off: " .. tostring(status.error), { "Run :UsageResume to retry" })
+	elseif status.collecting then
+		report:ok("Usage statistics are collected in " .. tostring(status.path))
+	else
+		report:info("Usage statistics start once a UI attaches")
+	end
+end
+
+local AUTO_INSTALL_ADVICE = {
+	mise = "Run :NvimConfigMiseInstall (or scripts/install-mise)",
+	parsers = "Run :NvimConfigParsersInstall",
+}
+
+local function check_auto_install(report)
+	local offline = vim.env.NVIM_CONFIG_OFFLINE == "1"
+	local auto = package.loaded["config.auto_install"]
+	if type(auto) ~= "table" or type(auto.status) ~= "function" then
+		if offline then
+			report:info("NVIM_CONFIG_OFFLINE=1: nothing is downloaded automatically")
+		end
+		return
+	end
+	local ok, status = pcall(auto.status)
+	if not ok or type(status) ~= "table" then
+		report:warn("Could not read the automatic install state: " .. tostring(status))
+		return
+	end
+	if status.skipped then
+		report:info("Automatic installs did not run in this session: " .. status.skipped)
+	elseif offline then
+		report:info("NVIM_CONFIG_OFFLINE=1: nothing is downloaded automatically")
+	end
+	local steps = vim.tbl_keys(status.failures or {})
+	table.sort(steps)
+	for _, step in ipairs(steps) do
+		local failure = status.failures[step]
+		local at = type(failure) == "table" and tonumber(failure.at) or nil
+		local when = at and os.date("%Y-%m-%d %H:%M", at) or "an unknown time"
+		local retry = at and os.date("%Y-%m-%d %H:%M", at + (status.retry_seconds or 0)) or "the next start"
+		local detail = type(failure) == "table" and failure.detail or failure
+		report:warn(("The automatic %s install failed at %s: %s"):format(step, when, tostring(detail)), {
+			AUTO_INSTALL_ADVICE[step] or "Retry the installation manually",
+			"Neovim retries it automatically after " .. retry,
+		})
+	end
+end
+
+local function check_undo(report)
+	local active = vim.fs.joinpath(vim.fn.stdpath("state"), "undo")
+	local stat = uv.fs_stat(active)
+	local healthy = true
+	if not stat or stat.type ~= "directory" then
+		healthy = false
+		report:error("The persistent undo directory is missing: " .. active, {
+			"mkdir -p -m 700 " .. active,
+			"Startup creates it, so also check the startup messages (:messages)",
+		})
+	else
+		local permissions = bit.band(stat.mode or 0, tonumber("777", 8))
+		if permissions ~= tonumber("700", 8) then
+			healthy = false
+			report:error(
+				("The persistent undo directory mode is %03o, expected 700: %s"):format(permissions, active),
+				{ "chmod 700 " .. active }
+			)
+		end
+	end
+	if not vim.o.undodir:find(active, 1, true) then
+		healthy = false
+		report:error(
+			"'undodir' does not use " .. active,
+			{ "Something overrides it: :verbose set undodir? shows what" }
+		)
+	end
+	if healthy then
+		report:ok("Persistent undo is stored owner-only in " .. active)
+	end
+	local legacy = vim.fs.joinpath(config_root(), ".undodir")
+	if uv.fs_stat(legacy) then
+		report:warn("The legacy undo directory is no longer used: " .. legacy, { "Review it, then: rm -r " .. legacy })
+	end
+end
+
+local VALIDATORS = {
+	{ name = "stylua", version = "stylua " .. toolchain.versions.stylua },
+	{ name = "shellcheck", version = "version: " .. toolchain.versions.shellcheck },
+	{ name = "actionlint", version = toolchain.versions.actionlint },
+	{ name = "tree-sitter", version = "tree-sitter " .. toolchain.versions.tree_sitter },
+}
+
+local function check_validation(report)
+	local root = config_root()
+	if vim.fn.filereadable(vim.fs.joinpath(root, "lazy-lock.json")) ~= 1 then
+		report:error("lazy-lock.json is missing, so plugins are not pinned", {
+			("git -C %s checkout -- lazy-lock.json"):format(root),
+		})
+	end
+	for _, name in ipairs({ "bootstrap-config", "check-config", "install-ci-tools", "provision-runtime" }) do
+		if vim.fn.executable(vim.fs.joinpath(root, "scripts", name)) ~= 1 then
+			report:error(("scripts/%s is missing or not executable"):format(name), {
+				("git -C %s checkout -- scripts/%s"):format(root, name),
+			})
+		end
+	end
+	local missing = {}
+	for _, validator in ipairs(VALIDATORS) do
+		local path = vim.fn.exepath(validator.name)
+		if path == "" then
+			missing[#missing + 1] = validator.name
+		end
+		report:detail(
+			("%s for scripts/check-config: %s (expects %q)"):format(
+				validator.name,
+				path ~= "" and path or "missing",
+				validator.version
+			)
+		)
+	end
+	if #missing > 0 then
+		report:info(
+			("scripts/check-config validators are not installed: %s (scripts/install-ci-tools /absolute/path/to/bin)"):format(
+				table.concat(missing, ", ")
+			)
+		)
 	end
 end
 
@@ -275,280 +541,72 @@ local function tool_contract()
 	return result
 end
 
-local function check_validation_contract(configured)
-	local root = config_root()
-	local lockfile = vim.fs.joinpath(root, "lazy-lock.json")
-	if vim.fn.filereadable(lockfile) == 1 then
-		health.ok("plugin lockfile available: " .. lockfile)
-	else
-		health.error("plugin lockfile is missing: " .. lockfile)
-	end
-
-	for _, name in ipairs({ "bootstrap-config", "check-config", "install-ci-tools", "provision-runtime" }) do
-		local path = vim.fs.joinpath(root, "scripts", name)
-		if vim.fn.executable(path) == 1 then
-			health.ok("validation entrypoint is executable: scripts/" .. name)
-		else
-			health.error("validation entrypoint is missing or not executable: " .. path)
-		end
-	end
-	local provision = vim.fs.joinpath(root, "scripts", "provision-runtime")
-	if vim.fn.executable(provision) == 1 then
-		health.info(
-			"provision-runtime is present; contract version 2 is executed only by scripts/check-config (offline unless --allow-network is explicit)"
+local function add_catalog_details(report)
+	report:detail(
+		("Mise %s or newer; tools in ~/.local/share/mise/installs, state in ~/.local/state/mise"):format(
+			toolchain.versions.mise
 		)
-	end
-	check_validation_tool("stylua", "stylua " .. toolchain.versions.stylua, configured)
-	check_validation_tool("shellcheck", "version: " .. toolchain.versions.shellcheck, configured)
-	check_validation_tool("actionlint", toolchain.versions.actionlint, configured)
-	check_validation_tool("tree-sitter", "tree-sitter " .. toolchain.versions.tree_sitter, configured)
-	check_tool("cc", "Tree-sitter parser compilation", "Install a host C compiler.", true, configured)
-end
-
-local function check_plugins()
-	health.start("Plugins")
-	local state = plugin_state.inspect()
-	if not state.loaded then
-		health.info("lazy.nvim is not loaded in this session; plugin state was not inspected")
-		return
-	end
-	if #state.missing == 0 then
-		health.ok(("%d plugins installed"):format(state.total))
-	else
-		health.warn(("%d plugin(s) are not installed: %s"):format(#state.missing, table.concat(state.missing, ", ")), {
-			"Restart Neovim with network access; missing plugins install automatically at their locked commits",
-			"Or run :Lazy install",
-		})
-	end
-	if #state.drift == 0 then
-		health.ok("installed plugin commits match " .. (state.lockfile or "the lockfile"))
-		return
-	end
-	local rows = {}
-	for _, item in ipairs(state.drift) do
-		rows[#rows + 1] = ("%s (%s, lock %s)"):format(item.name, item.head:sub(1, 7), item.locked:sub(1, 7))
-	end
-	health.warn(("%d plugin(s) differ from the lockfile: %s"):format(#rows, table.concat(rows, ", ")), {
-		"Startup moves them to the locked commits when downloads are allowed; this one could not be moved",
-		"Run :Lazy restore",
-	})
-end
-
-local function check_parsers()
-	health.start("Tree-sitter parsers")
-	local runtime = package.loaded["config.treesitter_runtime"]
-	if type(runtime) ~= "table" or type(runtime.inventory) ~= "function" then
-		health.info("Tree-sitter runtime is not configured in this session")
-		return
-	end
-	local ok, inventory = pcall(runtime.inventory)
-	if not ok or type(inventory) ~= "table" then
-		health.warn("could not inspect the configured parsers: " .. tostring(inventory))
-		return
-	end
-	if inventory.exact then
-		health.ok(("%d configured parsers are installed at their pinned revisions"):format(#inventory.required))
-		return
-	end
-	health.warn("parsers are missing or stale: " .. table.concat(inventory.problems, ", "), {
-		"They install in the background when Neovim starts with a UI and network access",
-		"Or run :NvimConfigParsersInstall (needs Mise for the tree-sitter CLI and a C compiler)",
-	})
-end
-
-local function check_markdown_view()
-	local markdown_view = package.loaded["config.markdown_view"]
-	if type(markdown_view) ~= "table" or type(markdown_view.status) ~= "function" then
-		return
-	end
-	local ok, status = pcall(markdown_view.status)
-	if not ok or type(status) ~= "table" then
-		health.warn("could not read the Markdown reading view state: " .. tostring(status))
-	elseif status.error then
-		health.warn(status.error, { "Restart Neovim with network access or run :Lazy restore md-render.nvim" })
-	elseif status.configured then
-		health.ok("Markdown reading view (md-render.nvim) is ready")
-	else
-		health.info("Markdown reading view is not configured in this session")
-	end
-end
-
-local function check_usage()
-	local usage = package.loaded["config.usage"]
-	if type(usage) ~= "table" or type(usage.status) ~= "function" then
-		return
-	end
-	health.start("Usage statistics")
-	local ok, status = pcall(usage.status)
-	if not ok or type(status) ~= "table" then
-		health.warn("could not read the usage statistics state: " .. tostring(status))
-	elseif not status.enabled then
-		health.info("local usage statistics are disabled in this session (telemetry off, headless, CI or tests)")
-	elseif status.error then
-		health.warn("local usage statistics are off: " .. tostring(status.error), {
-			"Install the host sqlite3 CLI: macOS ships /usr/bin/sqlite3; Ubuntu/Debian: sudo apt install sqlite3; "
-				.. "Fedora: sudo dnf install sqlite",
-			"Then run :UsageResume, or restart Neovim",
-		})
-	elseif status.collecting then
-		health.ok(("local usage statistics are collected in %s"):format(tostring(status.path)))
-	else
-		health.info("local usage statistics start once a UI attaches")
-	end
-end
-
-local AUTO_INSTALL_ADVICE = {
-	mise = "Run :NvimConfigMiseInstall (or scripts/install-mise)",
-	parsers = "Run :NvimConfigParsersInstall",
-}
-
-local function check_auto_install()
-	health.start("Automatic installs")
-	if vim.env.NVIM_CONFIG_OFFLINE == "1" then
-		health.info("NVIM_CONFIG_OFFLINE=1: nothing is downloaded automatically")
-	end
-	local auto = package.loaded["config.auto_install"]
-	if type(auto) ~= "table" or type(auto.status) ~= "function" then
-		health.info("automatic installs are not configured in this profile")
-		return
-	end
-	local ok, status = pcall(auto.status)
-	if not ok or type(status) ~= "table" then
-		health.warn("could not read the automatic install state: " .. tostring(status))
-		return
-	end
-	if status.skipped then
-		health.info("automatic installs did not run in this session: " .. status.skipped)
-	end
-	local steps = vim.tbl_keys(status.failures or {})
-	table.sort(steps)
-	for _, step in ipairs(steps) do
-		local failure = status.failures[step]
-		local at = type(failure) == "table" and tonumber(failure.at) or nil
-		local when = at and os.date("%Y-%m-%d %H:%M", at) or "an unknown time"
-		local retry = at and os.date("%Y-%m-%d %H:%M", at + (status.retry_seconds or 0)) or "the next start"
-		health.warn(("%s automatic install failed at %s: %s"):format(step, when, tostring(failure.detail or failure)), {
-			AUTO_INSTALL_ADVICE[step] or "Retry the installation manually",
-			"The automatic retry runs after " .. retry,
-		})
-	end
-	if #steps == 0 then
-		health.ok("no automatic install failures recorded")
-	end
-end
-
-local function check_undo()
-	local active = vim.fs.joinpath(vim.fn.stdpath("state"), "undo")
-	local stat = uv.fs_stat(active)
-	if not stat or stat.type ~= "directory" then
-		health.error("persistent undo directory is missing: " .. active)
-	else
-		local permissions = bit.band(stat.mode or 0, tonumber("777", 8))
-		if permissions == tonumber("700", 8) then
-			health.ok("persistent undo directory is owner-only: " .. active)
-		else
-			health.error(("persistent undo directory mode is %03o, expected 700: %s"):format(permissions, active))
-		end
-	end
-	if vim.o.undodir:find(active, 1, true) then
-		health.ok("'undodir' uses the state directory")
-	else
-		health.error("'undodir' does not use " .. active)
-	end
-
-	local legacy = vim.fs.joinpath(config_root(), ".undodir")
-	if uv.fs_stat(legacy) then
-		health.warn(
-			("Legacy undo directory still exists at %s. It is no longer active; review and remove it manually when no longer needed."):format(
-				legacy
-			)
-		)
-	else
-		health.ok("No legacy repo-local .undodir found")
-	end
-end
-
-function M.check()
-	health.start("Neovim configuration")
-	if vim.fn.has("nvim-0.12") == 1 then
-		if version_string() == toolchain.versions.neovim then
-			health.ok("Neovim " .. version_string() .. " matches the reproducible validation pin")
-		else
-			health.warn(
-				("Neovim %s is supported; reproducible validation pins %s"):format(
-					version_string(),
-					toolchain.versions.neovim
-				)
-			)
-		end
-	else
-		health.error("Neovim " .. version_string() .. " is unsupported; install Neovim 0.12 or newer")
-	end
-	local configured = check_path_order()
-	check_tool(
-		"git",
-		"lazy.nvim bootstrap and Git workflows",
-		"Install Git from https://git-scm.com.",
-		true,
-		configured
 	)
-	check_profile()
-	check_local_products()
-	check_plugins()
-	check_markdown_view()
-	check_parsers()
-	check_auto_install()
-	check_usage()
-
-	health.start("Mise tools")
-	check_tool(
-		"mise",
-		"locked editor tools: LSP servers, formatters, linters, debug adapters and parser builds",
-		"The full editor installs it in the background on startup; or run :NvimConfigMiseInstall.",
-		true,
-		configured
-	)
-	health.info(
-		"Mise minimum version: " .. toolchain.versions.mise .. "; version execution is reserved for provisioning"
-	)
-	health.info("Tools: ~/.local/share/mise/installs; state: ~/.local/state/mise")
 	for _, entry in ipairs(tool_contract()) do
-		health.info(entry.name .. "@" .. entry.version .. " (" .. entry.backend .. ")")
+		report:detail(entry.name .. "@" .. entry.version .. " (" .. entry.backend .. ")")
 	end
-	health.info(
-		"mise exec installs missing locked tools on first use; :NvimConfigToolsInstall[!] [all|name] preinstalls or reinstalls them"
-	)
-	health.info(
-		"Health observes the catalog and executable paths; provision-runtime inventories installed versions offline"
-	)
+end
 
-	health.start("Optional feature dependencies")
-	check_managed_tool("mmdflux", "Mermaid ASCII/SVG rendering", configured)
-	check_managed_tool("plantuml", "PlantUML ASCII/SVG rendering", configured)
-	check_external_tool(
-		"rust-analyzer",
-		"Rust language intelligence (host/user only)",
-		"Install it with rustup or the host package manager; managed and Mason copies are intentionally ignored.",
-		configured
-	)
-	health.info("Rust formatting is disabled until rustfmt has an exact manifest contract")
-	check_managed_tool("cmake-language-server", "CMake language intelligence", configured)
-	check_tool(
-		"rsvg-convert",
-		"SVG diagram rasterization",
-		"Install librsvg with the host package manager.",
-		false,
-		configured
-	)
-	check_tool("nvimpager", "pager profile", "Install nvimpager with the host package manager.", false, configured)
-	check_tool("lazygit", "Git terminal UI", "Install lazygit with the host package manager.", false, configured)
-	check_pager_profile()
+local function render(report, details)
+	health.start("Problems")
+	if #report.errors == 0 and #report.warnings == 0 then
+		health.ok("No problems found")
+	end
+	for _, item in ipairs(report.errors) do
+		health.error(item.message, item.advice)
+	end
+	for _, item in ipairs(report.warnings) do
+		health.warn(item.message, item.advice)
+	end
 
-	health.start("Reproducible validation")
-	check_validation_contract(configured)
+	health.start("Summary")
+	for _, item in ipairs(report.summary) do
+		health[item.kind](item.message)
+	end
+	if not details then
+		health.info(DETAILS_HINT)
+		return
+	end
 
-	health.start("Persistent undo")
-	check_undo()
+	health.start("Details")
+	for _, line in ipairs(report.details) do
+		health.info(line)
+	end
+end
+
+---@param opts? { platform?: table, details?: boolean } test seams; :checkhealth passes none
+function M.check(opts)
+	opts = opts or {}
+	local report = new_report(opts.platform or host_packages.detect())
+	local details = opts.details
+	if details == nil then
+		details = enabled(vim.g.nvimconfig_health_details)
+	end
+
+	check_neovim(report)
+	report:info("Platform: " .. host_packages.describe(report.platform))
+	local mise_found = check_required_tools(report)
+	check_path_order(report, local_path_set())
+	check_plugins(report)
+	check_parsers(report)
+	check_markdown_view(report)
+	check_local_products(report)
+	check_managed_tools(report, mise_found)
+	check_optional_tools(report)
+	check_pager_profile(report)
+	check_usage(report)
+	check_auto_install(report)
+	check_undo(report)
+	check_validation(report)
+	if details then
+		add_catalog_details(report)
+	end
+	render(report, details)
 end
 
 -- Small test seam for origin classification; no filesystem or state mutation.

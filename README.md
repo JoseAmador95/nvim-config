@@ -22,7 +22,12 @@ installed automatically:
   renderers) install through `mise exec` on their first use.
 
 Anything that could not be installed is listed by `:checkhealth nvimconfig`,
-together with the command that fixes it. A failed background step is retried
+together with the command that fixes it. Problems come first (errors, then
+warnings); host packages get the install command for the detected platform:
+`apt` on Ubuntu/Debian, `dnf` on Fedora and Homebrew on macOS or Linux, with an
+upstream download where no package exists. A short summary of what works
+follows; `:let g:nvimconfig_health_details = 1` also lists the PATH order and
+the Mise catalog. A failed background step is retried
 24 hours later; `:NvimConfigMiseInstall`, `:NvimConfigParsersInstall`,
 `:NvimConfigToolsInstall [all|name]` (`!` reinstalls) and `:Lazy restore` run the
 same work on demand. Parser builds need a host C compiler. This catalog requires
@@ -336,8 +341,9 @@ Mise verifies artifacts/dependency locks during installation. Runtime does not
 rehash tools or keep a separate attestation database. Host executables are not
 certified as substitutes. Mason, verified-tools and GumTree have been removed;
 old installations are left on disk but excluded from resolution. Historical
-GumTree comment origins remain readable. Health reports configuration and paths;
-`provision-runtime` inventories installed versions offline.
+GumTree comment origins remain readable. Health reports problems with their
+fixes and, on request, configuration and paths; `provision-runtime` inventories
+installed versions offline.
 
 | Feature | Tools |
 | --- | --- |

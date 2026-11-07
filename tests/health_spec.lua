@@ -61,8 +61,8 @@ T["health observes loaded state without activation, probes, or writes"] = functi
 	local emitted = {}
 	for _, kind in ipairs({ "start", "ok", "info", "warn", "error" }) do
 		original_health[kind] = vim.health[kind]
-		vim.health[kind] = function(message)
-			emitted[#emitted + 1] = { kind = kind, message = tostring(message) }
+		vim.health[kind] = function(message, advice)
+			emitted[#emitted + 1] = { kind = kind, message = tostring(message), advice = advice }
 		end
 	end
 
@@ -104,18 +104,34 @@ T["health observes loaded state without activation, probes, or writes"] = functi
 	assert(products[1].effective_config.enabled == true, "health returned shared plugin configuration")
 	package.loaded[first_module] = original_first
 
+	local function emitted_message(predicate, from)
+		for index = from or 1, #emitted do
+			if predicate(emitted[index].message) then
+				return true
+			end
+		end
+		return false
+	end
+	local catalog_entry = "devcontainers-cli@0.89.0 (npm:@devcontainers/cli)"
 	local check_ok, check_err = pcall(health.check)
 	assert(check_ok, check_err)
+	assert(#emitted > 0, "health emitted no observations")
+	assert(emitted[1].kind == "start" and emitted[1].message == "Problems", "health did not lead with problems")
+	assert(not emitted_message(function(message)
+		return message == catalog_entry or message:find("^PATH%[") ~= nil
+	end), "the PATH listing and Mise catalog must stay out of the default report")
+	local detailed_from = #emitted + 1
+	check_ok, check_err = pcall(health.check, { details = true })
+	assert(check_ok, check_err)
+	assert(
+		emitted_message(function(message)
+			return message == catalog_entry
+		end, detailed_from),
+		"health details omitted the exact Mise catalog entry"
+	)
 	assert(system_calls == 0, "health executed an external probe")
 	assert(#mutation_calls == 0, "health attempted filesystem mutation: " .. vim.inspect(mutation_calls))
 	assert(#attempted_loads == 0, "health activated runtime modules: " .. vim.inspect(attempted_loads))
-	assert(#emitted > 0, "health emitted no observations")
-	assert(
-		vim.iter(emitted):any(function(item)
-			return item.message == "devcontainers-cli@0.89.0 (npm:@devcontainers/cli)"
-		end),
-		"health omitted the exact Mise catalog entry"
-	)
 
 	package.loaded["localconfig.health"] = nil
 	local local_health = require("localconfig.health")
@@ -178,6 +194,79 @@ T["health observes loaded state without activation, probes, or writes"] = functi
 		select(1, health._path_origin(require("config.tool_paths").managed_root() .. "/installs/tool", {})) == "managed"
 	)
 	assert(select(1, health._path_origin(require("config.tool_paths").mason_bin() .. "/tool", {})) == "mason")
+end
+
+T["health lists errors before warnings, each with the fix for the platform"] = function()
+	local repo = vim.fn.getcwd()
+	vim.opt.runtimepath:prepend(repo)
+	package.path = table.concat({ repo .. "/lua/?.lua", repo .. "/lua/?/init.lua", package.path }, ";")
+
+	-- Only mise and cc exist, so git (required) and the optional host tools are missing.
+	local bin = vim.fn.tempname()
+	vim.fn.mkdir(bin, "p")
+	for _, name in ipairs({ "mise", "cc" }) do
+		local path = vim.fs.joinpath(bin, name)
+		vim.fn.writefile({ "#!/bin/sh" }, path)
+		vim.fn.setfperm(path, "rwx------")
+	end
+	local original_path = vim.env.PATH
+	vim.env.PATH = bin
+
+	local emitted = {}
+	local original_health = {}
+	for _, kind in ipairs({ "start", "ok", "info", "warn", "error" }) do
+		original_health[kind] = vim.health[kind]
+		vim.health[kind] = function(message, advice)
+			emitted[#emitted + 1] = { kind = kind, message = tostring(message), advice = advice }
+		end
+	end
+	local platform = require("config.host_packages").detect({
+		sysname = "Linux",
+		os_release = 'PRETTY_NAME="Fedora Linux 43"\nID=fedora\nVERSION_ID=43\n',
+		exepath = function()
+			return ""
+		end,
+	})
+	package.loaded["nvimconfig.health"] = nil
+	local ok, err = pcall(require("nvimconfig.health").check, { platform = platform })
+	for kind, original in pairs(original_health) do
+		vim.health[kind] = original
+	end
+	vim.env.PATH = original_path
+	vim.fn.delete(bin, "rf")
+	assert(ok, err)
+
+	local sections, last_error, first_warning, summary = {}, 0, math.huge, math.huge
+	for index, item in ipairs(emitted) do
+		if item.kind == "start" then
+			sections[#sections + 1] = item.message
+			summary = item.message == "Summary" and index or summary
+		elseif item.kind == "error" then
+			last_error = index
+		elseif item.kind == "warn" then
+			first_warning = math.min(first_warning, index)
+		elseif index > summary then
+			assert(item.kind == "ok" or item.kind == "info")
+		end
+	end
+	assert(vim.deep_equal(sections, { "Problems", "Summary" }), vim.inspect(sections))
+	assert(last_error > 0 and last_error < first_warning, "errors must precede warnings")
+	assert(first_warning < summary, "problems must precede the summary")
+
+	local function find(prefix)
+		for _, item in ipairs(emitted) do
+			if item.message:sub(1, #prefix) == prefix then
+				return item
+			end
+		end
+	end
+	local git = find("git is missing")
+	assert(git and git.kind == "error" and vim.deep_equal(git.advice, { "sudo dnf install git" }), vim.inspect(git))
+	local rsvg = find("rsvg-convert is missing")
+	assert(rsvg and rsvg.kind == "warn" and rsvg.advice[1] == "sudo dnf install librsvg2-tools", vim.inspect(rsvg))
+	local lazygit = find("lazygit is missing")
+	assert(lazygit and lazygit.advice[1]:find("lazygit/releases", 1, true), vim.inspect(lazygit))
+	assert(find("Platform: Fedora Linux 43; fixes use dnf"), "the summary does not name the platform")
 end
 
 return T
